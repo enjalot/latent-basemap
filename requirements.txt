@@ -1,0 +1,6 @@
+modal
+numpy
+torch
+tqdm
+parametric_umap
+wandb
