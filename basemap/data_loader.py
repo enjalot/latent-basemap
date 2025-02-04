@@ -13,6 +13,8 @@ class MemmapArrayConcatenator:
             npy_files = glob.glob(os.path.join(directory, "*.npy"))
             print("npy_files", npy_files)
             self.memmap_files.extend(npy_files)
+        
+        self.memmap_files = self.memmap_files[0:1]
             
         if not self.memmap_files:
             raise ValueError("No .npy files found in the provided directories")
@@ -40,9 +42,14 @@ class MemmapArrayConcatenator:
         self.cumulative_sizes = np.cumsum([0] + [shape[0] for shape in self.shapes])
     
         
-    def __array__(self):
+    def __array__(self, dtype=None, copy=False):
         # This allows numpy to treat our object as an array
-        return np.concatenate(self.memmaps, axis=0)
+        result = np.concatenate(self.memmaps, axis=0)
+        if dtype is not None:
+            result = result.astype(dtype)
+        if copy:
+            result = result.copy()
+        return result
     
     @property
     def shape(self):
@@ -57,4 +64,31 @@ class MemmapArrayConcatenator:
         if dtype == np.float32:
             return self
         raise NotImplementedError("Only float32 is supported")
+
+    def __getitem__(self, idx):
+        # Handle slice objects
+        if isinstance(idx, slice):
+            start = idx.start if idx.start is not None else 0
+            stop = idx.stop if idx.stop is not None else self.total_samples
+            step = idx.step if idx.step is not None else 1
+            
+            # Create a new MemmapArrayConcatenator with the sliced data
+            indices = range(start, stop, step)
+            result = np.zeros((len(indices), self.feature_dim), dtype=np.float32)
+            
+            for i, idx in enumerate(indices):
+                result[i] = self[idx]  # Use integer indexing
+            return result
+            
+        # Handle integer indexing
+        if idx < 0:
+            idx += self.total_samples
+        if not 0 <= idx < self.total_samples:
+            raise IndexError("Index out of bounds")
+            
+        # Find which memmap contains this index
+        array_idx = np.searchsorted(self.cumulative_sizes, idx, side='right') - 1
+        local_idx = idx - self.cumulative_sizes[array_idx]
+        
+        return self.memmaps[array_idx][local_idx]
 

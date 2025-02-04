@@ -1,6 +1,7 @@
 import wandb
 import torch.cuda as cuda
 from parametric_umap import ParametricUMAP
+
 from functools import wraps
 from tqdm.auto import tqdm
 

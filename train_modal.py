@@ -8,6 +8,7 @@ from modal import App, Image, Secret, Volume, build, enter, exit, gpu, method
 # though we only run them on Modal. If I dont depend here i can't figure out relative path imports
 from basemap.data_loader import MemmapArrayConcatenator
 from basemap.monitored import UMAPMonitor, MonitoredParametricUMAP
+import numpy as np
 
 
 DATASET = [
@@ -97,7 +98,8 @@ class RemoteTrainer:
 
         print("making monitor")
         monitor = UMAPMonitor(
-            use_wandb=True,
+            # use_wandb=True,
+            use_wandb=False,
             wandb_project=WANDB_PROJECT,
             wandb_run_name=f"train-{dataset}-{batch_size}-{n_epochs}-{learning_rate}",
         )
