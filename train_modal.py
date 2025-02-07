@@ -10,6 +10,8 @@ from basemap.data_loader import MemmapArrayConcatenator
 from basemap.monitored import UMAPMonitor, MonitoredParametricUMAP
 import numpy as np
 
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
 DATASET = [
     # f"/embeddings/fineweb-edu-sample-10BT-chunked-500-all-MiniLM-L6-v2/train",
@@ -23,7 +25,7 @@ DATASET = [
 WANDB_PROJECT = "basemap-all-minilm-l6-v2"
 D_IN = 384
 GPU_CONCURRENCY = 1
-# CPU_CONCURRENCY = 16
+CPU_CONCURRENCY = 4
 # GPU_CONFIG = gpu.A100(size="80GB")
 # GPU_CONFIG = gpu.A100(size="40GB")
 GPU_CONFIG = gpu.A10G()
@@ -72,7 +74,7 @@ app = App(
 
 @app.cls(
     gpu=GPU_CONFIG,
-    # cpu=CPU_CONCURRENCY,
+    cpu=CPU_CONCURRENCY,
     concurrency_limit=GPU_CONCURRENCY,
     timeout=60 * 60 * 10, # 10 hours
     container_idle_timeout=1200,

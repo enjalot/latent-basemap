@@ -10,11 +10,10 @@ class MemmapArrayConcatenator:
         self.memmap_files = []
         for directory in directories:
             print("directory", directory)
-            npy_files = glob.glob(os.path.join(directory, "*.npy"))
+            # npy_files = glob.glob(os.path.join(directory, "*.npy"))
+            npy_files = glob.glob(os.path.join(directory, "data-00000-*.npy"))
             print("npy_files", npy_files)
             self.memmap_files.extend(npy_files)
-        
-        self.memmap_files = self.memmap_files[0:1]
             
         if not self.memmap_files:
             raise ValueError("No .npy files found in the provided directories")
