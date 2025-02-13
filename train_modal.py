@@ -1,5 +1,5 @@
 """
-modal run train_modal.py --batch-size 512 --n-epochs 1 --learning-rate 0.0001
+modal run train_modal.py --batch-size 32 --n-epochs 1 --learning-rate 0.0001
 """
 
 from modal import App, Image, Secret, Volume, build, enter, exit, gpu, method
@@ -25,7 +25,7 @@ DATASET = [
 WANDB_PROJECT = "basemap-all-minilm-l6-v2"
 D_IN = 384
 GPU_CONCURRENCY = 1
-CPU_CONCURRENCY = 4
+CPU_CONCURRENCY = 32
 # GPU_CONFIG = gpu.A100(size="80GB")
 # GPU_CONFIG = gpu.A100(size="40GB")
 GPU_CONFIG = gpu.A10G()
@@ -39,6 +39,7 @@ st_image = (
         # "transformers==4.39.3",
         # "hf-transfer==0.1.6",
         # "huggingface_hub==0.22.2",
+        "annoy",
         "parametric_umap==0.1.1",
         "einops==0.7.0",
         "bitsandbytes",
@@ -121,7 +122,7 @@ class RemoteTrainer:
             monitor=monitor,
             low_memory=True,
             verbose=True,
-            n_processes=8
+            n_processes=32
         )
         print("saving model")
         pumap.save(f"/checkpoints/{WANDB_PROJECT}-{dataset}-{batch_size}-{n_epochs}-{learning_rate}")
