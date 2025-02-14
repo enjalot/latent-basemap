@@ -162,10 +162,27 @@ class ParametricUMAP:
         self : object
             Returns the instance itself
         """
-        # Initialize wandb if enabled
+        # Initialize wandb if enabled; also log model hyperparameters.
         if use_wandb:
             import wandb
-            wandb.init(project=wandb_project, name=wandb_run_name)
+            config = {
+                "n_components": self.n_components,
+                "hidden_dim": self.hidden_dim,
+                "n_layers": self.n_layers,
+                "n_neighbors": self.n_neighbors,
+                "a": self.a,
+                "b": self.b,
+                "correlation_weight": self.correlation_weight,
+                "learning_rate": self.learning_rate,
+                "n_epochs": self.n_epochs,
+                "batch_size": self.batch_size,
+                "device": self.device,
+                "use_batchnorm": self.use_batchnorm,
+                "use_dropout": self.use_dropout,
+                "clip_grad_norm": self.clip_grad_norm,
+                "clip_grad_value": self.clip_grad_value
+            }
+            wandb.init(project=wandb_project, name=wandb_run_name, config=config)
         
         logging.info("Casting input array to float32...")
         X = np.asarray(X).astype(np.float32)
@@ -211,16 +228,11 @@ class ParametricUMAP:
         # Initialize mixed precision scaler
         scaler = torch.cuda.amp.GradScaler()
         
-        # Initialize optimizer
+        # Initialize optimizer and scheduler
         optimizer = AdamW(self.model.parameters(), lr=self.learning_rate)
-        
-        # Initialize a plateau scheduler.
-        # Using ReduceLROnPlateau: if the provided loss metric does not improve for 'patience' steps,
-        # the learning rate will be multiplied by 'factor'.
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                         optimizer, mode='min', factor=0.5, patience=20, verbose=True)
         
-        # Training loop
         self.model.train()
         losses = []
         
@@ -242,7 +254,6 @@ class ParametricUMAP:
             num_batches = 0
             pbar2 = tqdm(range(len(loader)), desc=f'Epoch {epoch+1} batches:', position=0)
             
-            # Use the prefetcher to get batches asynchronously.
             prefetcher = DataPrefetcher(loader, dataset, target_dataset, self.device)
             batch_idx = 0
             batch = prefetcher.next()
@@ -250,7 +261,7 @@ class ParametricUMAP:
                 optimizer.zero_grad()
                 src_values, dst_values, targets = batch
 
-                # with torch.cuda.amp.autocast():
+                # forward pass
                 src_embeddings = self.model(src_values)
                 dst_embeddings = self.model(dst_values)
                 
@@ -268,48 +279,49 @@ class ParametricUMAP:
                 # Compute scaled gradients
                 scaler.scale(loss).backward()
                 
-                # Unscale gradients before clipping
+                # Unscale gradients to prepare for clipping
                 scaler.unscale_(optimizer)
+                # Log pre-clipping gradient norms
+                pre_clip_grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
+                grad_norm_pre_avg = float(np.mean(pre_clip_grad_norms)) if pre_clip_grad_norms else 0.0
                 
-                # Log pre-clipping gradient norms if needed
-                if batch_idx % 50 == 0:
-                    pre_clip_grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
-                    # logging.info(f"Pre-clip gradient norms: {pre_clip_grad_norms}")
-                
-                # Apply gradient clipping
+                # Apply gradient clipping if configured
                 if self.clip_grad_norm is not None:
                     torch.nn.utils.clip_grad_norm_(
                         self.model.parameters(),
                         max_norm=self.clip_grad_norm
                     )
-                
                 if self.clip_grad_value is not None:
                     torch.nn.utils.clip_grad_value_(
                         self.model.parameters(),
                         clip_value=self.clip_grad_value
                     )
+                post_clip_grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
+                grad_norm_post_avg = float(np.mean(post_clip_grad_norms)) if post_clip_grad_norms else 0.0
+                clipping_ratio = grad_norm_post_avg / grad_norm_pre_avg if grad_norm_pre_avg > 0 else 0.0
                 
-                # Log post-clipping gradient norms if needed
-                if batch_idx % 50 == 0:
-                    post_clip_grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
-                    # logging.info(f"Post-clip gradient norms: {post_clip_grad_norms}")
-                
-                # Optimizer step and scaler update
+                # Optimizer and scheduler step
                 scaler.step(optimizer)
                 scaler.update()
-                
-                # Update the scheduler with the current batch loss.
-                # This will decrease the learning rate if the loss has plateaued.
                 scheduler.step(loss.item())
                 current_lr = optimizer.param_groups[0]['lr']
-                # logging.debug("Current learning rate: {:.6f}".format(current_lr))
                 
+                # Log pos vs neg qs statistics
+                if (targets == 1).sum() > 0:
+                    pos_qs_mean = qs[targets==1].mean().item()
+                    pos_qs_std = qs[targets==1].std().item()
+                else:
+                    pos_qs_mean, pos_qs_std = 0, 0
+                if (targets == 0).sum() > 0:
+                    neg_qs_mean = qs[targets==0].mean().item()
+                    neg_qs_std = qs[targets==0].std().item()
+                else:
+                    neg_qs_mean, neg_qs_std = 0, 0
+
                 epoch_loss += loss.item()
                 num_batches += 1
 
-                dists = torch.norm(src_embeddings - dst_embeddings, dim=1, p=2*self.b)
-                grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
-
+                # Log to wandb including grad norms and qs statistics
                 if use_wandb:
                     wandb.log({
                         'batch_loss': loss.item(),
@@ -320,15 +332,21 @@ class ParametricUMAP:
                         'std_distance': dists.std().item(),
                         'mean_qs': qs.mean().item(),
                         'std_qs': qs.std().item(),
-                        'grad_norms': grad_norms
+                        'pos_qs_mean': pos_qs_mean,
+                        'pos_qs_std': pos_qs_std,
+                        'neg_qs_mean': neg_qs_mean,
+                        'neg_qs_std': neg_qs_std,
+                        'grad_norm_pre': grad_norm_pre_avg,
+                        'grad_norm_post': grad_norm_post_avg,
+                        'clipping_ratio': clipping_ratio,
+                        # 'step': batch_idx  # useful to chart progress over steps
                     })
-                
+                    
                 batch = prefetcher.next()
                 batch_idx += 1
                 pbar2.update(1)
                 pbar2.set_postfix({'loss': f'{loss.item():.4f}'})
 
-                # After scaler.update()
 
             if resample_negatives:
                 loader = ed.get_loader(batch_size=self.batch_size, sample_first=True)
@@ -339,18 +357,16 @@ class ParametricUMAP:
             
             if verbose:
                 logging.info('Epoch %d/%d, Loss: %.4f', epoch+1, self.n_epochs, avg_loss)
-            
-            # Log epoch-level metrics via wandb
             if use_wandb:
-                memory = torch.cuda.memory_allocated(self.device)/1e9 if torch.cuda.is_available() else 0.0
-                peak_memory = torch.cuda.max_memory_allocated(self.device)/1e9 if torch.cuda.is_available() else 0.0
-                wandb.log({
-                    'epoch_loss': avg_loss,
-                    'epoch_peak_gpu_memory': peak_memory
-                })
                 if torch.cuda.is_available():
+                    memory = torch.cuda.memory_allocated(self.device)/1e9
+                    peak_memory = torch.cuda.max_memory_allocated(self.device)/1e9
+                    wandb.log({
+                        'epoch_loss': avg_loss,
+                        'epoch_peak_gpu_memory': peak_memory
+                    })
                     logging.info("GPU Memory: %.2f GB (Peak: %.2f GB)", memory, peak_memory)
-            
+                    
         self.is_fitted = True
         if use_wandb:
             wandb.finish()

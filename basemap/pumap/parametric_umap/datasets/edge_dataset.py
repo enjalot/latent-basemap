@@ -194,6 +194,9 @@ class EdgeDataset:
         # Only sample negatives if they have not been provided/precomputed
         if self.neg_edges is None:
             self.sample_negative_edges(random_state=random_state, n_processes=n_processes, verbose=verbose)
+        
+        self.validate_negative_edges(1000)
+
         self.all_edges = self.pos_edges + self.neg_edges
         logging.info(f"Total edges: {len(self.pos_edges)} positive + {len(self.neg_edges)} negative")
         self._shuffle_edges(random_state=random_state)
@@ -356,6 +359,17 @@ class EdgeDataset:
             adj_sets[i] = neighbors
         logging.info("Adjacency sets built in %.2f seconds.", time.time() - start_time)
         return adj_sets
+
+    def validate_negative_edges(self, sample_size=100):
+        import random
+        logging.info(f"Validating {sample_size} negative edges...")
+        sample = random.sample(self.neg_edges, sample_size)
+        num_invalid = 0
+        for i, j in sample:
+            if j in self.adj_sets.get(i, set()):
+                num_invalid += 1
+                logging.info(f"Invalid negative: ({i}, {j})")
+        logging.info(f"Validation complete. {num_invalid} invalid edges out of {sample_size} sampled.")
     
     def precompute_and_save_negative_edges(self, file_path: str, random_state: int = 0, 
                                              n_processes: int = 6, verbose: bool = True) -> None:
