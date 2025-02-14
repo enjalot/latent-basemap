@@ -1,6 +1,5 @@
 import numpy as np
 from typing import List, Optional
-import lancedb
 
 class LanceDBLoader:
     """
@@ -24,6 +23,7 @@ class LanceDBLoader:
         columns : Optional[List[str]], optional
             List of columns to load when fetching data. If None, all columns are loaded.
         """
+        import lancedb
         # Cache the connection and table
         self.db = lancedb.connect(f"{db_name}")
         self.table = self.db.open_table(table_name)

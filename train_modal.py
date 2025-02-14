@@ -3,15 +3,21 @@ modal run train_modal.py --batch-size 512 --n-epochs 1 --learning-rate 0.0001
 """
 
 from modal import App, Image, Secret, Volume, build, enter, exit, gpu, method
+from basemap.pumap.parametric_umap import ParametricUMAP  # Use the unwrapped class
 # from parametric_umap import ParametricUMAP
 # TODO: importing these here means having the dependencies installed locally even
 # though we only run them on Modal. If I dont depend here i can't figure out relative path imports
 from basemap.data_loader import MemmapArrayConcatenator
-from basemap.monitored import UMAPMonitor, MonitoredParametricUMAP
+from basemap.lancedb_loader import LanceDBLoader
+# from basemap.monitored import UMAPMonitor, MonitoredParametricUMAP
 import numpy as np
 
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+
+DB_NAME = "enjalot/ls-fineweb-edu-100k"      # This is the (sub)directory or identifier for your DB inside /lancedb.
+TABLE_NAME = "scopes-001"           # The table name (or scope) to read from
+COLUMNS = ["vector"]           # The column that holds the embedding vectors
 
 DATASET = [
     # f"/embeddings/fineweb-edu-sample-10BT-chunked-500-all-MiniLM-L6-v2/train",
@@ -21,10 +27,15 @@ DATASET = [
     # f"/embeddings/RedPajama-Data-V2-sample-10B-chunked-120-all-MiniLM-L6-v2/train",
     # f"/embeddings/pile-uncopyrighted-chunked-120-all-MiniLM-L6-v2/train",
     f"/embeddings/wikipedia-en-chunked-120-all-MiniLM-L6-v2/train",
+    # f"/embeddings/wikipedia-en-chunked-500-all-MiniLM-L6-v2/train",
 ]
-TESTING = True
-WANDB_PROJECT = "basemap-all-minilm-l6-v2-wikipedia-120-0"
 D_IN = 384
+TESTING = True
+
+# WANDB_PROJECT = "basemap-all-minilm-l6-v2-wikipedia-120-0"
+# WANDB_PROJECT = "basemap-all-minilm-l6-v2-wikipedia-500"
+WANDB_PROJECT = "basemap-lancedb-fineweb-edu-100k"
+
 GPU_CONCURRENCY = 1
 CPU_CONCURRENCY = 2
 # GPU_CONFIG = gpu.A100(size="80GB")
@@ -34,8 +45,18 @@ GPU_CONFIG = gpu.A10G()
 
 # ------------------------------------------------------------------
 # New constants for precomputed files (generated from psym_modal.py and edges_modal.py)
-PSYM_RESULTS_FILE = "/checkpoints/pumap/wikipedia-en-chunked-120-all-MiniLM-L6-v2/precomputed_psym-0.pkl"
-NEGATIVE_EDGES_FILE = "/checkpoints/pumap/wikipedia-en-chunked-120-all-MiniLM-L6-v2/precomputed_negatives-0.pkl"
+# PSYM_RESULTS_FILE = "/checkpoints/pumap/wikipedia-en-chunked-120-all-MiniLM-L6-v2/precomputed_psym-0.pkl"
+# NEGATIVE_EDGES_FILE = "/checkpoints/pumap/wikipedia-en-chunked-120-all-MiniLM-L6-v2/precomputed_negatives-0.pkl"
+# PSYM_RESULTS_FILE = "/checkpoints/pumap/wikipedia-en-chunked-500-all-MiniLM-L6-v2/precomputed_psym.pkl"
+# NEGATIVE_EDGES_FILE = "/checkpoints/pumap/wikipedia-en-chunked-500-all-MiniLM-L6-v2/precomputed_negatives.pkl"
+PSYM_RESULTS_FILE = "/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_psym.pkl"
+# PSYM_RESULTS_FILE = "/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_psym-45.pkl"
+# NEGATIVE_EDGES_FILE = "/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_negatives.pkl"
+# NEGATIVE_EDGES_FILE = "/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_negatives-45-45.pkl"
+# NEGATIVE_EDGES_FILE = f"/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_negatives-150.pkl"
+NEGATIVE_EDGES_FILE = f"/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_negatives-300.pkl"
+#
+
 # ------------------------------------------------------------------
 
 st_image = (
@@ -92,6 +113,7 @@ app = App(
     volumes={
         "/embeddings": Volume.from_name("embeddings", create_if_missing=True),
         "/checkpoints": Volume.from_name("checkpoints", create_if_missing=True),
+        "/lancedb": Volume.from_name("lancedb", create_if_missing=True),
     }, 
     secrets=[Secret.from_name("enjalot-wandb-secret")],
 )
@@ -102,37 +124,38 @@ class RemoteTrainer:
         print("starting engine")
 
     @method()
-    def train(self, dataset, batch_size, n_epochs, learning_rate):
-        print(f"Training on datasets: {DATASET}, dimensions: {D_IN}")
-        
-        X_train = MemmapArrayConcatenator(DATASET, D_IN, testing=TESTING)
+    def train(self, batch_size, n_epochs, learning_rate):
+        # print(f"Training on datasets: {DATASET}, dimensions: {D_IN}")
+        # X_train = MemmapArrayConcatenator(DATASET, D_IN, testing=TESTING)
+        X_train = LanceDBLoader(db_name=f"/lancedb/{DB_NAME}", table_name=TABLE_NAME, columns=COLUMNS)
 
-        print("making monitor")
-        monitor = UMAPMonitor(
-            use_wandb=True,
-            # use_wandb=False,
-            wandb_project=WANDB_PROJECT,
-            wandb_run_name=f"train-{batch_size}-{n_epochs}-{learning_rate}",
-        )
         print("initializing model")
         # Initialize the model
-        pumap = MonitoredParametricUMAP(
+        pumap = ParametricUMAP(
             n_components=2,
+            n_layers=3,
+            hidden_dim=1024,
+            a=0.5,
+            b=1.0,
             batch_size=batch_size,
             n_epochs=n_epochs,
             learning_rate=learning_rate,
             device='cuda',
+            use_batchnorm=True,
+            use_dropout=True,
         )
         print("fitting model")
-        # Fit the model
+        # Fit the model with wandb instrumentation enabled
         pumap.fit(
             X_train, 
-            monitor=monitor,
             low_memory=True,
             verbose=True,
             n_processes=CPU_CONCURRENCY,
             precomputed_p_sym_path=PSYM_RESULTS_FILE,
-            precomputed_negatives_path=NEGATIVE_EDGES_FILE
+            precomputed_negatives_path=NEGATIVE_EDGES_FILE,
+            use_wandb=True,
+            wandb_project=WANDB_PROJECT,
+            wandb_run_name=f"train-{batch_size}-{n_epochs}-{learning_rate}"
         )
         print("saving model")
         pumap.save(f"/checkpoints/{WANDB_PROJECT}-{batch_size}-{n_epochs}-{learning_rate}")
@@ -143,7 +166,6 @@ def run(batch_size: int = 512, n_epochs: int = 10, learning_rate: float = 1e-4):
     print(f"Running with batch size: {batch_size}, n_epochs: {n_epochs}, learning_rate: {learning_rate}")
     job = RemoteTrainer()
     job.train.remote(
-        dataset=DATASET,
         batch_size=batch_size,
         n_epochs=n_epochs,
         learning_rate=learning_rate

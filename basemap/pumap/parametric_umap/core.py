@@ -3,6 +3,7 @@ from .datasets.edge_dataset import EdgeDataset
 from .datasets.covariates_datasets import VariableDataset, TorchSparseDataset
 from .utils.losses import compute_correlation_loss
 from .utils.graph import compute_all_p_umap
+from .utils.data_prefetcher import DataPrefetcher
 
 import torch
 import torch.nn as nn
@@ -10,6 +11,14 @@ from torch.optim import AdamW
 import numpy as np
 from tqdm.auto import tqdm
 import pickle  # Added for loading precomputed files
+import logging
+
+# Setup logging (similar to edge_dataset.py)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S"
+)
 
 class ParametricUMAP:
     def __init__(
@@ -26,7 +35,9 @@ class ParametricUMAP:
         batch_size=32,
         device='cuda' if torch.cuda.is_available() else 'cpu',
         use_batchnorm=False,
-        use_dropout=False
+        use_dropout=False,
+        clip_grad_norm=1.0,  # Maximum norm of gradients
+        clip_grad_value=None,  # Maximum value of gradients (optional)
     ):
         """
         Initialize ParametricUMAP.
@@ -57,6 +68,10 @@ class ParametricUMAP:
             Whether to use batch normalization in the MLP
         use_dropout : bool
             Whether to use dropout in the MLP
+        clip_grad_norm : float
+            Maximum norm of gradients. If None, gradient norm clipping is disabled.
+        clip_grad_value : float or None
+            Maximum value of gradients. If None, gradient value clipping is disabled.
         """
         self.n_components = n_components
         self.hidden_dim = hidden_dim
@@ -71,8 +86,11 @@ class ParametricUMAP:
         self.device = device
         self.use_batchnorm = use_batchnorm
         self.use_dropout = use_dropout
+        self.clip_grad_norm = clip_grad_norm
+        self.clip_grad_value = clip_grad_value
         
         self.model = None
+        # self.loss_fn = nn.BCEWithLogitsLoss()
         self.loss_fn = nn.BCELoss()
         self.is_fitted = False
         
@@ -94,7 +112,10 @@ class ParametricUMAP:
             random_state=0,
             verbose=True,
             precomputed_p_sym_path=None,
-            precomputed_negatives_path=None):
+            precomputed_negatives_path=None,
+            use_wandb=False,
+            wandb_project=None,
+            wandb_run_name=None):
         """
         Fit the model using X as training data.
         
@@ -102,68 +123,102 @@ class ParametricUMAP:
         -----------
         X : array-like of shape (n_samples, n_features)
             Training data
+            
         y : Ignored
             Not used, present for API consistency
+            
         resample_negatives : bool
             Whether to resample negatives at the beginning of each epoch
+            
         n_processes : int
             Number of processes for batching utilities
+            
         low_memory : bool
             Whether to use low memory mode (keeps data on CPU)
+            
         random_state : int
             Random seed for reproducibility
+            
         verbose : bool
             Whether to print detailed logs during training
+            
         precomputed_p_sym_path : str or None
             If provided, path to a file containing pickled precomputed P_sym
+            
         precomputed_negatives_path : str or None
             If provided, path to a file containing pickled negative edges
+            
+        use_wandb : bool
+            If True, initialize wandb and log metrics
+            
+        wandb_project : str or None
+            The wandb project name (if use_wandb is True)
+            
+        wandb_run_name : str or None
+            The wandb run name (if use_wandb is True)
             
         Returns:
         --------
         self : object
             Returns the instance itself
         """
-        print("Casting input array to float32...")
+        # Initialize wandb if enabled
+        if use_wandb:
+            import wandb
+            wandb.init(project=wandb_project, name=wandb_run_name)
+        
+        logging.info("Casting input array to float32...")
         X = np.asarray(X).astype(np.float32)
-        print("Input shape:", X.shape)
-
+        logging.info(f"Input shape: {X.shape}")
+    
         # Initialize model if not already done
         if self.model is None:
             self._init_model(X.shape[1])
             
         # Create datasets - load precomputed P_sym if available
         if precomputed_p_sym_path is not None:
-            print("Loading precomputed P_sym from", precomputed_p_sym_path)
+            logging.info("Loading precomputed P_sym from %s", precomputed_p_sym_path)
             with open(precomputed_p_sym_path, "rb") as f:
                 P_sym = pickle.load(f)["P_sym"]
         else:
-            print("Computing p_sym using compute_all_p_umap...")
+            logging.info("Computing p_sym using compute_all_p_umap...")
             P_sym = compute_all_p_umap(X, k=self.n_neighbors)
             
         # Create the EdgeDataset instance
-        print("Creating EdgeDataset...")
+        logging.info("Creating EdgeDataset...")
         ed = EdgeDataset(P_sym)
         
         # Load negative edges if a precomputed file is provided
         if precomputed_negatives_path is not None:
-            print("Loading precomputed negative edges from", precomputed_negatives_path)
+            logging.info("Loading precomputed negative edges from %s", precomputed_negatives_path)
             with open(precomputed_negatives_path, "rb") as f:
                 neg_edges = pickle.load(f)
             ed.neg_edges = neg_edges  # Assumes EdgeDataset uses this attribute internally
         
         # Create appropriate datasets for training
         if low_memory:
-            print("Using low memory mode.")
+            logging.info("Using low memory mode.")
             dataset = VariableDataset(X)
             target_dataset = TorchSparseDataset(P_sym)
         else:
-            print("Using high memory mode (data moved to device).")
+            logging.info("Using high memory mode (data moved to device).")
             dataset = VariableDataset(X).to(self.device)
             target_dataset = TorchSparseDataset(P_sym).to(self.device)
         
+        # Enable cudnn benchmark for optimized performance on fixed input sizes
+        torch.backends.cudnn.benchmark = True
+
+        # Initialize mixed precision scaler
+        scaler = torch.cuda.amp.GradScaler()
+        
         # Initialize optimizer
         optimizer = AdamW(self.model.parameters(), lr=self.learning_rate)
+        
+        # Initialize a plateau scheduler.
+        # Using ReduceLROnPlateau: if the provided loss metric does not improve for 'patience' steps,
+        # the learning rate will be multiplied by 'factor'.
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                        optimizer, mode='min', factor=0.5, patience=20, verbose=True)
         
         # Training loop
         self.model.train()
@@ -175,63 +230,130 @@ class ParametricUMAP:
                                n_processes=n_processes,
                                verbose=verbose)
         
-        if verbose:
-            print('Starting training...')
+        logging.info("Starting training...")
+        logging.info(f"Batch size: {self.batch_size}")
+        logging.info(f"Batches per epoch: {len(loader)}")
+
+        
             
-        pbar = tqdm(range(self.n_epochs), desc='Epochs', position=0)
-        for epoch in pbar:
+        # pbar = tqdm(range(self.n_epochs), desc='Epochs', position=0)
+        for epoch in range(self.n_epochs):
             epoch_loss = 0
             num_batches = 0
+            pbar2 = tqdm(range(len(loader)), desc=f'Epoch {epoch+1} batches:', position=0)
             
-            for edge_batch in tqdm(loader, desc=f'Epoch {epoch+1}', position=1, leave=False):
+            # Use the prefetcher to get batches asynchronously.
+            prefetcher = DataPrefetcher(loader, dataset, target_dataset, self.device)
+            batch_idx = 0
+            batch = prefetcher.next()
+            while batch is not None:
                 optimizer.zero_grad()
-                
-                # Get source and destination indexes from edge_batch
-                src_indexes = [i for i, j in edge_batch]
-                dst_indexes = [j for i, j in edge_batch]
-                
-                # Retrieve values from the dataset
-                src_values = dataset[src_indexes]
-                dst_values = dataset[dst_indexes]
-                targets = target_dataset[edge_batch]
-                
-                # If in low memory mode, move the data to the GPU
-                if low_memory:
-                    src_values = src_values.to(self.device)
-                    dst_values = dst_values.to(self.device)
-                    targets = targets.to(self.device)
-                
-                # Compute embeddings from the model
+                src_values, dst_values, targets = batch
+
+                # with torch.cuda.amp.autocast():
                 src_embeddings = self.model(src_values)
                 dst_embeddings = self.model(dst_values)
                 
-                # Compute distances
-                Z_distances = torch.norm(src_embeddings - dst_embeddings, dim=1)
-                X_distances = torch.norm(src_values - dst_values, dim=1)
-                
-                # Compute losses
-                qs = torch.pow(1 + self.a * torch.norm(src_embeddings - dst_embeddings, dim=1, p=2*self.b), -1)
+                # Compute distances and logits
+                dists = torch.norm(src_embeddings - dst_embeddings, dim=1, p=2*self.b)
+                qs = torch.pow(1 + self.a * dists, -1)
+                # logits = -self.a * torch.pow(dists, self.b)
                 umap_loss = self.loss_fn(qs, targets)
-                corr_loss = compute_correlation_loss(X_distances, Z_distances)
+                corr_loss = compute_correlation_loss(
+                    torch.norm(src_values - dst_values, dim=1),
+                    torch.norm(src_embeddings - dst_embeddings, dim=1)
+                )
                 loss = umap_loss + self.correlation_weight * corr_loss
                 
-                loss.backward()
-                optimizer.step()
+                # Compute scaled gradients
+                scaler.scale(loss).backward()
+                
+                # Unscale gradients before clipping
+                scaler.unscale_(optimizer)
+                
+                # Log pre-clipping gradient norms if needed
+                if batch_idx % 50 == 0:
+                    pre_clip_grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
+                    # logging.info(f"Pre-clip gradient norms: {pre_clip_grad_norms}")
+                
+                # Apply gradient clipping
+                if self.clip_grad_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(),
+                        max_norm=self.clip_grad_norm
+                    )
+                
+                if self.clip_grad_value is not None:
+                    torch.nn.utils.clip_grad_value_(
+                        self.model.parameters(),
+                        clip_value=self.clip_grad_value
+                    )
+                
+                # Log post-clipping gradient norms if needed
+                if batch_idx % 50 == 0:
+                    post_clip_grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
+                    # logging.info(f"Post-clip gradient norms: {post_clip_grad_norms}")
+                
+                # Optimizer step and scaler update
+                scaler.step(optimizer)
+                scaler.update()
+                
+                # Update the scheduler with the current batch loss.
+                # This will decrease the learning rate if the loss has plateaued.
+                scheduler.step(loss.item())
+                current_lr = optimizer.param_groups[0]['lr']
+                # logging.debug("Current learning rate: {:.6f}".format(current_lr))
                 
                 epoch_loss += loss.item()
                 num_batches += 1
+
+                dists = torch.norm(src_embeddings - dst_embeddings, dim=1, p=2*self.b)
+                grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
+
+                if use_wandb:
+                    wandb.log({
+                        'batch_loss': loss.item(),
+                        'umap_loss': umap_loss.item(),
+                        'corr_loss': corr_loss.item(),
+                        'learning_rate': current_lr,
+                        'mean_distance': dists.mean().item(),
+                        'std_distance': dists.std().item(),
+                        'mean_qs': qs.mean().item(),
+                        'std_qs': qs.std().item(),
+                        'grad_norms': grad_norms
+                    })
                 
+                batch = prefetcher.next()
+                batch_idx += 1
+                pbar2.update(1)
+                pbar2.set_postfix({'loss': f'{loss.item():.4f}'})
+
+                # After scaler.update()
+
             if resample_negatives:
                 loader = ed.get_loader(batch_size=self.batch_size, sample_first=True)
             
             avg_loss = epoch_loss / num_batches
             losses.append(avg_loss)
-            pbar.set_postfix({'loss': f'{avg_loss:.4f}'})
+            # pbar.set_postfix({'loss': f'{avg_loss:.4f}'})
             
             if verbose:
-                print(f'Epoch {epoch+1}/{self.n_epochs}, Loss: {avg_loss:.4f}')
+                logging.info('Epoch %d/%d, Loss: %.4f', epoch+1, self.n_epochs, avg_loss)
+            
+            # Log epoch-level metrics via wandb
+            if use_wandb:
+                memory = torch.cuda.memory_allocated(self.device)/1e9 if torch.cuda.is_available() else 0.0
+                peak_memory = torch.cuda.max_memory_allocated(self.device)/1e9 if torch.cuda.is_available() else 0.0
+                wandb.log({
+                    'epoch_loss': avg_loss,
+                    'epoch_peak_gpu_memory': peak_memory
+                })
+                if torch.cuda.is_available():
+                    logging.info("GPU Memory: %.2f GB (Peak: %.2f GB)", memory, peak_memory)
             
         self.is_fitted = True
+        if use_wandb:
+            wandb.finish()
         return self
     
     def transform(self, X):
@@ -297,7 +419,9 @@ class ParametricUMAP:
             'b': self.b,
             'correlation_weight': self.correlation_weight,
             'use_batchnorm': self.use_batchnorm,
-            'use_dropout': self.use_dropout
+            'use_dropout': self.use_dropout,
+            'clip_grad_norm': self.clip_grad_norm,
+            'clip_grad_value': self.clip_grad_value
         }
         
         torch.save(save_dict, path)
@@ -331,7 +455,9 @@ class ParametricUMAP:
             correlation_weight=save_dict['correlation_weight'],
             device=device,
             use_batchnorm=save_dict['use_batchnorm'],
-            use_dropout=save_dict['use_dropout']
+            use_dropout=save_dict['use_dropout'],
+            clip_grad_norm=save_dict['clip_grad_norm'],
+            clip_grad_value=save_dict['clip_grad_value']
         )
         
         # Initialize model architecture

@@ -13,13 +13,21 @@ from basemap.pumap.parametric_umap.datasets.edge_dataset import EdgeDataset
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
-N_CHUNKS = 99
-K = 15
+N_CHUNKS = 20
+K = 300
 RANDOM_STATE = 0
 
 # Constants and defaults for negative edge precomputation
-PSYM_RESULTS_FILE = "/checkpoints/pumap/wikipedia-en-chunked-120-all-MiniLM-L6-v2/precomputed_psym-0.pkl"
-NEGATIVE_EDGES_FILE = "/checkpoints/pumap/wikipedia-en-chunked-120-all-MiniLM-L6-v2/precomputed_negatives-0.pkl"
+# PSYM_RESULTS_FILE = "/checkpoints/pumap/wikipedia-en-chunked-120-all-MiniLM-L6-v2/precomputed_psym-0.pkl"
+# NEGATIVE_EDGES_FILE = "/checkpoints/pumap/wikipedia-en-chunked-120-all-MiniLM-L6-v2/precomputed_negatives-0.pkl"
+# PSYM_RESULTS_FILE = "/checkpoints/pumap/wikipedia-en-chunked-500-all-MiniLM-L6-v2/precomputed_psym.pkl"
+# NEGATIVE_EDGES_FILE = "/checkpoints/pumap/wikipedia-en-chunked-500-all-MiniLM-L6-v2/precomputed_negatives.pkl"
+PSYM_RESULTS_FILE = "/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_psym.pkl"
+# PSYM_RESULTS_FILE = "/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_psym-45.pkl"
+# NEGATIVE_EDGES_FILE = "/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_negatives.pkl"
+NEGATIVE_EDGES_FILE = f"/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_negatives-{K}.pkl"
+
+
 # CPU_CONCURRENCY = 2
 
 # Create an image with the required dependencies
@@ -63,7 +71,7 @@ class RemoteNegativesPrecomputer:
             raise FileNotFoundError(f"P_sym file not found at {PSYM_RESULTS_FILE}")
 
         with open(PSYM_RESULTS_FILE, "rb") as f:
-            P_sym = pickle.load(f)
+            P_sym = pickle.load(f)["P_sym"]
         print("P_sym loaded successfully.")
 
         # Create the EdgeDataset instance with the loaded P_sym
