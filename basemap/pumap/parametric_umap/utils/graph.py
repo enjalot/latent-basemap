@@ -5,6 +5,8 @@ import logging
 from typing import Tuple, List, Union
 import os
 from tqdm.auto import trange  # use tqdm.auto for nice behavior in notebooks/terminal
+from tqdm import tqdm
+from basemap.lancedb_loader import LanceDBLoader
 
 # import faiss
 import numpy as np
@@ -85,7 +87,7 @@ def compute_sigma_i_annoy(X: np.ndarray,
     def get_neighbors_range(start: int, end: int):
         distances_chunk = []
         neighbors_chunk = []
-        for i in range(start, end):
+        for i in trange(start, end, desc="Annoy k-NN chunk search"):
             # Get k+1 neighbors. If the index was added normally, the first neighbor
             # should be the query item itself (distance 0).
             nbs, dists = index.get_nns_by_item(i, k + 1, include_distances=True)
@@ -159,123 +161,127 @@ def compute_sigma_i_annoy(X: np.ndarray,
 
 
 
-# def compute_sigma_i(X: np.ndarray, k: int, tol: float = 1e-5, max_iter: int = 100,
-#                     batch_size_nn: int = 100, batch_size_add: int = 10000) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-#     """
-#     Compute sigma_i for each sample in the dataset using FAISS for k-nearest neighbors.
-    
-#     This function computes the optimal sigma_i values for each sample that will be used
-#     in the UMAP probability calculations. It uses batch-wise nearest neighbor search with FAISS
-#     and binary search (with progress reporting) to find sigma_i values that make the sum of probabilities equal to log2(k).
-    
-#     Parameters
-#     ----------
-#     X : np.ndarray
-#         Dataset of shape (n_samples, n_features)
-#     k : int
-#         Number of nearest neighbors to consider
-#     tol : float, optional
-#         Tolerance for binary search convergence, by default 1e-5
-#     max_iter : int, optional
-#         Maximum iterations for binary search, by default 100
-#     batch_size_nn : int, optional
-#         Batch size for nearest neighbor search (for progress reporting), by default 10000
-#     batch_size_add : int, optional
-#         Batch size for adding data to the FAISS index, by default 10000
-        
-#     Returns
-#     -------
-#     Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
-#         - sigma: Computed sigma_i for each sample, shape (n_samples,)
-#         - rho: Distance to the nearest neighbor for each sample, shape (n_samples,)
-#         - distances: Euclidean distances to k nearest neighbors, shape (n_samples, k)
-#         - neighbors: Indices of k nearest neighbors, shape (n_samples, k)
-#     """
-#     start_time = time.time()
-#     logging.info(f"Computing sigma_i for dataset of shape {X.shape} with k={k}")
-    
-#     n_samples, n_features = X.shape
+def compute_sigma_i_lance(lancedb_loader, k: int, tol: float = 1e-5, max_iter: int = 100) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Compute sigma_i for each sample in the dataset using the lancedb_loader's native search capabilities.
 
-#     # Enable FAISS multithreading
-#     faiss.omp_set_num_threads(32)
-#     logging.info(f"FAISS multithreading enabled with {faiss.omp_get_max_threads()} threads")
-#     logging.info(f"Available CPU cores: {os.cpu_count()}")
-#     logging.info(f"FAISS threads: {faiss.omp_get_max_threads()}")
-#     logging.info(f"OMP_NUM_THREADS: {os.environ.get('OMP_NUM_THREADS')}")
-#     logging.info(f"MKL_NUM_THREADS: {os.environ.get('MKL_NUM_THREADS')}")
-    
-#     # Step 1: Build the FAISS index in batches
-#     logging.info("Building FAISS index in batches...")
-#     index = faiss.IndexFlatL2(n_features)
-#     index_build_start = time.time()
-#     for i in trange(0, n_samples, batch_size_add, desc="Adding batches to index"):
-#         X_batch = X[i: i + batch_size_add]
-#         # Convert each batch to a contiguous array without loading the entire dataset at once
-#         X_batch_contig = np.ascontiguousarray(X_batch, dtype=np.float32)
-#         index.add(X_batch_contig)
-#     logging.info(f"FAISS index built in {time.time() - index_build_start:.2f} seconds")
+    This function computes the optimal sigma_i values for each sample that will be used
+    in the UMAP probability calculations. It leverages Lance's native nearest neighbor search
+    and uses multi-threading (via ThreadPoolExecutor) to compute the k-nearest neighbors in parallel.
+    A binary search is then performed to determine sigma_i values such that the sum of probabilities
+    (computed via an exponential decay) is approximately equal to log2(k).
 
-#     # Step 2: Compute k-nearest neighbors in batches with tqdm progress reporting
-#     logging.info("Computing k-nearest neighbors in batches...")
-#     knn_start = time.time()
-#     all_distances_sq = []
-#     all_neighbors = []
-#     for i in trange(0, n_samples, batch_size_nn, desc="Nearest neighbor batches"):
-#         logging.info(f"Processing batch {i // batch_size_nn} of {n_samples // batch_size_nn}")
-#         X_batch = X[i: i + batch_size_nn]
-#         X_batch_contig = np.ascontiguousarray(X_batch, dtype=np.float32)
-#         logging.info(f"X_batch_contig shape: {X_batch_contig.shape}")
-#         distances_sq_batch, neighbors_batch = index.search(X_batch_contig, k + 1)
-#         logging.info(f"distances_sq_batch shape: {distances_sq_batch.shape}")
-#         logging.info(f"neighbors_batch shape: {neighbors_batch.shape}")
-#         all_distances_sq.append(distances_sq_batch)
-#         all_neighbors.append(neighbors_batch)
-#     distances_sq = np.vstack(all_distances_sq)
-#     neighbors = np.vstack(all_neighbors)
-#     logging.info(f"K-nearest neighbors computed in {time.time() - knn_start:.2f} seconds")
+    Parameters
+    ----------
+    lancedb_loader : object
+        A Lance loader instance that provides:
+          - __len__() returning the number of samples,
+          - indexable access (lancedb_loader[i]), and
+          - a 'search(query, k)' method that returns a tuple:
+            (neighbor_indices, distances). Typically, the search returns k+1 results where the first
+            entry is the query itself.
+    k : int
+        Number of nearest neighbors (excluding self).
+    tol : float, optional
+        Tolerance for binary search convergence; default is 1e-5.
+    max_iter : int, optional
+        Maximum iterations for the binary search; default is 100.
 
-#     # Remove self distances and neighbors
-#     distances_sq = distances_sq[:, 1:].astype(np.float32)  # shape (n_samples, k)
-#     neighbors = neighbors[:, 1:]
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+        - sigma: Computed sigma_i for each sample, shape (n_samples,)
+        - rho: Distance to the nearest neighbor for each sample, shape (n_samples,)
+        - distances: Euclidean distances to k nearest neighbors, shape (n_samples, k)
+        - neighbors: Indices of k nearest neighbors, shape (n_samples, k)
+    """
+    import time
+    import logging
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+    from tqdm.auto import trange, tqdm
 
-#     # Convert squared distances to Euclidean distances
-#     distances = np.sqrt(distances_sq).astype(np.float32)
+    start_time = time.time()
+    n_samples = len(lancedb_loader)
+    logging.info(f"Computing sigma_i using Lance for dataset of size {n_samples} with k={k}")
 
-#     # Step 3: Compute rho and perform binary search for sigma_i, with tqdm for iterations
-#     rho = distances[:, 0].copy()  # nearest neighbor distance for each sample
-#     target = np.log2(k).astype(np.float32)  # target sum of probabilities
+    # Determine number of workers and chunk size
+    num_workers = os.cpu_count() or 1
+    chunk_size = (n_samples + num_workers - 1) // num_workers
+    logging.info(f"Using {num_workers} workers with chunk size {chunk_size}")
 
-#     logging.info("Starting binary search for sigma values...")
-#     binary_search_start = time.time()
-#     low = np.full(n_samples, 1e-5, dtype=np.float32)
-#     high = np.full(n_samples, 10.0, dtype=np.float32)
-#     sigma = np.zeros(n_samples, dtype=np.float32)
-#     converged = np.zeros(n_samples, dtype=bool)
+    def get_neighbors_range(start: int, end: int):
+        distances_chunk = []
+        neighbors_chunk = []
+        for i in trange(start, end, desc="Lance k-NN chunk search"):
+            # Retrieve k+1 neighbors so that we can remove the sample itself
+            nn_indices, dists = lancedb_loader.search(lancedb_loader[i], k=k + 1)
+            # Remove self if present. Typically the first element is the query itself.
+            if nn_indices and nn_indices[0] == i:
+                nn_indices = nn_indices[1:k+1]
+                dists = dists[1:k+1]
+            else:
+                # If self is present elsewhere in the list, remove it
+                if i in nn_indices:
+                    idx_self = nn_indices.index(i)
+                    nn_indices.pop(idx_self)
+                    dists.pop(idx_self)
+                nn_indices = nn_indices[:k]
+                dists = dists[:k]
+            distances_chunk.append(dists)
+            neighbors_chunk.append(nn_indices)
+        return distances_chunk, neighbors_chunk
 
-#     for _ in trange(max_iter, desc="Binary search iterations"):
-#         mid = (low + high) / 2.0
+    all_distances = []
+    all_neighbors = []
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = []
+        for start in range(0, n_samples, chunk_size):
+            end = min(start + chunk_size, n_samples)
+            futures.append(executor.submit(get_neighbors_range, start, end))
+        for future in tqdm(futures, desc="Lance k-NN search", total=len(futures)):
+            d_chunk, n_chunk = future.result()
+            all_distances.extend(d_chunk)
+            all_neighbors.extend(n_chunk)
 
-#         # Compute probabilities
-#         exponent = -np.maximum(distances - rho[:, np.newaxis], 0) / mid[:, np.newaxis]
-#         probs = np.exp(exponent)
-#         prob_sum = probs.sum(axis=1)
+    # Convert lists to numpy arrays
+    distances = np.array(all_distances, dtype=np.float32)  # shape (n_samples, k)
+    neighbors = np.array(all_neighbors, dtype=np.int64)      # shape (n_samples, k)
+    logging.info("Nearest neighbors computed using Lance")
 
-#         diff = prob_sum - target
-#         abs_diff = np.abs(diff)
-#         newly_converged = (abs_diff < tol) & (~converged)
-#         converged |= newly_converged
-#         sigma[newly_converged] = mid[newly_converged]
+    # Compute rho as the distance to the nearest neighbor (first neighbor distance)
+    rho = distances[:, 0].copy().astype(np.float32)
 
-#         # Update binary search bounds
-#         high = np.where(prob_sum > target, mid, high)
-#         low = np.where(prob_sum <= target, mid, low)
+    # Binary search to compute sigma_i for each sample such that the sum of probabilities equals log2(k)
+    target = np.log2(k).astype(np.float32)
+    logging.info("Starting binary search for sigma values (Lance)...")
+    low = np.full(n_samples, 1e-5, dtype=np.float32)
+    high = np.full(n_samples, 10.0, dtype=np.float32)
+    sigma = np.zeros(n_samples, dtype=np.float32)
+    converged = np.zeros(n_samples, dtype=bool)
 
-#     # For any samples that haven't converged within max_iter, use the last mid value
-#     sigma[~converged] = mid[~converged]
-#     logging.info(f"Binary search completed in {time.time() - binary_search_start:.2f} seconds")
-#     logging.info(f"Total sigma_i computation completed in {time.time() - start_time:.2f} seconds")
-    
-#     return sigma, rho, distances, neighbors
+    for _ in trange(max_iter, desc="Binary search iterations (Lance)"):
+        mid = (low + high) / 2.0
+        # Compute the exponent term: -max(d_ij - rho_i, 0) / mid_i
+        exponent = -np.maximum(distances - rho[:, None], 0) / mid[:, None]
+        probs = np.exp(exponent).astype(np.float32)
+        prob_sum = probs.sum(axis=1)
+        abs_diff = np.abs(prob_sum - target)
+        newly_converged = (abs_diff < tol) & (~converged)
+        converged |= newly_converged
+        sigma[newly_converged] = mid[newly_converged]
+        # Adjust binary search bounds
+        high = np.where(prob_sum > target, mid, high)
+        low = np.where(prob_sum <= target, mid, low)
+
+    # For any samples that did not converge, use the last computed mid value.
+    sigma[~converged] = mid[~converged]
+    total_time = time.time() - start_time
+    logging.info(f"Binary search completed in {total_time:.2f} seconds")
+    logging.info(f"Total sigma_i computation using Lance completed in {total_time:.2f} seconds")
+
+    return sigma, rho, distances, neighbors
+
 
 
 def compute_p_umap(sigma: np.ndarray, rho: np.ndarray, distances: np.ndarray, neighbors: np.ndarray) -> sparse.csr_matrix:
@@ -364,8 +370,7 @@ def compute_p_umap_symmetric(P):
     return P_sym
 
 
-def compute_all_p_umap(X: np.ndarray, k: int, tol: float = 1e-5, max_iter: int = 100,
-                      return_dist_and_neigh: bool = False) -> Union[sparse.csr_matrix, Tuple[sparse.csr_matrix, np.ndarray, np.ndarray]]:
+def compute_all_p_umap(X: Union[np.ndarray, LanceDBLoader], k: int, tol: float = 1e-5, max_iter: int = 100) -> sparse.csr_matrix:
     """
     Compute symmetric UMAP probabilities for the entire dataset.
     
@@ -382,8 +387,6 @@ def compute_all_p_umap(X: np.ndarray, k: int, tol: float = 1e-5, max_iter: int =
         Tolerance for binary search, by default 1e-5
     max_iter : int, optional
         Maximum iterations for binary search, by default 100
-    return_dist_and_neigh : bool, optional
-        Whether to return distances and neighbors, by default False
         
     Returns
     -------
@@ -399,8 +402,10 @@ def compute_all_p_umap(X: np.ndarray, k: int, tol: float = 1e-5, max_iter: int =
     logging.info(f"Starting complete UMAP probability computation for dataset of shape {X.shape}")
     
     # Step 1: Compute sigma, rho, distances, and neighbors
-    # sigma, rho, distances, neighbors = compute_sigma_i(X, k, tol, max_iter)
-    sigma, rho, distances, neighbors = compute_sigma_i_annoy(X, k, tol, max_iter)
+    if isinstance(X, LanceDBLoader):
+        sigma, rho, distances, neighbors = compute_sigma_i_lance(X, k, tol, max_iter)
+    else:
+        sigma, rho, distances, neighbors = compute_sigma_i_annoy(X, k, tol, max_iter)
 
     # Step 2: Compute p_j|i
     P = compute_p_umap(sigma, rho, distances, neighbors)
@@ -410,7 +415,90 @@ def compute_all_p_umap(X: np.ndarray, k: int, tol: float = 1e-5, max_iter: int =
 
     logging.info(f"Total UMAP probability computation completed in {time.time() - total_start:.2f} seconds")
     
-    if return_dist_and_neigh:
-        return P_sym, distances, neighbors
+    return P_sym
+
+
+def save_umap_results(file_path: str, P_sym, distances=None, neighbors=None):
+    """
+    Serialize the UMAP results to disk using pickle.
+
+    Parameters
+    ----------
+    file_path : str
+        The file path to save the results.
+    P_sym : sparse.csr_matrix
+        The symmetric UMAP probability matrix.
+    distances : Optional[np.ndarray], optional
+        Array of distances to the k nearest neighbors, by default None.
+    neighbors : Optional[np.ndarray], optional
+        Array of neighbor indices, by default None.
+    """
+    import pickle
+    # Ensure the directory exists                
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    result = {
+        "P_sym": P_sym,
+        "distances": distances,
+        "neighbors": neighbors
+    }
+    with open(file_path, "wb") as f:
+        pickle.dump(result, f, protocol=pickle.HIGHEST_PROTOCOL)
+    logging.info("UMAP results saved to %s", file_path)
+
+
+def load_umap_results(file_path: str):
+    """
+    Load serialized UMAP results from disk.
+
+    Parameters
+    ----------
+    file_path : str
+        The file path from which to load the results.
+    
+    Returns
+    -------
+    dict
+        Dictionary containing the keys "P_sym", "distances", and "neighbors".
+    """
+    import pickle
+    with open(file_path, "rb") as f:
+        result = pickle.load(f)
+    logging.info("UMAP results loaded from %s", file_path)
+    return result
+
+
+def compute_and_save_all_p_umap(X: Union[np.ndarray, LanceDBLoader], k: int, file_path: str, tol: float = 1e-5,
+                                max_iter: int = 100):
+    """
+    Compute the symmetric UMAP probabilities for the dataset X and serialize the results.
+    If the results have already been computed and saved, load them from disk instead.
+
+    Parameters
+    ----------
+    X : Union[np.ndarray, LanceDBLoader]
+        The dataset on which to compute UMAP probabilities.
+    k : int
+        Number of nearest neighbors.
+    file_path : str
+        Path to save/load the computed UMAP results.
+    tol : float, optional
+        Tolerance for binary search convergence, by default 1e-5.
+    max_iter : int, optional
+        Maximum iterations for binary search, by default 100.
+
+    Returns
+    -------
+    Union[sparse.csr_matrix, Tuple[sparse.csr_matrix, np.ndarray, np.ndarray]]
+        The computed symmetric UMAP probability matrix. If return_dist_and_neigh is True, a tuple
+        (P_sym, distances, neighbors) is returned.
+    """
+    if os.path.exists(file_path):
+        logging.info("UMAP results found at %s. Loading from file...", file_path)
+        result = load_umap_results(file_path)
     else:
-        return P_sym
+        logging.info("UMAP results not found at %s. Computing UMAP probabilities...", file_path)
+        result = compute_all_p_umap(X, k, tol, max_iter)
+        save_umap_results(file_path, result)
+    return result
+
+

@@ -3,26 +3,30 @@ python train_local.py --batch-size 32 --n-epochs 1 --learning-rate 0.0001
 """
 
 import torch
-from basemap.data_loader import MemmapArrayConcatenator
+# from basemap.data_loader import MemmapArrayConcatenator
+from basemap.lancedb_loader import LanceDBLoader
 from basemap.monitored import UMAPMonitor, MonitoredParametricUMAP
 import argparse
 import numpy as np
 
 # Configuration
-DATASET = [
-    # "data/wikipedia-en-chunked-120-all-MiniLM-L6-v2/train"
-    "data/"
-]
-WANDB_PROJECT = "basemap-all-minilm-l6-v2"
-D_IN = 384
+# DATASET = ["data/"]
+DATASET = "/Users/enjalot/latent-scope-demo/ls-fineweb-edu-100k/lancedb"
+TABLE = "scopes-001"
+
+WANDB_PROJECT = "basemap-ls-fineweb-edu-100k"
+D_IN = 768
+
+UMAP_RESULTS_FILE = "data/precomputed_umap_results_ls-fineweb-edu-100k.pkl"
+NEGATIVE_EDGES_FILE = "data/precomputed_negatives_lance_ls-fineweb-edu-100k.pkl"
 
 def train(dataset, batch_size, n_epochs, learning_rate):
     print(f"Training on datasets: {dataset}, dimensions: {D_IN}")
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    X_train = MemmapArrayConcatenator(dataset, D_IN)
-    
+    # X_train = MemmapArrayConcatenator(dataset, D_IN)
+    X_train = LanceDBLoader(db_name=DATASET, table_name=TABLE, columns=["vector"])
     # Convert to regular numpy array and take subset
     print("Converting to numpy array...")
     # X_train = np.array(X_train)  # This uses the __array__ method
@@ -57,11 +61,13 @@ def train(dataset, batch_size, n_epochs, learning_rate):
         monitor=monitor,
         low_memory=True,
         verbose=True,
-        n_processes=8
+        n_processes=8,
+        precomputed_p_sym_path=UMAP_RESULTS_FILE,
+        precomputed_negatives_path=NEGATIVE_EDGES_FILE
     )
     
     print("Saving model")
-    pumap.save(f"checkpoints/{WANDB_PROJECT}-local-{batch_size}-{n_epochs}-{learning_rate}")
+    pumap.save(f"data/pumap-{WANDB_PROJECT}-local-{batch_size}-{n_epochs}-{learning_rate}")
     print("Done")
 
 def main():

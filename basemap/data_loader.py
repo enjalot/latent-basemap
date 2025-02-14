@@ -3,15 +3,17 @@ import os
 import glob
 
 class MemmapArrayConcatenator:
-    def __init__(self, directories, input_dim):
+    def __init__(self, directories, input_dim, testing: bool = False):
         self.input_dim = input_dim
         
         # Collect all .npy files from directories
         self.memmap_files = []
         for directory in directories:
             print("directory", directory)
-            # npy_files = glob.glob(os.path.join(directory, "*.npy"))
-            npy_files = glob.glob(os.path.join(directory, "data-00000-*.npy"))
+            if testing:
+                npy_files = glob.glob(os.path.join(directory, "data-00000-*.npy"))
+            else:
+                npy_files = glob.glob(os.path.join(directory, "*.npy"))
             print("npy_files", npy_files)
             self.memmap_files.extend(npy_files)
             

@@ -9,6 +9,7 @@ import torch.nn as nn
 from torch.optim import AdamW
 import numpy as np
 from tqdm.auto import tqdm
+import pickle  # Added for loading precomputed files
 
 class ParametricUMAP:
     def __init__(
@@ -38,6 +39,8 @@ class ParametricUMAP:
             Dimension of hidden layers in the MLP
         n_layers : int
             Number of hidden layers in the MLP
+        n_neighbors : int
+            Number of nearest neighbors to consider for UMAP probabilities
         a, b : float
             UMAP parameters for the optimization
         correlation_weight : float
@@ -50,6 +53,10 @@ class ParametricUMAP:
             Batch size for training
         device : str
             Device to use for computations ('cpu' or 'cuda')
+        use_batchnorm : bool
+            Whether to use batch normalization in the MLP
+        use_dropout : bool
+            Whether to use dropout in the MLP
         """
         self.n_components = n_components
         self.hidden_dim = hidden_dim
@@ -85,7 +92,9 @@ class ParametricUMAP:
             n_processes=6,
             low_memory=False,
             random_state=0,
-            verbose=True):
+            verbose=True,
+            precomputed_p_sym_path=None,
+            precomputed_negatives_path=None):
         """
         Fit the model using X as training data.
         
@@ -95,34 +104,63 @@ class ParametricUMAP:
             Training data
         y : Ignored
             Not used, present for API consistency
-        
+        resample_negatives : bool
+            Whether to resample negatives at the beginning of each epoch
+        n_processes : int
+            Number of processes for batching utilities
+        low_memory : bool
+            Whether to use low memory mode (keeps data on CPU)
+        random_state : int
+            Random seed for reproducibility
+        verbose : bool
+            Whether to print detailed logs during training
+        precomputed_p_sym_path : str or None
+            If provided, path to a file containing pickled precomputed P_sym
+        precomputed_negatives_path : str or None
+            If provided, path to a file containing pickled negative edges
+            
         Returns:
         --------
         self : object
             Returns the instance itself
         """
-        print("casting array")
+        print("Casting input array to float32...")
         X = np.asarray(X).astype(np.float32)
-        print("shape", X.shape)
+        print("Input shape:", X.shape)
 
         # Initialize model if not already done
         if self.model is None:
             self._init_model(X.shape[1])
             
-        # Create datasets
-        print("computing p_sym")
-        P_sym = compute_all_p_umap(X, k=self.n_neighbors)
-        print("computing ed")
+        # Create datasets - load precomputed P_sym if available
+        if precomputed_p_sym_path is not None:
+            print("Loading precomputed P_sym from", precomputed_p_sym_path)
+            with open(precomputed_p_sym_path, "rb") as f:
+                P_sym = pickle.load(f)["P_sym"]
+        else:
+            print("Computing p_sym using compute_all_p_umap...")
+            P_sym = compute_all_p_umap(X, k=self.n_neighbors)
+            
+        # Create the EdgeDataset instance
+        print("Creating EdgeDataset...")
         ed = EdgeDataset(P_sym)
         
+        # Load negative edges if a precomputed file is provided
+        if precomputed_negatives_path is not None:
+            print("Loading precomputed negative edges from", precomputed_negatives_path)
+            with open(precomputed_negatives_path, "rb") as f:
+                neg_edges = pickle.load(f)
+            ed.neg_edges = neg_edges  # Assumes EdgeDataset uses this attribute internally
+        
+        # Create appropriate datasets for training
         if low_memory:
-            print("low memory")
+            print("Using low memory mode.")
             dataset = VariableDataset(X)
             target_dataset = TorchSparseDataset(P_sym)
         else:
-            print("not low memory")
+            print("Using high memory mode (data moved to device).")
             dataset = VariableDataset(X).to(self.device)
-            target_dataset = TorchSparseDataset(P_sym).to(self.device) #if the dataset is not too big, it's better to keep it on GPU for faster computation
+            target_dataset = TorchSparseDataset(P_sym).to(self.device)
         
         # Initialize optimizer
         optimizer = AdamW(self.model.parameters(), lr=self.learning_rate)
@@ -130,7 +168,7 @@ class ParametricUMAP:
         # Training loop
         self.model.train()
         losses = []
-
+        
         loader = ed.get_loader(batch_size=self.batch_size, 
                                sample_first=True,
                                random_state=random_state,
@@ -138,8 +176,8 @@ class ParametricUMAP:
                                verbose=verbose)
         
         if verbose:
-            print('Training...')
-        
+            print('Starting training...')
+            
         pbar = tqdm(range(self.n_epochs), desc='Epochs', position=0)
         for epoch in pbar:
             epoch_loss = 0
@@ -148,22 +186,22 @@ class ParametricUMAP:
             for edge_batch in tqdm(loader, desc=f'Epoch {epoch+1}', position=1, leave=False):
                 optimizer.zero_grad()
                 
-                # Get src and dst indexes from edge_batch
-                src_indexes = [i for i,j in edge_batch]
-                dst_indexes = [j for i,j in edge_batch]
+                # Get source and destination indexes from edge_batch
+                src_indexes = [i for i, j in edge_batch]
+                dst_indexes = [j for i, j in edge_batch]
                 
-                # Get values from dataset
+                # Retrieve values from the dataset
                 src_values = dataset[src_indexes]
                 dst_values = dataset[dst_indexes]
                 targets = target_dataset[edge_batch]
-
-                # If low memory, the dataset is not on GPU, so we need to move the values to GPU
+                
+                # If in low memory mode, move the data to the GPU
                 if low_memory:
                     src_values = src_values.to(self.device)
                     dst_values = dst_values.to(self.device)
                     targets = targets.to(self.device)
                 
-                # Get embeddings from model
+                # Compute embeddings from the model
                 src_embeddings = self.model(src_values)
                 dst_embeddings = self.model(dst_values)
                 
@@ -188,10 +226,8 @@ class ParametricUMAP:
             
             avg_loss = epoch_loss / num_batches
             losses.append(avg_loss)
-            
-            # Update progress bar with current loss
             pbar.set_postfix({'loss': f'{avg_loss:.4f}'})
-
+            
             if verbose:
                 print(f'Epoch {epoch+1}/{self.n_epochs}, Loss: {avg_loss:.4f}')
             
@@ -223,9 +259,9 @@ class ParametricUMAP:
             
         return X_reduced.cpu().numpy()
     
-    def fit_transform(self, X,verbose=True,low_memory=False):
+    def fit_transform(self, X, verbose=True, low_memory=False):
         """
-        Fit the model with X and apply the dimensionality reduction on X.
+        Fit the model with X and apply dimensionality reduction on X.
         
         Parameters:
         -----------
@@ -237,7 +273,7 @@ class ParametricUMAP:
         X_new : array-like of shape (n_samples, n_components)
             Transformed data
         """
-        self.fit(X,verbose=verbose,low_memory=low_memory)
+        self.fit(X, verbose=verbose, low_memory=low_memory)
         return self.transform(X)
     
     def save(self, path):

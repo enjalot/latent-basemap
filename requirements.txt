@@ -4,3 +4,4 @@ torch
 tqdm
 parametric_umap
 wandb
+lancedb

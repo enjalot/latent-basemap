@@ -1,5 +1,5 @@
 """
-modal run train_modal.py --batch-size 32 --n-epochs 1 --learning-rate 0.0001
+modal run train_modal.py --batch-size 512 --n-epochs 1 --learning-rate 0.0001
 """
 
 from modal import App, Image, Secret, Volume, build, enter, exit, gpu, method
@@ -22,14 +22,21 @@ DATASET = [
     # f"/embeddings/pile-uncopyrighted-chunked-120-all-MiniLM-L6-v2/train",
     f"/embeddings/wikipedia-en-chunked-120-all-MiniLM-L6-v2/train",
 ]
-WANDB_PROJECT = "basemap-all-minilm-l6-v2"
+TESTING = True
+WANDB_PROJECT = "basemap-all-minilm-l6-v2-wikipedia-120-0"
 D_IN = 384
 GPU_CONCURRENCY = 1
-CPU_CONCURRENCY = 32
+CPU_CONCURRENCY = 2
 # GPU_CONFIG = gpu.A100(size="80GB")
 # GPU_CONFIG = gpu.A100(size="40GB")
 GPU_CONFIG = gpu.A10G()
 # GPU_CONFIG = gpu.H100()
+
+# ------------------------------------------------------------------
+# New constants for precomputed files (generated from psym_modal.py and edges_modal.py)
+PSYM_RESULTS_FILE = "/checkpoints/pumap/wikipedia-en-chunked-120-all-MiniLM-L6-v2/precomputed_psym-0.pkl"
+NEGATIVE_EDGES_FILE = "/checkpoints/pumap/wikipedia-en-chunked-120-all-MiniLM-L6-v2/precomputed_negatives-0.pkl"
+# ------------------------------------------------------------------
 
 st_image = (
     Image.debian_slim(python_version="3.10")
@@ -50,7 +57,8 @@ st_image = (
         "pyarrow",
         "datasets",
         "simple_parsing",
-        "wandb"
+        "wandb",
+        "lancedb"
     )
     .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
     # .run_function(
@@ -97,14 +105,14 @@ class RemoteTrainer:
     def train(self, dataset, batch_size, n_epochs, learning_rate):
         print(f"Training on datasets: {DATASET}, dimensions: {D_IN}")
         
-        X_train = MemmapArrayConcatenator(DATASET, D_IN)
+        X_train = MemmapArrayConcatenator(DATASET, D_IN, testing=TESTING)
 
         print("making monitor")
         monitor = UMAPMonitor(
-            # use_wandb=True,
-            use_wandb=False,
+            use_wandb=True,
+            # use_wandb=False,
             wandb_project=WANDB_PROJECT,
-            wandb_run_name=f"train-{dataset}-{batch_size}-{n_epochs}-{learning_rate}",
+            wandb_run_name=f"train-{batch_size}-{n_epochs}-{learning_rate}",
         )
         print("initializing model")
         # Initialize the model
@@ -122,10 +130,12 @@ class RemoteTrainer:
             monitor=monitor,
             low_memory=True,
             verbose=True,
-            n_processes=32
+            n_processes=CPU_CONCURRENCY,
+            precomputed_p_sym_path=PSYM_RESULTS_FILE,
+            precomputed_negatives_path=NEGATIVE_EDGES_FILE
         )
         print("saving model")
-        pumap.save(f"/checkpoints/{WANDB_PROJECT}-{dataset}-{batch_size}-{n_epochs}-{learning_rate}")
+        pumap.save(f"/checkpoints/{WANDB_PROJECT}-{batch_size}-{n_epochs}-{learning_rate}")
         print("done")
 
 @app.local_entrypoint()

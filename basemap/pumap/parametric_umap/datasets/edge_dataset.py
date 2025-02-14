@@ -15,18 +15,33 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 
-# Global variable to hold shared adjacency sets in workers
+# Global variables to hold shared adjacency info in workers.
 _global_adj_sets = None
+_global_total_nodes = None  # NEW: will store the total number of nodes for candidate list generation
 
 def init_worker(worker_id: int, adj_sets: Dict[int, Set[int]]):
     """
     Initializer for worker processes to set a global variable.
+    (Used in single–machine mode, where we build the full adjacency set.)
     """
     logging.info(f"Worker {worker_id} initialization started")
     start_time = time.time()
     global _global_adj_sets
     _global_adj_sets = {node: np.array(list(neighbors)) for node, neighbors in adj_sets.items()}
-    logging.info(f"Worker {worker_id} initialization completed in %.2f seconds", time.time() - start_time)
+    logging.info("Worker %d initialization completed in %.2f seconds", worker_id, time.time() - start_time)
+
+def init_worker_partial(worker_id: int, partial_adj_sets: Dict[int, np.ndarray], total_nodes: int):
+    """
+    NEW: Initializer for a distributed subtask worker that only loads a _partial_
+    adjacency dictionary (for the nodes in its chunk) and the total number of nodes.
+    """
+    logging.info("Worker %d partial initialization started", worker_id)
+    start_time = time.time()
+    global _global_adj_sets, _global_total_nodes
+    _global_adj_sets = partial_adj_sets   # Only for nodes in our chunk.
+    _global_total_nodes = total_nodes      # Total nodes in the full graph.
+    logging.info("Worker %d partial initialization completed in %.2f seconds; total nodes = %d",
+                 worker_id, time.time() - start_time, total_nodes)
 
 def sample_negative_edges_worker(
     node_list: Union[List[int], np.ndarray], 
@@ -35,19 +50,24 @@ def sample_negative_edges_worker(
 ) -> List[Tuple[int, int]]:
     """
     Sample k negative edges for each node in node_list using the global _global_adj_sets.
+    Using _global_total_nodes (if set) to create the full candidate list.
     
     Accepts node_list as a NumPy array or a Python list. Each element is cast to an int
     before dictionary lookup to ensure compatibility.
     """
     rng = np.random.RandomState(random_state)
-    n_nodes = len(_global_adj_sets)
-    all_nodes = np.arange(n_nodes)
+    # Use _global_total_nodes if available; else fall back to the length of _global_adj_sets.
+    try:
+        total = _global_total_nodes
+    except NameError:
+        total = len(_global_adj_sets)
+    all_nodes = np.arange(total)
     neg_edges = []
     
     # Use tqdm.auto for smart handling of nested progress bars
     for node in tqdm(node_list, desc="Sampling negative edges", leave=False, position=1):
         node_int = int(node)
-        # Here, connected is already a NumPy array
+        # Here, connected is an array of neighbors for node_int (from our partial dictionary).
         connected = _global_adj_sets[node_int]
         mask = ~np.isin(all_nodes, connected)
         mask[node_int] = False
@@ -126,7 +146,7 @@ class EdgeDataset:
     """
     def __init__(self, P_sym: csr_matrix) -> None:
         start_time = time.time()
-        # self.adj_sets: Dict[int, Set[int]] = self._get_adjacency_sets(P_sym)
+        # For single–machine use we build the full adjacency sets.
         self.adj_sets: Dict[int, Set[int]] = self._get_adjacency_sets_csr(P_sym)
         
         # Obtain positive edges
@@ -135,7 +155,8 @@ class EdgeDataset:
         
         self.neg_edges: Optional[List[Tuple[int, int]]] = None
         self.all_edges: Optional[List[Tuple[int, int]]] = None
-        logging.info(f"EdgeDataset initialized: {len(self.pos_edges)} positive edges, adjacency sets built in {time.time() - start_time:.2f} seconds.")
+        logging.info("EdgeDataset initialized: %d positive edges, adjacency sets built in %.2f seconds.", 
+                     len(self.pos_edges), time.time() - start_time)
 
     def _shuffle_edges(self, random_state: int = 0) -> None:
         """
@@ -329,7 +350,6 @@ class EdgeDataset:
         logging.info("Building adjacency sets from CSR for %d nodes...", n_samples)
         adj_sets = {}
         for i in range(n_samples):
-            # Get neighbors for row i directly from CSR structure
             start = P_sym.indptr[i]
             end = P_sym.indptr[i + 1]
             neighbors = set(P_sym.indices[start:end])
@@ -368,7 +388,7 @@ class EdgeDataset:
 
 
     @classmethod
-    def load_precomputed_negative_edges(cls, file_path: str) -> list:
+    def load_precomputed_negative_edges(file_path: str) -> list:
         """
         Load precomputed negative edges from a file.
         
@@ -385,4 +405,78 @@ class EdgeDataset:
         with open(file_path, "rb") as f:
             neg_edges = pickle.load(f)
         return neg_edges
+        
+
+def distributed_sample_negative_edges_subtask(psym_filepath: str, chunk_idx: int, n_chunks: int, 
+                                                random_state: int = 0, k: int = 5, verbose: bool = True) -> list:
+    # This function is not part of the EdgeDataset class, as it will be run independently in a distributed setting.
+    """
+    Distributed version: load P_sym from file, determine its own chunk of positive nodes based on the
+    provided chunk index and total number of chunks, and sample negative edges for that chunk.
     
+    This version is modified to build only a partial adjacency set for the nodes in the current chunk,
+    so as to reduce memory usage. The candidate list for negative sampling is still built using the total
+    number of nodes.
+    
+    Parameters
+    ----------
+    psym_filepath : str
+        Path to the precomputed P_sym file.
+    chunk_idx : int
+        Index of the current chunk (0-indexed).
+    n_chunks : int
+        Total number of chunks.
+    random_state : int, optional
+        Random seed for reproducibility, by default 0.
+    k : int, optional
+        Number of negative edges per node, by default 5.
+    verbose : bool, optional
+        Whether to run in verbose mode, by default True.
+        
+    Returns
+    -------
+    list of Tuple[int, int]
+        List of sampled negative edges for the chunk.
+    """
+    # Load the P_sym matrix from file.
+    with open(psym_filepath, "rb") as f:
+        loaded = pickle.load(f)
+        if isinstance(loaded, dict) and "P_sym" in loaded:
+            P_sym = loaded["P_sym"]
+        else:
+            P_sym = loaded
+    total_nodes = P_sym.shape[0]
+    if verbose:
+        logging.info("Distributed sampling: total nodes = %d", total_nodes)
+    
+    # Compute the positive source nodes without building the full adjacency set.
+    # (Avoiding P_sym.todok() helps reduce memory usage.)
+    pos_nodes = [i for i in range(total_nodes) if P_sym.indptr[i] < P_sym.indptr[i+1]]
+    if verbose:
+        logging.info("Distributed sampling: found %d positive nodes", len(pos_nodes))
+    
+    # Partition pos_nodes into n_chunks and select the chunk for this subtask.
+    pos_nodes_array = np.array(pos_nodes)
+    all_chunks = np.array_split(pos_nodes_array, n_chunks)
+    if chunk_idx < 0 or chunk_idx >= len(all_chunks):
+        raise ValueError(f"Chunk index {chunk_idx} is out of bounds for {n_chunks} chunks.")
+    node_chunk = all_chunks[chunk_idx].tolist()
+    if verbose:
+        logging.info("Chunk %d selected with %d nodes", chunk_idx, len(node_chunk))
+    
+    # Build a _partial_ adjacency set for only the nodes in the current chunk.
+    partial_adj_sets = {}
+    for node in node_chunk:
+        start = P_sym.indptr[node]
+        end = P_sym.indptr[node + 1]
+        # The neighbors are stored in the CSR matrix's indices; no need to iterate over all nodes.
+        neighbors = P_sym.indices[start:end]
+        partial_adj_sets[node] = neighbors
+    # Explicitly drop reference to the full P_sym to help garbage collection.
+    del P_sym
+    
+    # Initialize the worker with only the partial adjacency set and the overall node count.
+    init_worker_partial(0, partial_adj_sets, total_nodes)
+    neg_edges = sample_negative_edges_worker(node_chunk, k, random_state)
+    return neg_edges
+
