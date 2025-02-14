@@ -22,10 +22,12 @@ RANDOM_STATE = 0
 # NEGATIVE_EDGES_FILE = "/checkpoints/pumap/wikipedia-en-chunked-120-all-MiniLM-L6-v2/precomputed_negatives-0.pkl"
 # PSYM_RESULTS_FILE = "/checkpoints/pumap/wikipedia-en-chunked-500-all-MiniLM-L6-v2/precomputed_psym.pkl"
 # NEGATIVE_EDGES_FILE = "/checkpoints/pumap/wikipedia-en-chunked-500-all-MiniLM-L6-v2/precomputed_negatives.pkl"
-PSYM_RESULTS_FILE = "/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_psym.pkl"
+# PSYM_RESULTS_FILE = "/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_psym.pkl"
+PSYM_RESULTS_FILE = "/checkpoints/pumap/ls-dataisplural/precomputed_psym-15.pkl"
 # PSYM_RESULTS_FILE = "/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_psym-45.pkl"
 # NEGATIVE_EDGES_FILE = "/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_negatives.pkl"
-NEGATIVE_EDGES_FILE = f"/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_negatives-{K}.pkl"
+# NEGATIVE_EDGES_FILE = f"/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_negatives-{K}.pkl"
+NEGATIVE_EDGES_FILE = f"/checkpoints/pumap/ls-dataisplural/precomputed_negatives-{K}.pkl"
 
 
 # CPU_CONCURRENCY = 2

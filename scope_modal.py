@@ -17,11 +17,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 
 # Constants and defaults for P_sym precomputation using LanceDB scope
 # Adjust the following as needed.
-DB_NAME = "enjalot/ls-fineweb-edu-100k"      # This is the (sub)directory or identifier for your DB inside /lancedb.
+# DB_NAME = "enjalot/ls-fineweb-edu-100k"      # This is the (sub)directory or identifier for your DB inside /lancedb.
+DB_NAME = "enjalot/ls-dataisplural"      # This is the (sub)directory or identifier for your DB inside /lancedb.
 TABLE_NAME = "scopes-001"           # The table name (or scope) to read from
 COLUMNS = ["vector"]           # The column that holds the embedding vectors
-N_NEIGHBORS = 45
-PSYM_RESULTS_FILE = "/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_psym-45.pkl"
+N_NEIGHBORS = 15
+PSYM_RESULTS_FILE = "/checkpoints/pumap/ls-dataisplural/precomputed_psym-15.pkl"
 TESTING = False
 
 # Create an image with the required dependencies (note that lancedb is installed)

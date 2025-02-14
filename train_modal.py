@@ -15,7 +15,8 @@ import numpy as np
 import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-DB_NAME = "enjalot/ls-fineweb-edu-100k"      # This is the (sub)directory or identifier for your DB inside /lancedb.
+# DB_NAME = "enjalot/ls-fineweb-edu-100k"      # This is the (sub)directory or identifier for your DB inside /lancedb.
+DB_NAME = "enjalot/ls-dataisplural"      # This is the (sub)directory or identifier for your DB inside /lancedb.
 TABLE_NAME = "scopes-001"           # The table name (or scope) to read from
 COLUMNS = ["vector"]           # The column that holds the embedding vectors
 
@@ -34,7 +35,8 @@ TESTING = True
 
 # WANDB_PROJECT = "basemap-all-minilm-l6-v2-wikipedia-120-0"
 # WANDB_PROJECT = "basemap-all-minilm-l6-v2-wikipedia-500"
-WANDB_PROJECT = "basemap-lancedb-fineweb-edu-100k"
+# WANDB_PROJECT = "basemap-lancedb-fineweb-edu-100k"
+WANDB_PROJECT = "basemap-lancedb-dataisplural"
 
 GPU_CONCURRENCY = 1
 CPU_CONCURRENCY = 2
@@ -49,12 +51,14 @@ GPU_CONFIG = gpu.A10G()
 # NEGATIVE_EDGES_FILE = "/checkpoints/pumap/wikipedia-en-chunked-120-all-MiniLM-L6-v2/precomputed_negatives-0.pkl"
 # PSYM_RESULTS_FILE = "/checkpoints/pumap/wikipedia-en-chunked-500-all-MiniLM-L6-v2/precomputed_psym.pkl"
 # NEGATIVE_EDGES_FILE = "/checkpoints/pumap/wikipedia-en-chunked-500-all-MiniLM-L6-v2/precomputed_negatives.pkl"
-PSYM_RESULTS_FILE = "/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_psym.pkl"
+# PSYM_RESULTS_FILE = "/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_psym.pkl"
+PSYM_RESULTS_FILE = "/checkpoints/pumap/ls-dataisplural/precomputed_psym-15.pkl"
 # PSYM_RESULTS_FILE = "/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_psym-45.pkl"
 # NEGATIVE_EDGES_FILE = "/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_negatives.pkl"
 # NEGATIVE_EDGES_FILE = "/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_negatives-45-45.pkl"
 # NEGATIVE_EDGES_FILE = f"/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_negatives-150.pkl"
-NEGATIVE_EDGES_FILE = f"/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_negatives-300.pkl"
+# NEGATIVE_EDGES_FILE = f"/checkpoints/pumap/ls-fineweb-edu-100k/precomputed_negatives-300.pkl"
+NEGATIVE_EDGES_FILE = f"/checkpoints/pumap/ls-dataisplural/precomputed_negatives-300.pkl"
 #
 
 # ------------------------------------------------------------------
@@ -137,13 +141,16 @@ class RemoteTrainer:
             hidden_dim=1024,
             a=0.1,
             b=1.0,
-            correlation_weight=0.01,
+            correlation_weight=0.1,
             batch_size=batch_size,
             n_epochs=n_epochs,
             learning_rate=learning_rate,
             device='cuda',
             use_batchnorm=True,
-            use_dropout=True,
+            use_dropout=False,
+            clip_grad_norm=1.0,
+            clip_grad_value=None,
+            pos_ratio=0.75,
         )
         print("fitting model")
         # Fit the model with wandb instrumentation enabled
@@ -159,8 +166,9 @@ class RemoteTrainer:
             wandb_run_name=f"train-{batch_size}-{n_epochs}-{learning_rate}"
         )
         print("saving model")
-        pumap.save(f"/checkpoints/{WANDB_PROJECT}-{batch_size}-{n_epochs}-{learning_rate}")
-        print("done")
+        save_path = f"/checkpoints/{WANDB_PROJECT}/{pumap.wandb_run_id}"
+        pumap.save(save_path)
+        print(f"Model saved to {save_path}")
 
 @app.local_entrypoint()
 def run(batch_size: int = 512, n_epochs: int = 10, learning_rate: float = 1e-4):
