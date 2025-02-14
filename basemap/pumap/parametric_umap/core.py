@@ -12,6 +12,7 @@ import numpy as np
 from tqdm.auto import tqdm
 import pickle  # Added for loading precomputed files
 import logging
+import os
 
 # Setup logging (similar to edge_dataset.py)
 logging.basicConfig(
@@ -38,6 +39,7 @@ class ParametricUMAP:
         use_dropout=False,
         clip_grad_norm=1.0,  # Maximum norm of gradients
         clip_grad_value=None,  # Maximum value of gradients (optional)
+        pos_ratio=0.5,
     ):
         """
         Initialize ParametricUMAP.
@@ -72,6 +74,8 @@ class ParametricUMAP:
             Maximum norm of gradients. If None, gradient norm clipping is disabled.
         clip_grad_value : float or None
             Maximum value of gradients. If None, gradient value clipping is disabled.
+        pos_ratio : float
+            Ratio of positive edges to negative edges.
         """
         self.n_components = n_components
         self.hidden_dim = hidden_dim
@@ -88,7 +92,7 @@ class ParametricUMAP:
         self.use_dropout = use_dropout
         self.clip_grad_norm = clip_grad_norm
         self.clip_grad_value = clip_grad_value
-        
+        self.pos_ratio = pos_ratio
         self.model = None
         # self.loss_fn = nn.BCEWithLogitsLoss()
         self.loss_fn = nn.BCELoss()
@@ -180,9 +184,12 @@ class ParametricUMAP:
                 "use_batchnorm": self.use_batchnorm,
                 "use_dropout": self.use_dropout,
                 "clip_grad_norm": self.clip_grad_norm,
-                "clip_grad_value": self.clip_grad_value
+                "clip_grad_value": self.clip_grad_value,
+                "pos_ratio": self.pos_ratio
             }
             wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+            self.wandb_run = wandb.run  # Store the entire run object
+            self.wandb_run_id = wandb.run.id  # Store the run ID
         
         logging.info("Casting input array to float32...")
         X = np.asarray(X).astype(np.float32)
@@ -236,13 +243,14 @@ class ParametricUMAP:
         self.model.train()
         losses = []
         
-        loader = ed.get_loader(batch_size=self.batch_size, 
-                               sample_first=True,
-                               random_state=random_state,
-                               n_processes=n_processes,
-                               verbose=verbose)
+        # Use balanced loader here instead of the original get_loader:
+        loader = ed.get_balanced_loader(
+                        batch_size=self.batch_size, 
+                        pos_ratio=self.pos_ratio,       # Adjust positive ratio as needed
+                        shuffle=True,
+                        random_state=random_state)
         
-        logging.info("Starting training...")
+        logging.info("Starting training with balanced batches...")
         logging.info(f"Batch size: {self.batch_size}")
         logging.info(f"Batches per epoch: {len(loader)}")
 
@@ -261,11 +269,11 @@ class ParametricUMAP:
                 optimizer.zero_grad()
                 src_values, dst_values, targets = batch
 
-                # forward pass
+                # Forward pass
                 src_embeddings = self.model(src_values)
                 dst_embeddings = self.model(dst_values)
                 
-                # Compute distances and logits
+                # Compute distances and qs values
                 dists = torch.norm(src_embeddings - dst_embeddings, dim=1, p=2*self.b)
                 qs = torch.pow(1 + self.a * dists, -1)
                 # logits = -self.a * torch.pow(dists, self.b)
@@ -287,10 +295,7 @@ class ParametricUMAP:
                 
                 # Apply gradient clipping if configured
                 if self.clip_grad_norm is not None:
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(),
-                        max_norm=self.clip_grad_norm
-                    )
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.clip_grad_norm)
                 if self.clip_grad_value is not None:
                     torch.nn.utils.clip_grad_value_(
                         self.model.parameters(),
@@ -306,7 +311,7 @@ class ParametricUMAP:
                 scheduler.step(loss.item())
                 current_lr = optimizer.param_groups[0]['lr']
                 
-                # Log pos vs neg qs statistics
+                # Compute qs stats for positive and negative samples:
                 if (targets == 1).sum() > 0:
                     pos_qs_mean = qs[targets==1].mean().item()
                     pos_qs_std = qs[targets==1].std().item()
@@ -317,11 +322,21 @@ class ParametricUMAP:
                     neg_qs_std = qs[targets==0].std().item()
                 else:
                     neg_qs_mean, neg_qs_std = 0, 0
-
+                
+                # Compute mean distances separately for positive and negative edges.
+                if (targets == 1).sum() > 0:
+                    mean_pos_distance = dists[targets==1].mean().item()
+                else:
+                    mean_pos_distance = 0.0
+                if (targets == 0).sum() > 0:
+                    mean_neg_distance = dists[targets==0].mean().item()
+                else:
+                    mean_neg_distance = 0.0
+                
                 epoch_loss += loss.item()
                 num_batches += 1
 
-                # Log to wandb including grad norms and qs statistics
+                # Log to wandb (or any other logging system)
                 if use_wandb:
                     wandb.log({
                         'batch_loss': loss.item(),
@@ -332,6 +347,8 @@ class ParametricUMAP:
                         'std_distance': dists.std().item(),
                         'mean_qs': qs.mean().item(),
                         'std_qs': qs.std().item(),
+                        'mean_pos_distance': mean_pos_distance,
+                        'mean_neg_distance': mean_neg_distance,
                         'pos_qs_mean': pos_qs_mean,
                         'pos_qs_std': pos_qs_std,
                         'neg_qs_mean': neg_qs_mean,
@@ -341,7 +358,7 @@ class ParametricUMAP:
                         'clipping_ratio': clipping_ratio,
                         # 'step': batch_idx  # useful to chart progress over steps
                     })
-                    
+
                 batch = prefetcher.next()
                 batch_idx += 1
                 pbar2.update(1)
@@ -425,7 +442,10 @@ class ParametricUMAP:
         """
         if not self.is_fitted:
             raise RuntimeError("Model must be fitted before saving")
-            
+        
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        
         save_dict = {
             'model_state_dict': self.model.state_dict(),
             'n_components': self.n_components,

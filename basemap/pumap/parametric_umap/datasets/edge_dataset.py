@@ -15,6 +15,81 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 
+class BalancedEdgeBatchIterator:
+    """
+    Iterator for creating balanced batches of positive and negative edges.
+    
+    Parameters:
+        pos_edges (List[Tuple[int, int]]): The list of positive edges.
+        neg_edges (List[Tuple[int, int]]): The list of negative edges.
+        pos_ratio (float, optional): Proportion of positive edges per batch (default 0.5).
+        batch_size (int, optional): Overall batch size (default 128).
+        shuffle (bool, optional): Whether to shuffle the edges at the start of each epoch.
+    """
+    def __init__(self, pos_edges, neg_edges, pos_ratio=0.5, batch_size=128, shuffle=True):
+        # Ensure that the inputs are Python lists (not numpy arrays)
+        self.pos_edges = list(pos_edges)
+        self.neg_edges = list(neg_edges)
+        self.batch_size = batch_size
+        self.pos_ratio = pos_ratio
+        self.shuffle = shuffle
+        # Number of positive and negative samples per batch.
+        self.num_pos = int(batch_size * pos_ratio)
+        self.num_neg = batch_size - self.num_pos
+
+    def __iter__(self):
+        if self.shuffle:
+            np.random.shuffle(self.pos_edges)
+            np.random.shuffle(self.neg_edges)
+        # Reset batch indices.
+        self.pos_idx = 0
+        self.neg_idx = 0
+        return self
+
+    def __next__(self):
+        # Stop as soon as we've exhausted the positive edges.
+        if self.pos_idx >= len(self.pos_edges):
+            raise StopIteration
+
+        # Get positive batch.
+        pos_batch = self.pos_edges[self.pos_idx:min(self.pos_idx + self.num_pos, len(self.pos_edges))]
+        self.pos_idx += self.num_pos
+
+        # If not enough positives remain, sample the remaining with replacement.
+        if len(pos_batch) < self.num_pos:
+            pos_array = np.empty(len(self.pos_edges), dtype=object)
+            pos_array[:] = self.pos_edges
+            extra = np.random.choice(pos_array, self.num_pos - len(pos_batch), replace=True)
+            if np.isscalar(extra):
+                extra = [extra]
+            else:
+                extra = extra.tolist()
+            pos_batch.extend(extra)
+
+        # Get negative batch.
+        neg_batch = self.neg_edges[self.neg_idx:min(self.neg_idx + self.num_neg, len(self.neg_edges))]
+        self.neg_idx += self.num_neg
+        if len(neg_batch) < self.num_neg:
+            neg_array = np.empty(len(self.neg_edges), dtype=object)
+            neg_array[:] = self.neg_edges
+            extra = np.random.choice(neg_array, self.num_neg - len(neg_batch), replace=True)
+            if np.isscalar(extra):
+                extra = [extra]
+            else:
+                extra = extra.tolist()
+            neg_batch.extend(extra)
+        
+        batch = pos_batch + neg_batch
+        if self.shuffle:
+            np.random.shuffle(batch)
+        return batch
+
+    def __len__(self):
+        # The number of batches is defined solely by the positive edges.
+        return int(np.ceil(len(self.pos_edges) / self.num_pos))
+
+
+
 # Global variables to hold shared adjacency info in workers.
 _global_adj_sets = None
 _global_total_nodes = None  # NEW: will store the total number of nodes for candidate list generation
@@ -419,6 +494,17 @@ class EdgeDataset:
         with open(file_path, "rb") as f:
             neg_edges = pickle.load(f)
         return neg_edges
+
+    def get_balanced_loader(self, batch_size: int, pos_ratio: float = 0.5, shuffle: bool = True, random_state: int = 0) -> BalancedEdgeBatchIterator:
+        """
+        Returns an iterator that yields balanced batches with a fixed positive ratio.
+        """
+        # Ensure negatives have been sampled; if not, sample and shuffle.
+        if self.neg_edges is None:
+            self.sample_and_shuffle(random_state=random_state)
+        return BalancedEdgeBatchIterator(self.pos_edges, self.neg_edges, pos_ratio=pos_ratio, batch_size=batch_size, shuffle=shuffle)
+
+
         
 
 def distributed_sample_negative_edges_subtask(psym_filepath: str, chunk_idx: int, n_chunks: int, 

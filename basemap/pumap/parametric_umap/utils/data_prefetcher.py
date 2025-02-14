@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 
 class DataPrefetcher:
     """
@@ -25,8 +26,17 @@ class DataPrefetcher:
             self.prefetched = None
             return
         
+        # If a single edge is returned instead of a batch (i.e. a tuple of 2 ints),
+        # then wrap it in a list so that subsequent code can always iterate over a list.
+        if (len(edge_batch) == 2 and
+            isinstance(edge_batch[0], (np.integer, int))):
+            edge_batch = [edge_batch]
+        
         # Get indexes and retrieve raw data
-        src_indexes = [i for i, j in edge_batch]
+        try:
+            src_indexes = [i for i, j in edge_batch]
+        except:
+            print(f"Error: {edge_batch}")
         dst_indexes = [j for i, j in edge_batch]
         src_values = self.dataset[src_indexes]
         dst_values = self.dataset[dst_indexes]
