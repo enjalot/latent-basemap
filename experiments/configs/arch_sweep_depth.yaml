@@ -1,0 +1,17 @@
+# Depth scaling sweep.
+# Tests: does a deeper MLP learn better embeddings?
+#
+# Model sizes (512 hidden each):
+#   n_layers=1  →  ~265K params
+#   n_layers=2  →  ~528K params
+#   n_layers=3  →  ~791K params  (default)
+#   n_layers=4  →  ~1.1M params
+#   n_layers=6  →  ~1.6M params
+#   n_layers=8  →  ~2.1M params
+#
+# Usage with base config:
+#   python -m experiments.run_experiment experiments/configs/arch_sweep_base.yaml \
+#       --sweep experiments/configs/arch_sweep_depth.yaml
+
+sweep:
+  model.n_layers: [1, 2, 3, 4, 6, 8]

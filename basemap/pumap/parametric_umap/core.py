@@ -190,7 +190,7 @@ class ParametricUMAP:
 
         # Mixed precision: only on CUDA (MPS and CPU don't support GradScaler)
         use_amp = 'cuda' in str(self.device)
-        scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+        scaler = torch.amp.GradScaler(self.device, enabled=use_amp) if use_amp else None
 
         optimizer = AdamW(self.model.parameters(), lr=self.learning_rate)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -225,7 +225,7 @@ class ParametricUMAP:
                 optimizer.zero_grad(set_to_none=True)
                 src_values, dst_values, targets = batch
 
-                with torch.cuda.amp.autocast(enabled=use_amp):
+                with torch.autocast(device_type='cuda', enabled=use_amp):
                     # Forward pass
                     src_embeddings = self.model(src_values)
                     dst_embeddings = self.model(dst_values)
@@ -241,12 +241,13 @@ class ParametricUMAP:
 
                     umap_loss = self.loss_fn(qs, targets)
 
-                    corr_loss = compute_correlation_loss(
-                        torch.norm(src_values - dst_values, dim=1),
-                        torch.norm(src_embeddings - dst_embeddings, dim=1)
-                    )
+                # Correlation loss in full precision (distance correlation is numerically sensitive)
+                corr_loss = compute_correlation_loss(
+                    torch.norm(src_values - dst_values, dim=1),
+                    torch.norm(src_embeddings.float() - dst_embeddings.float(), dim=1)
+                )
 
-                    loss = umap_loss + self.correlation_weight * corr_loss
+                loss = umap_loss + self.correlation_weight * corr_loss
 
                 # Check for NaN loss
                 if torch.isnan(loss):
@@ -255,8 +256,11 @@ class ParametricUMAP:
                     pbar.update(1)
                     continue
 
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                else:
+                    loss.backward()
 
                 # Gradient diagnostics
                 pre_clip_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
@@ -271,8 +275,11 @@ class ParametricUMAP:
                 grad_norm_post = float(np.mean(post_clip_norms)) if post_clip_norms else 0.0
                 clipping_ratio = grad_norm_post / grad_norm_pre if grad_norm_pre > 0 else 1.0
 
-                scaler.step(optimizer)
-                scaler.update()
+                if scaler is not None:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
 
                 current_lr = optimizer.param_groups[0]['lr']
 

@@ -1,0 +1,17 @@
+# Width scaling sweep.
+# Tests: does a wider MLP learn better embeddings?
+#
+# Model sizes (3 layers each):
+#   hidden_dim=128  →    ~100K params
+#   hidden_dim=256  →    ~330K params
+#   hidden_dim=512  →    ~1.1M params
+#   hidden_dim=1024 →    ~4.2M params
+#   hidden_dim=2048 →   ~16.8M params
+#   hidden_dim=4096 →   ~67.1M params
+#
+# Usage with base config:
+#   python -m experiments.run_experiment experiments/configs/arch_sweep_base.yaml \
+#       --sweep experiments/configs/arch_sweep_width.yaml
+
+sweep:
+  model.hidden_dim: [128, 256, 512, 1024, 2048, 4096]

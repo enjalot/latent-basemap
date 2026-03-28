@@ -1,0 +1,57 @@
+# Scale test: 1M real embeddings
+# Expected runtime: ~2-4 hours on A10G/A100
+#
+# IMPORTANT: At 1M scale:
+#   1. MUST precompute P_sym and negatives offline (edges_modal.py)
+#   2. Use low_memory=true (data stays on CPU)
+#   3. Use large batch sizes to amortize I/O overhead
+#   4. Metrics are sampled (5K-10K subset), not full pairwise
+#
+# Usage:
+#   python -m experiments.run_experiment experiments/configs/scaling_1m.yaml
+
+name: scaling_1m
+description: "1M real embeddings — precomputed graph required, sampled metrics"
+
+data:
+  source: memmap                  # Memmap is more efficient at 1M+ scale
+  memmap_dirs: []                 # <-- SET THIS to list of dirs with .npy files
+  input_dim: 384
+  n_samples: 1000000
+  n_neighbors: 15
+  precomputed_p_sym_path: null    # <-- SET THIS (required at this scale)
+  precomputed_negatives_path: null # <-- SET THIS
+
+model:
+  n_components: 2
+  hidden_dim: 1024
+  n_layers: 3
+  a: 1.0
+  b: 1.0
+
+train:
+  n_epochs: 5                    # Fewer epochs needed with more data
+  batch_size: 4096
+  learning_rate: 0.001
+  correlation_weight: 0.1
+  pos_ratio: 0.5
+  clip_grad_norm: 1.0
+  low_memory: true
+  n_processes: 8
+
+eval:
+  metrics:
+    - distance_correlation
+    - knn_preservation
+  knn_k: 10
+  metric_sample_size: 10000      # Subsample to keep eval tractable
+  compare_umap: false            # Standard UMAP is too slow at 1M
+
+logging:
+  use_wandb: true
+  wandb_project: parametric-umap-scaling
+  wandb_tags: ["scaling", "1m"]
+  wandb_group: scaling_real_data
+  results_dir: experiments/results
+  save_model: true
+  save_embeddings: false          # 1M × 2 = 8MB, could save but not by default

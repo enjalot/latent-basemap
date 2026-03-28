@@ -436,6 +436,10 @@ class EdgeDataset:
 
     def validate_negative_edges(self, sample_size=100):
         import random
+        if not self.neg_edges:
+            logging.warning("No negative edges to validate")
+            return
+        sample_size = min(sample_size, len(self.neg_edges))
         logging.info(f"Validating {sample_size} negative edges...")
         sample = random.sample(self.neg_edges, sample_size)
         num_invalid = 0

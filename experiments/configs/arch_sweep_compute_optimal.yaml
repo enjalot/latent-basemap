@@ -1,0 +1,17 @@
+# Compute-optimal sweep: jointly vary model size and data.
+# Tests: for a fixed compute budget (params × samples × epochs), what's the
+# best allocation between model size and data?
+#
+# This mimics the Chinchilla-style analysis: is it better to train a small
+# model on lots of data or a big model on less data?
+#
+# Each config targets roughly the same total FLOPs:
+#   small model + lots of data  vs.  large model + less data
+#
+# Usage:
+#   python -m experiments.run_experiment experiments/configs/arch_sweep_base.yaml \
+#       --sweep experiments/configs/arch_sweep_compute_optimal.yaml
+
+sweep:
+  model.hidden_dim: [256, 512, 1024, 2048]
+  data.n_samples: [50000, 20000, 10000, 5000]

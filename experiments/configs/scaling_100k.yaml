@@ -1,0 +1,62 @@
+# Scale test: 100K real embeddings
+# Expected runtime: ~30 min on A10G, ~2 hours on CPU
+#
+# At this scale, precomputing P_sym and negatives offline is strongly recommended.
+# Use psym_modal.py / edges_modal.py first, then set the paths below.
+#
+# Usage:
+#   python -m experiments.run_experiment experiments/configs/scaling_100k.yaml
+
+name: scaling_100k
+description: "100K real embeddings — precomputed graph recommended"
+
+data:
+  source: lancedb
+  lancedb_path: ""                # <-- SET THIS
+  lancedb_table: scopes-001
+  lancedb_columns: ["vector"]
+  input_dim: 384
+  n_samples: 100000
+  n_neighbors: 15
+  precomputed_p_sym_path: null    # <-- SET THIS (strongly recommended at 100K+)
+  precomputed_negatives_path: null
+
+model:
+  n_components: 2
+  hidden_dim: 512
+  n_layers: 3
+  a: 1.0
+  b: 1.0
+
+train:
+  n_epochs: 10
+  batch_size: 2048
+  learning_rate: 0.001
+  correlation_weight: 0.1
+  pos_ratio: 0.5
+  clip_grad_norm: 1.0
+  low_memory: true               # Keep data on CPU, stream to GPU
+  n_processes: 8
+
+eval:
+  metrics:
+    - trustworthiness
+    - distance_correlation
+    - knn_preservation
+  knn_k: 10
+  metric_sample_size: 5000       # Subsample metrics (full would be slow)
+  compare_umap: true
+  umap_kwargs:
+    n_components: 2
+    n_neighbors: 15
+    min_dist: 0.1
+    metric: euclidean
+
+logging:
+  use_wandb: true
+  wandb_project: parametric-umap-scaling
+  wandb_tags: ["scaling", "100k"]
+  wandb_group: scaling_real_data
+  results_dir: experiments/results
+  save_model: true
+  save_embeddings: false          # 100K embeddings = ~800KB, OK to save
