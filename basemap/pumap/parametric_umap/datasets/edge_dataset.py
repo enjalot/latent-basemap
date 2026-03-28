@@ -57,32 +57,30 @@ class BalancedEdgeBatchIterator:
 
         # If not enough positives remain, sample the remaining with replacement.
         if len(pos_batch) < self.num_pos:
-            pos_array = np.empty(len(self.pos_edges), dtype=object)
-            pos_array[:] = self.pos_edges
-            extra = np.random.choice(pos_array, self.num_pos - len(pos_batch), replace=True)
-            if np.isscalar(extra):
-                extra = [extra]
-            else:
-                extra = extra.tolist()
-            pos_batch.extend(extra)
+            extras_needed = self.num_pos - len(pos_batch)
+            extra_idx = np.random.randint(0, len(self.pos_edges), size=extras_needed)
+            pos_batch.extend([self.pos_edges[i] for i in extra_idx])
 
         # Get negative batch.
         neg_batch = self.neg_edges[self.neg_idx:min(self.neg_idx + self.num_neg, len(self.neg_edges))]
         self.neg_idx += self.num_neg
         if len(neg_batch) < self.num_neg:
-            neg_array = np.empty(len(self.neg_edges), dtype=object)
-            neg_array[:] = self.neg_edges
-            extra = np.random.choice(neg_array, self.num_neg - len(neg_batch), replace=True)
-            if np.isscalar(extra):
-                extra = [extra]
-            else:
-                extra = extra.tolist()
-            neg_batch.extend(extra)
-        
+            extras_needed = self.num_neg - len(neg_batch)
+            extra_idx = np.random.randint(0, len(self.neg_edges), size=extras_needed)
+            neg_batch.extend([self.neg_edges[i] for i in extra_idx])
+
+        # Build labels: 1.0 for positive edges, 0.0 for negative edges
+        labels = np.concatenate([
+            np.ones(len(pos_batch), dtype=np.float32),
+            np.zeros(len(neg_batch), dtype=np.float32)
+        ])
+
         batch = pos_batch + neg_batch
         if self.shuffle:
-            np.random.shuffle(batch)
-        return batch
+            perm = np.random.permutation(len(batch))
+            batch = [batch[i] for i in perm]
+            labels = labels[perm]
+        return batch, labels
 
     def __len__(self):
         # The number of batches is defined solely by the positive edges.
@@ -101,8 +99,9 @@ def init_worker(worker_id: int, adj_sets: Dict[int, Set[int]]):
     """
     logging.info(f"Worker {worker_id} initialization started")
     start_time = time.time()
-    global _global_adj_sets
+    global _global_adj_sets, _global_total_nodes
     _global_adj_sets = {node: np.array(list(neighbors)) for node, neighbors in adj_sets.items()}
+    _global_total_nodes = len(adj_sets)
     logging.info("Worker %d initialization completed in %.2f seconds", worker_id, time.time() - start_time)
 
 def init_worker_partial(worker_id: int, partial_adj_sets: Dict[int, np.ndarray], total_nodes: int):

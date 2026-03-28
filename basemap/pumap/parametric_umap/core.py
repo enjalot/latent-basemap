@@ -1,6 +1,6 @@
 from .models.mlp import MLP
 from .datasets.edge_dataset import EdgeDataset
-from .datasets.covariates_datasets import VariableDataset, TorchSparseDataset
+from .datasets.covariates_datasets import VariableDataset
 from .utils.losses import compute_correlation_loss
 from .utils.graph import compute_all_p_umap
 from .utils.data_prefetcher import DataPrefetcher
@@ -10,11 +10,10 @@ import torch.nn as nn
 from torch.optim import AdamW
 import numpy as np
 from tqdm.auto import tqdm
-import pickle  # Added for loading precomputed files
+import pickle
 import logging
 import os
 
-# Setup logging (similar to edge_dataset.py)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -34,49 +33,21 @@ class ParametricUMAP:
         learning_rate=1e-4,
         n_epochs=10,
         batch_size=32,
-        device='cuda' if torch.cuda.is_available() else 'cpu',
+        device=None,  # Auto-detect: cuda > mps > cpu
         use_batchnorm=False,
         use_dropout=False,
-        clip_grad_norm=1.0,  # Maximum norm of gradients
-        clip_grad_value=None,  # Maximum value of gradients (optional)
+        clip_grad_norm=1.0,
+        clip_grad_value=None,
         pos_ratio=0.5,
     ):
-        """
-        Initialize ParametricUMAP.
-        
-        Parameters:
-        -----------
-        n_components : int
-            Number of dimensions in the output embedding
-        hidden_dim : int
-            Dimension of hidden layers in the MLP
-        n_layers : int
-            Number of hidden layers in the MLP
-        n_neighbors : int
-            Number of nearest neighbors to consider for UMAP probabilities
-        a, b : float
-            UMAP parameters for the optimization
-        correlation_weight : float
-            Weight of the correlation loss term
-        learning_rate : float
-            Learning rate for the optimizer
-        n_epochs : int
-            Number of training epochs
-        batch_size : int
-            Batch size for training
-        device : str
-            Device to use for computations ('cpu' or 'cuda')
-        use_batchnorm : bool
-            Whether to use batch normalization in the MLP
-        use_dropout : bool
-            Whether to use dropout in the MLP
-        clip_grad_norm : float
-            Maximum norm of gradients. If None, gradient norm clipping is disabled.
-        clip_grad_value : float or None
-            Maximum value of gradients. If None, gradient value clipping is disabled.
-        pos_ratio : float
-            Ratio of positive edges to negative edges.
-        """
+        if device is None:
+            if torch.cuda.is_available():
+                device = 'cuda'
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                device = 'mps'
+            else:
+                device = 'cpu'
+
         self.n_components = n_components
         self.hidden_dim = hidden_dim
         self.n_layers = n_layers
@@ -94,12 +65,11 @@ class ParametricUMAP:
         self.clip_grad_value = clip_grad_value
         self.pos_ratio = pos_ratio
         self.model = None
-        # self.loss_fn = nn.BCEWithLogitsLoss()
         self.loss_fn = nn.BCELoss()
         self.is_fitted = False
-        
+
     def _init_model(self, input_dim):
-        """Initialize the MLP model"""
+        """Initialize the MLP model."""
         self.model = MLP(
             input_dim=input_dim,
             hidden_dim=self.hidden_dim,
@@ -108,7 +78,7 @@ class ParametricUMAP:
             use_batchnorm=self.use_batchnorm,
             use_dropout=self.use_dropout
         ).to(self.device)
-        
+
     def fit(self, X, y=None,
             resample_negatives=False,
             n_processes=6,
@@ -122,51 +92,37 @@ class ParametricUMAP:
             wandb_run_name=None):
         """
         Fit the model using X as training data.
-        
-        Parameters:
-        -----------
+
+        Parameters
+        ----------
         X : array-like of shape (n_samples, n_features)
             Training data
-            
         y : Ignored
-            Not used, present for API consistency
-            
         resample_negatives : bool
             Whether to resample negatives at the beginning of each epoch
-            
         n_processes : int
             Number of processes for batching utilities
-            
         low_memory : bool
             Whether to use low memory mode (keeps data on CPU)
-            
         random_state : int
             Random seed for reproducibility
-            
         verbose : bool
             Whether to print detailed logs during training
-            
         precomputed_p_sym_path : str or None
-            If provided, path to a file containing pickled precomputed P_sym
-            
+            Path to pickled precomputed P_sym
         precomputed_negatives_path : str or None
-            If provided, path to a file containing pickled negative edges
-            
+            Path to pickled negative edges
         use_wandb : bool
-            If True, initialize wandb and log metrics
-            
+            If True, log metrics to wandb
         wandb_project : str or None
-            The wandb project name (if use_wandb is True)
-            
+            wandb project name
         wandb_run_name : str or None
-            The wandb run name (if use_wandb is True)
-            
-        Returns:
-        --------
-        self : object
-            Returns the instance itself
+            wandb run name
+
+        Returns
+        -------
+        self
         """
-        # Initialize wandb if enabled; also log model hyperparameters.
         if use_wandb:
             import wandb
             config = {
@@ -188,155 +144,152 @@ class ParametricUMAP:
                 "pos_ratio": self.pos_ratio
             }
             wandb.init(project=wandb_project, name=wandb_run_name, config=config)
-            self.wandb_run = wandb.run  # Store the entire run object
-            self.wandb_run_id = wandb.run.id  # Store the run ID
-        
+            self.wandb_run = wandb.run
+            self.wandb_run_id = wandb.run.id
+
         logging.info("Casting input array to float32...")
         X = np.asarray(X).astype(np.float32)
         logging.info(f"Input shape: {X.shape}")
-    
-        # Initialize model if not already done
+
         if self.model is None:
             self._init_model(X.shape[1])
-            
-        # Create datasets - load precomputed P_sym if available
+
+        # Load or compute P_sym
         if precomputed_p_sym_path is not None:
             logging.info("Loading precomputed P_sym from %s", precomputed_p_sym_path)
             with open(precomputed_p_sym_path, "rb") as f:
-                P_sym = pickle.load(f)["P_sym"]
+                loaded = pickle.load(f)
+                if isinstance(loaded, dict) and "P_sym" in loaded:
+                    P_sym = loaded["P_sym"]
+                else:
+                    P_sym = loaded
         else:
             logging.info("Computing p_sym using compute_all_p_umap...")
             P_sym = compute_all_p_umap(X, k=self.n_neighbors)
-            
-        # Create the EdgeDataset instance
+
+        # Create the EdgeDataset
         logging.info("Creating EdgeDataset...")
         ed = EdgeDataset(P_sym)
-        
-        # Load negative edges if a precomputed file is provided
+
+        # Load precomputed negative edges if available
         if precomputed_negatives_path is not None:
             logging.info("Loading precomputed negative edges from %s", precomputed_negatives_path)
             with open(precomputed_negatives_path, "rb") as f:
                 neg_edges = pickle.load(f)
-            ed.neg_edges = neg_edges  # Assumes EdgeDataset uses this attribute internally
-        
-        # Create appropriate datasets for training
+            ed.neg_edges = neg_edges
+
+        # Create feature dataset (labels come from the balanced loader now)
         if low_memory:
-            logging.info("Using low memory mode.")
+            logging.info("Using low memory mode (data on CPU, async transfer to GPU).")
             dataset = VariableDataset(X)
-            target_dataset = TorchSparseDataset(P_sym)
         else:
             logging.info("Using high memory mode (data moved to device).")
             dataset = VariableDataset(X).to(self.device)
-            target_dataset = TorchSparseDataset(P_sym).to(self.device)
-        
-        # Enable cudnn benchmark for optimized performance on fixed input sizes
+
         torch.backends.cudnn.benchmark = True
 
-        # Initialize mixed precision scaler
-        scaler = torch.cuda.amp.GradScaler()
-        
-        # Initialize optimizer and scheduler
+        # Mixed precision: only on CUDA (MPS and CPU don't support GradScaler)
+        use_amp = 'cuda' in str(self.device)
+        scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+
         optimizer = AdamW(self.model.parameters(), lr=self.learning_rate)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                        optimizer, mode='min', factor=0.5, patience=20, verbose=True)
-        
+            optimizer, mode='min', factor=0.5, patience=5)
+
         self.model.train()
         losses = []
-        
-        # Use balanced loader here instead of the original get_loader:
-        loader = ed.get_balanced_loader(
-                        batch_size=self.batch_size, 
-                        pos_ratio=self.pos_ratio,       # Adjust positive ratio as needed
-                        shuffle=True,
-                        random_state=random_state)
-        
-        logging.info("Starting training with balanced batches...")
-        logging.info(f"Batch size: {self.batch_size}")
-        logging.info(f"Batches per epoch: {len(loader)}")
 
-        
-            
-        # pbar = tqdm(range(self.n_epochs), desc='Epochs', position=0)
+        loader = ed.get_balanced_loader(
+            batch_size=self.batch_size,
+            pos_ratio=self.pos_ratio,
+            shuffle=True,
+            random_state=random_state)
+
+        logging.info("Starting training with balanced batches...")
+        logging.info(f"Batch size: {self.batch_size}, Pos ratio: {self.pos_ratio}")
+        logging.info(f"Batches per epoch: {len(loader)}")
+        logging.info(f"Positive edges: {len(ed.pos_edges)}, Negative edges: {len(ed.neg_edges)}")
+        logging.info(f"Mixed precision: {use_amp}")
+
+        global_step = 0
         for epoch in range(self.n_epochs):
-            epoch_loss = 0
+            epoch_loss = 0.0
+            epoch_umap_loss = 0.0
+            epoch_corr_loss = 0.0
             num_batches = 0
-            pbar2 = tqdm(range(len(loader)), desc=f'Epoch {epoch+1} batches:', position=0)
-            
-            prefetcher = DataPrefetcher(loader, dataset, target_dataset, self.device)
-            batch_idx = 0
+            pbar = tqdm(range(len(loader)), desc=f'Epoch {epoch+1}/{self.n_epochs}', position=0)
+
+            prefetcher = DataPrefetcher(loader, dataset, self.device)
             batch = prefetcher.next()
             while batch is not None:
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 src_values, dst_values, targets = batch
 
-                # Forward pass
-                src_embeddings = self.model(src_values)
-                dst_embeddings = self.model(dst_values)
-                
-                # Compute distances and qs values
-                dists = torch.norm(src_embeddings - dst_embeddings, dim=1, p=2*self.b)
-                qs = torch.pow(1 + self.a * dists, -1)
-                # logits = -self.a * torch.pow(dists, self.b)
-                umap_loss = self.loss_fn(qs, targets)
-                corr_loss = compute_correlation_loss(
-                    torch.norm(src_values - dst_values, dim=1),
-                    torch.norm(src_embeddings - dst_embeddings, dim=1)
-                )
-                loss = umap_loss + self.correlation_weight * corr_loss
-                
-                # Compute scaled gradients
+                with torch.cuda.amp.autocast(enabled=use_amp):
+                    # Forward pass
+                    src_embeddings = self.model(src_values)
+                    dst_embeddings = self.model(dst_values)
+
+                    # Compute pairwise distances in embedding space
+                    dists = torch.norm(src_embeddings - dst_embeddings, dim=1, p=2*self.b)
+
+                    # UMAP similarity in low-dim: q_ij = (1 + a * ||z_i - z_j||^{2b})^{-1}
+                    qs = torch.pow(1 + self.a * dists, -1)
+
+                    # Clamp qs to avoid log(0) in BCE
+                    qs = torch.clamp(qs, min=1e-7, max=1 - 1e-7)
+
+                    umap_loss = self.loss_fn(qs, targets)
+
+                    corr_loss = compute_correlation_loss(
+                        torch.norm(src_values - dst_values, dim=1),
+                        torch.norm(src_embeddings - dst_embeddings, dim=1)
+                    )
+
+                    loss = umap_loss + self.correlation_weight * corr_loss
+
+                # Check for NaN loss
+                if torch.isnan(loss):
+                    logging.warning("NaN loss detected at step %d, skipping batch", global_step)
+                    batch = prefetcher.next()
+                    pbar.update(1)
+                    continue
+
                 scaler.scale(loss).backward()
-                
-                # Unscale gradients to prepare for clipping
                 scaler.unscale_(optimizer)
-                # Log pre-clipping gradient norms
-                pre_clip_grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
-                grad_norm_pre_avg = float(np.mean(pre_clip_grad_norms)) if pre_clip_grad_norms else 0.0
-                
-                # Apply gradient clipping if configured
+
+                # Gradient diagnostics
+                pre_clip_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
+                grad_norm_pre = float(np.mean(pre_clip_norms)) if pre_clip_norms else 0.0
+
                 if self.clip_grad_norm is not None:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.clip_grad_norm)
                 if self.clip_grad_value is not None:
-                    torch.nn.utils.clip_grad_value_(
-                        self.model.parameters(),
-                        clip_value=self.clip_grad_value
-                    )
-                post_clip_grad_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
-                grad_norm_post_avg = float(np.mean(post_clip_grad_norms)) if post_clip_grad_norms else 0.0
-                clipping_ratio = grad_norm_post_avg / grad_norm_pre_avg if grad_norm_pre_avg > 0 else 0.0
-                
-                # Optimizer and scheduler step
+                    torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=self.clip_grad_value)
+
+                post_clip_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
+                grad_norm_post = float(np.mean(post_clip_norms)) if post_clip_norms else 0.0
+                clipping_ratio = grad_norm_post / grad_norm_pre if grad_norm_pre > 0 else 1.0
+
                 scaler.step(optimizer)
                 scaler.update()
-                scheduler.step(loss.item())
-                current_lr = optimizer.param_groups[0]['lr']
-                
-                # Compute qs stats for positive and negative samples:
-                if (targets == 1).sum() > 0:
-                    pos_qs_mean = qs[targets==1].mean().item()
-                    pos_qs_std = qs[targets==1].std().item()
-                else:
-                    pos_qs_mean, pos_qs_std = 0, 0
-                if (targets == 0).sum() > 0:
-                    neg_qs_mean = qs[targets==0].mean().item()
-                    neg_qs_std = qs[targets==0].std().item()
-                else:
-                    neg_qs_mean, neg_qs_std = 0, 0
-                
-                # Compute mean distances separately for positive and negative edges.
-                if (targets == 1).sum() > 0:
-                    mean_pos_distance = dists[targets==1].mean().item()
-                else:
-                    mean_pos_distance = 0.0
-                if (targets == 0).sum() > 0:
-                    mean_neg_distance = dists[targets==0].mean().item()
-                else:
-                    mean_neg_distance = 0.0
-                
-                epoch_loss += loss.item()
-                num_batches += 1
 
-                # Log to wandb (or any other logging system)
+                current_lr = optimizer.param_groups[0]['lr']
+
+                # Per-class stats
+                pos_mask = targets > 0.5
+                neg_mask = ~pos_mask
+                pos_qs_mean = qs[pos_mask].mean().item() if pos_mask.any() else 0.0
+                neg_qs_mean = qs[neg_mask].mean().item() if neg_mask.any() else 0.0
+                mean_pos_dist = dists[pos_mask].mean().item() if pos_mask.any() else 0.0
+                mean_neg_dist = dists[neg_mask].mean().item() if neg_mask.any() else 0.0
+
+                epoch_loss += loss.item()
+                epoch_umap_loss += umap_loss.item()
+                epoch_corr_loss += corr_loss.item()
+                num_batches += 1
+                global_step += 1
+
                 if use_wandb:
                     wandb.log({
                         'batch_loss': loss.item(),
@@ -345,147 +298,134 @@ class ParametricUMAP:
                         'learning_rate': current_lr,
                         'mean_distance': dists.mean().item(),
                         'std_distance': dists.std().item(),
-                        'mean_qs': qs.mean().item(),
-                        'std_qs': qs.std().item(),
-                        'mean_pos_distance': mean_pos_distance,
-                        'mean_neg_distance': mean_neg_distance,
+                        'mean_pos_distance': mean_pos_dist,
+                        'mean_neg_distance': mean_neg_dist,
                         'pos_qs_mean': pos_qs_mean,
-                        'pos_qs_std': pos_qs_std,
                         'neg_qs_mean': neg_qs_mean,
-                        'neg_qs_std': neg_qs_std,
-                        'grad_norm_pre': grad_norm_pre_avg,
-                        'grad_norm_post': grad_norm_post_avg,
+                        'grad_norm_pre': grad_norm_pre,
+                        'grad_norm_post': grad_norm_post,
                         'clipping_ratio': clipping_ratio,
-                        # 'step': batch_idx  # useful to chart progress over steps
+                        'global_step': global_step,
                     })
 
                 batch = prefetcher.next()
-                batch_idx += 1
-                pbar2.update(1)
-                pbar2.set_postfix({'loss': f'{loss.item():.4f}'})
+                pbar.update(1)
+                pbar.set_postfix({
+                    'loss': f'{loss.item():.4f}',
+                    'umap': f'{umap_loss.item():.4f}',
+                    'pos_q': f'{pos_qs_mean:.3f}',
+                    'neg_q': f'{neg_qs_mean:.3f}',
+                })
 
+            pbar.close()
 
             if resample_negatives:
-                loader = ed.get_loader(batch_size=self.batch_size, sample_first=True)
-            
-            avg_loss = epoch_loss / num_batches
+                ed.neg_edges = None  # Force re-sampling
+                loader = ed.get_balanced_loader(
+                    batch_size=self.batch_size,
+                    pos_ratio=self.pos_ratio,
+                    shuffle=True,
+                    random_state=random_state + epoch + 1)
+
+            avg_loss = epoch_loss / max(num_batches, 1)
+            avg_umap = epoch_umap_loss / max(num_batches, 1)
+            avg_corr = epoch_corr_loss / max(num_batches, 1)
             losses.append(avg_loss)
-            # pbar.set_postfix({'loss': f'{avg_loss:.4f}'})
-            
+
+            # Step scheduler per-epoch (not per-batch)
+            scheduler.step(avg_loss)
+
             if verbose:
-                logging.info('Epoch %d/%d, Loss: %.4f', epoch+1, self.n_epochs, avg_loss)
+                logging.info(
+                    'Epoch %d/%d — Loss: %.4f (umap: %.4f, corr: %.4f) — LR: %.2e',
+                    epoch+1, self.n_epochs, avg_loss, avg_umap, avg_corr, current_lr)
             if use_wandb:
+                log_dict = {'epoch_loss': avg_loss, 'epoch_umap_loss': avg_umap, 'epoch_corr_loss': avg_corr}
                 if torch.cuda.is_available():
-                    memory = torch.cuda.memory_allocated(self.device)/1e9
-                    peak_memory = torch.cuda.max_memory_allocated(self.device)/1e9
-                    wandb.log({
-                        'epoch_loss': avg_loss,
-                        'epoch_peak_gpu_memory': peak_memory
-                    })
-                    logging.info("GPU Memory: %.2f GB (Peak: %.2f GB)", memory, peak_memory)
-                    
+                    peak_memory = torch.cuda.max_memory_allocated(self.device) / 1e9
+                    log_dict['epoch_peak_gpu_memory'] = peak_memory
+                    logging.info("Peak GPU Memory: %.2f GB", peak_memory)
+                wandb.log(log_dict)
+
         self.is_fitted = True
         if use_wandb:
             wandb.finish()
         return self
-    
-    def transform(self, X):
+
+    def transform(self, X, batch_size=4096):
         """
         Apply dimensionality reduction to X.
-        
-        Parameters:
-        -----------
+
+        Parameters
+        ----------
         X : array-like of shape (n_samples, n_features)
-            New data to transform
-            
-        Returns:
-        --------
-        X_new : array-like of shape (n_samples, n_components)
-            Transformed data
+        batch_size : int
+            Process in batches to avoid OOM on large inputs
+
+        Returns
+        -------
+        X_new : ndarray of shape (n_samples, n_components)
         """
         if not self.is_fitted:
             raise RuntimeError("Model must be fitted before transform")
-            
+
         self.model.eval()
-        X = torch.tensor(X, dtype=torch.float32).to(self.device)
-        
+        X = np.asarray(X, dtype=np.float32)
+
+        results = []
         with torch.no_grad():
-            X_reduced = self.model(X)
-            
-        return X_reduced.cpu().numpy()
-    
-    def fit_transform(self, X, verbose=True, low_memory=False):
-        """
-        Fit the model with X and apply dimensionality reduction on X.
-        
-        Parameters:
-        -----------
-        X : array-like of shape (n_samples, n_features)
-            Training data
-            
-        Returns:
-        --------
-        X_new : array-like of shape (n_samples, n_components)
-            Transformed data
-        """
-        self.fit(X, verbose=verbose, low_memory=low_memory)
+            for i in range(0, len(X), batch_size):
+                batch = torch.tensor(X[i:i+batch_size], dtype=torch.float32).to(self.device)
+                results.append(self.model(batch).cpu().numpy())
+
+        return np.concatenate(results, axis=0)
+
+    def fit_transform(self, X, **kwargs):
+        """Fit and transform in one call."""
+        self.fit(X, **kwargs)
         return self.transform(X)
-    
+
     def save(self, path):
-        """
-        Save the model to a file.
-        
-        Parameters:
-        -----------
-        path : str
-            Path to save the model
-        """
+        """Save the model to a file."""
         if not self.is_fitted:
             raise RuntimeError("Model must be fitted before saving")
-        
-        # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        
+
+        os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
+
         save_dict = {
             'model_state_dict': self.model.state_dict(),
             'n_components': self.n_components,
             'hidden_dim': self.hidden_dim,
             'n_layers': self.n_layers,
+            'n_neighbors': self.n_neighbors,
             'a': self.a,
             'b': self.b,
             'correlation_weight': self.correlation_weight,
             'use_batchnorm': self.use_batchnorm,
             'use_dropout': self.use_dropout,
             'clip_grad_norm': self.clip_grad_norm,
-            'clip_grad_value': self.clip_grad_value
+            'clip_grad_value': self.clip_grad_value,
+            'pos_ratio': self.pos_ratio,
         }
-        
         torch.save(save_dict, path)
-        
+
     @classmethod
-    def load(cls, path, device='cuda' if torch.cuda.is_available() else 'cpu'):
-        """
-        Load a saved model.
-        
-        Parameters:
-        -----------
-        path : str
-            Path to the saved model
-        device : str
-            Device to load the model to
-            
-        Returns:
-        --------
-        model : ParametricUMAP
-            Loaded model
-        """
+    def load(cls, path, device=None):
+        """Load a saved model."""
+        if device is None:
+            if torch.cuda.is_available():
+                device = 'cuda'
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                device = 'mps'
+            else:
+                device = 'cpu'
         save_dict = torch.load(path, map_location=device)
-        
-        # Create instance with saved parameters
+
         instance = cls(
             n_components=save_dict['n_components'],
             hidden_dim=save_dict['hidden_dim'],
             n_layers=save_dict['n_layers'],
+            n_neighbors=save_dict.get('n_neighbors', 15),
             a=save_dict['a'],
             b=save_dict['b'],
             correlation_weight=save_dict['correlation_weight'],
@@ -493,14 +433,13 @@ class ParametricUMAP:
             use_batchnorm=save_dict['use_batchnorm'],
             use_dropout=save_dict['use_dropout'],
             clip_grad_norm=save_dict['clip_grad_norm'],
-            clip_grad_value=save_dict['clip_grad_value']
+            clip_grad_value=save_dict['clip_grad_value'],
+            pos_ratio=save_dict.get('pos_ratio', 0.5),
         )
-        
-        # Initialize model architecture
-        instance._init_model(input_dim=save_dict['model_state_dict']['model.0.weight'].shape[1])
-        
-        # Load state dict
+
+        input_dim = save_dict['model_state_dict']['model.0.weight'].shape[1]
+        instance._init_model(input_dim=input_dim)
         instance.model.load_state_dict(save_dict['model_state_dict'])
         instance.is_fitted = True
-        
+
         return instance

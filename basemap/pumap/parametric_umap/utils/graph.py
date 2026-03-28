@@ -4,13 +4,13 @@ import time
 import logging
 from typing import Tuple, List, Union
 import os
-from tqdm.auto import trange  # use tqdm.auto for nice behavior in notebooks/terminal
+from tqdm.auto import trange
 from tqdm import tqdm
-from basemap.lancedb_loader import LanceDBLoader
 
-# import faiss
-import numpy as np
-from scipy import sparse
+try:
+    from basemap.lancedb_loader import LanceDBLoader
+except ImportError:
+    LanceDBLoader = None
 
 os.environ["OMP_NUM_THREADS"] = "32"
 os.environ["MKL_NUM_THREADS"] = "32"
@@ -370,7 +370,54 @@ def compute_p_umap_symmetric(P):
     return P_sym
 
 
-def compute_all_p_umap(X: Union[np.ndarray, LanceDBLoader], k: int, tol: float = 1e-5, max_iter: int = 100) -> sparse.csr_matrix:
+def compute_sigma_i_sklearn(X: np.ndarray, k: int, tol: float = 1e-5, max_iter: int = 100) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Compute sigma_i using sklearn's NearestNeighbors as a fallback when Annoy is unavailable.
+    Same interface as compute_sigma_i_annoy.
+    """
+    from sklearn.neighbors import NearestNeighbors
+
+    start_time = time.time()
+    n_samples = X.shape[0]
+    logging.info(f"Computing sigma_i using sklearn for dataset of shape {X.shape} with k={k}")
+
+    nn = NearestNeighbors(n_neighbors=k+1, algorithm='auto', metric='euclidean', n_jobs=-1)
+    nn.fit(X)
+    distances_full, neighbors_full = nn.kneighbors(X)
+
+    # Remove self (first column)
+    distances = distances_full[:, 1:].astype(np.float32)
+    neighbors = neighbors_full[:, 1:].astype(np.int64)
+    logging.info("k-nearest neighbors computed using sklearn")
+
+    rho = distances[:, 0].copy()
+
+    target = np.log2(k).astype(np.float32)
+    logging.info("Starting binary search for sigma values...")
+    low = np.full(n_samples, 1e-5, dtype=np.float32)
+    high = np.full(n_samples, 10.0, dtype=np.float32)
+    sigma = np.zeros(n_samples, dtype=np.float32)
+    converged = np.zeros(n_samples, dtype=bool)
+
+    for _ in trange(max_iter, desc="Binary search iterations"):
+        mid = (low + high) / 2.0
+        exponent = -np.maximum(distances - rho[:, np.newaxis], 0) / mid[:, np.newaxis]
+        probs = np.exp(exponent).astype(np.float32)
+        prob_sum = probs.sum(axis=1)
+        abs_diff = np.abs(prob_sum - target)
+        newly_converged = (abs_diff < tol) & (~converged)
+        converged |= newly_converged
+        sigma[newly_converged] = mid[newly_converged]
+        high = np.where(prob_sum > target, mid, high)
+        low = np.where(prob_sum <= target, mid, low)
+
+    sigma[~converged] = mid[~converged]
+    logging.info(f"Total sigma_i computation using sklearn completed in {time.time() - start_time:.2f} seconds")
+
+    return sigma, rho, distances, neighbors
+
+
+def compute_all_p_umap(X, k: int, tol: float = 1e-5, max_iter: int = 100) -> sparse.csr_matrix:
     """
     Compute symmetric UMAP probabilities for the entire dataset.
     
@@ -402,10 +449,16 @@ def compute_all_p_umap(X: Union[np.ndarray, LanceDBLoader], k: int, tol: float =
     logging.info(f"Starting complete UMAP probability computation for dataset of shape {X.shape}")
     
     # Step 1: Compute sigma, rho, distances, and neighbors
-    if isinstance(X, LanceDBLoader):
+    if LanceDBLoader is not None and isinstance(X, LanceDBLoader):
         sigma, rho, distances, neighbors = compute_sigma_i_lance(X, k, tol, max_iter)
     else:
-        sigma, rho, distances, neighbors = compute_sigma_i_annoy(X, k, tol, max_iter)
+        # Try annoy first, fall back to sklearn
+        try:
+            from annoy import AnnoyIndex  # noqa: F401
+            sigma, rho, distances, neighbors = compute_sigma_i_annoy(X, k, tol, max_iter)
+        except ImportError:
+            logging.info("Annoy not available, using sklearn NearestNeighbors")
+            sigma, rho, distances, neighbors = compute_sigma_i_sklearn(X, k, tol, max_iter)
 
     # Step 2: Compute p_j|i
     P = compute_p_umap(sigma, rho, distances, neighbors)
