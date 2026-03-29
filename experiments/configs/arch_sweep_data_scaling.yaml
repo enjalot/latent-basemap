@@ -1,0 +1,12 @@
+# Data scaling sweep (fixed architecture).
+# Tests: does more training data improve quality at fixed model size?
+# This is the key question for billion-scale feasibility.
+#
+# Run this with different data sources to compare synthetic vs. real.
+#
+# Usage:
+#   python -m experiments.run_experiment experiments/configs/arch_sweep_base.yaml \
+#       --sweep experiments/configs/arch_sweep_data_scaling.yaml
+
+sweep:
+  data.n_samples: [1000, 5000, 10000, 50000]

@@ -1,0 +1,59 @@
+# Architecture sweep — base config.
+# Used with a sweep file to explore scaling laws.
+#
+# Key question: does more compute (bigger model) improve quality?
+# We sweep hidden_dim and n_layers independently to see:
+#   1. Width scaling: does wider help?
+#   2. Depth scaling: does deeper help?
+#   3. Compute-optimal: what's the best params-per-FLOP tradeoff?
+#
+# Usage:
+#   # Dry run to see all configs:
+#   python -m experiments.run_experiment experiments/configs/arch_sweep_base.yaml \
+#       --sweep experiments/configs/arch_sweep_width.yaml --dry-run
+#
+#   # Actually run:
+#   python -m experiments.run_experiment experiments/configs/arch_sweep_base.yaml \
+#       --sweep experiments/configs/arch_sweep_width.yaml
+
+name: arch_sweep
+description: "Architecture scaling law exploration"
+
+data:
+  source: synthetic
+  input_dim: 384                  # Match real embedding dim
+  n_samples: 10000                # Big enough to differentiate models
+  n_neighbors: 15
+
+model:
+  n_components: 2
+  hidden_dim: 512                 # Will be swept
+  n_layers: 3                     # Will be swept
+  a: 1.0
+  b: 1.0
+
+train:
+  n_epochs: 10
+  batch_size: 512
+  learning_rate: 0.001
+  correlation_weight: 0.1
+  pos_ratio: 0.5
+  clip_grad_norm: 1.0
+  low_memory: true
+  n_processes: 6
+
+eval:
+  metrics:
+    - trustworthiness
+    - distance_correlation
+    - knn_preservation
+  knn_k: 10
+  metric_sample_size: 5000
+
+logging:
+  use_wandb: true
+  wandb_project: parametric-umap-scaling-laws
+  wandb_tags: ["arch_sweep"]
+  wandb_group: arch_sweep
+  results_dir: experiments/results
+  save_model: true

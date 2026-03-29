@@ -4,6 +4,8 @@ __pycache__
 data/
 wandb/
 .DS_Store
-.claude
-experiments
+experiments/results/
+validation_results/
+scale_results/
 *.un~
+.claude

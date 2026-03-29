@@ -1,0 +1,64 @@
+# Scale test: 10K real embeddings
+# Expected runtime: ~5 min on GPU, ~30 min on CPU
+#
+# Before running, update the data paths to your actual data.
+#
+# Usage:
+#   python -m experiments.run_experiment experiments/configs/scaling_10k.yaml
+#   python -m experiments.run_experiment experiments/configs/scaling_10k.yaml \
+#       --override data.lancedb_path=/path/to/lancedb data.n_samples=10000
+
+name: scaling_10k
+description: "10K real embeddings — full metrics, compare with standard UMAP"
+
+data:
+  source: lancedb
+  lancedb_path: ""                # <-- SET THIS to your LanceDB path
+  lancedb_table: scopes-001
+  lancedb_columns: ["vector"]
+  input_dim: 384                  # all-MiniLM-L6-v2
+  n_samples: 10000
+  n_neighbors: 15
+  # Optional: precomputed graph (speeds up training significantly)
+  # precomputed_p_sym_path: /path/to/precomputed_psym.pkl
+  # precomputed_negatives_path: /path/to/precomputed_negatives.pkl
+
+model:
+  n_components: 2
+  hidden_dim: 512
+  n_layers: 3
+  a: 1.0
+  b: 1.0
+
+train:
+  n_epochs: 10
+  batch_size: 512
+  learning_rate: 0.001
+  correlation_weight: 0.1
+  pos_ratio: 0.5
+  clip_grad_norm: 1.0
+  low_memory: true
+  n_processes: 6
+
+eval:
+  metrics:
+    - trustworthiness
+    - distance_correlation
+    - knn_preservation
+  knn_k: 10
+  metric_sample_size: 5000
+  compare_umap: true              # Compare with standard UMAP
+  umap_kwargs:
+    n_components: 2
+    n_neighbors: 15
+    min_dist: 0.1
+    metric: euclidean
+
+logging:
+  use_wandb: true
+  wandb_project: parametric-umap-scaling
+  wandb_tags: ["scaling", "10k"]
+  wandb_group: scaling_real_data
+  results_dir: experiments/results
+  save_model: true
+  save_embeddings: true

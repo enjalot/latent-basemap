@@ -1,0 +1,45 @@
+# Smoke test — verifies the pipeline works end-to-end on synthetic data.
+# Should complete in under 60 seconds on CPU.
+#
+# Usage: python -m experiments.run_experiment experiments/configs/smoke_test.yaml
+
+name: smoke_test
+description: Quick synthetic validation to verify training pipeline
+
+data:
+  source: synthetic
+  input_dim: 50
+  n_samples: 1000
+  n_neighbors: 15
+
+model:
+  n_components: 2
+  hidden_dim: 128
+  n_layers: 2
+  a: 1.0
+  b: 1.0
+
+train:
+  n_epochs: 5
+  batch_size: 256
+  learning_rate: 0.001
+  correlation_weight: 0.1
+  pos_ratio: 0.5
+  clip_grad_norm: 1.0
+  low_memory: true
+  n_processes: 4
+
+eval:
+  metrics:
+    - trustworthiness
+    - distance_correlation
+    - knn_preservation
+    - silhouette
+  knn_k: 10
+  metric_sample_size: 1000
+  compare_umap: false
+
+logging:
+  use_wandb: false
+  results_dir: experiments/results
+  save_model: true
