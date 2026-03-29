@@ -186,7 +186,8 @@ class ParametricUMAP:
             logging.info("Using high memory mode (data moved to device).")
             dataset = VariableDataset(X).to(self.device)
 
-        torch.backends.cudnn.benchmark = True
+        if 'cuda' in str(self.device):
+            torch.backends.cudnn.benchmark = True
 
         # Mixed precision: only on CUDA (MPS and CPU don't support GradScaler)
         use_amp = 'cuda' in str(self.device)
@@ -225,7 +226,7 @@ class ParametricUMAP:
                 optimizer.zero_grad(set_to_none=True)
                 src_values, dst_values, targets = batch
 
-                with torch.autocast(device_type='cuda', enabled=use_amp):
+                with torch.autocast(device_type='cuda' if use_amp else 'cpu', enabled=use_amp):
                     # Forward pass
                     src_embeddings = self.model(src_values)
                     dst_embeddings = self.model(dst_values)
@@ -348,7 +349,7 @@ class ParametricUMAP:
                     epoch+1, self.n_epochs, avg_loss, avg_umap, avg_corr, current_lr)
             if use_wandb:
                 log_dict = {'epoch_loss': avg_loss, 'epoch_umap_loss': avg_umap, 'epoch_corr_loss': avg_corr}
-                if torch.cuda.is_available():
+                if 'cuda' in str(self.device):
                     peak_memory = torch.cuda.max_memory_allocated(self.device) / 1e9
                     log_dict['epoch_peak_gpu_memory'] = peak_memory
                     logging.info("Peak GPU Memory: %.2f GB", peak_memory)
