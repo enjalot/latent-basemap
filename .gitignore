@@ -4,3 +4,6 @@ __pycache__
 data/
 wandb/
 .DS_Store
+.claude
+experiments
+*.un~
