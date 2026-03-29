@@ -7,3 +7,5 @@ wandb/
 experiments/results/
 validation_results/
 scale_results/
+*.un~
+.claude
