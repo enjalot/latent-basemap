@@ -26,10 +26,15 @@ class BalancedEdgeBatchIterator:
         batch_size (int, optional): Overall batch size (default 128).
         shuffle (bool, optional): Whether to shuffle the edges at the start of each epoch.
     """
-    def __init__(self, pos_edges, neg_edges, pos_ratio=0.5, batch_size=128, shuffle=True):
+    def __init__(self, pos_edges, neg_edges, pos_weights=None, pos_ratio=0.5, batch_size=128, shuffle=True):
         # Ensure that the inputs are Python lists (not numpy arrays)
         self.pos_edges = list(pos_edges)
         self.neg_edges = list(neg_edges)
+        # P_sym probability for each positive edge; fall back to 1.0 if not provided.
+        if pos_weights is not None:
+            self.pos_weights = np.asarray(pos_weights, dtype=np.float32)
+        else:
+            self.pos_weights = np.ones(len(self.pos_edges), dtype=np.float32)
         self.batch_size = batch_size
         self.pos_ratio = pos_ratio
         self.shuffle = shuffle
@@ -39,7 +44,9 @@ class BalancedEdgeBatchIterator:
 
     def __iter__(self):
         if self.shuffle:
-            np.random.shuffle(self.pos_edges)
+            perm = np.random.permutation(len(self.pos_edges))
+            self.pos_edges = [self.pos_edges[i] for i in perm]
+            self.pos_weights = self.pos_weights[perm]
             np.random.shuffle(self.neg_edges)
         # Reset batch indices.
         self.pos_idx = 0
@@ -52,7 +59,9 @@ class BalancedEdgeBatchIterator:
             raise StopIteration
 
         # Get positive batch.
-        pos_batch = self.pos_edges[self.pos_idx:min(self.pos_idx + self.num_pos, len(self.pos_edges))]
+        end = min(self.pos_idx + self.num_pos, len(self.pos_edges))
+        pos_batch = self.pos_edges[self.pos_idx:end]
+        pos_batch_weights = self.pos_weights[self.pos_idx:end]
         self.pos_idx += self.num_pos
 
         # If not enough positives remain, sample the remaining with replacement.
@@ -60,6 +69,7 @@ class BalancedEdgeBatchIterator:
             extras_needed = self.num_pos - len(pos_batch)
             extra_idx = np.random.randint(0, len(self.pos_edges), size=extras_needed)
             pos_batch.extend([self.pos_edges[i] for i in extra_idx])
+            pos_batch_weights = np.concatenate([pos_batch_weights, self.pos_weights[extra_idx]])
 
         # Get negative batch.
         neg_batch = self.neg_edges[self.neg_idx:min(self.neg_idx + self.num_neg, len(self.neg_edges))]
@@ -69,9 +79,9 @@ class BalancedEdgeBatchIterator:
             extra_idx = np.random.randint(0, len(self.neg_edges), size=extras_needed)
             neg_batch.extend([self.neg_edges[i] for i in extra_idx])
 
-        # Build labels: 1.0 for positive edges, 0.0 for negative edges
+        # Use actual P_sym probabilities for positive edges; 0.0 for negatives.
         labels = np.concatenate([
-            np.ones(len(pos_batch), dtype=np.float32),
+            pos_batch_weights,
             np.zeros(len(neg_batch), dtype=np.float32)
         ])
 
@@ -223,10 +233,12 @@ class EdgeDataset:
         # For single–machine use we build the full adjacency sets.
         self.adj_sets: Dict[int, Set[int]] = self._get_adjacency_sets_csr(P_sym)
         
-        # Obtain positive edges
+        # Obtain positive edges and their P_sym weights
         P_sym_dok = P_sym.todok()
-        self.pos_edges: List[Tuple[int, int]] = list(P_sym_dok.keys())
-        
+        items = list(P_sym_dok.items())
+        self.pos_edges: List[Tuple[int, int]] = [(i, j) for (i, j), _ in items]
+        self.pos_weights: np.ndarray = np.array([w for _, w in items], dtype=np.float32)
+
         self.neg_edges: Optional[List[Tuple[int, int]]] = None
         self.all_edges: Optional[List[Tuple[int, int]]] = None
         logging.info("EdgeDataset initialized: %d positive edges, adjacency sets built in %.2f seconds.", 
@@ -505,7 +517,7 @@ class EdgeDataset:
         # Ensure negatives have been sampled; if not, sample and shuffle.
         if self.neg_edges is None:
             self.sample_and_shuffle(random_state=random_state)
-        return BalancedEdgeBatchIterator(self.pos_edges, self.neg_edges, pos_ratio=pos_ratio, batch_size=batch_size, shuffle=shuffle)
+        return BalancedEdgeBatchIterator(self.pos_edges, self.neg_edges, pos_weights=self.pos_weights, pos_ratio=pos_ratio, batch_size=batch_size, shuffle=shuffle)
 
 
         

@@ -23,6 +23,7 @@ import os
 import json
 import time
 import logging
+import yaml
 import numpy as np
 import torch
 from pathlib import Path
@@ -212,16 +213,33 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
     logging.info(f"Data loaded: {X.shape} in {data_load_time:.1f}s")
 
     # ── Train/test split ──
+    # When precomputed graphs are provided, their edge indices correspond to the
+    # original row order of X. Permuting X before passing it to fit() would
+    # misalign the graph indices, so we skip the split in that case and train on
+    # the full dataset.
     n = len(X)
-    n_train = int(n * 0.8)
-    rng = np.random.RandomState(cfg.data.random_seed)
-    perm = rng.permutation(n)
-    X_train = X[perm[:n_train]]
-    X_test = X[perm[n_train:]]
-    labels_train = labels[perm[:n_train]] if labels is not None else None
-    labels_test = labels[perm[n_train:]] if labels is not None else None
+    using_precomputed = bool(cfg.data.precomputed_p_sym_path or cfg.data.precomputed_negatives_path)
+    if using_precomputed:
+        logging.warning(
+            "Precomputed graph paths are set — skipping train/test split to keep "
+            "graph indices aligned with X. All %d samples will be used for training.", n
+        )
+        X_train, X_test = X, None
+        labels_train = labels
+        labels_test = None
+    else:
+        n_train = int(n * 0.8)
+        rng = np.random.RandomState(cfg.data.random_seed)
+        perm = rng.permutation(n)
+        X_train = X[perm[:n_train]]
+        X_test = X[perm[n_train:]]
+        labels_train = labels[perm[:n_train]] if labels is not None else None
+        labels_test = labels[perm[n_train:]] if labels is not None else None
 
-    logging.info(f"Train: {X_train.shape}, Test: {X_test.shape}")
+    if X_test is not None:
+        logging.info(f"Train: {X_train.shape}, Test: {X_test.shape}")
+    else:
+        logging.info(f"Train: {X_train.shape} (no test split)")
 
     # ── Auto-detect device ──
     device = cfg.train.device
@@ -279,25 +297,31 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         wandb_run_name=wandb_run_name,
     )
     train_time = time.time() - t0
+    n_train = len(X_train)
     samples_per_sec = n_train * tc.n_epochs / train_time
 
     # ── Transform ──
     t0 = time.time()
     Z_train = pumap.transform(X_train)
-    Z_test = pumap.transform(X_test)
+    Z_test = pumap.transform(X_test) if X_test is not None else None
     transform_time = time.time() - t0
 
     # ── Evaluate ──
-    logging.info("Computing metrics on test set...")
-    metrics_test = compute_metrics(X_test, Z_test, cfg, labels_test)
     metrics_train = compute_metrics(X_train, Z_train, cfg, labels_train)
+    metrics_test = {}
+    if X_test is not None:
+        logging.info("Computing metrics on test set...")
+        metrics_test = compute_metrics(X_test, Z_test, cfg, labels_test)
 
     # ── Standard UMAP baseline ──
     umap_baseline = {}
-    if cfg.eval.compare_umap:
+    if cfg.eval.compare_umap and X_test is not None:
         umap_baseline = run_umap_baseline(X_train, X_test, cfg)
+    elif cfg.eval.compare_umap:
+        logging.warning("Skipping UMAP baseline: no test split available (precomputed graph mode).")
 
     # ── Compile results ──
+    eval_arr = Z_test if Z_test is not None else Z_train
     results = {
         "config": cfg.to_dict(),
         "config_hash": cfg.config_hash(),
@@ -306,7 +330,7 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
             "n_samples": n,
             "n_features": int(X.shape[1]),
             "n_train": n_train,
-            "n_test": n - n_train,
+            "n_test": len(X_test) if X_test is not None else 0,
         },
         "model": {
             "n_params": n_params,
@@ -320,10 +344,10 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         "metrics_train": metrics_train,
         "metrics_test": metrics_test,
         "embedding_stats": {
-            "mean": Z_test.mean(axis=0).tolist(),
-            "std": Z_test.std(axis=0).tolist(),
-            "min": float(Z_test.min()),
-            "max": float(Z_test.max()),
+            "mean": eval_arr.mean(axis=0).tolist(),
+            "std": eval_arr.std(axis=0).tolist(),
+            "min": float(eval_arr.min()),
+            "max": float(eval_arr.max()),
         },
         "umap_baseline": umap_baseline,
     }
@@ -337,7 +361,8 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
 
     if cfg.logging.save_embeddings:
         np.save(os.path.join(run_dir, "Z_train.npy"), Z_train)
-        np.save(os.path.join(run_dir, "Z_test.npy"), Z_test)
+        if Z_test is not None:
+            np.save(os.path.join(run_dir, "Z_test.npy"), Z_test)
 
     # ── Print summary ──
     logging.info(f"\n{'─'*60}")
@@ -346,7 +371,8 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
     logging.info(f"  Params:           {n_params:,}")
     logging.info(f"  Train time:       {train_time:.1f}s ({samples_per_sec:.0f} samples/sec)")
     logging.info(f"  Transform time:   {transform_time:.2f}s")
-    for k, v in metrics_test.items():
+    report_metrics = metrics_test if metrics_test else metrics_train
+    for k, v in report_metrics.items():
         logging.info(f"  {k}: {v:.4f}")
     if umap_baseline.get("metrics_test"):
         logging.info(f"  --- UMAP baseline ---")
@@ -433,14 +459,12 @@ def main():
     cfg = load_config(args.config, overrides)
 
     if args.dry_run:
-        import yaml
         print(yaml.dump(cfg.to_dict(), default_flow_style=False, sort_keys=False))
         print(f"Config hash: {cfg.config_hash()}")
         print(f"Run dir would be: {cfg.run_dir()}")
         return
 
     if args.sweep:
-        import yaml
         run_sweep(cfg, args.sweep)
     else:
         run_single_experiment(cfg)
