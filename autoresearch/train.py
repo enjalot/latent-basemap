@@ -111,8 +111,16 @@ def train():
         shuffle=True,
     )
 
-    # Optimizer
+    # Optimizer + cosine schedule with warmup
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
+    warmup_steps = 200
+    total_steps_est = 12000  # ~5 epochs at batch 2048
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return step / warmup_steps
+        progress = (step - warmup_steps) / max(1, total_steps_est - warmup_steps)
+        return 0.5 * (1.0 + np.cos(np.pi * min(progress, 1.0)))
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     loss_fn = nn.BCELoss()
 
     # Training
@@ -172,6 +180,7 @@ def train():
             if CLIP_GRAD_NORM > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP_GRAD_NORM)
             optimizer.step()
+            scheduler.step()
 
             epoch_loss += loss.item()
             epoch_umap += umap_loss.item()
