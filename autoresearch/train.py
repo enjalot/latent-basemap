@@ -173,10 +173,12 @@ def train():
 
             umap_loss = loss_fn(qs.float(), targets.float())
 
-            # Distance correlation loss
+            # Distance correlation loss (log-space to emphasize local neighborhoods)
+            high_dists = torch.norm(src_values - dst_values, dim=1)
+            low_dists = torch.norm(src_emb.float() - dst_emb.float(), dim=1)
             corr_loss = compute_correlation_loss(
-                torch.norm(src_values - dst_values, dim=1),
-                torch.norm(src_emb.float() - dst_emb.float(), dim=1)
+                torch.log1p(high_dists),
+                torch.log1p(low_dists)
             )
 
             loss = umap_loss + CORRELATION_WEIGHT * corr_loss
