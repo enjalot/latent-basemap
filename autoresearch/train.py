@@ -59,7 +59,7 @@ A_PARAM = 1.9
 B_PARAM = 0.8951
 
 # Loss weights
-CORRELATION_WEIGHT = 1.0     # weight for distance correlation loss
+CORRELATION_WEIGHT = 2.0     # weight for distance correlation loss
 
 
 # ─── Training Loop ──────────────────────────────────────────────────────────
