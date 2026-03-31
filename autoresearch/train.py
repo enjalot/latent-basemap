@@ -61,7 +61,7 @@ CLIP_GRAD_NORM = 1.0
 
 # UMAP curve parameters: q_ij = (1 + a * ||z_i - z_j||^{2b})^{-1}
 A_PARAM = 1.9
-B_PARAM = 0.5
+B_PARAM = 0.4
 
 # Loss weights
 CORRELATION_WEIGHT = 150.0   # weight for distance correlation loss
