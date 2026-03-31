@@ -44,7 +44,7 @@ D_IN = 384
     scaledown_window=600,
     image=st_image,
     volumes=VOLUMES,
-    memory=32768,  # 32GB RAM for loading 150M vectors
+    memory=65536,  # 64GB RAM — we stream from memmap, not full load
 )
 def build_and_query(n_per_dataset: int = 50_000_000, k: int = 15,
                     nprobe: int = 128, query_only: bool = False):
@@ -59,27 +59,41 @@ def build_and_query(n_per_dataset: int = 50_000_000, k: int = 15,
 
     results = {"n_per_dataset": n_per_dataset, "total_n": total_n, "k": k}
 
-    # ── Load data ──
+    # ── Setup data loaders (memmap, not full load) ──
     t0 = time.time()
-    all_X = []
+    loaders = []
+    dataset_sizes = []
     for name, path in DATASETS.items():
-        logging.info(f"Loading {name}...")
         loader = MemmapArrayConcatenator([path], D_IN)
         n_available = loader.shape[0]
         n_take = min(n_per_dataset, n_available)
-        X_part = np.asarray(loader[:n_take]).astype(np.float32)
-        all_X.append(X_part)
-        logging.info(f"  {name}: {X_part.shape} ({n_available:,} available, took {n_take:,})")
-        del loader
+        loaders.append((name, loader, n_take))
+        dataset_sizes.append(n_take)
+        logging.info(f"  {name}: {n_available:,} available, will use {n_take:,}")
 
-    X = np.concatenate(all_X, axis=0)
-    X = np.ascontiguousarray(X)
-    del all_X
-    load_time = time.time() - t0
-    actual_n = len(X)
-    logging.info(f"Total data: {X.shape} loaded in {load_time:.1f}s")
+    actual_n = sum(dataset_sizes)
+    setup_time = time.time() - t0
+    logging.info(f"Total: {actual_n:,} vectors across {len(DATASETS)} datasets (setup: {setup_time:.1f}s)")
     results["actual_n"] = actual_n
-    results["load_s"] = load_time
+    results["setup_s"] = setup_time
+    load_time = setup_time  # for cost calculation
+
+    def stream_batches(batch_size=500_000):
+        """Yield contiguous float32 batches from all datasets without loading all into RAM."""
+        for name, loader, n_take in loaders:
+            for s in range(0, n_take, batch_size):
+                e = min(s + batch_size, n_take)
+                batch = np.asarray(loader[s:e]).astype(np.float32)
+                yield np.ascontiguousarray(batch)
+
+    def load_training_sample(n_train):
+        """Load a small training sample (fits in RAM) for IVF centroid training."""
+        per_ds = n_train // len(DATASETS) + 1
+        parts = []
+        for name, loader, n_take in loaders:
+            take = min(per_ds, n_take)
+            parts.append(np.asarray(loader[:take]).astype(np.float32))
+        return np.ascontiguousarray(np.concatenate(parts)[:n_train])
 
     # ── Build index ──
     if not query_only:
@@ -96,22 +110,25 @@ def build_and_query(n_per_dataset: int = 50_000_000, k: int = 15,
         gpu_res = faiss.StandardGpuResources()
         index_gpu = faiss.index_cpu_to_gpu(gpu_res, 0, index)
 
-        logging.info("Training on GPU...")
-        index_gpu.train(X[:train_size])
+        logging.info("Loading training sample...")
+        X_train = load_training_sample(train_size)
+        logging.info(f"Training on GPU ({len(X_train):,} vectors)...")
+        index_gpu.train(X_train)
+        del X_train
         train_time = time.time() - t0
         logging.info(f"Training: {train_time:.1f}s")
 
-        # Add vectors in batches
-        logging.info("Adding vectors...")
+        # Add vectors by streaming from memmap
+        logging.info("Adding vectors (streaming from memmap)...")
         t0 = time.time()
-        batch_add = 500_000
-        for s in range(0, actual_n, batch_add):
-            e = min(s + batch_add, actual_n)
-            index_gpu.add(X[s:e])
-            if (s // batch_add) % 10 == 0:
-                logging.info(f"  Added {e:,}/{actual_n:,}")
+        added = 0
+        for batch in stream_batches(500_000):
+            index_gpu.add(batch)
+            added += len(batch)
+            if added % 5_000_000 < 500_000:
+                logging.info(f"  Added {added:,}/{actual_n:,}")
         add_time = time.time() - t0
-        logging.info(f"Addition: {add_time:.1f}s")
+        logging.info(f"Addition: {add_time:.1f}s ({added:,} vectors)")
 
         # Transfer to CPU and save
         index_cpu = faiss.index_gpu_to_cpu(index_gpu)
@@ -146,18 +163,21 @@ def build_and_query(n_per_dataset: int = 50_000_000, k: int = 15,
     index_gpu.nprobe = nprobe
 
     t0 = time.time()
-    batch_query = 100_000
+    # Allocate output arrays (150M * 16 * 4B = ~10GB — fits in 64GB RAM)
     all_neighbors = np.empty((actual_n, k + 1), dtype=np.int64)
     all_distances = np.empty((actual_n, k + 1), dtype=np.float32)
 
-    for s in range(0, actual_n, batch_query):
-        e = min(s + batch_query, actual_n)
-        all_distances[s:e], all_neighbors[s:e] = index_gpu.search(X[s:e], k + 1)
+    # Stream queries from memmap
+    row_offset = 0
+    for batch in stream_batches(100_000):
+        bs = len(batch)
+        all_distances[row_offset:row_offset+bs], all_neighbors[row_offset:row_offset+bs] = index_gpu.search(batch, k + 1)
+        row_offset += bs
         elapsed = time.time() - t0
-        if (s // batch_query) % 50 == 0 and s > 0:
-            qps = e / elapsed
-            eta = (actual_n - e) / qps / 60
-            logging.info(f"  Queried {e:,}/{actual_n:,} ({qps:.0f} QPS, ETA {eta:.0f}min)")
+        if row_offset % 5_000_000 < 100_000 and row_offset > 0:
+            qps = row_offset / elapsed
+            eta = (actual_n - row_offset) / qps / 60
+            logging.info(f"  Queried {row_offset:,}/{actual_n:,} ({qps:.0f} QPS, ETA {eta:.0f}min)")
 
     query_time = time.time() - t0
     qps = actual_n / query_time
