@@ -18,7 +18,7 @@ st_image = (
     Image.debian_slim(python_version="3.10")
     .pip_install(
         "torch==2.1.2", "numpy==1.26.3", "scipy", "scikit-learn",
-        "tqdm", "faiss-cpu", "wandb",
+        "tqdm", "faiss-gpu-cu12", "wandb",
     )
     .add_local_python_source("basemap")
 )

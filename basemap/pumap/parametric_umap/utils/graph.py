@@ -446,17 +446,40 @@ def compute_sigma_i_faiss(X: np.ndarray, k: int, tol: float = 1e-5,
     logging.info(f"Computing k-NN with FAISS for {n:,} samples, k={k}, d={d}")
 
     # Build index
-    # Build index — CPU only (GPU FAISS has compatibility issues on Modal)
-    logging.info("Using FAISS CPU")
-    if n > 200_000:
-        # HNSW for large datasets — approximate but fast
-        index = faiss.IndexHNSWFlat(d, 32)
-        index.hnsw.efSearch = max(k * 4, 64)
-        index.add(X)
+    # Build index — prefer GPU when available (requires faiss-gpu-cu12)
+    use_gpu_index = False
+    if use_gpu:
+        try:
+            ngpus = faiss.get_num_gpus()
+            if ngpus > 0:
+                use_gpu_index = True
+        except Exception:
+            pass
+
+    if use_gpu_index:
+        logging.info(f"Using FAISS GPU ({faiss.get_num_gpus()} GPUs)")
+        gpu_res = faiss.StandardGpuResources()
+        if n > 500_000:
+            # IVF for large GPU datasets
+            nlist = min(int(np.sqrt(n)), 4096)
+            index_cpu = faiss.index_factory(d, f"IVF{nlist},Flat")
+            index = faiss.index_cpu_to_gpu(gpu_res, 0, index_cpu)
+            train_size = min(n, nlist * 40)
+            index.train(X[:train_size])
+            index.add(X)
+            index.nprobe = min(nlist // 4, 64)
+        else:
+            index = faiss.GpuIndexFlatL2(gpu_res, d)
+            index.add(X)
     else:
-        # Flat (exact) for smaller datasets
-        index = faiss.IndexFlatL2(d)
-        index.add(X)
+        logging.info("Using FAISS CPU")
+        if n > 200_000:
+            index = faiss.IndexHNSWFlat(d, 32)
+            index.hnsw.efSearch = max(k * 4, 64)
+            index.add(X)
+        else:
+            index = faiss.IndexFlatL2(d)
+            index.add(X)
 
     # Search — do in batches for large datasets to avoid GPU OOM
     batch_search = 50_000
@@ -507,7 +530,7 @@ def compute_sigma_i_faiss(X: np.ndarray, k: int, tol: float = 1e-5,
     return sigma, rho, distances, neighbors_clean
 
 
-def compute_knn_graph_fast(X, k: int) -> sparse.csr_matrix:
+def compute_knn_graph_fast(X, k: int, use_gpu: bool = True) -> sparse.csr_matrix:
     """
     Fast k-NN graph without sigma binary search.
     Uses uniform weights (1/k) for all edges. Much faster at scale.
@@ -524,13 +547,35 @@ def compute_knn_graph_fast(X, k: int) -> sparse.csr_matrix:
     # Find k-NN
     try:
         import faiss
-        logging.info("Using FAISS CPU")
-        if n > 200_000:
-            index = faiss.IndexHNSWFlat(d, 32)
-            index.hnsw.efSearch = max(k * 4, 64)
-        else:
-            index = faiss.IndexFlatL2(d)
-        index.add(X)
+        # Try GPU first (requires faiss-gpu-cu12)
+        gpu_ok = False
+        if use_gpu:
+            try:
+                if faiss.get_num_gpus() > 0:
+                    gpu_res = faiss.StandardGpuResources()
+                    if n > 500_000:
+                        nlist = min(int(np.sqrt(n)), 4096)
+                        index_cpu = faiss.index_factory(d, f"IVF{nlist},Flat")
+                        index = faiss.index_cpu_to_gpu(gpu_res, 0, index_cpu)
+                        index.train(X[:min(n, nlist * 40)])
+                        index.add(X)
+                        index.nprobe = min(nlist // 4, 64)
+                    else:
+                        index = faiss.GpuIndexFlatL2(gpu_res, d)
+                        index.add(X)
+                    gpu_ok = True
+                    logging.info(f"Using FAISS GPU")
+            except Exception as e:
+                logging.warning(f"FAISS GPU failed: {e}")
+
+        if not gpu_ok:
+            logging.info("Using FAISS CPU")
+            if n > 200_000:
+                index = faiss.IndexHNSWFlat(d, 32)
+                index.hnsw.efSearch = max(k * 4, 64)
+            else:
+                index = faiss.IndexFlatL2(d)
+            index.add(X)
         # Batch search
         batch_sz = 50_000
         all_dists = np.empty((n, k + 1), dtype=np.float32)
