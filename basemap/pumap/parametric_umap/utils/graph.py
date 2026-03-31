@@ -464,46 +464,48 @@ def compute_sigma_i_faiss(X: np.ndarray, k: int, tol: float = 1e-5,
         index = faiss.IndexFlatL2(d)
         index.add(X)
 
-    # Search
-    dists_sq, neighbors = index.search(X, k + 1)
+    # Search — do in batches for large datasets to avoid GPU OOM
+    batch_search = 50_000
+    if n <= batch_search:
+        dists_sq, neighbors = index.search(X, k + 1)
+    else:
+        dists_sq = np.empty((n, k + 1), dtype=np.float32)
+        neighbors = np.empty((n, k + 1), dtype=np.int64)
+        for start in range(0, n, batch_search):
+            end = min(start + batch_search, n)
+            dists_sq[start:end], neighbors[start:end] = index.search(X[start:end], k + 1)
+            if start > 0 and start % (batch_search * 5) == 0:
+                logging.info(f"  FAISS search progress: {start:,}/{n:,}")
+
     knn_time = time.time() - start_time
     logging.info(f"FAISS k-NN search completed in {knn_time:.2f}s")
 
-    # Remove self-matches — vectorized (no Python loop)
-    self_idx = np.arange(n)[:, None]
-    mask = neighbors != self_idx
-    # For each row, take first k True columns
-    # Most rows have self at position 0, so columns 1:k+1 work
-    # But handle edge cases with advanced indexing
+    # Remove self-matches — take columns 1:k+1 (self is at column 0)
     distances = np.sqrt(np.maximum(dists_sq[:, 1:k+1], 0)).astype(np.float32)
     neighbors_clean = neighbors[:, 1:k+1].copy()
 
-    # Binary search for sigma — properly vectorized with persistent lo/hi
-    logging.info("Starting binary search for sigma values...")
+    # Reuse the existing vectorized sigma binary search from compute_sigma_i_sklearn
+    # (it's the same algorithm, just needs distances, neighbors, and params)
+    logging.info("Computing sigma via binary search...")
+    rho = distances[:, 0].astype(np.float64).copy()
     target = np.log2(k)
     sigma = np.ones(n, dtype=np.float64)
-    rho = distances[:, 0].astype(np.float64).copy()
     lo = np.full(n, 1e-20, dtype=np.float64)
     hi = np.full(n, 1e20, dtype=np.float64)
 
     for iteration in tqdm(range(max_iter), desc="Binary search iterations"):
         d_adj = np.maximum(distances.astype(np.float64) - rho[:, None], 0)
-        p = np.exp(-d_adj / np.maximum(sigma[:, None], 1e-20))
-        p_sum = p.sum(axis=1)
-
+        p_sum = np.exp(-d_adj / np.maximum(sigma[:, None], 1e-20)).sum(axis=1)
         diff = p_sum - target
         converged = np.abs(diff) < tol
-
         if converged.all():
             break
-
-        too_high = diff > 0
-        too_low = diff < 0
-
-        hi[too_high & ~converged] = sigma[too_high & ~converged]
-        sigma[too_high & ~converged] = (sigma[too_high & ~converged] + lo[too_high & ~converged]) / 2
-        lo[too_low & ~converged] = sigma[too_low & ~converged]
-        sigma[too_low & ~converged] = (sigma[too_low & ~converged] + hi[too_low & ~converged]) / 2
+        too_high = (diff > 0) & ~converged
+        too_low = (diff < 0) & ~converged
+        hi[too_high] = sigma[too_high]
+        sigma[too_high] = (sigma[too_high] + lo[too_high]) / 2
+        lo[too_low] = sigma[too_low]
+        sigma[too_low] = (sigma[too_low] + hi[too_low]) / 2
 
     total_time = time.time() - start_time
     logging.info(f"Total FAISS sigma_i computation completed in {total_time:.2f}s")
