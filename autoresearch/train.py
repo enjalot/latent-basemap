@@ -30,7 +30,7 @@ class UMAPNet(nn.Module):
     """Bottleneck MLP with residual connections for parametric UMAP."""
     def __init__(self, input_dim=INPUT_DIM, hidden_dim=512, output_dim=OUTPUT_DIM, n_layers=3):
         super().__init__()
-        neck_dim = hidden_dim // 2  # 256
+        neck_dim = hidden_dim * 3 // 4  # 384
         self.proj_in = nn.Linear(input_dim, hidden_dim)
         self.down = nn.Sequential(nn.Linear(hidden_dim, neck_dim), nn.ReLU())
         self.blocks = nn.ModuleList([
