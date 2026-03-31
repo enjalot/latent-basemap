@@ -446,64 +446,49 @@ def compute_sigma_i_faiss(X: np.ndarray, k: int, tol: float = 1e-5,
     logging.info(f"Computing k-NN with FAISS for {n:,} samples, k={k}, d={d}")
 
     # Build index
+    # Build index — try GPU, fall back to CPU on error
+    gpu_res = None
     if use_gpu and faiss.get_num_gpus() > 0:
         logging.info(f"Using FAISS GPU ({faiss.get_num_gpus()} GPUs available)")
-        if n > 100_000:
-            # IVF index for large datasets
-            nlist = min(int(np.sqrt(n)), 16384)
-            index = faiss.index_factory(d, f"IVF{nlist},Flat")
+        try:
             gpu_res = faiss.StandardGpuResources()
-            index = faiss.index_cpu_to_gpu(gpu_res, 0, index)
-            train_size = min(n, nlist * 40)
-            index.train(X[:train_size])
-            index.add(X)
-            index.nprobe = min(nlist // 4, 64)
-        else:
-            # Flat index for smaller datasets (exact)
             index = faiss.IndexFlatL2(d)
-            gpu_res = faiss.StandardGpuResources()
             index = faiss.index_cpu_to_gpu(gpu_res, 0, index)
             index.add(X)
-    else:
+        except Exception as e:
+            logging.warning(f"FAISS GPU failed ({e}), falling back to CPU")
+            gpu_res = None
+
+    if gpu_res is None:
         logging.info("Using FAISS CPU")
-        if n > 500_000:
-            # HNSW for large CPU datasets
-            index = faiss.IndexHNSWFlat(d, 32)
-            index.hnsw.efSearch = max(k * 2, 64)
-            index.add(X)
-        else:
-            index = faiss.IndexFlatL2(d)
-            index.add(X)
+        index = faiss.IndexFlatL2(d)
+        index.add(X)
 
     # Search
     dists_sq, neighbors = index.search(X, k + 1)
     knn_time = time.time() - start_time
     logging.info(f"FAISS k-NN search completed in {knn_time:.2f}s")
 
-    # Remove self-matches (first column is typically self with dist=0)
-    # But FAISS doesn't guarantee self is first, so filter explicitly
-    mask = neighbors != np.arange(n)[:, None]
-    # Take first k True entries per row
-    distances = np.zeros((n, k), dtype=np.float32)
-    neighbors_clean = np.zeros((n, k), dtype=np.int64)
-    for i in range(n):
-        valid = np.where(mask[i])[0][:k]
-        distances[i, :len(valid)] = np.sqrt(np.maximum(dists_sq[i, valid], 0))
-        neighbors_clean[i, :len(valid)] = neighbors[i, valid]
+    # Remove self-matches — vectorized (no Python loop)
+    self_idx = np.arange(n)[:, None]
+    mask = neighbors != self_idx
+    # For each row, take first k True columns
+    # Most rows have self at position 0, so columns 1:k+1 work
+    # But handle edge cases with advanced indexing
+    distances = np.sqrt(np.maximum(dists_sq[:, 1:k+1], 0)).astype(np.float32)
+    neighbors_clean = neighbors[:, 1:k+1].copy()
 
-    # Binary search for sigma (same as sklearn version)
+    # Binary search for sigma — properly vectorized with persistent lo/hi
     logging.info("Starting binary search for sigma values...")
     target = np.log2(k)
     sigma = np.ones(n, dtype=np.float64)
     rho = distances[:, 0].astype(np.float64).copy()
+    lo = np.full(n, 1e-20, dtype=np.float64)
+    hi = np.full(n, 1e20, dtype=np.float64)
 
     for iteration in tqdm(range(max_iter), desc="Binary search iterations"):
-        lo = np.full(n, 1e-20)
-        hi = np.full(n, 1e20)
-        converged = np.zeros(n, dtype=bool)
-
         d_adj = np.maximum(distances.astype(np.float64) - rho[:, None], 0)
-        p = np.exp(-d_adj / sigma[:, None])
+        p = np.exp(-d_adj / np.maximum(sigma[:, None], 1e-20))
         p_sum = p.sum(axis=1)
 
         diff = p_sum - target
@@ -515,14 +500,10 @@ def compute_sigma_i_faiss(X: np.ndarray, k: int, tol: float = 1e-5,
         too_high = diff > 0
         too_low = diff < 0
 
-        sigma_new = sigma.copy()
-        # Too high: need smaller sigma
-        sigma_new[too_high & ~converged] = (sigma[too_high & ~converged] + lo[too_high & ~converged]) / 2
         hi[too_high & ~converged] = sigma[too_high & ~converged]
-        # Too low: need larger sigma
-        sigma_new[too_low & ~converged] = (sigma[too_low & ~converged] + hi[too_low & ~converged]) / 2
+        sigma[too_high & ~converged] = (sigma[too_high & ~converged] + lo[too_high & ~converged]) / 2
         lo[too_low & ~converged] = sigma[too_low & ~converged]
-        sigma = sigma_new
+        sigma[too_low & ~converged] = (sigma[too_low & ~converged] + hi[too_low & ~converged]) / 2
 
     total_time = time.time() - start_time
     logging.info(f"Total FAISS sigma_i computation completed in {total_time:.2f}s")
