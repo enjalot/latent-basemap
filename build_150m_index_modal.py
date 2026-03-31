@@ -236,12 +236,28 @@ def build_and_query(n_per_dataset: int = 50_000_000, k: int = 15,
     return results
 
 
+@app.function(
+    gpu="A100-40GB",
+    timeout=60 * 60 * 8,
+    scaledown_window=600,
+    image=st_image,
+    volumes=VOLUMES,
+    memory=65536,
+)
+def build_and_query_a100(n_per_dataset: int = 50_000_000, k: int = 15,
+                         nprobe: int = 128, query_only: bool = False):
+    return build_and_query.local(n_per_dataset, k, nprobe, query_only)
+
+
 @app.local_entrypoint()
 def run(n_per_dataset: int = 50_000_000, k: int = 15, nprobe: int = 128,
-        query_only: bool = False):
+        query_only: bool = False, gpu: str = "a10g"):
     total = n_per_dataset * 3
-    print(f"Building IVF_PQ for {total/1e6:.0f}M vectors ({n_per_dataset/1e6:.0f}M x 3 datasets)")
-    results = build_and_query.remote(n_per_dataset, k, nprobe, query_only)
+    print(f"Building IVF_PQ for {total/1e6:.0f}M vectors ({n_per_dataset/1e6:.0f}M x 3 datasets) on {gpu}")
+    if gpu == "a100":
+        results = build_and_query_a100.remote(n_per_dataset, k, nprobe, query_only)
+    else:
+        results = build_and_query.remote(n_per_dataset, k, nprobe, query_only)
     print(f"\nResults:")
     for key, val in results.items():
         print(f"  {key}: {val}")
