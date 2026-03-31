@@ -1,0 +1,7 @@
+# Sweep 2: Loss balance — correlation_weight and pos_ratio
+# Higher pos_ratio = more positive edges per batch = focus on local structure
+# Lower correlation_weight = let UMAP loss dominate (UMAP loss IS the KNN loss)
+# 9 configs x 10 epochs
+sweep:
+  train.pos_ratio: [0.5, 0.75, 0.9]
+  train.correlation_weight: [0.0, 0.01, 0.1]

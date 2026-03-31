@@ -1,0 +1,11 @@
+# Parameter sweep for ls-squad 20k
+# Sweeps: n_neighbors, hidden_dim, n_layers, pos_ratio, correlation_weight
+# Total configs: 3 x 3 x 2 x 2 x 2 = 72 — too many!
+# Instead we sweep in focused groups to isolate effects.
+
+# Group 1: Graph structure (n_neighbors) x Architecture (hidden_dim, n_layers)
+# 4 x 3 x 3 = 36 configs
+sweep:
+  data.n_neighbors: [15, 50, 100]
+  model.hidden_dim: [256, 512, 1024]
+  model.n_layers: [2, 3, 4]

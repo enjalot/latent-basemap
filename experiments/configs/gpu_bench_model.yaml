@@ -1,0 +1,4 @@
+# Model size sweep for GPU memory/throughput scaling
+sweep:
+  model.hidden_dim: [256, 512, 1024, 2048]
+  model.n_layers: [2, 3, 4]

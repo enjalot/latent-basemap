@@ -1,0 +1,40 @@
+name: ls_squad_sweep
+description: "Parameter sweep on SQuAD 20k (nomic-embed-text-v1.5, 768d)"
+
+data:
+  source: h5
+  h5_path: /Users/enjalot/latent-scope-demo/ls-squad/embeddings/embedding-003.h5
+  h5_dataset: embeddings
+  input_dim: 768
+  reference_umap_path: /Users/enjalot/latent-scope-demo/ls-squad/umaps/umap-001.parquet
+  n_neighbors: 15
+  random_seed: 42
+
+model:
+  hidden_dim: 512
+  n_layers: 3
+  n_components: 2
+
+train:
+  n_epochs: 20
+  batch_size: 512
+  learning_rate: 0.001
+  correlation_weight: 0.1
+  pos_ratio: 0.5
+  clip_grad_norm: 1.0
+
+eval:
+  metrics:
+    - trustworthiness
+    - distance_correlation
+    - knn_preservation
+  knn_k: 10
+  metric_sample_size: 5000
+
+logging:
+  use_wandb: true
+  wandb_project: latent-basemap-sweep
+  wandb_group: ls-squad-sweep
+  results_dir: experiments/results
+  save_model: true
+  save_embeddings: true

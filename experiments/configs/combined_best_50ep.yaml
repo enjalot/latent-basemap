@@ -1,0 +1,43 @@
+name: combined_best_50ep
+description: "Combined best findings from all 3 autoresearch agents, 50 epochs on A10G"
+
+data:
+  source: h5
+  h5_path: /data/ls-squad/embedding-003.h5
+  h5_dataset: embeddings
+  input_dim: 768
+  reference_umap_path: /data/ls-squad/umap-001.parquet
+  n_neighbors: 100
+  precomputed_p_sym_path: /data/precomputed/ls-squad_nn100_psym.pkl
+  precomputed_negatives_path: /data/precomputed/ls-squad_nn100_negatives.pkl
+  random_seed: 42
+
+model:
+  hidden_dim: 512
+  n_layers: 3
+  n_components: 2
+  a: 0.1
+  b: 0.8951
+
+train:
+  n_epochs: 50
+  batch_size: 4096
+  learning_rate: 0.001
+  correlation_weight: 50.0
+  pos_ratio: 0.2
+  clip_grad_norm: 1.0
+
+eval:
+  metrics:
+    - trustworthiness
+    - distance_correlation
+    - knn_preservation
+  knn_k: 10
+  metric_sample_size: 5000
+
+logging:
+  use_wandb: true
+  wandb_project: pumap-combined-best
+  results_dir: experiments/results
+  save_model: true
+  save_embeddings: true

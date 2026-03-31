@@ -1,0 +1,8 @@
+# Sweep 1: UMAP curve parameters a/b
+# The a/b params control the similarity kernel shape.
+# Standard UMAP fits them to min_dist. We've been using 1.0/1.0 (wrong!)
+# This tests: correct values, the old defaults, and tighter/looser variants.
+# 4 configs x 10 epochs = cheap and fast
+sweep:
+  model.a: [1.0, 1.5769, 1.9, 3.0]
+  model.b: [0.8951]

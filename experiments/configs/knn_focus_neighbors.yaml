@@ -1,0 +1,6 @@
+# Sweep 3: n_neighbors with corrected a/b
+# Now that a/b are correct, see if n_neighbors still matters as much
+# Also test eval knn_k matching to see if we're measuring fairly
+# 3 configs x 10 epochs
+sweep:
+  data.n_neighbors: [15, 50, 100]

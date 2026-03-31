@@ -1,0 +1,40 @@
+name: gpu_bench
+description: "GPU throughput benchmark on ls-squad 20k (768d nomic embeddings)"
+
+data:
+  source: h5
+  h5_path: /data/ls-squad/embedding-003.h5
+  h5_dataset: embeddings
+  input_dim: 768
+  reference_umap_path: /data/ls-squad/umap-001.parquet
+  n_neighbors: 15
+  random_seed: 42
+
+model:
+  hidden_dim: 512
+  n_layers: 3
+  n_components: 2
+
+train:
+  n_epochs: 5
+  batch_size: 512
+  learning_rate: 0.001
+  correlation_weight: 0.1
+  pos_ratio: 0.5
+  clip_grad_norm: 1.0
+
+eval:
+  metrics:
+    - trustworthiness
+    - distance_correlation
+    - knn_preservation
+  knn_k: 10
+  metric_sample_size: 5000
+
+logging:
+  use_wandb: true
+  wandb_project: pumap-gpu-bench
+  wandb_group: gpu-bench
+  results_dir: experiments/results
+  save_model: false
+  save_embeddings: false

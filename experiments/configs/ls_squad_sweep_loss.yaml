@@ -1,0 +1,6 @@
+# Group 2: Loss balance (pos_ratio, correlation_weight)
+# Use best architecture from group 1, sweep loss params
+# 3 x 3 = 9 configs
+sweep:
+  train.pos_ratio: [0.25, 0.5, 0.75]
+  train.correlation_weight: [0.01, 0.1, 0.5]
