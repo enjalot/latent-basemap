@@ -27,20 +27,25 @@ from basemap.pumap.parametric_umap.utils.losses import compute_correlation_loss
 # MODIFY THIS: Try different architectures, activations, skip connections, etc.
 
 class UMAPNet(nn.Module):
-    """MLP with residual connections for parametric UMAP."""
+    """Bottleneck MLP with residual connections for parametric UMAP."""
     def __init__(self, input_dim=INPUT_DIM, hidden_dim=512, output_dim=OUTPUT_DIM, n_layers=3):
         super().__init__()
+        neck_dim = hidden_dim // 2  # 256
         self.proj_in = nn.Linear(input_dim, hidden_dim)
+        self.down = nn.Sequential(nn.Linear(hidden_dim, neck_dim), nn.ReLU())
         self.blocks = nn.ModuleList([
-            nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU())
-            for _ in range(n_layers)
+            nn.Sequential(nn.Linear(neck_dim, neck_dim), nn.ReLU())
+            for _ in range(n_layers - 1)
         ])
+        self.up = nn.Sequential(nn.Linear(neck_dim, hidden_dim), nn.ReLU())
         self.proj_out = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, x):
         x = F.relu(self.proj_in(x))
+        x = self.down(x)
         for block in self.blocks:
-            x = x + block(x)  # residual connection
+            x = x + block(x)  # residual in bottleneck
+        x = self.up(x)
         return self.proj_out(x)
 
 
