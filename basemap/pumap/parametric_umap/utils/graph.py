@@ -446,21 +446,15 @@ def compute_sigma_i_faiss(X: np.ndarray, k: int, tol: float = 1e-5,
     logging.info(f"Computing k-NN with FAISS for {n:,} samples, k={k}, d={d}")
 
     # Build index
-    # Build index — try GPU, fall back to CPU on error
-    gpu_res = None
-    if use_gpu and faiss.get_num_gpus() > 0:
-        logging.info(f"Using FAISS GPU ({faiss.get_num_gpus()} GPUs available)")
-        try:
-            gpu_res = faiss.StandardGpuResources()
-            index = faiss.IndexFlatL2(d)
-            index = faiss.index_cpu_to_gpu(gpu_res, 0, index)
-            index.add(X)
-        except Exception as e:
-            logging.warning(f"FAISS GPU failed ({e}), falling back to CPU")
-            gpu_res = None
-
-    if gpu_res is None:
-        logging.info("Using FAISS CPU")
+    # Build index — CPU only (GPU FAISS has compatibility issues on Modal)
+    logging.info("Using FAISS CPU")
+    if n > 200_000:
+        # HNSW for large datasets — approximate but fast
+        index = faiss.IndexHNSWFlat(d, 32)
+        index.hnsw.efSearch = max(k * 4, 64)
+        index.add(X)
+    else:
+        # Flat (exact) for smaller datasets
         index = faiss.IndexFlatL2(d)
         index.add(X)
 
@@ -511,6 +505,62 @@ def compute_sigma_i_faiss(X: np.ndarray, k: int, tol: float = 1e-5,
     logging.info(f"Total FAISS sigma_i computation completed in {total_time:.2f}s")
 
     return sigma, rho, distances, neighbors_clean
+
+
+def compute_knn_graph_fast(X, k: int) -> sparse.csr_matrix:
+    """
+    Fast k-NN graph without sigma binary search.
+    Uses uniform weights (1/k) for all edges. Much faster at scale.
+    Suitable for parametric UMAP training where the neural network
+    learns the distance function anyway.
+
+    Returns sparse symmetric matrix with uniform edge weights.
+    """
+    total_start = time.time()
+    n, d = X.shape
+    X = np.ascontiguousarray(X.astype(np.float32))
+    logging.info(f"Computing fast k-NN graph for {n:,} samples, k={k}")
+
+    # Find k-NN
+    try:
+        import faiss
+        logging.info("Using FAISS CPU")
+        if n > 200_000:
+            index = faiss.IndexHNSWFlat(d, 32)
+            index.hnsw.efSearch = max(k * 4, 64)
+        else:
+            index = faiss.IndexFlatL2(d)
+        index.add(X)
+        # Batch search
+        batch_sz = 50_000
+        all_dists = np.empty((n, k + 1), dtype=np.float32)
+        all_nbrs = np.empty((n, k + 1), dtype=np.int64)
+        for s in range(0, n, batch_sz):
+            e = min(s + batch_sz, n)
+            all_dists[s:e], all_nbrs[s:e] = index.search(X[s:e], k + 1)
+        neighbors = all_nbrs[:, 1:k+1]
+    except ImportError:
+        from sklearn.neighbors import NearestNeighbors
+        logging.info("Using sklearn NearestNeighbors")
+        nn = NearestNeighbors(n_neighbors=k+1, n_jobs=-1).fit(X)
+        _, idx = nn.kneighbors(X)
+        neighbors = idx[:, 1:]
+
+    knn_time = time.time() - total_start
+    logging.info(f"k-NN search: {knn_time:.2f}s")
+
+    # Build symmetric sparse matrix with uniform weights
+    sources = np.repeat(np.arange(n), k)
+    targets = neighbors.flatten()
+    weights = np.full(len(sources), 1.0 / k, dtype=np.float32)
+
+    P = sparse.csr_matrix((weights, (sources, targets)), shape=(n, n))
+    # Symmetrize: P_sym = P + P^T - P * P^T (standard UMAP symmetrization)
+    P_t = P.T
+    P_sym = P + P_t - P.multiply(P_t)
+
+    logging.info(f"Fast k-NN graph: {knn_time:.1f}s, {P_sym.nnz:,} edges")
+    return P_sym
 
 
 def compute_all_p_umap(X, k: int, tol: float = 1e-5, max_iter: int = 100) -> sparse.csr_matrix:

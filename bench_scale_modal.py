@@ -18,7 +18,7 @@ st_image = (
     Image.debian_slim(python_version="3.10")
     .pip_install(
         "torch==2.1.2", "numpy==1.26.3", "scipy", "scikit-learn",
-        "tqdm", "faiss-gpu", "wandb",
+        "tqdm", "faiss-cpu", "wandb",
     )
     .add_local_python_source("basemap")
 )
@@ -49,7 +49,7 @@ def bench(n_samples: int = 100_000, n_neighbors: int = 15, n_epochs: int = 2,
     import torch.nn.functional as F
     from torch.optim import AdamW
     from basemap.data_loader import MemmapArrayConcatenator
-    from basemap.pumap.parametric_umap.utils.graph import compute_all_p_umap
+    from basemap.pumap.parametric_umap.utils.graph import compute_knn_graph_fast
     from basemap.pumap.parametric_umap.datasets.edge_dataset import EdgeDataset
     from basemap.pumap.parametric_umap.utils.losses import compute_correlation_loss
 
@@ -73,11 +73,11 @@ def bench(n_samples: int = 100_000, n_neighbors: int = 15, n_epochs: int = 2,
     results["actual_n"] = actual_n
     results["input_dim"] = X.shape[1]
 
-    # ── k-NN with FAISS ──
+    # ── k-NN (fast, no sigma) ──
     t0 = time.time()
-    P_sym = compute_all_p_umap(X, k=n_neighbors)
+    P_sym = compute_knn_graph_fast(X, k=n_neighbors)
     knn_time = time.time() - t0
-    logging.info(f"k-NN + P_sym: {knn_time:.1f}s ({P_sym.nnz:,} edges)")
+    logging.info(f"k-NN (fast): {knn_time:.1f}s ({P_sym.nnz:,} edges)")
     results["knn_time_s"] = knn_time
     results["n_edges"] = P_sym.nnz
 

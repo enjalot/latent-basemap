@@ -1,0 +1,30 @@
+04:04:44 [INFO] Building adjacency sets from CSR for 20958 nodes...
+04:04:44 [INFO] Adjacency sets built in 0.30 seconds.
+04:04:46 [INFO] EdgeDataset initialized: 2805546 positive edges, adjacency sets built in 2.11 seconds.
+Device: mps
+Loading data...
+Parameters: 1,084,546
+Training for 180s...
+Batches per epoch: 4570
+Epoch 1: loss=-109.8158 (umap=0.2172, corr=-0.7336) [88s]
+Epoch 2: loss=-113.9179 (umap=0.0704, corr=-0.7599) [168s]
+Epoch 3: loss=-114.7648 (umap=0.0694, corr=-0.7656) [180s]
+
+Training complete: 3 epochs, 9637 steps, 180.0s
+Evaluating...
+---
+knn_10: 0.271970
+knn_25: 0.298092
+knn_50: 0.313068
+trustworthiness: 0.888894
+dist_corr: 0.474793
+ref_procrustes: 0.450422
+ref_knn_overlap: 0.265649
+training_seconds: 180.0
+eval_seconds: 4.5
+total_seconds: 184.5
+num_epochs: 3
+num_steps: 9637
+num_params: 1084546
+hidden_dim: 512
+n_layers: 3
