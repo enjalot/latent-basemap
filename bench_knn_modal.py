@@ -260,3 +260,15 @@ def run(n_samples: int = 10000, k: int = 15):
     print(f"k-NN Benchmark: {n_samples:,} samples, k={k}")
     results = bench_knn.remote(n_samples, k)
     print(f"\n{json.dumps(results, indent=2)}")
+
+
+@app.function(
+    gpu="A100-40GB",
+    timeout=60 * 30,
+    scaledown_window=120,
+    image=st_image,
+    volumes=VOLUMES,
+)
+def bench_knn_a100(n_samples: int = 10000, k: int = 15, d: int = 384):
+    """Same benchmark but on A100-40GB."""
+    return bench_knn.local(n_samples, k, d)

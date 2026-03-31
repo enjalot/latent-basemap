@@ -200,9 +200,25 @@ def bench(n_samples: int = 100_000, n_neighbors: int = 15, n_epochs: int = 2,
     return results
 
 
+@app.function(
+    gpu="A100-40GB",
+    timeout=60 * 60 * 2,
+    scaledown_window=120,
+    image=st_image,
+    volumes=VOLUMES,
+    secrets=SECRETS,
+)
+def bench_a100(n_samples: int = 100_000, n_neighbors: int = 15, n_epochs: int = 2,
+               batch_size: int = 4096, hidden_dim: int = 512):
+    return bench.local(n_samples, n_neighbors, n_epochs, batch_size, hidden_dim)
+
+
 @app.local_entrypoint()
 def run(n_samples: int = 100_000, n_neighbors: int = 15, n_epochs: int = 2,
-        batch_size: int = 4096, hidden_dim: int = 512):
-    print(f"Benchmarking: {n_samples:,} samples, nn={n_neighbors}, {n_epochs} epochs, bs={batch_size}")
-    results = bench.remote(n_samples, n_neighbors, n_epochs, batch_size, hidden_dim)
+        batch_size: int = 4096, hidden_dim: int = 512, gpu: str = "a10g"):
+    print(f"Benchmarking: {n_samples:,} samples, nn={n_neighbors}, {n_epochs} epochs, bs={batch_size}, gpu={gpu}")
+    if gpu == "a100":
+        results = bench_a100.remote(n_samples, n_neighbors, n_epochs, batch_size, hidden_dim)
+    else:
+        results = bench.remote(n_samples, n_neighbors, n_epochs, batch_size, hidden_dim)
     print(f"\nResults: {results}")
