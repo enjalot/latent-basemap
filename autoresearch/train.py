@@ -56,7 +56,7 @@ HIDDEN_DIM = 512
 N_LAYERS = 3
 BATCH_SIZE = 3072
 LEARNING_RATE = 1e-3
-POS_RATIO = 0.5
+POS_RATIO = 0.4
 CLIP_GRAD_NORM = 1.0
 
 # UMAP curve parameters: q_ij = (1 + a * ||z_i - z_j||^{2b})^{-1}
