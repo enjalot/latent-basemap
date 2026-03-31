@@ -128,43 +128,103 @@ def init_worker_partial(worker_id: int, partial_adj_sets: Dict[int, np.ndarray],
                  worker_id, time.time() - start_time, total_nodes)
 
 def sample_negative_edges_worker(
-    node_list: Union[List[int], np.ndarray], 
-    k: int, 
+    node_list: Union[List[int], np.ndarray],
+    k: int,
     random_state: int
 ) -> List[Tuple[int, int]]:
     """
-    Sample k negative edges for each node in node_list using the global _global_adj_sets.
-    Using _global_total_nodes (if set) to create the full candidate list.
-    
-    Accepts node_list as a NumPy array or a Python list. Each element is cast to an int
-    before dictionary lookup to ensure compatibility.
+    Sample k negative edges for each node in node_list.
+    Uses simple random sampling — no exclusion of neighbors.
+    Collision probability is k/N which is negligible at scale
+    (0.015% at N=100K, 0.0015% at N=1M).
     """
     rng = np.random.RandomState(random_state)
-    # Use _global_total_nodes if available; else fall back to the length of _global_adj_sets.
     try:
         total = _global_total_nodes
     except NameError:
         total = len(_global_adj_sets)
-    all_nodes = np.arange(total)
     neg_edges = []
-    
-    # Use tqdm.auto for smart handling of nested progress bars
+
     for node in tqdm(node_list, desc="Sampling negative edges", leave=False, position=1):
         node_int = int(node)
-        # Here, connected is an array of neighbors for node_int (from our partial dictionary).
-        connected = _global_adj_sets[node_int]
-        mask = ~np.isin(all_nodes, connected)
-        mask[node_int] = False
-        candidates = all_nodes[mask]
-    
-        if len(candidates) >= k:
-            targets = rng.choice(candidates, size=k, replace=False)
-        else:
-            targets = candidates
-    
+        # Simple random sampling — no O(N) exclusion scan
+        targets = rng.randint(0, total, size=k)
+        # Only exclude self
+        targets = targets[targets != node_int]
         for target in targets:
             neg_edges.append((node_int, int(target)))
-    return list(set(neg_edges))
+    return neg_edges
+
+class OnTheFlyBalancedIterator:
+    """
+    Balanced batch iterator that samples negatives on-the-fly.
+    No precomputed negative edges needed — just positive edges from P_sym.
+
+    For each batch: draws pos_ratio fraction from positive edges,
+    and samples the rest as random (src, dst) pairs from the full dataset.
+    """
+    def __init__(self, pos_edges, pos_weights, n_nodes, pos_ratio=0.5,
+                 batch_size=512, shuffle=True, random_state=0):
+        self.pos_edges = list(pos_edges)
+        self.pos_weights = np.asarray(pos_weights, dtype=np.float32)
+        self.n_nodes = n_nodes
+        self.pos_ratio = pos_ratio
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.rng = np.random.RandomState(random_state)
+        self.num_pos = max(1, int(batch_size * pos_ratio))
+        self.num_neg = batch_size - self.num_pos
+        self.pos_idx = 0
+
+    def __iter__(self):
+        if self.shuffle:
+            perm = np.random.permutation(len(self.pos_edges))
+            self.pos_edges = [self.pos_edges[i] for i in perm]
+            self.pos_weights = self.pos_weights[perm]
+        self.pos_idx = 0
+        return self
+
+    def __next__(self):
+        if self.pos_idx >= len(self.pos_edges):
+            raise StopIteration
+
+        # Positive batch
+        end = min(self.pos_idx + self.num_pos, len(self.pos_edges))
+        pos_batch = self.pos_edges[self.pos_idx:end]
+        pos_batch_weights = self.pos_weights[self.pos_idx:end]
+        self.pos_idx += self.num_pos
+
+        if len(pos_batch) < self.num_pos:
+            extras = self.num_pos - len(pos_batch)
+            idx = self.rng.randint(0, len(self.pos_edges), size=extras)
+            pos_batch.extend([self.pos_edges[i] for i in idx])
+            pos_batch_weights = np.concatenate([pos_batch_weights, self.pos_weights[idx]])
+
+        # Negative batch — simple random pairs, no precomputation
+        neg_src = self.rng.randint(0, self.n_nodes, size=self.num_neg)
+        neg_dst = self.rng.randint(0, self.n_nodes, size=self.num_neg)
+        # Exclude self-loops
+        mask = neg_src != neg_dst
+        neg_src, neg_dst = neg_src[mask], neg_dst[mask]
+        neg_batch = list(zip(neg_src.tolist(), neg_dst.tolist()))
+
+        # Combine
+        labels = np.concatenate([
+            pos_batch_weights,
+            np.zeros(len(neg_batch), dtype=np.float32)
+        ])
+        batch = pos_batch + neg_batch
+
+        if self.shuffle:
+            perm = np.random.permutation(len(batch))
+            batch = [batch[i] for i in perm]
+            labels = labels[perm]
+
+        return batch, labels
+
+    def __len__(self):
+        return int(np.ceil(len(self.pos_edges) / self.num_pos))
+
 
 class EdgeBatchIterator:
     """
@@ -518,6 +578,19 @@ class EdgeDataset:
         if self.neg_edges is None:
             self.sample_and_shuffle(random_state=random_state)
         return BalancedEdgeBatchIterator(self.pos_edges, self.neg_edges, pos_weights=self.pos_weights, pos_ratio=pos_ratio, batch_size=batch_size, shuffle=shuffle)
+
+    def get_on_the_fly_loader(self, n_nodes: int, batch_size: int = 512,
+                               pos_ratio: float = 0.5, shuffle: bool = True,
+                               random_state: int = 0) -> OnTheFlyBalancedIterator:
+        """
+        Returns an iterator that samples negatives on-the-fly (no precomputation).
+        Only needs positive edges from P_sym.
+        """
+        return OnTheFlyBalancedIterator(
+            self.pos_edges, self.pos_weights, n_nodes,
+            pos_ratio=pos_ratio, batch_size=batch_size,
+            shuffle=shuffle, random_state=random_state
+        )
 
 
         
