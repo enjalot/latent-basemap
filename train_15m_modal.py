@@ -74,7 +74,8 @@ def _do_train(gpu_name, n_epochs=10, batch_size=4096, hidden_dim=512, lr=1e-3):
 
     # Strategy: GPU-resident if data fits, else pinned CPU memory
     data_gb = actual_n * D_IN * 4 / 1e9
-    gpu_mem_total = torch.cuda.get_device_properties(0).total_mem / 1e9
+    props = torch.cuda.get_device_properties(0)
+    gpu_mem_total = getattr(props, 'total_memory', getattr(props, 'total_mem', 0)) / 1e9
     gpu_headroom = 4.0  # reserve for model + gradients + scratch
     data_on_gpu = data_gb < (gpu_mem_total - gpu_headroom)
 
