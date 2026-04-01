@@ -72,10 +72,18 @@ def _do_train(gpu_name, n_epochs=10, batch_size=4096, hidden_dim=512, lr=1e-3):
     load_time = time.time() - t0
     logging.info(f"Data: {X.shape} in {load_time:.1f}s")
 
-    # Keep data on CPU — 15M x 384 x 4B = 23GB doesn't fit on A10G (24GB)
-    # Transfer per-batch to GPU instead
-    X_tensor = torch.tensor(X, dtype=torch.float32)  # CPU
-    logging.info(f"Data on CPU: {X_tensor.shape} ({X_tensor.nbytes/1e9:.1f} GB)")
+    # Strategy: GPU-resident if data fits, else pinned CPU memory
+    data_gb = actual_n * D_IN * 4 / 1e9
+    gpu_mem_total = torch.cuda.get_device_properties(0).total_mem / 1e9
+    gpu_headroom = 4.0  # reserve for model + gradients + scratch
+    data_on_gpu = data_gb < (gpu_mem_total - gpu_headroom)
+
+    if data_on_gpu:
+        X_tensor = torch.tensor(X, dtype=torch.float32, device=device)
+        logging.info(f"Data on GPU: {X_tensor.shape} ({data_gb:.1f} GB, GPU has {gpu_mem_total:.0f} GB)")
+    else:
+        X_tensor = torch.tensor(X, dtype=torch.float32).pin_memory()
+        logging.info(f"Data on CPU (pinned): {X_tensor.shape} ({data_gb:.1f} GB, GPU has {gpu_mem_total:.0f} GB)")
 
     # ── Load edge list ──
     t0 = time.time()
@@ -176,13 +184,18 @@ def _do_train(gpu_name, n_epochs=10, batch_size=4096, hidden_dim=512, lr=1e-3):
             all_dst = np.concatenate([p_dst, neg_dst])
             targets = np.concatenate([p_wt, np.zeros(n_neg, dtype=np.float32)])
 
-            src_idx = torch.from_numpy(all_src.astype(np.int64))
-            dst_idx = torch.from_numpy(all_dst.astype(np.int64))
-            targets_t = torch.from_numpy(targets).to(device)
+            targets_t = torch.from_numpy(targets).to(device, non_blocking=True)
 
-            # Index on CPU, transfer to GPU per batch
-            src_values = X_tensor[src_idx.cpu()].to(device)
-            dst_values = X_tensor[dst_idx.cpu()].to(device)
+            if data_on_gpu:
+                src_idx = torch.from_numpy(all_src.astype(np.int64)).to(device)
+                dst_idx = torch.from_numpy(all_dst.astype(np.int64)).to(device)
+                src_values = X_tensor[src_idx]
+                dst_values = X_tensor[dst_idx]
+            else:
+                src_idx = torch.from_numpy(all_src.astype(np.int64))
+                dst_idx = torch.from_numpy(all_dst.astype(np.int64))
+                src_values = X_tensor[src_idx].to(device, non_blocking=True)
+                dst_values = X_tensor[dst_idx].to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
 
@@ -272,15 +285,22 @@ def train_l40s(n_epochs=10, batch_size=4096, hidden_dim=512, lr=1e-3):
 def train_a10g(n_epochs=10, batch_size=4096, hidden_dim=512, lr=1e-3):
     return _do_train("A10G", n_epochs, batch_size, hidden_dim, lr)
 
+@app.function(gpu="A100-40GB", timeout=60*60*2, scaledown_window=300,
+              image=st_image, volumes=VOLUMES, secrets=SECRETS)
+def train_a100(n_epochs=10, batch_size=4096, hidden_dim=512, lr=1e-3):
+    return _do_train("A100-40GB", n_epochs, batch_size, hidden_dim, lr)
+
+
+GPU_DISPATCH = {"l40s": train_l40s, "a10g": train_a10g, "a100": train_a100}
 
 @app.local_entrypoint()
 def run(n_epochs: int = 10, batch_size: int = 4096, hidden_dim: int = 512,
-        lr: float = 1e-3, gpu: str = "l40s"):
+        lr: float = 1e-3, gpu: str = "a10g"):
+    fn = GPU_DISPATCH.get(gpu)
+    if not fn:
+        raise ValueError(f"Unknown GPU: {gpu}. Choose from: {list(GPU_DISPATCH.keys())}")
     print(f"Training 15M on {gpu}, {n_epochs} epochs")
-    if gpu == "l40s":
-        results = train_l40s.remote(n_epochs, batch_size, hidden_dim, lr)
-    else:
-        results = train_a10g.remote(n_epochs, batch_size, hidden_dim, lr)
+    results = fn.remote(n_epochs, batch_size, hidden_dim, lr)
     print(f"\nResults:")
     for k, v in results.items():
         print(f"  {k}: {v}")
