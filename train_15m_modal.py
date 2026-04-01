@@ -72,10 +72,10 @@ def _do_train(gpu_name, n_epochs=10, batch_size=4096, hidden_dim=512, lr=1e-3):
     load_time = time.time() - t0
     logging.info(f"Data: {X.shape} in {load_time:.1f}s")
 
-    # Move to GPU
-    X_tensor = torch.tensor(X, dtype=torch.float32, device=device)
-    data_mem = torch.cuda.max_memory_allocated() / 1e9
-    logging.info(f"Data on GPU: {data_mem:.2f} GB")
+    # Keep data on CPU — 15M x 384 x 4B = 23GB doesn't fit on A10G (24GB)
+    # Transfer per-batch to GPU instead
+    X_tensor = torch.tensor(X, dtype=torch.float32)  # CPU
+    logging.info(f"Data on CPU: {X_tensor.shape} ({X_tensor.nbytes/1e9:.1f} GB)")
 
     # ── Load edge list ──
     t0 = time.time()
@@ -168,12 +168,13 @@ def _do_train(gpu_name, n_epochs=10, batch_size=4096, hidden_dim=512, lr=1e-3):
             all_dst = np.concatenate([p_dst, neg_dst])
             targets = np.concatenate([p_wt, np.zeros(n_neg, dtype=np.float32)])
 
-            src_idx = torch.from_numpy(all_src.astype(np.int64)).to(device)
-            dst_idx = torch.from_numpy(all_dst.astype(np.int64)).to(device)
+            src_idx = torch.from_numpy(all_src.astype(np.int64))
+            dst_idx = torch.from_numpy(all_dst.astype(np.int64))
             targets_t = torch.from_numpy(targets).to(device)
 
-            src_values = X_tensor[src_idx]
-            dst_values = X_tensor[dst_idx]
+            # Index on CPU, transfer to GPU per batch
+            src_values = X_tensor[src_idx.cpu()].to(device)
+            dst_values = X_tensor[dst_idx.cpu()].to(device)
 
             optimizer.zero_grad(set_to_none=True)
 
