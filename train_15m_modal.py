@@ -80,11 +80,19 @@ def _do_train(gpu_name, n_epochs=10, batch_size=4096, hidden_dim=512, lr=1e-3):
     # ── Load edge list ──
     t0 = time.time()
     edges = np.load(EDGES_PATH)
-    pos_sources = edges["sources"]
-    pos_targets = edges["targets"]
-    pos_weights = edges["weights"]
+    raw_sources = edges["sources"]
+    raw_targets = edges["targets"]
+    raw_weights = edges["weights"]
+
+    # Filter: keep only edges where both endpoints are in our training set
+    # (The index may be larger than our subset — e.g. 150M index queried for 15M)
+    mask = (raw_sources < actual_n) & (raw_targets < actual_n)
+    pos_sources = raw_sources[mask]
+    pos_targets = raw_targets[mask]
+    pos_weights = raw_weights[mask]
     n_pos_edges = len(pos_sources)
-    logging.info(f"Edges loaded: {n_pos_edges:,} in {time.time()-t0:.1f}s")
+    pct_kept = 100 * n_pos_edges / len(raw_sources)
+    logging.info(f"Edges loaded: {len(raw_sources):,} raw, {n_pos_edges:,} after filtering ({pct_kept:.1f}%) in {time.time()-t0:.1f}s")
 
     # ── Model ──
     class UMAPNet(nn.Module):
