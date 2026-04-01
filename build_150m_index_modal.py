@@ -47,14 +47,19 @@ D_IN = 384
     memory=65536,  # 64GB RAM — we stream from memmap, not full load
 )
 def build_and_query(n_per_dataset: int = 50_000_000, k: int = 15,
-                    nprobe: int = 128, query_only: bool = False):
+                    nprobe: int = 128, query_only: bool = False,
+                    index_name: str = ""):
     import faiss
     from scipy import sparse
     from basemap.data_loader import MemmapArrayConcatenator
 
     total_n = n_per_dataset * len(DATASETS)
     tag = f"{total_n // 1_000_000}m"
-    index_path = f"/checkpoints/pumap/faiss_ivf_pq_{tag}.index"
+    # Allow using a different (larger) index for query-only mode
+    if index_name:
+        index_path = f"/checkpoints/pumap/faiss_ivf_pq_{index_name}.index"
+    else:
+        index_path = f"/checkpoints/pumap/faiss_ivf_pq_{tag}.index"
     edges_path = f"/checkpoints/pumap/edges_{tag}_k{k}.npz"
 
     results = {"n_per_dataset": n_per_dataset, "total_n": total_n, "k": k}
@@ -245,19 +250,20 @@ def build_and_query(n_per_dataset: int = 50_000_000, k: int = 15,
     memory=65536,
 )
 def build_and_query_a100(n_per_dataset: int = 50_000_000, k: int = 15,
-                         nprobe: int = 128, query_only: bool = False):
-    return build_and_query.local(n_per_dataset, k, nprobe, query_only)
+                         nprobe: int = 128, query_only: bool = False,
+                         index_name: str = ""):
+    return build_and_query.local(n_per_dataset, k, nprobe, query_only, index_name)
 
 
 @app.local_entrypoint()
 def run(n_per_dataset: int = 50_000_000, k: int = 15, nprobe: int = 128,
-        query_only: bool = False, gpu: str = "a10g"):
+        query_only: bool = False, gpu: str = "a10g", index_name: str = ""):
     total = n_per_dataset * 3
     print(f"Building IVF_PQ for {total/1e6:.0f}M vectors ({n_per_dataset/1e6:.0f}M x 3 datasets) on {gpu}")
     if gpu == "a100":
-        results = build_and_query_a100.remote(n_per_dataset, k, nprobe, query_only)
+        results = build_and_query_a100.remote(n_per_dataset, k, nprobe, query_only, index_name)
     else:
-        results = build_and_query.remote(n_per_dataset, k, nprobe, query_only)
+        results = build_and_query.remote(n_per_dataset, k, nprobe, query_only, index_name)
     print(f"\nResults:")
     for key, val in results.items():
         print(f"  {key}: {val}")
