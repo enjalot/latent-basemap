@@ -313,10 +313,13 @@ def run_experiment(exp_config: dict, n_epochs: int = 10):
     train_time = time.time() - train_start
     peak_mem = torch.cuda.max_memory_allocated() / 1e9
 
-    # ── Evaluate ──
+    # ── Evaluate (batched to avoid OOM) ──
     model.eval()
+    Z_parts = []
     with torch.no_grad():
-        Z = model(X_tensor).cpu().numpy()
+        for i in range(0, actual_n, 100_000):
+            Z_parts.append(model(X_tensor[i:i+100_000]).cpu().numpy())
+    Z = np.concatenate(Z_parts)
 
     # Sampled distance correlation (global metric)
     rng2 = np.random.RandomState(42)
