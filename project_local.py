@@ -50,8 +50,11 @@ MODEL_NAMES = [
 
 
 class UMAPNet(nn.Module):
-    def __init__(self, d_in=384, hidden_dim=512, d_out=2, n_layers=3):
+    def __init__(self, d_in=384, hidden_dim=512, d_out=2, n_layers=3,
+                 use_tanh=False, output_scale=5.0):
         super().__init__()
+        self.use_tanh = use_tanh
+        self.output_scale = output_scale
         self.proj_in = nn.Linear(d_in, hidden_dim)
         self.blocks = nn.ModuleList([
             nn.Sequential(nn.LayerNorm(hidden_dim), nn.Linear(hidden_dim, hidden_dim), nn.ReLU())
@@ -64,7 +67,10 @@ class UMAPNet(nn.Module):
         x = F.relu(self.proj_in(x))
         for b in self.blocks:
             x = x + b(x)
-        return self.proj_out(self.out_norm(x))
+        out = self.proj_out(self.out_norm(x))
+        if self.use_tanh:
+            out = torch.tanh(out) * self.output_scale
+        return out
 
 
 def download_models():
@@ -104,13 +110,15 @@ def load_model(model_path, device="cpu"):
         hidden_dim=cfg.get("hidden_dim", 512),
         d_out=cfg.get("d_out", 2),
         n_layers=cfg.get("n_layers", 3),
+        use_tanh=cfg.get("use_tanh", False),
+        output_scale=cfg.get("output_scale", 5.0),
     )
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     return model.to(device)
 
 
-def project_dataset(dataset_name, device="mps"):
+def project_dataset(dataset_name, device="cpu", model_dir=None):
     """Project a dataset with all models, save as UMAP parquets."""
     ds = DATASETS[dataset_name]
 
@@ -138,8 +146,13 @@ def project_dataset(dataset_name, device="mps"):
 
     X_tensor = torch.tensor(X, dtype=torch.float32, device=device)
 
-    for model_name in MODEL_NAMES:
-        model_path = MODEL_DIR / f"{model_name}.pt"
+    # Determine which models to project
+    if model_dir:
+        model_names_and_paths = [(p.stem, p) for p in sorted(Path(model_dir).glob("*.pt"))]
+    else:
+        model_names_and_paths = [(n, MODEL_DIR / f"{n}.pt") for n in MODEL_NAMES]
+
+    for model_name, model_path in model_names_and_paths:
         if not model_path.exists():
             print(f"  Skipping {model_name} — model not found")
             continue
@@ -199,7 +212,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--download", action="store_true", help="Download models from Modal")
     parser.add_argument("--dataset", type=str, help="Dataset to project")
-    parser.add_argument("--device", type=str, default="mps", help="Device (mps/cpu)")
+    parser.add_argument("--device", type=str, default="cpu", help="Device (mps/cpu)")
+    parser.add_argument("--model-dir", type=str, default=None, help="Directory of .pt model files")
     args = parser.parse_args()
 
     if args.download:
@@ -208,7 +222,10 @@ if __name__ == "__main__":
 
     if args.dataset:
         print(f"\nProjecting {args.dataset}...")
-        project_dataset(args.dataset, device=args.device)
+        if args.model_dir:
+            project_dataset(args.dataset, device=args.device, model_dir=Path(args.model_dir))
+        else:
+            project_dataset(args.dataset, device=args.device)
 
     if not args.download and not args.dataset:
         print("Usage:")
