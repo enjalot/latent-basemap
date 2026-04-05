@@ -9,3 +9,9 @@ validation_results/
 scale_results/
 *.un~
 .claude
+models/
+*.pt
+*.h5
+*.npy
+*.npz
+*.parquet
