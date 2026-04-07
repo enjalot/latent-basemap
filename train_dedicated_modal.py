@@ -38,16 +38,16 @@ DATASETS = {
 D_IN = 384
 
 EXPERIMENTS = [
-    {"name": "ded-15m-more-global", "n_per_ds": 5_000_000,
+    {"name": "ded-15m-more-global", "n_per_ds": 5_000_000, "max_cost": 2.0,
      "hidden_dim": 512, "umap_weight": 5.0, "edge_corr_weight": 50.0,
      "global_weight": 30.0},
-    {"name": "ded-15m-bigger-model", "n_per_ds": 5_000_000,
+    {"name": "ded-15m-bigger-model", "n_per_ds": 5_000_000, "max_cost": 2.0,
      "hidden_dim": 1024, "umap_weight": 5.0, "edge_corr_weight": 50.0,
      "global_weight": 10.0},
-    {"name": "ded-30m-more-global", "n_per_ds": 10_000_000,
+    {"name": "ded-30m-more-global", "n_per_ds": 10_000_000, "max_cost": 3.0,
      "hidden_dim": 512, "umap_weight": 5.0, "edge_corr_weight": 50.0,
      "global_weight": 30.0},
-    {"name": "ded-30m-bigger-model", "n_per_ds": 10_000_000,
+    {"name": "ded-30m-bigger-model", "n_per_ds": 10_000_000, "max_cost": 3.0,
      "hidden_dim": 1024, "umap_weight": 5.0, "edge_corr_weight": 50.0,
      "global_weight": 10.0},
 ]
@@ -57,7 +57,25 @@ EXPERIMENTS = [
     gpu="L40S", timeout=60*60*3, scaledown_window=300,
     image=st_image, volumes=VOLUMES, secrets=SECRETS,
 )
-def run_experiment(exp: dict, n_epochs: int = 10):
+def run_experiment_l40s(exp: dict, n_epochs: int = 10):
+    return _train(exp, n_epochs, "L40S")
+
+@app.function(
+    gpu="T4", timeout=60*60*4, scaledown_window=300,
+    image=st_image, volumes=VOLUMES, secrets=SECRETS,
+)
+def run_experiment_t4(exp: dict, n_epochs: int = 10):
+    return _train(exp, n_epochs, "T4")
+
+@app.function(
+    gpu="A10G", timeout=60*60*4, scaledown_window=300,
+    image=st_image, volumes=VOLUMES, secrets=SECRETS,
+)
+def run_experiment_a10g(exp: dict, n_epochs: int = 10):
+    return _train(exp, n_epochs, "A10G")
+
+def _train(exp: dict, n_epochs: int, gpu_name: str):
+    import os
     import torch
     import torch.nn as nn
     import torch.nn.functional as F
@@ -156,14 +174,39 @@ def run_experiment(exp: dict, n_epochs: int = 10):
     except:
         wandb = None
 
+    # ── Check for existing checkpoint to resume from ──
+    save_path = f"/checkpoints/pumap/model_ded_{name}.pt"
+    start_epoch = 1
+    global_step = 0
+    if os.path.exists(save_path):
+        ckpt = torch.load(save_path, map_location=device)
+        if "epoch" in ckpt:
+            model.load_state_dict(ckpt["model_state_dict"])
+            start_epoch = ckpt["epoch"] + 1
+            global_step = ckpt.get("global_step", 0)
+            logging.info(f"[{name}] Resuming from epoch {start_epoch} (step {global_step})")
+        else:
+            logging.info(f"[{name}] Found final checkpoint, skipping training")
+            return ckpt.get("result", {"name": name, "status": "already_done"})
+
+    # ── Budget guard ──
+    max_cost_usd = exp.get("max_cost", 2.0)  # default $2 max per experiment
+    gpu_rate = {"T4": 0.59, "A10G": 1.10, "L40S": 1.70, "A100-40GB": 2.10}.get(gpu_name, 1.70)
+
     model.train()
     torch.cuda.reset_peak_memory_stats()
     t0 = time.time()
-    global_step = 0
 
     uw, ecw, gw = exp["umap_weight"], exp["edge_corr_weight"], exp["global_weight"]
 
-    for epoch in range(1, n_epochs + 1):
+    for epoch in range(start_epoch, n_epochs + 1):
+        # Budget check at start of each epoch
+        elapsed = time.time() - t0
+        cost_so_far = elapsed * gpu_rate / 3600
+        if cost_so_far > max_cost_usd:
+            logging.warning(f"[{name}] Budget exceeded: ${cost_so_far:.2f} > ${max_cost_usd:.2f}. Stopping.")
+            break
+
         perm = rng.permutation(n_pos)
         epoch_loss, nb = 0.0, 0
         edges_this_epoch = min(batches_per_epoch * pos_per_batch, n_pos)
@@ -224,19 +267,21 @@ def run_experiment(exp: dict, n_epochs: int = 10):
             if wandb and global_step % 200 == 0:
                 wandb.log({"loss": loss.item()}, step=global_step)
 
-        sps = actual_n * epoch / (time.time() - t0)
-        logging.info(f"[{name}] Epoch {epoch}/{n_epochs}: loss={epoch_loss/nb:.4f} [{time.time()-t0:.0f}s, {sps:.0f} sps]")
+        elapsed = time.time() - t0
+        cost_so_far = elapsed * gpu_rate / 3600
+        sps = actual_n * (epoch - start_epoch + 1) / elapsed
+        logging.info(f"[{name}] Epoch {epoch}/{n_epochs}: loss={epoch_loss/nb:.4f} [{elapsed:.0f}s, {sps:.0f} sps, ${cost_so_far:.2f}]")
+
+        # ── Save checkpoint every epoch ──
+        torch.save({
+            "model_state_dict": model.state_dict(),
+            "config": {"d_in": D_IN, "hidden_dim": hidden_dim, "n_layers": 3, "d_out": 2},
+            "name": name, "epoch": epoch, "global_step": global_step,
+        }, save_path)
+        VOLUMES["/checkpoints"].commit()
 
     train_time = time.time() - t0
     peak_mem = torch.cuda.max_memory_allocated() / 1e9
-
-    # Save model
-    save_path = f"/checkpoints/pumap/model_ded_{name}.pt"
-    torch.save({
-        "model_state_dict": model.state_dict(),
-        "config": {"d_in": D_IN, "hidden_dim": hidden_dim, "n_layers": 3, "d_out": 2},
-        "name": name,
-    }, save_path)
 
     # Evaluate (batched)
     model.eval()
@@ -268,8 +313,7 @@ def run_experiment(exp: dict, n_epochs: int = 10):
     _, idx_l = nn_l.kneighbors(Z_eval)
     knn_10 = sum(len(set(idx_h[ii,1:]) & set(idx_l[ii,1:])) for ii in range(n_eval)) / (n_eval * 10)
 
-    VOLUMES["/checkpoints"].commit()
-    cost = train_time * 1.70 / 3600
+    cost = train_time * gpu_rate / 3600
 
     result = {
         "name": name, "dist_corr": dist_corr, "knn_10": knn_10,
@@ -279,15 +323,28 @@ def run_experiment(exp: dict, n_epochs: int = 10):
     }
     logging.info(f"[{name}] dc={dist_corr:.4f} knn={knn_10:.4f} edges={n_pos:,} ${cost:.2f}")
 
+    # Final save — no 'epoch' key marks this as complete (won't resume)
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "config": {"d_in": D_IN, "hidden_dim": hidden_dim, "n_layers": 3, "d_out": 2},
+        "name": name, "result": result,
+    }, save_path)
+    VOLUMES["/checkpoints"].commit()
+
     if wandb:
         wandb.log(result); wandb.summary.update(result); wandb.finish()
     return result
 
 
+GPU_DISPATCH = {"l40s": run_experiment_l40s, "t4": run_experiment_t4, "a10g": run_experiment_a10g}
+
 @app.local_entrypoint()
-def run():
-    handles = [(e["name"], run_experiment.spawn(e)) for e in EXPERIMENTS]
-    print(f"Spawned {len(handles)} experiments")
+def run(gpu: str = "t4"):
+    fn = GPU_DISPATCH.get(gpu)
+    if not fn:
+        raise ValueError(f"Unknown GPU: {gpu}. Choose: {list(GPU_DISPATCH.keys())}")
+    handles = [(e["name"], fn.spawn(e)) for e in EXPERIMENTS]
+    print(f"Spawned {len(handles)} experiments on {gpu}")
 
     results = []
     for name, h in handles:
