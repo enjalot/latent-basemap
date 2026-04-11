@@ -197,12 +197,17 @@ def build_and_query(n_per_dataset: int = 50_000_000, k: int = 15,
     logging.info("Building edge list...")
     t0 = time.time()
 
-    # Remove self-matches, take first k neighbors
-    neighbors = all_neighbors[:, 1:k+1]
-
-    # Build symmetric sparse matrix with uniform weights
-    sources = np.repeat(np.arange(actual_n), k).astype(np.int32)
-    targets = neighbors.flatten().astype(np.int32)
+    # Remove self-matches by ID (IVF_PQ doesn't guarantee self at column 0)
+    all_sources = []
+    all_targets = []
+    for i in range(actual_n):
+        nbrs = all_neighbors[i]
+        mask = nbrs != i
+        valid = nbrs[mask][:k]
+        all_sources.extend([i] * len(valid))
+        all_targets.extend(valid)
+    sources = np.array(all_sources, dtype=np.int32)
+    targets = np.array(all_targets, dtype=np.int32)
     weights = np.ones(len(sources), dtype=np.float32) / k
 
     # Save as compressed npz
