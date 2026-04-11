@@ -497,9 +497,20 @@ def compute_sigma_i_faiss(X: np.ndarray, k: int, tol: float = 1e-5,
     knn_time = time.time() - start_time
     logging.info(f"FAISS k-NN search completed in {knn_time:.2f}s")
 
-    # Remove self-matches — take columns 1:k+1 (self is at column 0)
-    distances = np.sqrt(np.maximum(dists_sq[:, 1:k+1], 0)).astype(np.float32)
-    neighbors_clean = neighbors[:, 1:k+1].copy()
+    # Remove self-matches by ID (approximate indexes don't guarantee self at column 0)
+    distances_out = np.empty((n, k), dtype=np.float32)
+    neighbors_clean = np.empty((n, k), dtype=np.int64)
+    for i in range(n):
+        mask = neighbors[i] != i
+        valid_d = np.sqrt(np.maximum(dists_sq[i, mask], 0))
+        valid_n = neighbors[i, mask]
+        take = min(k, len(valid_n))
+        distances_out[i, :take] = valid_d[:take]
+        neighbors_clean[i, :take] = valid_n[:take]
+        if take < k:  # fill remainder (rare edge case)
+            distances_out[i, take:] = distances_out[i, take-1]
+            neighbors_clean[i, take:] = neighbors_clean[i, take-1]
+    distances = distances_out
 
     # Reuse the existing vectorized sigma binary search from compute_sigma_i_sklearn
     # (it's the same algorithm, just needs distances, neighbors, and params)
@@ -583,13 +594,20 @@ def compute_knn_graph_fast(X, k: int, use_gpu: bool = True) -> sparse.csr_matrix
         for s in range(0, n, batch_sz):
             e = min(s + batch_sz, n)
             all_dists[s:e], all_nbrs[s:e] = index.search(X[s:e], k + 1)
-        neighbors = all_nbrs[:, 1:k+1]
+        # Remove self-matches by ID (approximate indexes may not have self at col 0)
+        neighbors = np.empty((n, k), dtype=np.int64)
+        for i in range(n):
+            mask = all_nbrs[i] != i
+            valid = all_nbrs[i, mask][:k]
+            neighbors[i, :len(valid)] = valid
+            if len(valid) < k:
+                neighbors[i, len(valid):] = valid[-1]
     except ImportError:
         from sklearn.neighbors import NearestNeighbors
         logging.info("Using sklearn NearestNeighbors")
         nn = NearestNeighbors(n_neighbors=k+1, n_jobs=-1).fit(X)
         _, idx = nn.kneighbors(X)
-        neighbors = idx[:, 1:]
+        neighbors = idx[:, 1:]  # sklearn exact search, self always at col 0
 
     knn_time = time.time() - total_start
     logging.info(f"k-NN search: {knn_time:.2f}s")
