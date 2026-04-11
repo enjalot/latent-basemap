@@ -417,6 +417,197 @@ def compute_sigma_i_sklearn(X: np.ndarray, k: int, tol: float = 1e-5, max_iter: 
     return sigma, rho, distances, neighbors
 
 
+def compute_sigma_i_faiss(X: np.ndarray, k: int, tol: float = 1e-5,
+                          max_iter: int = 100, use_gpu: bool = True
+                          ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Compute sigma_i using FAISS for approximate nearest neighbors.
+    Much faster than sklearn/annoy at scale (100K+), supports GPU.
+
+    Parameters
+    ----------
+    X : np.ndarray
+        Dataset of shape (n_samples, n_features)
+    k : int
+        Number of nearest neighbors (excluding self)
+    use_gpu : bool
+        If True and GPU is available, use GPU-accelerated FAISS
+
+    Returns
+    -------
+    Tuple of (sigma, rho, distances, neighbors)
+    """
+    import faiss
+
+    start_time = time.time()
+    n, d = X.shape
+    X = np.ascontiguousarray(X.astype(np.float32))
+
+    logging.info(f"Computing k-NN with FAISS for {n:,} samples, k={k}, d={d}")
+
+    # Build index
+    # Build index — prefer GPU when available (requires faiss-gpu-cu12)
+    use_gpu_index = False
+    if use_gpu:
+        try:
+            ngpus = faiss.get_num_gpus()
+            if ngpus > 0:
+                use_gpu_index = True
+        except Exception:
+            pass
+
+    if use_gpu_index:
+        logging.info(f"Using FAISS GPU ({faiss.get_num_gpus()} GPUs)")
+        gpu_res = faiss.StandardGpuResources()
+        if n > 500_000:
+            # IVF for large GPU datasets
+            nlist = min(int(np.sqrt(n)), 4096)
+            index_cpu = faiss.index_factory(d, f"IVF{nlist},Flat")
+            index = faiss.index_cpu_to_gpu(gpu_res, 0, index_cpu)
+            train_size = min(n, nlist * 40)
+            index.train(X[:train_size])
+            index.add(X)
+            index.nprobe = min(nlist // 4, 64)
+        else:
+            index = faiss.GpuIndexFlatL2(gpu_res, d)
+            index.add(X)
+    else:
+        logging.info("Using FAISS CPU")
+        if n > 200_000:
+            index = faiss.IndexHNSWFlat(d, 32)
+            index.hnsw.efSearch = max(k * 4, 64)
+            index.add(X)
+        else:
+            index = faiss.IndexFlatL2(d)
+            index.add(X)
+
+    # Search — do in batches for large datasets to avoid GPU OOM
+    batch_search = 50_000
+    if n <= batch_search:
+        dists_sq, neighbors = index.search(X, k + 1)
+    else:
+        dists_sq = np.empty((n, k + 1), dtype=np.float32)
+        neighbors = np.empty((n, k + 1), dtype=np.int64)
+        for start in range(0, n, batch_search):
+            end = min(start + batch_search, n)
+            dists_sq[start:end], neighbors[start:end] = index.search(X[start:end], k + 1)
+            if start > 0 and start % (batch_search * 5) == 0:
+                logging.info(f"  FAISS search progress: {start:,}/{n:,}")
+
+    knn_time = time.time() - start_time
+    logging.info(f"FAISS k-NN search completed in {knn_time:.2f}s")
+
+    # Remove self-matches — take columns 1:k+1 (self is at column 0)
+    distances = np.sqrt(np.maximum(dists_sq[:, 1:k+1], 0)).astype(np.float32)
+    neighbors_clean = neighbors[:, 1:k+1].copy()
+
+    # Reuse the existing vectorized sigma binary search from compute_sigma_i_sklearn
+    # (it's the same algorithm, just needs distances, neighbors, and params)
+    logging.info("Computing sigma via binary search...")
+    rho = distances[:, 0].astype(np.float64).copy()
+    target = np.log2(k)
+    sigma = np.ones(n, dtype=np.float64)
+    lo = np.full(n, 1e-20, dtype=np.float64)
+    hi = np.full(n, 1e20, dtype=np.float64)
+
+    for iteration in tqdm(range(max_iter), desc="Binary search iterations"):
+        d_adj = np.maximum(distances.astype(np.float64) - rho[:, None], 0)
+        p_sum = np.exp(-d_adj / np.maximum(sigma[:, None], 1e-20)).sum(axis=1)
+        diff = p_sum - target
+        converged = np.abs(diff) < tol
+        if converged.all():
+            break
+        too_high = (diff > 0) & ~converged
+        too_low = (diff < 0) & ~converged
+        hi[too_high] = sigma[too_high]
+        sigma[too_high] = (sigma[too_high] + lo[too_high]) / 2
+        lo[too_low] = sigma[too_low]
+        sigma[too_low] = (sigma[too_low] + hi[too_low]) / 2
+
+    total_time = time.time() - start_time
+    logging.info(f"Total FAISS sigma_i computation completed in {total_time:.2f}s")
+
+    return sigma, rho, distances, neighbors_clean
+
+
+def compute_knn_graph_fast(X, k: int, use_gpu: bool = True) -> sparse.csr_matrix:
+    """
+    Fast k-NN graph without sigma binary search.
+    Uses uniform weights (1/k) for all edges. Much faster at scale.
+    Suitable for parametric UMAP training where the neural network
+    learns the distance function anyway.
+
+    Returns sparse symmetric matrix with uniform edge weights.
+    """
+    total_start = time.time()
+    n, d = X.shape
+    X = np.ascontiguousarray(X.astype(np.float32))
+    logging.info(f"Computing fast k-NN graph for {n:,} samples, k={k}")
+
+    # Find k-NN
+    try:
+        import faiss
+        # Try GPU first (requires faiss-gpu-cu12)
+        gpu_ok = False
+        if use_gpu:
+            try:
+                if faiss.get_num_gpus() > 0:
+                    gpu_res = faiss.StandardGpuResources()
+                    if n > 500_000:
+                        nlist = min(int(np.sqrt(n)), 4096)
+                        index_cpu = faiss.index_factory(d, f"IVF{nlist},Flat")
+                        index = faiss.index_cpu_to_gpu(gpu_res, 0, index_cpu)
+                        index.train(X[:min(n, nlist * 40)])
+                        index.add(X)
+                        index.nprobe = min(nlist // 4, 64)
+                    else:
+                        index = faiss.GpuIndexFlatL2(gpu_res, d)
+                        index.add(X)
+                    gpu_ok = True
+                    logging.info(f"Using FAISS GPU")
+            except Exception as e:
+                logging.warning(f"FAISS GPU failed: {e}")
+
+        if not gpu_ok:
+            logging.info("Using FAISS CPU")
+            if n > 200_000:
+                index = faiss.IndexHNSWFlat(d, 32)
+                index.hnsw.efSearch = max(k * 4, 64)
+            else:
+                index = faiss.IndexFlatL2(d)
+            index.add(X)
+        # Batch search
+        batch_sz = 50_000
+        all_dists = np.empty((n, k + 1), dtype=np.float32)
+        all_nbrs = np.empty((n, k + 1), dtype=np.int64)
+        for s in range(0, n, batch_sz):
+            e = min(s + batch_sz, n)
+            all_dists[s:e], all_nbrs[s:e] = index.search(X[s:e], k + 1)
+        neighbors = all_nbrs[:, 1:k+1]
+    except ImportError:
+        from sklearn.neighbors import NearestNeighbors
+        logging.info("Using sklearn NearestNeighbors")
+        nn = NearestNeighbors(n_neighbors=k+1, n_jobs=-1).fit(X)
+        _, idx = nn.kneighbors(X)
+        neighbors = idx[:, 1:]
+
+    knn_time = time.time() - total_start
+    logging.info(f"k-NN search: {knn_time:.2f}s")
+
+    # Build symmetric sparse matrix with uniform weights
+    sources = np.repeat(np.arange(n), k)
+    targets = neighbors.flatten()
+    weights = np.full(len(sources), 1.0 / k, dtype=np.float32)
+
+    P = sparse.csr_matrix((weights, (sources, targets)), shape=(n, n))
+    # Symmetrize: P_sym = P + P^T - P * P^T (standard UMAP symmetrization)
+    P_t = P.T
+    P_sym = P + P_t - P.multiply(P_t)
+
+    logging.info(f"Fast k-NN graph: {knn_time:.1f}s, {P_sym.nnz:,} edges")
+    return P_sym
+
+
 def compute_all_p_umap(X, k: int, tol: float = 1e-5, max_iter: int = 100) -> sparse.csr_matrix:
     """
     Compute symmetric UMAP probabilities for the entire dataset.
@@ -452,13 +643,17 @@ def compute_all_p_umap(X, k: int, tol: float = 1e-5, max_iter: int = 100) -> spa
     if LanceDBLoader is not None and isinstance(X, LanceDBLoader):
         sigma, rho, distances, neighbors = compute_sigma_i_lance(X, k, tol, max_iter)
     else:
-        # Try annoy first, fall back to sklearn
+        # Prefer FAISS > Annoy > sklearn
         try:
-            from annoy import AnnoyIndex  # noqa: F401
-            sigma, rho, distances, neighbors = compute_sigma_i_annoy(X, k, tol, max_iter)
+            import faiss  # noqa: F401
+            sigma, rho, distances, neighbors = compute_sigma_i_faiss(X, k, tol, max_iter)
         except ImportError:
-            logging.info("Annoy not available, using sklearn NearestNeighbors")
-            sigma, rho, distances, neighbors = compute_sigma_i_sklearn(X, k, tol, max_iter)
+            try:
+                from annoy import AnnoyIndex  # noqa: F401
+                sigma, rho, distances, neighbors = compute_sigma_i_annoy(X, k, tol, max_iter)
+            except ImportError:
+                logging.info("FAISS and Annoy not available, using sklearn NearestNeighbors")
+                sigma, rho, distances, neighbors = compute_sigma_i_sklearn(X, k, tol, max_iter)
 
     # Step 2: Compute p_j|i
     P = compute_p_umap(sigma, rho, distances, neighbors)
