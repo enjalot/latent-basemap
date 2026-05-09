@@ -20,6 +20,24 @@ from pathlib import Path
 from datetime import datetime
 
 
+def _coerce_override_value(value: str, current: Any) -> Any:
+    """Coerce CLI override strings to the type of the existing config value."""
+    if isinstance(current, bool):
+        if isinstance(value, bool):
+            return value
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "off"}:
+            return False
+        raise ValueError(f"Cannot parse boolean override value: {value!r}")
+
+    if current is not None:
+        return type(current)(value)
+
+    return value
+
+
 @dataclass
 class DataConfig:
     """Where the data comes from and how to subsample it."""
@@ -74,6 +92,7 @@ class TrainConfig:
     resample_negatives: bool = False
     n_processes: int = 6
     device: Optional[str] = None  # Auto-detect
+    verbose: bool = True
 
 
 @dataclass
@@ -162,9 +181,7 @@ class ExperimentConfig:
                 if sub is not None and hasattr(sub, param):
                     # Coerce types
                     current = getattr(sub, param)
-                    if current is not None:
-                        value = type(current)(value)
-                    setattr(sub, param, value)
+                    setattr(sub, param, _coerce_override_value(value, current))
                 else:
                     raise ValueError(f"Unknown config key: {key}")
             else:

@@ -432,7 +432,7 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
     pumap.fit(
         X_train,
         low_memory=tc.low_memory,
-        verbose=True,
+        verbose=tc.verbose,
         n_processes=tc.n_processes,
         resample_negatives=tc.resample_negatives,
         precomputed_p_sym_path=cfg.data.precomputed_p_sym_path,

@@ -218,7 +218,12 @@ class ParametricUMAP:
             epoch_umap_loss = 0.0
             epoch_corr_loss = 0.0
             num_batches = 0
-            pbar = tqdm(range(len(loader)), desc=f'Epoch {epoch+1}/{self.n_epochs}', position=0)
+            pbar = tqdm(
+                range(len(loader)),
+                desc=f'Epoch {epoch+1}/{self.n_epochs}',
+                position=0,
+                disable=not verbose,
+            )
 
             prefetcher = DataPrefetcher(loader, dataset, self.device)
             batch = prefetcher.next()
@@ -240,8 +245,9 @@ class ParametricUMAP:
                     # Clamp qs to avoid log(0) in BCE
                     qs = torch.clamp(qs, min=1e-7, max=1 - 1e-7)
 
-                    umap_loss = self.loss_fn(qs, targets)
-
+                # BCELoss is unsafe under autocast. Keep the forward pass mixed
+                # precision, then compute BCE in fp32.
+                umap_loss = self.loss_fn(qs.float(), targets.float())
                 # Correlation loss in full precision (distance correlation is numerically sensitive)
                 corr_loss = compute_correlation_loss(
                     torch.norm(src_values - dst_values, dim=1),
@@ -318,12 +324,13 @@ class ParametricUMAP:
 
                 batch = prefetcher.next()
                 pbar.update(1)
-                pbar.set_postfix({
-                    'loss': f'{loss.item():.4f}',
-                    'umap': f'{umap_loss.item():.4f}',
-                    'pos_q': f'{pos_qs_mean:.3f}',
-                    'neg_q': f'{neg_qs_mean:.3f}',
-                })
+                if verbose:
+                    pbar.set_postfix({
+                        'loss': f'{loss.item():.4f}',
+                        'umap': f'{umap_loss.item():.4f}',
+                        'pos_q': f'{pos_qs_mean:.3f}',
+                        'neg_q': f'{neg_qs_mean:.3f}',
+                    })
 
             pbar.close()
 
