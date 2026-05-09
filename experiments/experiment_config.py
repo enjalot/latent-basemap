@@ -20,10 +20,32 @@ from pathlib import Path
 from datetime import datetime
 
 
+def _coerce_override_value(value: str, current: Any) -> Any:
+    """Coerce CLI override strings to the type of the existing config value."""
+    if isinstance(current, bool):
+        if isinstance(value, bool):
+            return value
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "off"}:
+            return False
+        raise ValueError(f"Cannot parse boolean override value: {value!r}")
+
+    if current is not None:
+        return type(current)(value)
+
+    return value
+
+
 @dataclass
 class DataConfig:
     """Where the data comes from and how to subsample it."""
-    source: str = "synthetic"       # "synthetic", "memmap", "lancedb"
+    source: str = "synthetic"       # "synthetic", "h5", "memmap", "lancedb"
+    # For h5
+    h5_path: str = ""
+    h5_dataset: str = "embeddings"
+    reference_umap_path: str = ""
     # For memmap
     memmap_dirs: List[str] = field(default_factory=list)
     input_dim: int = 384
@@ -37,12 +59,15 @@ class DataConfig:
     # Precomputed graph
     precomputed_p_sym_path: Optional[str] = None
     precomputed_negatives_path: Optional[str] = None
+    precomputed_edges_path: Optional[str] = None
+    precomputed_index_path: Optional[str] = None
     n_neighbors: int = 15
 
 
 @dataclass
 class ModelConfig:
     """Architecture and UMAP hyperparameters."""
+    architecture: str = "mlp"
     n_components: int = 2
     hidden_dim: int = 512
     n_layers: int = 3
@@ -68,6 +93,12 @@ class TrainConfig:
     resample_negatives: bool = False
     n_processes: int = 6
     device: Optional[str] = None  # Auto-detect
+    verbose: bool = True
+    correlation_distance_transform: str = "raw"
+    lr_schedule: str = "plateau"
+    warmup_steps: int = 0
+    total_steps_estimate: int = 0
+    use_amp: bool = True
 
 
 @dataclass
@@ -156,9 +187,7 @@ class ExperimentConfig:
                 if sub is not None and hasattr(sub, param):
                     # Coerce types
                     current = getattr(sub, param)
-                    if current is not None:
-                        value = type(current)(value)
-                    setattr(sub, param, value)
+                    setattr(sub, param, _coerce_override_value(value, current))
                 else:
                     raise ValueError(f"Unknown config key: {key}")
             else:

@@ -61,3 +61,27 @@ class MLP(nn.Module):
             torch.Tensor: Output tensor of shape (batch_size, output_dim).
         """
         return self.model(x)
+
+
+class ResidualBottleneckMLP(nn.Module):
+    """Bottleneck MLP with residual blocks in the hidden bottleneck."""
+
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers=3):
+        super().__init__()
+        neck_dim = hidden_dim * 3 // 4
+        self.proj_in = nn.Linear(input_dim, hidden_dim)
+        self.down = nn.Sequential(nn.Linear(hidden_dim, neck_dim), nn.ReLU())
+        self.blocks = nn.ModuleList([
+            nn.Sequential(nn.Linear(neck_dim, neck_dim), nn.ReLU())
+            for _ in range(max(num_layers - 1, 0))
+        ])
+        self.up = nn.Sequential(nn.Linear(neck_dim, hidden_dim), nn.ReLU())
+        self.proj_out = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, x):
+        x = F.relu(self.proj_in(x))
+        x = self.down(x)
+        for block in self.blocks:
+            x = x + block(x)
+        x = self.up(x)
+        return self.proj_out(x)

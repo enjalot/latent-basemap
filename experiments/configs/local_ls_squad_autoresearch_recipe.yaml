@@ -1,0 +1,51 @@
+name: local_ls_squad_autoresearch_recipe
+description: "Manifest-backed LS-SQuAD run using the best current autoresearch recipe"
+
+data:
+  source: h5
+  h5_path: /data/latent-basemap/ls-squad/embedding-003.h5
+  h5_dataset: embeddings
+  input_dim: 768
+  reference_umap_path: /data/latent-basemap/ls-squad/umap-001.parquet
+  n_neighbors: 100
+  precomputed_p_sym_path: /data/latent-basemap/precomputed/ls-squad_nn100_psym.pkl
+  precomputed_negatives_path: /data/latent-basemap/precomputed/ls-squad_nn100_negatives.pkl
+  random_seed: 42
+
+model:
+  architecture: residual_bottleneck
+  hidden_dim: 512
+  n_layers: 3
+  n_components: 2
+  a: 0.5
+  b: 0.4
+
+train:
+  n_epochs: 3
+  batch_size: 3072
+  learning_rate: 0.001
+  correlation_weight: 200.0
+  correlation_distance_transform: log1p
+  lr_schedule: cosine
+  warmup_steps: 200
+  total_steps_estimate: 18000
+  use_amp: true
+  pos_ratio: 0.2
+  clip_grad_norm: 1.0
+  low_memory: false
+  verbose: false
+
+eval:
+  metrics:
+    - trustworthiness
+    - distance_correlation
+    - knn_preservation
+  knn_k: 10
+  metric_sample_size: 5000
+  compare_umap: false
+
+logging:
+  use_wandb: false
+  results_dir: experiments/results
+  save_model: true
+  save_embeddings: true

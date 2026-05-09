@@ -2,6 +2,13 @@ modal
 numpy
 torch
 tqdm
-parametric_umap
 wandb
 lancedb
+parametric_umap
+scipy
+scikit-learn
+h5py
+pandas
+pyarrow
+pyyaml
+faiss-cpu

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 Unified experiment runner for Parametric UMAP.
 
@@ -24,17 +25,27 @@ import json
 import time
 import logging
 import yaml
-import numpy as np
-import torch
+import platform
+import socket
+import subprocess
 from pathlib import Path
 from datetime import datetime
+
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
+try:
+    import torch
+except ImportError:
+    torch = None
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from experiments.experiment_config import (
     ExperimentConfig, load_config, generate_sweep_configs
 )
-from basemap.pumap.parametric_umap import ParametricUMAP
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,6 +62,8 @@ def load_data(cfg: ExperimentConfig) -> np.ndarray:
 
     if dc.source == "synthetic":
         return _load_synthetic(dc)
+    elif dc.source == "h5":
+        return _load_h5(dc)
     elif dc.source == "memmap":
         return _load_memmap(dc)
     elif dc.source == "lancedb":
@@ -60,6 +73,8 @@ def load_data(cfg: ExperimentConfig) -> np.ndarray:
 
 
 def _load_synthetic(dc):
+    if np is None:
+        raise RuntimeError("numpy is required to load synthetic data")
     from sklearn.datasets import make_swiss_roll, make_blobs
     n = dc.n_samples or 1000
     X, labels = make_blobs(n_samples=n, n_features=dc.input_dim, centers=20,
@@ -67,7 +82,29 @@ def _load_synthetic(dc):
     return X.astype(np.float32), labels.astype(np.float32)
 
 
+def _load_h5(dc):
+    if np is None:
+        raise RuntimeError("numpy is required to load H5 data")
+    import h5py
+
+    if not dc.h5_path:
+        raise ValueError("data.h5_path is required when data.source='h5'")
+
+    logging.info("Loading H5 dataset %s:%s", dc.h5_path, dc.h5_dataset)
+    with h5py.File(os.path.expanduser(dc.h5_path), "r") as f:
+        X = f[dc.h5_dataset][:]
+
+    X = np.asarray(X, dtype=np.float32)
+    if dc.n_samples and dc.n_samples < len(X):
+        rng = np.random.RandomState(dc.random_seed)
+        idx = rng.choice(len(X), dc.n_samples, replace=False)
+        X = X[idx]
+    return X, None
+
+
 def _load_memmap(dc):
+    if np is None:
+        raise RuntimeError("numpy is required to load memmap data")
     from basemap.data_loader import MemmapArrayConcatenator
     loader = MemmapArrayConcatenator(dc.memmap_dirs, dc.input_dim)
     logging.info(f"Memmap data shape: {loader.shape}")
@@ -79,7 +116,97 @@ def _load_memmap(dc):
     return X, None
 
 
+# ─── Reproducibility Metadata ────────────────────────────────────────────────
+
+def _run_cmd(args):
+    try:
+        out = subprocess.check_output(args, cwd=Path(__file__).resolve().parents[1],
+                                      stderr=subprocess.DEVNULL, text=True)
+        return out.strip()
+    except Exception:
+        return None
+
+
+def _file_manifest(path):
+    if not path:
+        return None
+    p = Path(os.path.expanduser(path))
+    if not p.exists():
+        return {"path": str(p), "exists": False}
+    stat = p.stat()
+    return {
+        "path": str(p),
+        "exists": True,
+        "size_bytes": stat.st_size,
+        "mtime": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+    }
+
+
+def _dir_manifest(paths):
+    manifests = []
+    for raw in paths or []:
+        p = Path(os.path.expanduser(raw))
+        entry = {"path": str(p), "exists": p.exists()}
+        if p.exists():
+            npy_files = sorted(p.glob("*.npy"))
+            entry.update({
+                "n_npy_files": len(npy_files),
+                "size_bytes": sum(f.stat().st_size for f in npy_files),
+                "first_files": [str(f) for f in npy_files[:5]],
+            })
+        manifests.append(entry)
+    return manifests
+
+
+def collect_run_manifest(cfg: ExperimentConfig, device: str, eval_mode: str) -> dict:
+    dc = cfg.data
+    manifest = {
+        "git": {
+            "commit": _run_cmd(["git", "rev-parse", "HEAD"]),
+            "branch": _run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"]),
+            "dirty_status": _run_cmd(["git", "status", "--short"]),
+        },
+        "host": {
+            "hostname": socket.gethostname(),
+            "platform": platform.platform(),
+            "python": sys.version.split()[0],
+        },
+        "device": {
+            "selected": device,
+            "torch": getattr(torch, "__version__", None) if torch is not None else None,
+            "cuda_available": torch.cuda.is_available() if torch is not None else False,
+            "cuda_device_name": (
+                torch.cuda.get_device_name(0)
+                if torch is not None and torch.cuda.is_available()
+                else None
+            ),
+        },
+        "data_assets": {
+            "h5": _file_manifest(dc.h5_path),
+            "reference_umap": _file_manifest(dc.reference_umap_path),
+            "precomputed_p_sym": _file_manifest(dc.precomputed_p_sym_path),
+            "precomputed_negatives": _file_manifest(dc.precomputed_negatives_path),
+            "precomputed_edges": _file_manifest(dc.precomputed_edges_path),
+            "precomputed_index": _file_manifest(dc.precomputed_index_path),
+            "memmap_dirs": _dir_manifest(dc.memmap_dirs),
+        },
+        "eval_contract": {
+            "mode": eval_mode,
+            "note": (
+                "transductive_full_graph: train uses all rows because precomputed graph indices "
+                "must align; metrics are sampled from rows seen during training."
+                if eval_mode == "transductive_full_graph"
+                else "holdout_rows: graph/model train on train rows only; metrics_test uses held-out rows."
+            ),
+        },
+        "effective_config": cfg.to_dict(),
+    }
+    return manifest
+
+
 def _load_lancedb(dc):
+    if np is None:
+        raise RuntimeError("numpy is required to load LanceDB data")
     from basemap.lancedb_loader import LanceDBLoader
     loader = LanceDBLoader(db_name=dc.lancedb_path, table_name=dc.lancedb_table,
                            columns=dc.lancedb_columns)
@@ -157,6 +284,14 @@ def _knn_preservation(X_h, X_l, k):
     return preserved / (len(X_h) * k)
 
 
+def set_global_seeds(seed: int):
+    """Seed numpy and torch for reproducible experiment runs."""
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 # ─── Standard UMAP Baseline ─────────────────────────────────────────────────
 
 def run_umap_baseline(X_train, X_test, cfg: ExperimentConfig) -> dict:
@@ -195,6 +330,13 @@ def run_umap_baseline(X_train, X_test, cfg: ExperimentConfig) -> dict:
 
 def run_single_experiment(cfg: ExperimentConfig) -> dict:
     """Run one experiment end-to-end. Returns results dict."""
+    if cfg.data.precomputed_edges_path:
+        raise NotImplementedError(
+            "data.precomputed_edges_path is inventoried in manifests but is not yet "
+            "wired into ParametricUMAP.fit(). Use precomputed_p_sym_path for now, "
+            "or implement the edge-list trainer before running scale experiments."
+        )
+
     run_dir = cfg.run_dir()
     os.makedirs(run_dir, exist_ok=True)
 
@@ -207,6 +349,8 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
     logging.info(f"=" * 60)
 
     # ── Load data ──
+    set_global_seeds(cfg.data.random_seed)
+
     t0 = time.time()
     X, labels = load_data(cfg)
     data_load_time = time.time() - t0
@@ -218,7 +362,12 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
     # misalign the graph indices, so we skip the split in that case and train on
     # the full dataset.
     n = len(X)
-    using_precomputed = bool(cfg.data.precomputed_p_sym_path or cfg.data.precomputed_negatives_path)
+    using_precomputed = bool(
+        cfg.data.precomputed_p_sym_path
+        or cfg.data.precomputed_negatives_path
+        or cfg.data.precomputed_edges_path
+        or cfg.data.precomputed_index_path
+    )
     if using_precomputed:
         logging.warning(
             "Precomputed graph paths are set — skipping train/test split to keep "
@@ -244,15 +393,21 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
     # ── Auto-detect device ──
     device = cfg.train.device
     if device is None:
-        if torch.cuda.is_available():
+        if torch is not None and torch.cuda.is_available():
             device = 'cuda'
-        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+        elif torch is not None and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
             device = 'mps'
         else:
             device = 'cpu'
     logging.info(f"Device: {device}")
+    eval_mode = "transductive_full_graph" if using_precomputed else "holdout_rows"
+    run_manifest = collect_run_manifest(cfg, device, eval_mode)
 
     # ── Build model ──
+    if torch is None:
+        raise RuntimeError("torch is required to run experiments")
+    from basemap.pumap.parametric_umap import ParametricUMAP
+
     mc = cfg.model
     tc = cfg.train
     pumap = ParametricUMAP(
@@ -272,6 +427,12 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         clip_grad_norm=tc.clip_grad_norm,
         clip_grad_value=tc.clip_grad_value,
         pos_ratio=tc.pos_ratio,
+        architecture=mc.architecture,
+        correlation_distance_transform=tc.correlation_distance_transform,
+        lr_schedule=tc.lr_schedule,
+        warmup_steps=tc.warmup_steps,
+        total_steps_estimate=tc.total_steps_estimate,
+        use_amp=tc.use_amp,
     )
 
     # Count parameters
@@ -287,8 +448,9 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
     pumap.fit(
         X_train,
         low_memory=tc.low_memory,
-        verbose=True,
+        verbose=tc.verbose,
         n_processes=tc.n_processes,
+        random_state=cfg.data.random_seed,
         resample_negatives=tc.resample_negatives,
         precomputed_p_sym_path=cfg.data.precomputed_p_sym_path,
         precomputed_negatives_path=cfg.data.precomputed_negatives_path,
@@ -350,11 +512,14 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
             "max": float(eval_arr.max()),
         },
         "umap_baseline": umap_baseline,
+        "run_manifest": run_manifest,
     }
 
     # ── Save ──
     with open(os.path.join(run_dir, "results.json"), 'w') as f:
         json.dump(results, f, indent=2)
+    with open(os.path.join(run_dir, "manifest.json"), 'w') as f:
+        json.dump(run_manifest, f, indent=2)
 
     if cfg.logging.save_model:
         pumap.save(os.path.join(run_dir, "model.pt"))
@@ -421,8 +586,9 @@ def _print_sweep_summary(results_list):
         name = r['config']['name'][:38]
         n_params = r['model']['n_params']
         train_s = r['timing']['train_s']
-        dc = r['metrics_test'].get('distance_correlation', 0)
-        knn = r['metrics_test'].get('knn_preservation', 0)
+        metrics = r['metrics_test'] or r['metrics_train']
+        dc = metrics.get('distance_correlation', 0)
+        knn = metrics.get('knn_preservation', 0)
         logging.info(f"  {name:<40} {n_params:>8,} {train_s:>9.1f} {dc:>10.4f} {knn:>8.4f}")
 
 
