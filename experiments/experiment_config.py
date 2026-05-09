@@ -23,7 +23,11 @@ from datetime import datetime
 @dataclass
 class DataConfig:
     """Where the data comes from and how to subsample it."""
-    source: str = "synthetic"       # "synthetic", "memmap", "lancedb"
+    source: str = "synthetic"       # "synthetic", "h5", "memmap", "lancedb"
+    # For h5
+    h5_path: str = ""
+    h5_dataset: str = "embeddings"
+    reference_umap_path: str = ""
     # For memmap
     memmap_dirs: List[str] = field(default_factory=list)
     input_dim: int = 384
@@ -37,6 +41,8 @@ class DataConfig:
     # Precomputed graph
     precomputed_p_sym_path: Optional[str] = None
     precomputed_negatives_path: Optional[str] = None
+    precomputed_edges_path: Optional[str] = None
+    precomputed_index_path: Optional[str] = None
     n_neighbors: int = 15
 
 

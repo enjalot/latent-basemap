@@ -1,10 +1,12 @@
 venv
+.venv
 __pycache__
 *.pyc
 data/
 wandb/
 .DS_Store
 experiments/results/
+experiments/assets_inventory.json
 validation_results/
 scale_results/
 *.un~

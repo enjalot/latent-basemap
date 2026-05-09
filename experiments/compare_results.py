@@ -70,6 +70,7 @@ def print_table(results, csv_path=None):
             "name": cfg.get("name", name)[:35],
             "n_samples": r.get("data", {}).get("n_train", "?"),
             "input_dim": r.get("data", {}).get("n_features", "?"),
+            "eval_mode": r.get("run_manifest", {}).get("eval_contract", {}).get("mode", "?"),
             "hidden_dim": model_cfg.get("hidden_dim", "?"),
             "n_layers": model_cfg.get("n_layers", "?"),
             "n_params": r.get("model", {}).get("n_params", "?"),
@@ -79,8 +80,8 @@ def print_table(results, csv_path=None):
             "samp_per_sec": r.get("timing", {}).get("samples_per_sec", 0),
         }
 
-        # Test metrics
-        mt = r.get("metrics_test", {})
+        # Prefer test metrics; fall back to train metrics for transductive/precomputed runs.
+        mt = r.get("metrics_test") or r.get("metrics_train", {})
         row["trust"] = mt.get("trustworthiness", None)
         row["dist_corr"] = mt.get("distance_correlation", None)
         row["knn_pres"] = mt.get("knn_preservation", None)
