@@ -67,6 +67,7 @@ class DataConfig:
 @dataclass
 class ModelConfig:
     """Architecture and UMAP hyperparameters."""
+    architecture: str = "mlp"
     n_components: int = 2
     hidden_dim: int = 512
     n_layers: int = 3
@@ -93,6 +94,11 @@ class TrainConfig:
     n_processes: int = 6
     device: Optional[str] = None  # Auto-detect
     verbose: bool = True
+    correlation_distance_transform: str = "raw"
+    lr_schedule: str = "plateau"
+    warmup_steps: int = 0
+    total_steps_estimate: int = 0
+    use_amp: bool = True
 
 
 @dataclass

@@ -417,6 +417,12 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         clip_grad_norm=tc.clip_grad_norm,
         clip_grad_value=tc.clip_grad_value,
         pos_ratio=tc.pos_ratio,
+        architecture=mc.architecture,
+        correlation_distance_transform=tc.correlation_distance_transform,
+        lr_schedule=tc.lr_schedule,
+        warmup_steps=tc.warmup_steps,
+        total_steps_estimate=tc.total_steps_estimate,
+        use_amp=tc.use_amp,
     )
 
     # Count parameters

@@ -1,4 +1,4 @@
-from .models.mlp import MLP
+from .models.mlp import MLP, ResidualBottleneckMLP
 from .datasets.edge_dataset import EdgeDataset
 from .datasets.covariates_datasets import VariableDataset
 from .utils.losses import compute_correlation_loss
@@ -39,6 +39,12 @@ class ParametricUMAP:
         clip_grad_norm=1.0,
         clip_grad_value=None,
         pos_ratio=0.5,
+        architecture="mlp",
+        correlation_distance_transform="raw",
+        lr_schedule="plateau",
+        warmup_steps=0,
+        total_steps_estimate=0,
+        use_amp=True,
     ):
         if device is None:
             if torch.cuda.is_available():
@@ -64,20 +70,36 @@ class ParametricUMAP:
         self.clip_grad_norm = clip_grad_norm
         self.clip_grad_value = clip_grad_value
         self.pos_ratio = pos_ratio
+        self.architecture = architecture
+        self.correlation_distance_transform = correlation_distance_transform
+        self.lr_schedule = lr_schedule
+        self.warmup_steps = warmup_steps
+        self.total_steps_estimate = total_steps_estimate
+        self.use_amp = use_amp
         self.model = None
         self.loss_fn = nn.BCELoss()
         self.is_fitted = False
 
     def _init_model(self, input_dim):
-        """Initialize the MLP model."""
-        self.model = MLP(
-            input_dim=input_dim,
-            hidden_dim=self.hidden_dim,
-            output_dim=self.n_components,
-            num_layers=self.n_layers,
-            use_batchnorm=self.use_batchnorm,
-            use_dropout=self.use_dropout
-        ).to(self.device)
+        """Initialize the configured parametric model."""
+        if self.architecture == "mlp":
+            self.model = MLP(
+                input_dim=input_dim,
+                hidden_dim=self.hidden_dim,
+                output_dim=self.n_components,
+                num_layers=self.n_layers,
+                use_batchnorm=self.use_batchnorm,
+                use_dropout=self.use_dropout
+            ).to(self.device)
+        elif self.architecture == "residual_bottleneck":
+            self.model = ResidualBottleneckMLP(
+                input_dim=input_dim,
+                hidden_dim=self.hidden_dim,
+                output_dim=self.n_components,
+                num_layers=self.n_layers,
+            ).to(self.device)
+        else:
+            raise ValueError(f"Unknown architecture: {self.architecture}")
 
     def fit(self, X, y=None,
             resample_negatives=False,
@@ -141,7 +163,13 @@ class ParametricUMAP:
                 "use_dropout": self.use_dropout,
                 "clip_grad_norm": self.clip_grad_norm,
                 "clip_grad_value": self.clip_grad_value,
-                "pos_ratio": self.pos_ratio
+                "pos_ratio": self.pos_ratio,
+                "architecture": self.architecture,
+                "correlation_distance_transform": self.correlation_distance_transform,
+                "lr_schedule": self.lr_schedule,
+                "warmup_steps": self.warmup_steps,
+                "total_steps_estimate": self.total_steps_estimate,
+                "use_amp": self.use_amp,
             }
             wandb.init(project=wandb_project, name=wandb_run_name, config=config)
             self.wandb_run = wandb.run
@@ -190,12 +218,25 @@ class ParametricUMAP:
             torch.backends.cudnn.benchmark = True
 
         # Mixed precision: only on CUDA (MPS and CPU don't support GradScaler)
-        use_amp = 'cuda' in str(self.device)
+        use_amp = self.use_amp and 'cuda' in str(self.device)
         scaler = torch.amp.GradScaler(self.device, enabled=use_amp) if use_amp else None
 
         optimizer = AdamW(self.model.parameters(), lr=self.learning_rate)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode='min', factor=0.5, patience=5)
+        if self.lr_schedule == "plateau":
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', factor=0.5, patience=5)
+        elif self.lr_schedule == "cosine":
+            total_steps = max(self.total_steps_estimate, 1)
+
+            def lr_lambda(step):
+                if self.warmup_steps > 0 and step < self.warmup_steps:
+                    return step / self.warmup_steps
+                progress = (step - self.warmup_steps) / max(1, total_steps - self.warmup_steps)
+                return 0.5 * (1.0 + np.cos(np.pi * min(progress, 1.0)))
+
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        else:
+            raise ValueError(f"Unknown lr_schedule: {self.lr_schedule}")
 
         self.model.train()
         losses = []
@@ -250,8 +291,10 @@ class ParametricUMAP:
                 umap_loss = self.loss_fn(qs.float(), targets.float())
                 # Correlation loss in full precision (distance correlation is numerically sensitive)
                 corr_loss = compute_correlation_loss(
-                    torch.norm(src_values - dst_values, dim=1),
-                    torch.norm(src_embeddings.float() - dst_embeddings.float(), dim=1)
+                    self._transform_correlation_distances(torch.norm(src_values - dst_values, dim=1)),
+                    self._transform_correlation_distances(
+                        torch.norm(src_embeddings.float() - dst_embeddings.float(), dim=1)
+                    )
                 )
 
                 loss = umap_loss + self.correlation_weight * corr_loss
@@ -287,6 +330,9 @@ class ParametricUMAP:
                     scaler.update()
                 else:
                     optimizer.step()
+
+                if self.lr_schedule == "cosine":
+                    scheduler.step()
 
                 current_lr = optimizer.param_groups[0]['lr']
 
@@ -347,8 +393,9 @@ class ParametricUMAP:
             avg_corr = epoch_corr_loss / max(num_batches, 1)
             losses.append(avg_loss)
 
-            # Step scheduler per-epoch (not per-batch)
-            scheduler.step(avg_loss)
+            # Step plateau scheduler per-epoch; cosine schedule is stepped per-batch.
+            if self.lr_schedule == "plateau":
+                scheduler.step(avg_loss)
 
             if verbose:
                 logging.info(
@@ -366,6 +413,15 @@ class ParametricUMAP:
         if use_wandb:
             wandb.finish()
         return self
+
+    def _transform_correlation_distances(self, distances):
+        if self.correlation_distance_transform == "raw":
+            return distances
+        if self.correlation_distance_transform == "log1p":
+            return torch.log1p(distances)
+        raise ValueError(
+            f"Unknown correlation_distance_transform: {self.correlation_distance_transform}"
+        )
 
     def transform(self, X, batch_size=4096):
         """
