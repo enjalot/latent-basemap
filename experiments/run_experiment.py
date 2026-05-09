@@ -284,6 +284,14 @@ def _knn_preservation(X_h, X_l, k):
     return preserved / (len(X_h) * k)
 
 
+def set_global_seeds(seed: int):
+    """Seed numpy and torch for reproducible experiment runs."""
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 # ─── Standard UMAP Baseline ─────────────────────────────────────────────────
 
 def run_umap_baseline(X_train, X_test, cfg: ExperimentConfig) -> dict:
@@ -341,6 +349,8 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
     logging.info(f"=" * 60)
 
     # ── Load data ──
+    set_global_seeds(cfg.data.random_seed)
+
     t0 = time.time()
     X, labels = load_data(cfg)
     data_load_time = time.time() - t0
@@ -440,6 +450,7 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         low_memory=tc.low_memory,
         verbose=tc.verbose,
         n_processes=tc.n_processes,
+        random_state=cfg.data.random_seed,
         resample_negatives=tc.resample_negatives,
         precomputed_p_sym_path=cfg.data.precomputed_p_sym_path,
         precomputed_negatives_path=cfg.data.precomputed_negatives_path,
