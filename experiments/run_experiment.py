@@ -108,11 +108,12 @@ def _load_memmap(dc):
     from basemap.data_loader import MemmapArrayConcatenator
     loader = MemmapArrayConcatenator(dc.memmap_dirs, dc.input_dim)
     logging.info(f"Memmap data shape: {loader.shape}")
-    X = np.asarray(loader).astype(np.float32)
-    if dc.n_samples and dc.n_samples < len(X):
+    if dc.n_samples and dc.n_samples < len(loader):
         rng = np.random.RandomState(dc.random_seed)
-        idx = rng.choice(len(X), dc.n_samples, replace=False)
-        X = X[idx]
+        idx = rng.choice(len(loader), dc.n_samples, replace=False)
+        X = loader[idx]
+    else:
+        X = np.asarray(loader).astype(np.float32)
     return X, None
 
 

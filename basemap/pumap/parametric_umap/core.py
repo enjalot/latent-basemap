@@ -254,6 +254,7 @@ class ParametricUMAP:
         logging.info(f"Mixed precision: {use_amp}")
 
         global_step = 0
+        consecutive_nonfinite_losses = 0
         for epoch in range(self.n_epochs):
             epoch_loss = 0.0
             epoch_umap_loss = 0.0
@@ -283,12 +284,17 @@ class ParametricUMAP:
                     # UMAP similarity in low-dim: q_ij = (1 + a * ||z_i - z_j||^{2b})^{-1}
                     qs = torch.pow(1 + self.a * dists, -1)
 
-                    # Clamp qs to avoid log(0) in BCE
+                    # Keep BCE inputs in its valid probability domain. Larger
+                    # scale pilots can occasionally produce non-finite low-dim
+                    # distances early in training.
+                    qs = torch.nan_to_num(qs, nan=1e-7, posinf=1 - 1e-7, neginf=1e-7)
                     qs = torch.clamp(qs, min=1e-7, max=1 - 1e-7)
 
                 # BCELoss is unsafe under autocast. Keep the forward pass mixed
                 # precision, then compute BCE in fp32.
-                umap_loss = self.loss_fn(qs.float(), targets.float())
+                targets_for_loss = torch.nan_to_num(targets.float(), nan=0.0, posinf=1.0, neginf=0.0)
+                targets_for_loss = torch.clamp(targets_for_loss, min=0.0, max=1.0)
+                umap_loss = self.loss_fn(qs.float(), targets_for_loss)
                 # Correlation loss in full precision (distance correlation is numerically sensitive)
                 corr_loss = compute_correlation_loss(
                     self._transform_correlation_distances(torch.norm(src_values - dst_values, dim=1)),
@@ -299,12 +305,22 @@ class ParametricUMAP:
 
                 loss = umap_loss + self.correlation_weight * corr_loss
 
-                # Check for NaN loss
-                if torch.isnan(loss):
-                    logging.warning("NaN loss detected at step %d, skipping batch", global_step)
+                if not torch.isfinite(loss):
+                    consecutive_nonfinite_losses += 1
+                    logging.warning(
+                        "Non-finite loss detected at step %d, skipping batch (%d consecutive)",
+                        global_step,
+                        consecutive_nonfinite_losses,
+                    )
+                    if consecutive_nonfinite_losses >= 100:
+                        raise RuntimeError(
+                            f"Aborting training after {consecutive_nonfinite_losses} "
+                            "consecutive non-finite losses"
+                        )
                     batch = prefetcher.next()
                     pbar.update(1)
                     continue
+                consecutive_nonfinite_losses = 0
 
                 if scaler is not None:
                     scaler.scale(loss).backward()

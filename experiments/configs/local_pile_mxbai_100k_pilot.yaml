@@ -1,0 +1,50 @@
+name: local_pile_mxbai_100k_pilot
+description: "Local 100K holdout pilot on pile mxbai-edge-32m float16 embeddings"
+
+data:
+  source: memmap
+  memmap_dirs:
+    - /data/embeddings/pile-uncopyrighted-chunked-500-mxbai-edge-32m/train
+  input_dim: 64
+  n_samples: 100000
+  n_neighbors: 15
+  random_seed: 42
+
+model:
+  architecture: residual_bottleneck
+  hidden_dim: 1024
+  n_layers: 3
+  n_components: 2
+  a: 0.5
+  b: 0.4
+
+train:
+  n_epochs: 3
+  batch_size: 8192
+  learning_rate: 0.001
+  correlation_weight: 200.0
+  correlation_distance_transform: log1p
+  lr_schedule: cosine
+  warmup_steps: 200
+  total_steps_estimate: 6000
+  use_amp: true
+  pos_ratio: 0.15
+  clip_grad_norm: 1.0
+  low_memory: false
+  verbose: false
+  n_processes: 8
+
+eval:
+  metrics:
+    - trustworthiness
+    - distance_correlation
+    - knn_preservation
+  knn_k: 10
+  metric_sample_size: 5000
+  compare_umap: false
+
+logging:
+  use_wandb: false
+  results_dir: experiments/results
+  save_model: false
+  save_embeddings: false
