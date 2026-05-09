@@ -21,14 +21,14 @@ model:
   b: 0.4
 
 train:
-  n_epochs: 12
+  n_epochs: 3
   batch_size: 3072
   learning_rate: 0.001
-  correlation_weight: 150.0
+  correlation_weight: 200.0
   correlation_distance_transform: log1p
   lr_schedule: cosine
   warmup_steps: 200
-  total_steps_estimate: 12000
+  total_steps_estimate: 18000
   use_amp: true
   pos_ratio: 0.2
   clip_grad_norm: 1.0

@@ -325,13 +325,16 @@ class ParametricUMAP:
                 grad_norm_post = float(np.mean(post_clip_norms)) if post_clip_norms else 0.0
                 clipping_ratio = grad_norm_post / grad_norm_pre if grad_norm_pre > 0 else 1.0
 
+                optimizer_was_run = True
                 if scaler is not None:
+                    scale_before = scaler.get_scale()
                     scaler.step(optimizer)
                     scaler.update()
+                    optimizer_was_run = scaler.get_scale() >= scale_before
                 else:
                     optimizer.step()
 
-                if self.lr_schedule == "cosine":
+                if self.lr_schedule == "cosine" and optimizer_was_run:
                     scheduler.step()
 
                 current_lr = optimizer.param_groups[0]['lr']
