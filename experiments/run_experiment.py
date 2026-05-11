@@ -434,6 +434,7 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         warmup_steps=tc.warmup_steps,
         total_steps_estimate=tc.total_steps_estimate,
         use_amp=tc.use_amp,
+        positive_target_mode=tc.positive_target_mode,
     )
 
     # Count parameters

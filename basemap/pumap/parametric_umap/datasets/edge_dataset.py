@@ -26,7 +26,16 @@ class BalancedEdgeBatchIterator:
         batch_size (int, optional): Overall batch size (default 128).
         shuffle (bool, optional): Whether to shuffle the edges at the start of each epoch.
     """
-    def __init__(self, pos_edges, neg_edges, pos_weights=None, pos_ratio=0.5, batch_size=128, shuffle=True):
+    def __init__(
+        self,
+        pos_edges,
+        neg_edges,
+        pos_weights=None,
+        pos_ratio=0.5,
+        batch_size=128,
+        shuffle=True,
+        positive_target_mode="probability",
+    ):
         # Ensure that the inputs are Python lists (not numpy arrays)
         self.pos_edges = list(pos_edges)
         self.neg_edges = list(neg_edges)
@@ -38,6 +47,7 @@ class BalancedEdgeBatchIterator:
         self.batch_size = batch_size
         self.pos_ratio = pos_ratio
         self.shuffle = shuffle
+        self.positive_target_mode = positive_target_mode
         # Number of positive and negative samples per batch.
         self.num_pos = int(batch_size * pos_ratio)
         self.num_neg = batch_size - self.num_pos
@@ -79,9 +89,17 @@ class BalancedEdgeBatchIterator:
             extra_idx = np.random.randint(0, len(self.neg_edges), size=extras_needed)
             neg_batch.extend([self.neg_edges[i] for i in extra_idx])
 
-        # Use actual P_sym probabilities for positive edges; 0.0 for negatives.
+        if self.positive_target_mode == "probability":
+            positive_labels = pos_batch_weights
+        elif self.positive_target_mode == "binary":
+            positive_labels = np.ones(len(pos_batch), dtype=np.float32)
+        else:
+            raise ValueError(f"Unknown positive_target_mode: {self.positive_target_mode}")
+
+        # Positive labels are either P_sym probabilities or binary 1.0 depending
+        # on positive_target_mode; negatives are always 0.0.
         labels = np.concatenate([
-            pos_batch_weights,
+            positive_labels,
             np.zeros(len(neg_batch), dtype=np.float32)
         ])
 
@@ -570,14 +588,29 @@ class EdgeDataset:
             neg_edges = pickle.load(f)
         return neg_edges
 
-    def get_balanced_loader(self, batch_size: int, pos_ratio: float = 0.5, shuffle: bool = True, random_state: int = 0) -> BalancedEdgeBatchIterator:
+    def get_balanced_loader(
+        self,
+        batch_size: int,
+        pos_ratio: float = 0.5,
+        shuffle: bool = True,
+        random_state: int = 0,
+        positive_target_mode: str = "probability",
+    ) -> BalancedEdgeBatchIterator:
         """
         Returns an iterator that yields balanced batches with a fixed positive ratio.
         """
         # Ensure negatives have been sampled; if not, sample and shuffle.
         if self.neg_edges is None:
             self.sample_and_shuffle(random_state=random_state)
-        return BalancedEdgeBatchIterator(self.pos_edges, self.neg_edges, pos_weights=self.pos_weights, pos_ratio=pos_ratio, batch_size=batch_size, shuffle=shuffle)
+        return BalancedEdgeBatchIterator(
+            self.pos_edges,
+            self.neg_edges,
+            pos_weights=self.pos_weights,
+            pos_ratio=pos_ratio,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            positive_target_mode=positive_target_mode,
+        )
 
     def get_on_the_fly_loader(self, n_nodes: int, batch_size: int = 512,
                                pos_ratio: float = 0.5, shuffle: bool = True,
@@ -667,4 +700,3 @@ def distributed_sample_negative_edges_subtask(psym_filepath: str, chunk_idx: int
     init_worker_partial(0, partial_adj_sets, total_nodes)
     neg_edges = sample_negative_edges_worker(node_chunk, k, random_state)
     return neg_edges
-

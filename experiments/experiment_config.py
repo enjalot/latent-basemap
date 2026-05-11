@@ -99,6 +99,7 @@ class TrainConfig:
     warmup_steps: int = 0
     total_steps_estimate: int = 0
     use_amp: bool = True
+    positive_target_mode: str = "probability"  # "probability" or "binary"
 
 
 @dataclass

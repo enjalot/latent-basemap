@@ -45,6 +45,7 @@ class ParametricUMAP:
         warmup_steps=0,
         total_steps_estimate=0,
         use_amp=True,
+        positive_target_mode="probability",
     ):
         if device is None:
             if torch.cuda.is_available():
@@ -76,6 +77,7 @@ class ParametricUMAP:
         self.warmup_steps = warmup_steps
         self.total_steps_estimate = total_steps_estimate
         self.use_amp = use_amp
+        self.positive_target_mode = positive_target_mode
         self.model = None
         self.loss_fn = nn.BCELoss()
         self.is_fitted = False
@@ -245,13 +247,15 @@ class ParametricUMAP:
             batch_size=self.batch_size,
             pos_ratio=self.pos_ratio,
             shuffle=True,
-            random_state=random_state)
+            random_state=random_state,
+            positive_target_mode=self.positive_target_mode)
 
         logging.info("Starting training with balanced batches...")
         logging.info(f"Batch size: {self.batch_size}, Pos ratio: {self.pos_ratio}")
         logging.info(f"Batches per epoch: {len(loader)}")
         logging.info(f"Positive edges: {len(ed.pos_edges)}, Negative edges: {len(ed.neg_edges)}")
         logging.info(f"Mixed precision: {use_amp}")
+        logging.info(f"Positive target mode: {self.positive_target_mode}")
 
         global_step = 0
         consecutive_nonfinite_losses = 0
