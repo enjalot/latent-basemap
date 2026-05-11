@@ -152,9 +152,7 @@ def sample_negative_edges_worker(
 ) -> List[Tuple[int, int]]:
     """
     Sample k negative edges for each node in node_list.
-    Uses simple random sampling — no exclusion of neighbors.
-    Collision probability is k/N which is negligible at scale
-    (0.015% at N=100K, 0.0015% at N=1M).
+    Uses rejection sampling to exclude self and existing graph neighbors.
     """
     rng = np.random.RandomState(random_state)
     try:
@@ -165,12 +163,14 @@ def sample_negative_edges_worker(
 
     for node in tqdm(node_list, desc="Sampling negative edges", leave=False, position=1):
         node_int = int(node)
-        # Simple random sampling — no O(N) exclusion scan
-        targets = rng.randint(0, total, size=k)
-        # Only exclude self
-        targets = targets[targets != node_int]
-        for target in targets:
-            neg_edges.append((node_int, int(target)))
+        neighbors = _global_adj_sets.get(node_int, ())
+        sampled = 0
+        while sampled < k:
+            target = int(rng.randint(0, total))
+            if target == node_int or target in neighbors:
+                continue
+            neg_edges.append((node_int, target))
+            sampled += 1
     return neg_edges
 
 class OnTheFlyBalancedIterator:
