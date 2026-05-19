@@ -13,6 +13,7 @@ from tqdm.auto import tqdm
 import pickle
 import logging
 import os
+from pathlib import Path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -111,6 +112,8 @@ class ParametricUMAP:
             verbose=True,
             precomputed_p_sym_path=None,
             precomputed_negatives_path=None,
+            cache_p_sym_path=None,
+            cache_negatives_path=None,
             use_wandb=False,
             wandb_project=None,
             wandb_run_name=None):
@@ -136,6 +139,10 @@ class ParametricUMAP:
             Path to pickled precomputed P_sym
         precomputed_negatives_path : str or None
             Path to pickled negative edges
+        cache_p_sym_path : str or None
+            Path where computed P_sym should be loaded from or written to
+        cache_negatives_path : str or None
+            Path where sampled negative edges should be loaded from or written to
         use_wandb : bool
             If True, log metrics to wandb
         wandb_project : str or None
@@ -193,9 +200,23 @@ class ParametricUMAP:
                     P_sym = loaded["P_sym"]
                 else:
                     P_sym = loaded
+        elif cache_p_sym_path is not None and Path(cache_p_sym_path).exists():
+            logging.info("Loading cached P_sym from %s", cache_p_sym_path)
+            with open(cache_p_sym_path, "rb") as f:
+                loaded = pickle.load(f)
+                if isinstance(loaded, dict) and "P_sym" in loaded:
+                    P_sym = loaded["P_sym"]
+                else:
+                    P_sym = loaded
         else:
             logging.info("Computing p_sym using compute_all_p_umap...")
             P_sym = compute_all_p_umap(X, k=self.n_neighbors)
+            if cache_p_sym_path is not None:
+                cache_path = Path(cache_p_sym_path)
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                logging.info("Saving cached P_sym to %s", cache_p_sym_path)
+                with cache_path.open("wb") as f:
+                    pickle.dump({"P_sym": P_sym}, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         # Create the EdgeDataset
         logging.info("Creating EdgeDataset...")
@@ -207,6 +228,10 @@ class ParametricUMAP:
             with open(precomputed_negatives_path, "rb") as f:
                 neg_edges = pickle.load(f)
             ed.neg_edges = neg_edges
+        elif cache_negatives_path is not None and Path(cache_negatives_path).exists():
+            logging.info("Loading cached negative edges from %s", cache_negatives_path)
+            with open(cache_negatives_path, "rb") as f:
+                ed.neg_edges = pickle.load(f)
 
         # Create feature dataset (labels come from the balanced loader now)
         if low_memory:
@@ -248,7 +273,15 @@ class ParametricUMAP:
             pos_ratio=self.pos_ratio,
             shuffle=True,
             random_state=random_state,
+            n_processes=n_processes,
+            verbose=verbose,
             positive_target_mode=self.positive_target_mode)
+        if cache_negatives_path is not None and precomputed_negatives_path is None and not Path(cache_negatives_path).exists():
+            cache_path = Path(cache_negatives_path)
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            logging.info("Saving cached negative edges to %s", cache_negatives_path)
+            with cache_path.open("wb") as f:
+                pickle.dump(ed.neg_edges, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         logging.info("Starting training with balanced batches...")
         logging.info(f"Batch size: {self.batch_size}, Pos ratio: {self.pos_ratio}")
@@ -409,7 +442,9 @@ class ParametricUMAP:
                     batch_size=self.batch_size,
                     pos_ratio=self.pos_ratio,
                     shuffle=True,
-                    random_state=random_state + epoch + 1)
+                    random_state=random_state + epoch + 1,
+                    n_processes=n_processes,
+                    verbose=verbose)
 
             avg_loss = epoch_loss / max(num_batches, 1)
             avg_umap = epoch_umap_loss / max(num_batches, 1)

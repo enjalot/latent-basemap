@@ -46,6 +46,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from experiments.experiment_config import (
     ExperimentConfig, load_config, generate_sweep_configs
 )
+from experiments.artifact_cache import build_graph_cache_spec, write_manifest_if_missing
 
 logging.basicConfig(
     level=logging.INFO,
@@ -403,6 +404,14 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
     logging.info(f"Device: {device}")
     eval_mode = "transductive_full_graph" if using_precomputed else "holdout_rows"
     run_manifest = collect_run_manifest(cfg, device, eval_mode)
+    graph_cache = build_graph_cache_spec(cfg, X_train, eval_mode)
+    if graph_cache is not None:
+        write_manifest_if_missing(graph_cache)
+        run_manifest["graph_cache"] = graph_cache.to_dict()
+        logging.info("Graph cache key: %s", graph_cache.key)
+        logging.info("Graph cache dir: %s", graph_cache.artifact_dir)
+    else:
+        run_manifest["graph_cache"] = None
 
     # ── Build model ──
     if torch is None:
@@ -456,11 +465,15 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         resample_negatives=tc.resample_negatives,
         precomputed_p_sym_path=cfg.data.precomputed_p_sym_path,
         precomputed_negatives_path=cfg.data.precomputed_negatives_path,
+        cache_p_sym_path=graph_cache.p_sym_path if graph_cache is not None else None,
+        cache_negatives_path=graph_cache.negatives_path if graph_cache is not None else None,
         use_wandb=cfg.logging.use_wandb,
         wandb_project=cfg.logging.wandb_project,
         wandb_run_name=wandb_run_name,
     )
     train_time = time.time() - t0
+    if graph_cache is not None:
+        run_manifest["graph_cache"] = graph_cache.to_dict()
     n_train = len(X_train)
     samples_per_sec = n_train * tc.n_epochs / train_time
 

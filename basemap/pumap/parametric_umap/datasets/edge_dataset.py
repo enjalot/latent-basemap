@@ -594,6 +594,8 @@ class EdgeDataset:
         pos_ratio: float = 0.5,
         shuffle: bool = True,
         random_state: int = 0,
+        n_processes: int = 6,
+        verbose: bool = True,
         positive_target_mode: str = "probability",
     ) -> BalancedEdgeBatchIterator:
         """
@@ -601,7 +603,11 @@ class EdgeDataset:
         """
         # Ensure negatives have been sampled; if not, sample and shuffle.
         if self.neg_edges is None:
-            self.sample_and_shuffle(random_state=random_state)
+            self.sample_and_shuffle(
+                random_state=random_state,
+                n_processes=n_processes,
+                verbose=verbose,
+            )
         return BalancedEdgeBatchIterator(
             self.pos_edges,
             self.neg_edges,

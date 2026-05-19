@@ -1,0 +1,54 @@
+name: local_pile_mxbai_cached
+description: "Local holdout experiments on pile mxbai-edge-32m embeddings with reusable graph artifacts"
+
+data:
+  source: memmap
+  memmap_dirs:
+    - /data/embeddings/pile-uncopyrighted-chunked-500-mxbai-edge-32m/train
+  input_dim: 64
+  n_samples: 200000
+  n_neighbors: 50
+  random_seed: 42
+  use_graph_cache: true
+  graph_cache_dir: experiments/cache/graphs
+
+model:
+  architecture: residual_bottleneck
+  hidden_dim: 1024
+  n_layers: 3
+  n_components: 2
+  a: 1.0
+  b: 1.0
+
+train:
+  n_epochs: 60
+  batch_size: 8192
+  learning_rate: 0.001
+  correlation_weight: 0.0
+  correlation_distance_transform: log1p
+  lr_schedule: cosine
+  warmup_steps: 200
+  total_steps_estimate: 500000
+  use_amp: true
+  pos_ratio: 0.20
+  positive_target_mode: binary
+  clip_grad_norm: 1.0
+  low_memory: false
+  resample_negatives: false
+  verbose: false
+  n_processes: 8
+
+eval:
+  metrics:
+    - trustworthiness
+    - distance_correlation
+    - knn_preservation
+  knn_k: 10
+  metric_sample_size: 5000
+  compare_umap: false
+
+logging:
+  use_wandb: false
+  results_dir: experiments/results
+  save_model: false
+  save_embeddings: false

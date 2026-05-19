@@ -61,6 +61,8 @@ class DataConfig:
     precomputed_negatives_path: Optional[str] = None
     precomputed_edges_path: Optional[str] = None
     precomputed_index_path: Optional[str] = None
+    use_graph_cache: bool = False
+    graph_cache_dir: str = "experiments/cache/graphs"
     n_neighbors: int = 15
 
 
