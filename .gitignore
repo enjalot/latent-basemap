@@ -17,3 +17,4 @@ models/
 *.npy
 *.npz
 *.parquet
+experiments/cache/
