@@ -55,6 +55,24 @@ logging.basicConfig(
 )
 
 
+# ─── Run persistence ─────────────────────────────────────────────────────────
+
+def _write_coords_parquet(path, Z, ls_index):
+    """Write the final 2D projection as coords.parquet with columns
+    x, y (float32) and ls_index (int64 original row index)."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    Z = np.asarray(Z, dtype=np.float32)
+    ls_index = np.asarray(ls_index, dtype=np.int64)
+    table = pa.table({
+        "x": pa.array(Z[:, 0], type=pa.float32()),
+        "y": pa.array(Z[:, 1], type=pa.float32()),
+        "ls_index": pa.array(ls_index, type=pa.int64()),
+    })
+    pq.write_table(table, path)
+
+
 # ─── Data Loading ────────────────────────────────────────────────────────────
 
 def load_data(cfg: ExperimentConfig) -> np.ndarray:
@@ -114,7 +132,10 @@ def _load_memmap(dc):
         idx = rng.choice(len(loader), dc.n_samples, replace=False)
         X = loader[idx]
     else:
-        X = np.asarray(loader).astype(np.float32)
+        # Keep the loader lazy — do NOT materialise the full corpus (>=2 GB
+        # rule). Downstream indexing (splits, metrics, edge-list fit, transform)
+        # handles the lazy MemmapArrayConcatenator per-batch/per-subset.
+        X = loader
     return X, None
 
 
@@ -332,13 +353,6 @@ def run_umap_baseline(X_train, X_test, cfg: ExperimentConfig) -> dict:
 
 def run_single_experiment(cfg: ExperimentConfig) -> dict:
     """Run one experiment end-to-end. Returns results dict."""
-    if cfg.data.precomputed_edges_path:
-        raise NotImplementedError(
-            "data.precomputed_edges_path is inventoried in manifests but is not yet "
-            "wired into ParametricUMAP.fit(). Use precomputed_p_sym_path for now, "
-            "or implement the edge-list trainer before running scale experiments."
-        )
-
     run_dir = cfg.run_dir()
     os.makedirs(run_dir, exist_ok=True)
 
@@ -378,6 +392,8 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         X_train, X_test = X, None
         labels_train = labels
         labels_test = None
+        # ls_index is the original row order (edge indices align to it).
+        train_indices = np.arange(n, dtype=np.int64)
     else:
         n_train = int(n * 0.8)
         rng = np.random.RandomState(cfg.data.random_seed)
@@ -386,6 +402,8 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         X_test = X[perm[n_train:]]
         labels_train = labels[perm[:n_train]] if labels is not None else None
         labels_test = labels[perm[n_train:]] if labels is not None else None
+        # Map training rows back to their original dataset row indices.
+        train_indices = perm[:n_train].astype(np.int64)
 
     if X_test is not None:
         logging.info(f"Train: {X_train.shape}, Test: {X_test.shape}")
@@ -444,6 +462,7 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         total_steps_estimate=tc.total_steps_estimate,
         use_amp=tc.use_amp,
         positive_target_mode=tc.positive_target_mode,
+        reject_neighbors=tc.reject_neighbors,
     )
 
     # Count parameters
@@ -465,6 +484,7 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         resample_negatives=tc.resample_negatives,
         precomputed_p_sym_path=cfg.data.precomputed_p_sym_path,
         precomputed_negatives_path=cfg.data.precomputed_negatives_path,
+        precomputed_edges_path=cfg.data.precomputed_edges_path,
         cache_p_sym_path=graph_cache.p_sym_path if graph_cache is not None else None,
         cache_negatives_path=graph_cache.negatives_path if graph_cache is not None else None,
         use_wandb=cfg.logging.use_wandb,
@@ -536,7 +556,19 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
     with open(os.path.join(run_dir, "manifest.json"), 'w') as f:
         json.dump(run_manifest, f, indent=2)
 
-    if cfg.logging.save_model:
+    # ── Run persistence (defaults ON) ──
+    # Every run writes its final 2D coordinates + model checkpoint so it can be
+    # re-scored / inspected / stability-tested without retraining. Past runs
+    # saved neither — a real loss (see plan §2 caveat).
+    model_saved = False
+    if cfg.logging.persist_run:
+        coords_path = os.path.join(run_dir, "coords.parquet")
+        _write_coords_parquet(coords_path, Z_train, train_indices)
+        logging.info("Saved coords: %s (%d rows)", coords_path, len(Z_train))
+        pumap.save(os.path.join(run_dir, "model.pt"))
+        model_saved = True
+
+    if cfg.logging.save_model and not model_saved:
         pumap.save(os.path.join(run_dir, "model.pt"))
 
     if cfg.logging.save_embeddings:

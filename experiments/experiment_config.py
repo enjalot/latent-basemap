@@ -102,6 +102,10 @@ class TrainConfig:
     total_steps_estimate: int = 0
     use_amp: bool = True
     positive_target_mode: str = "probability"  # "probability" or "binary"
+    # Edge-list scale path: reject actual graph neighbours in the negative
+    # sampler (self-pairs are always rejected). Off by default — the rejection
+    # set costs memory at 150M scale.
+    reject_neighbors: bool = False
 
 
 @dataclass
@@ -131,6 +135,10 @@ class LoggingConfig:
     results_dir: str = "experiments/results"
     save_model: bool = True
     save_embeddings: bool = False         # Save transformed embeddings
+    # Run persistence: always write coords.parquet (x, y, ls_index) + model.pt
+    # into the run dir so runs can be re-scored / inspected / stability-tested
+    # without retraining. Defaults ON — past runs saved neither (real loss).
+    persist_run: bool = True
 
 
 @dataclass

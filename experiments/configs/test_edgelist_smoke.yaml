@@ -1,0 +1,55 @@
+name: test_edgelist_smoke
+description: >
+  CPU smoke test for the precomputed edge-list training path. Trains a few
+  epochs on synthetic gaussian blobs (32-d) using an exact-kNN edge .npz with
+  binary targets, then checks that coords.parquet + model.pt are persisted and
+  that the 2D projection separates the blobs. The data + edge .npz paths below
+  are placeholders; tests/test_edgelist_smoke.py generates them under a tmp dir
+  and overrides these fields at runtime.
+
+data:
+  source: memmap
+  memmap_dirs:
+    - /tmp/basemap_edgelist_smoke/blobs_32d
+  input_dim: 32
+  precomputed_edges_path: /tmp/basemap_edgelist_smoke/blobs_edges_k10.npz
+  n_neighbors: 10
+  random_seed: 42
+
+model:
+  architecture: residual_bottleneck
+  hidden_dim: 128
+  n_layers: 3
+  n_components: 2
+  a: 1.0
+  b: 1.0
+
+train:
+  n_epochs: 30
+  batch_size: 512
+  learning_rate: 0.01
+  correlation_weight: 0.0
+  pos_ratio: 0.2
+  clip_grad_norm: 1.0
+  positive_target_mode: binary
+  lr_schedule: cosine
+  warmup_steps: 50
+  total_steps_estimate: 3000
+  use_amp: false
+  device: cpu
+  verbose: false
+
+eval:
+  metrics:
+    - trustworthiness
+    - distance_correlation
+    - knn_preservation
+    - silhouette
+  knn_k: 10
+  metric_sample_size: 5000
+
+logging:
+  use_wandb: false
+  results_dir: /tmp/basemap_edgelist_smoke/results
+  persist_run: true
+  save_embeddings: false

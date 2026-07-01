@@ -47,6 +47,7 @@ class ParametricUMAP:
         total_steps_estimate=0,
         use_amp=True,
         positive_target_mode="probability",
+        reject_neighbors=False,
     ):
         if device is None:
             if torch.cuda.is_available():
@@ -79,12 +80,15 @@ class ParametricUMAP:
         self.total_steps_estimate = total_steps_estimate
         self.use_amp = use_amp
         self.positive_target_mode = positive_target_mode
+        self.reject_neighbors = reject_neighbors
         self.model = None
+        self.input_dim = None
         self.loss_fn = nn.BCELoss()
         self.is_fitted = False
 
     def _init_model(self, input_dim):
         """Initialize the configured parametric model."""
+        self.input_dim = input_dim
         if self.architecture == "mlp":
             self.model = MLP(
                 input_dim=input_dim,
@@ -104,6 +108,67 @@ class ParametricUMAP:
         else:
             raise ValueError(f"Unknown architecture: {self.architecture}")
 
+    def _prepare_edge_list_training(self, X, edges_path, n_train, low_memory, random_state):
+        """Build the (dataset, loader) pair for the precomputed edge-list path.
+
+        Loads the .npz edge list (lazily), filters edges to the training node
+        range when the index covers more nodes than X (e.g. a 15M slice of the
+        150M index), optionally builds a neighbour-rejection set, and returns a
+        memmap-safe dataset plus an on-the-fly balanced iterator.
+        """
+        from .datasets.edge_list_dataset import (
+            EdgeListBalancedIterator, LazyArrayDataset,
+            load_edge_arrays, build_edge_key_set,
+        )
+        from .datasets.covariates_datasets import VariableDataset
+
+        load_weights = self.positive_target_mode == "probability"
+        sources, targets, weights, n_nodes = load_edge_arrays(
+            edges_path, load_weights=load_weights)
+        logging.info(
+            "Loaded edge list from %s: %d directed edges, n_nodes=%d",
+            edges_path, len(sources), n_nodes,
+        )
+
+        # Filter to the training range if the index spans more nodes than X.
+        if n_nodes > n_train:
+            logging.info(
+                "Filtering edges to training range (n_nodes=%d > n_train=%d)...",
+                n_nodes, n_train,
+            )
+            mask = (np.asarray(sources) < n_train) & (np.asarray(targets) < n_train)
+            sources = np.ascontiguousarray(np.asarray(sources)[mask])
+            targets = np.ascontiguousarray(np.asarray(targets)[mask])
+            if weights is not None:
+                weights = np.ascontiguousarray(np.asarray(weights)[mask])
+            logging.info("Kept %d / %d edges after filtering.", len(sources), len(mask))
+
+        n_pos_edges = int(len(sources))
+
+        edge_set = None
+        if self.reject_neighbors:
+            logging.info("Building positive-edge rejection set (reject_neighbors=True)...")
+            edge_set = build_edge_key_set(np.asarray(sources), np.asarray(targets), n_train)
+
+        loader = EdgeListBalancedIterator(
+            sources, targets, weights, n_nodes=n_train,
+            pos_ratio=self.pos_ratio, batch_size=self.batch_size,
+            shuffle=True, random_state=random_state,
+            positive_target_mode=self.positive_target_mode,
+            edge_set=edge_set,
+        )
+
+        # In-memory ndarray on the GPU is fastest when it fits; otherwise keep
+        # indexing lazy so memmap-backed inputs never materialise.
+        if isinstance(X, np.ndarray) and not low_memory:
+            logging.info("Edge-list mode: feature matrix resident on %s.", self.device)
+            dataset = VariableDataset(X).to(self.device)
+        else:
+            logging.info("Edge-list mode: lazy per-batch feature indexing (memmap-safe).")
+            dataset = LazyArrayDataset(X)
+
+        return dataset, loader, n_pos_edges
+
     def fit(self, X, y=None,
             resample_negatives=False,
             n_processes=6,
@@ -112,6 +177,7 @@ class ParametricUMAP:
             verbose=True,
             precomputed_p_sym_path=None,
             precomputed_negatives_path=None,
+            precomputed_edges_path=None,
             cache_p_sym_path=None,
             cache_negatives_path=None,
             use_wandb=False,
@@ -184,62 +250,95 @@ class ParametricUMAP:
             self.wandb_run = wandb.run
             self.wandb_run_id = wandb.run.id
 
-        logging.info("Casting input array to float32...")
-        X = np.asarray(X).astype(np.float32)
-        logging.info(f"Input shape: {X.shape}")
+        edge_list_mode = precomputed_edges_path is not None
 
-        if self.model is None:
-            self._init_model(X.shape[1])
-
-        # Load or compute P_sym
-        if precomputed_p_sym_path is not None:
-            logging.info("Loading precomputed P_sym from %s", precomputed_p_sym_path)
-            with open(precomputed_p_sym_path, "rb") as f:
-                loaded = pickle.load(f)
-                if isinstance(loaded, dict) and "P_sym" in loaded:
-                    P_sym = loaded["P_sym"]
-                else:
-                    P_sym = loaded
-        elif cache_p_sym_path is not None and Path(cache_p_sym_path).exists():
-            logging.info("Loading cached P_sym from %s", cache_p_sym_path)
-            with open(cache_p_sym_path, "rb") as f:
-                loaded = pickle.load(f)
-                if isinstance(loaded, dict) and "P_sym" in loaded:
-                    P_sym = loaded["P_sym"]
-                else:
-                    P_sym = loaded
+        if edge_list_mode:
+            # Scale path: stream positive edges from the precomputed .npz and
+            # sample negatives on the fly. X is kept lazy (may be a memmap /
+            # MemmapArrayConcatenator) — never materialise >=2 GB.
+            n_features = int(X.shape[1])
+            n_train = int(X.shape[0])
+            logging.info(f"Input shape (lazy, edge-list mode): ({n_train}, {n_features})")
+            if self.model is None:
+                self._init_model(n_features)
+            ed = None
+            dataset, loader, n_pos_edges = self._prepare_edge_list_training(
+                X, precomputed_edges_path, n_train, low_memory, random_state)
+            neg_desc = "on-the-fly"
         else:
-            logging.info("Computing p_sym using compute_all_p_umap...")
-            P_sym = compute_all_p_umap(X, k=self.n_neighbors)
-            if cache_p_sym_path is not None:
-                cache_path = Path(cache_p_sym_path)
+            logging.info("Casting input array to float32...")
+            X = np.asarray(X).astype(np.float32)
+            logging.info(f"Input shape: {X.shape}")
+
+            if self.model is None:
+                self._init_model(X.shape[1])
+
+            # Load or compute P_sym
+            if precomputed_p_sym_path is not None:
+                logging.info("Loading precomputed P_sym from %s", precomputed_p_sym_path)
+                with open(precomputed_p_sym_path, "rb") as f:
+                    loaded = pickle.load(f)
+                    if isinstance(loaded, dict) and "P_sym" in loaded:
+                        P_sym = loaded["P_sym"]
+                    else:
+                        P_sym = loaded
+            elif cache_p_sym_path is not None and Path(cache_p_sym_path).exists():
+                logging.info("Loading cached P_sym from %s", cache_p_sym_path)
+                with open(cache_p_sym_path, "rb") as f:
+                    loaded = pickle.load(f)
+                    if isinstance(loaded, dict) and "P_sym" in loaded:
+                        P_sym = loaded["P_sym"]
+                    else:
+                        P_sym = loaded
+            else:
+                logging.info("Computing p_sym using compute_all_p_umap...")
+                P_sym = compute_all_p_umap(X, k=self.n_neighbors)
+                if cache_p_sym_path is not None:
+                    cache_path = Path(cache_p_sym_path)
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    logging.info("Saving cached P_sym to %s", cache_p_sym_path)
+                    with cache_path.open("wb") as f:
+                        pickle.dump({"P_sym": P_sym}, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+            # Create the EdgeDataset
+            logging.info("Creating EdgeDataset...")
+            ed = EdgeDataset(P_sym)
+
+            # Load precomputed negative edges if available
+            if precomputed_negatives_path is not None:
+                logging.info("Loading precomputed negative edges from %s", precomputed_negatives_path)
+                with open(precomputed_negatives_path, "rb") as f:
+                    neg_edges = pickle.load(f)
+                ed.neg_edges = neg_edges
+            elif cache_negatives_path is not None and Path(cache_negatives_path).exists():
+                logging.info("Loading cached negative edges from %s", cache_negatives_path)
+                with open(cache_negatives_path, "rb") as f:
+                    ed.neg_edges = pickle.load(f)
+
+            # Create feature dataset (labels come from the balanced loader now)
+            if low_memory:
+                logging.info("Using low memory mode (data on CPU, async transfer to GPU).")
+                dataset = VariableDataset(X)
+            else:
+                logging.info("Using high memory mode (data moved to device).")
+                dataset = VariableDataset(X).to(self.device)
+
+            loader = ed.get_balanced_loader(
+                batch_size=self.batch_size,
+                pos_ratio=self.pos_ratio,
+                shuffle=True,
+                random_state=random_state,
+                n_processes=n_processes,
+                verbose=verbose,
+                positive_target_mode=self.positive_target_mode)
+            if cache_negatives_path is not None and precomputed_negatives_path is None and not Path(cache_negatives_path).exists():
+                cache_path = Path(cache_negatives_path)
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
-                logging.info("Saving cached P_sym to %s", cache_p_sym_path)
+                logging.info("Saving cached negative edges to %s", cache_negatives_path)
                 with cache_path.open("wb") as f:
-                    pickle.dump({"P_sym": P_sym}, f, protocol=pickle.HIGHEST_PROTOCOL)
-
-        # Create the EdgeDataset
-        logging.info("Creating EdgeDataset...")
-        ed = EdgeDataset(P_sym)
-
-        # Load precomputed negative edges if available
-        if precomputed_negatives_path is not None:
-            logging.info("Loading precomputed negative edges from %s", precomputed_negatives_path)
-            with open(precomputed_negatives_path, "rb") as f:
-                neg_edges = pickle.load(f)
-            ed.neg_edges = neg_edges
-        elif cache_negatives_path is not None and Path(cache_negatives_path).exists():
-            logging.info("Loading cached negative edges from %s", cache_negatives_path)
-            with open(cache_negatives_path, "rb") as f:
-                ed.neg_edges = pickle.load(f)
-
-        # Create feature dataset (labels come from the balanced loader now)
-        if low_memory:
-            logging.info("Using low memory mode (data on CPU, async transfer to GPU).")
-            dataset = VariableDataset(X)
-        else:
-            logging.info("Using high memory mode (data moved to device).")
-            dataset = VariableDataset(X).to(self.device)
+                    pickle.dump(ed.neg_edges, f, protocol=pickle.HIGHEST_PROTOCOL)
+            n_pos_edges = len(ed.pos_edges)
+            neg_desc = str(len(ed.neg_edges))
 
         if 'cuda' in str(self.device):
             torch.backends.cudnn.benchmark = True
@@ -268,25 +367,10 @@ class ParametricUMAP:
         self.model.train()
         losses = []
 
-        loader = ed.get_balanced_loader(
-            batch_size=self.batch_size,
-            pos_ratio=self.pos_ratio,
-            shuffle=True,
-            random_state=random_state,
-            n_processes=n_processes,
-            verbose=verbose,
-            positive_target_mode=self.positive_target_mode)
-        if cache_negatives_path is not None and precomputed_negatives_path is None and not Path(cache_negatives_path).exists():
-            cache_path = Path(cache_negatives_path)
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            logging.info("Saving cached negative edges to %s", cache_negatives_path)
-            with cache_path.open("wb") as f:
-                pickle.dump(ed.neg_edges, f, protocol=pickle.HIGHEST_PROTOCOL)
-
         logging.info("Starting training with balanced batches...")
         logging.info(f"Batch size: {self.batch_size}, Pos ratio: {self.pos_ratio}")
         logging.info(f"Batches per epoch: {len(loader)}")
-        logging.info(f"Positive edges: {len(ed.pos_edges)}, Negative edges: {len(ed.neg_edges)}")
+        logging.info(f"Positive edges: {n_pos_edges}, Negative edges: {neg_desc}")
         logging.info(f"Mixed precision: {use_amp}")
         logging.info(f"Positive target mode: {self.positive_target_mode}")
 
@@ -436,7 +520,7 @@ class ParametricUMAP:
 
             pbar.close()
 
-            if resample_negatives:
+            if resample_negatives and ed is not None:
                 ed.neg_edges = None  # Force re-sampling
                 loader = ed.get_balanced_loader(
                     batch_size=self.batch_size,
@@ -499,12 +583,17 @@ class ParametricUMAP:
             raise RuntimeError("Model must be fitted before transform")
 
         self.model.eval()
-        X = np.asarray(X, dtype=np.float32)
+        # Do not materialise the whole array — index per batch so lazy memmaps
+        # / MemmapArrayConcatenator inputs stay off-RAM (>=2 GB rule).
+        n = len(X)
 
         results = []
         with torch.no_grad():
-            for i in range(0, len(X), batch_size):
-                batch = torch.tensor(X[i:i+batch_size], dtype=torch.float32).to(self.device)
+            for i in range(0, n, batch_size):
+                # Clamp the slice end: MemmapArrayConcatenator's slice handler
+                # does not clamp `stop` to the array length.
+                chunk = np.asarray(X[i:min(i + batch_size, n)], dtype=np.float32)
+                batch = torch.from_numpy(chunk).to(self.device)
                 results.append(self.model(batch).cpu().numpy())
 
         return np.concatenate(results, axis=0)
@@ -523,6 +612,8 @@ class ParametricUMAP:
 
         save_dict = {
             'model_state_dict': self.model.state_dict(),
+            'architecture': self.architecture,
+            'input_dim': self.input_dim,
             'n_components': self.n_components,
             'hidden_dim': self.hidden_dim,
             'n_layers': self.n_layers,
@@ -530,11 +621,13 @@ class ParametricUMAP:
             'a': self.a,
             'b': self.b,
             'correlation_weight': self.correlation_weight,
+            'learning_rate': self.learning_rate,
             'use_batchnorm': self.use_batchnorm,
             'use_dropout': self.use_dropout,
             'clip_grad_norm': self.clip_grad_norm,
             'clip_grad_value': self.clip_grad_value,
             'pos_ratio': self.pos_ratio,
+            'positive_target_mode': self.positive_target_mode,
         }
         torch.save(save_dict, path)
 
@@ -548,7 +641,7 @@ class ParametricUMAP:
                 device = 'mps'
             else:
                 device = 'cpu'
-        save_dict = torch.load(path, map_location=device)
+        save_dict = torch.load(path, map_location=device, weights_only=False)
 
         instance = cls(
             n_components=save_dict['n_components'],
@@ -564,11 +657,22 @@ class ParametricUMAP:
             clip_grad_norm=save_dict['clip_grad_norm'],
             clip_grad_value=save_dict['clip_grad_value'],
             pos_ratio=save_dict.get('pos_ratio', 0.5),
+            architecture=save_dict.get('architecture', 'mlp'),
+            positive_target_mode=save_dict.get('positive_target_mode', 'probability'),
         )
 
-        input_dim = save_dict['model_state_dict']['model.0.weight'].shape[1]
-        instance._init_model(input_dim=input_dim)
-        instance.model.load_state_dict(save_dict['model_state_dict'])
+        state_dict = save_dict['model_state_dict']
+        input_dim = save_dict.get('input_dim')
+        if input_dim is None:
+            # Backward compat: infer from the first linear layer of either arch.
+            if 'model.0.weight' in state_dict:            # MLP
+                input_dim = state_dict['model.0.weight'].shape[1]
+            elif 'proj_in.weight' in state_dict:          # ResidualBottleneckMLP
+                input_dim = state_dict['proj_in.weight'].shape[1]
+            else:
+                raise KeyError("Cannot infer input_dim from checkpoint state_dict")
+        instance._init_model(input_dim=int(input_dim))
+        instance.model.load_state_dict(state_dict)
         instance.is_fitted = True
 
         return instance
