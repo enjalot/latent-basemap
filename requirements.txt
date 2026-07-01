@@ -12,3 +12,7 @@ pandas
 pyarrow
 pyyaml
 faiss-cpu
+igraph
+leidenalg
+pytest
+umap-learn
