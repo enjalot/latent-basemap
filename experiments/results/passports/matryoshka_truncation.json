@@ -1,0 +1,18 @@
+{
+  "n_rows": 100000,
+  "k": 50,
+  "dropped_to_100k": false,
+  "results": {
+    "256": {
+      "mean_edge_overlap": 0.6733645999999999,
+      "median_edge_overlap": 0.68,
+      "mean_recall10_of_50": 0.961786
+    },
+    "128": {
+      "mean_edge_overlap": 0.5139584,
+      "median_edge_overlap": 0.52,
+      "mean_recall10_of_50": 0.841191
+    }
+  },
+  "threshold_note": "Decision threshold (plan \u00a73): >=90% edge overlap at 256d means graph construction at 20M+ can use truncated dims."
+}

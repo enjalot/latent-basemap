@@ -1,0 +1,146 @@
+{
+  "space": {
+    "name": "mxbai-colbert-64-pile",
+    "model": "mxbai-edge-colbert-v0-32m",
+    "dim": 64,
+    "per_token": true,
+    "directory": "/data/embeddings/pile-uncopyrighted-chunked-500-mxbai-edge-32m/train/",
+    "note": "PER-TOKEN ColBERT late-interaction vectors (one vector per token, not per chunk), 500-token chunks, pile-uncopyrighted. Included as a known-anisotropic contrast substrate; sampling draws random tokens."
+  },
+  "data": {
+    "total_rows": 390852269,
+    "n_shards": 26,
+    "dtypes": [
+      "float16"
+    ]
+  },
+  "sample_sizes": {
+    "master": 100000,
+    "pairs": 100000,
+    "twonn": 20000,
+    "pca": 50000,
+    "hubness": 50000,
+    "k_hub": 50
+  },
+  "metrics": {
+    "anisotropy": {
+      "mean_cosine": 0.8873893618583679,
+      "mean_abs_cosine": 0.9194517135620117,
+      "std_cosine": 0.2460484653711319,
+      "cosine_pct": {
+        "p1": -0.9142736196517944,
+        "p5": 0.8248476386070251,
+        "p25": 0.8914825320243835,
+        "p50": 0.9251834154129028,
+        "p75": 0.9546630382537842,
+        "p95": 0.9810367822647095,
+        "p99": 0.9888630509376526
+      },
+      "mean_norm": 0.9999997615814209,
+      "norm_cv": 4.530469959718175e-05,
+      "n_pairs": 100000
+    },
+    "uniformity": {
+      "l_uniform": -0.32271226154005284,
+      "t": 2.0,
+      "n_pairs": 100000
+    },
+    "intrinsic_dim": {
+      "twonn_id": 17.164859211044,
+      "n_points": 20000,
+      "n_used": 17999,
+      "discard_frac": 0.1,
+      "pca_participation_ratio_ref": 10.193891167516718
+    },
+    "pca": {
+      "participation_ratio": 10.193891167516718,
+      "n_eigen": 64,
+      "top_eigenvalues": [
+        0.0331281693498807,
+        0.0035555155371166515,
+        0.003166632618975975,
+        0.0025386012447164647,
+        0.002454248783303827,
+        0.0021679686420857844,
+        0.002104583758945196,
+        0.002075739735870277,
+        0.002026251463209544,
+        0.0019528861684143409,
+        0.001879683393568768,
+        0.0017981545975111891,
+        0.001743937775870328,
+        0.0017219200767369634,
+        0.0016721853626997332,
+        0.0016452532234710693,
+        0.0016001918822058205,
+        0.0015552663549960582,
+        0.0015097260735000974,
+        0.0014607038735940591,
+        0.0014006058070268684,
+        0.0013912146253165537,
+        0.0013773840728491394,
+        0.0013500458583668303,
+        0.0013399073399467754,
+        0.001269366671122394,
+        0.001245662424585068,
+        0.0012257608682162407,
+        0.0011990864113283297,
+        0.0011600993562722157,
+        0.0011377631517836555,
+        0.0011258002842262104,
+        0.001110587214762198,
+        0.0010681749506790846,
+        0.0010429702932074397,
+        0.0010367764891823558,
+        0.0010009796603539024,
+        0.000976702765100614,
+        0.0009520761678088158,
+        0.0009384667775517431,
+        0.0009235514203590753,
+        0.0009023938682336382,
+        0.0008766393459573041,
+        0.0008525080972751592,
+        0.0008307219232890281,
+        0.000818707993456473,
+        0.0007951187937602982,
+        0.0007679170248653341,
+        0.0007352095123090088,
+        0.0007167565920351307,
+        0.0007088367000585481,
+        0.0007004355018754774,
+        0.0006750887876890733,
+        0.0006534652928260136,
+        0.0006452726608292091,
+        0.0006305428154686982,
+        0.0006140071925629751,
+        0.0005792453579509377,
+        0.000574274000965168,
+        0.00054515106302909,
+        0.0005056404655059132,
+        0.0004992775832545819,
+        0.0004618874033112338,
+        0.0004494086966272478
+      ],
+      "var_top2": 0.32879786483986184,
+      "var_top10": 0.4944970673171871,
+      "var_top50": 0.926121723288215,
+      "tail_powerlaw_slope": -0.7521532723326384,
+      "tail_range": [
+        10,
+        64
+      ]
+    },
+    "hubness": {
+      "k": 50,
+      "indegree_skewness": 2.7481421085975675,
+      "indegree_max": 907,
+      "indegree_mean": 50.0,
+      "indegree_std": 59.19925303582808,
+      "n_points": 50000,
+      "n_hubs_ge_2k": 7119,
+      "n_antihubs_zero": 570
+    }
+  },
+  "wall_time_sec": 16.7,
+  "interpretation": "Anisotropic cone (mean cos +0.887, 33% variance in top-2 PCA): a dominant axis exists that a map can lock onto, which helps determinism but Euclidean UMAP may over-weight that axis; cosine/centering worth checking. Intrinsic dimension is comparatively low and concentrated (TwoNN 17.2, PCA participation ratio 10 of 64, 33% of variance already in the top-2 axes): a few directions dominate, so a 2D map can capture more of the coarse geometry, but the strong anisotropy above means Euclidean structure is skewed. High hubness (in-degree skew 2.7, max 907): a few hub points dominate the kNN graph, a known kNN-quality concern that can distort attraction; mutual-kNN or hubness-aware edge weighting may help. NOTE: these are per-token ColBERT vectors, not pooled chunk embeddings -- geometry is token-level and not directly comparable to the pooled sentence spaces; deferred as a basemap substrate."
+}
