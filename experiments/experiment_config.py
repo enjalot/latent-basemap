@@ -106,11 +106,26 @@ class TrainConfig:
     # sampler (self-pairs are always rejected). Off by default — the rejection
     # set costs memory at 150M scale.
     reject_neighbors: bool = False
-    # Anchored initialization (plan §4.2): pretrain the encoder to regress
-    # deterministic 2D targets before the UMAP-loss phase. "none" or "pca".
+    # Anchored initialization (plan §4.2 / §4.3): pretrain the encoder to
+    # regress deterministic 2D targets before the UMAP-loss phase.
+    #   "none" — off.
+    #   "pca"  — targets are PCA-2D of the input (deterministic init).
+    #   "file" — targets come from an existing layout parquet
+    #            (anchored_init_path; columns x,y[,ls_index]) — reference-atlas
+    #            distillation (§4.3). Rows align by ls_index when present, else
+    #            positionally. Targets are scaled to RMS radius ~5 either way.
     anchored_init: str = "none"
     anchored_init_epochs: int = 2
     anchored_init_lr: float = 1e-3
+    # Teacher-layout coordinates parquet for anchored_init="file". Ignored
+    # otherwise. Set anchored_init_epochs=0 for hold-only (no pretrain) runs.
+    anchored_init_path: str = ""
+    # Reference-atlas distillation *throughout* training (plan §4.3): when
+    # > 0, add an ongoing MSE term w*||f(x_i) - target_i||^2 on a random
+    # subsample of anchors during the main UMAP phase (not just the pretrain).
+    # Requires anchored_init in {pca, file} to define the target source.
+    anchor_hold_weight: float = 0.0
+    anchor_hold_fraction: float = 0.05   # fraction of each batch drawn as anchors
     # Mid-near pair loss (plan §6 Phase 1, PaCMAP-style global term). When
     # enabled, add an annealed mid-near attractive term to the edge-list BCE.
     midnear_enabled: bool = False

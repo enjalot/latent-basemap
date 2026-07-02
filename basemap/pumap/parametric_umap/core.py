@@ -52,6 +52,9 @@ class ParametricUMAP:
         anchored_init="none",
         anchored_init_epochs=2,
         anchored_init_lr=1e-3,
+        anchored_init_path="",
+        anchor_hold_weight=0.0,
+        anchor_hold_fraction=0.05,
         midnear_enabled=False,
         mn_pairs_per_batch=0,
         mn_weight_scale=1.0,
@@ -93,6 +96,9 @@ class ParametricUMAP:
         self.anchored_init = anchored_init
         self.anchored_init_epochs = anchored_init_epochs
         self.anchored_init_lr = anchored_init_lr
+        self.anchored_init_path = anchored_init_path
+        self.anchor_hold_weight = anchor_hold_weight
+        self.anchor_hold_fraction = anchor_hold_fraction
         self.midnear_enabled = midnear_enabled
         self.mn_pairs_per_batch = mn_pairs_per_batch
         self.mn_weight_scale = mn_weight_scale
@@ -114,6 +120,8 @@ class ParametricUMAP:
         # Populated by anchored initialization; persisted by the runner so that
         # stability analysis can reuse the exact deterministic targets used.
         self.anchor_targets_ = None
+        self.anchor_scale_ = None        # RMS-radius scale factor (manifest)
+        self._anchor_targets_dev = None  # resident targets for the hold term
 
     def _init_model(self, input_dim):
         """Initialize the configured parametric model."""
@@ -310,8 +318,75 @@ class ParametricUMAP:
 
         # Isotropic scale to the requested RMS radius.
         rms = float(np.sqrt(np.mean(np.sum(targets.astype(np.float64) ** 2, axis=1))))
-        if rms > 0:
-            targets *= (target_rms_radius / rms)
+        scale = (target_rms_radius / rms) if rms > 0 else 1.0
+        targets *= np.float32(scale)
+        self.anchor_scale_ = float(scale)
+        return targets
+
+    def _compute_anchor_targets(self, X, n_train, random_state=0):
+        """Dispatch to the configured anchored-init target source (pca / file)."""
+        if self.anchored_init == "pca":
+            return self._compute_pca_anchor_targets(
+                X, n_train, random_state=random_state)
+        if self.anchored_init == "file":
+            return self._load_file_anchor_targets(
+                n_train, random_state=random_state)
+        raise ValueError(f"Unknown anchored_init: {self.anchored_init}")
+
+    def _load_file_anchor_targets(self, n_train, target_rms_radius=5.0,
+                                  random_state=0):
+        """Load reference-atlas teacher coordinates for distillation (plan §4.3).
+
+        Reads ``anchored_init_path`` (a coords parquet with columns ``x, y`` and
+        optionally ``ls_index``) into a ``(n_train, n_components)`` float32 target
+        array. Rows align by ``ls_index`` when that column is present (training
+        row ``i`` takes the teacher row whose ``ls_index == i``), otherwise
+        positionally (the first ``n_train`` rows in file order). Targets are
+        isotropically scaled to RMS radius ``target_rms_radius`` (~5), matching
+        the PCA path; the scale factor is recorded on ``self.anchor_scale_`` so
+        the runner can persist it in the run manifest.
+        """
+        import pyarrow.parquet as pq
+
+        path = os.path.expanduser(str(self.anchored_init_path or ""))
+        if not path:
+            raise ValueError(
+                "anchored_init='file' requires train.anchored_init_path")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"anchor target parquet not found: {path}")
+
+        df = pq.read_table(path).to_pandas()
+        if "x" not in df.columns or "y" not in df.columns:
+            raise ValueError(
+                f"anchor target parquet {path} must have 'x' and 'y' columns; "
+                f"got {list(df.columns)}")
+        xy = df[["x", "y"]].to_numpy().astype(np.float32)
+
+        if "ls_index" in df.columns:
+            ls = df["ls_index"].to_numpy().astype(np.int64)
+            targets = np.full((n_train, self.n_components), np.nan, dtype=np.float32)
+            in_range = (ls >= 0) & (ls < n_train)
+            targets[ls[in_range]] = xy[in_range]
+            missing = int(np.isnan(targets[:, 0]).sum())
+            if missing:
+                raise ValueError(
+                    f"anchor target parquet {path} covers only "
+                    f"{n_train - missing}/{n_train} training rows by ls_index "
+                    f"(missing {missing}); cannot align teacher layout.")
+        else:
+            if xy.shape[0] < n_train:
+                raise ValueError(
+                    f"anchor target parquet {path} has {xy.shape[0]} rows < "
+                    f"n_train {n_train}; cannot align positionally.")
+            targets = np.ascontiguousarray(xy[:n_train])
+
+        rms = float(np.sqrt(np.mean(np.sum(targets.astype(np.float64) ** 2, axis=1))))
+        scale = (target_rms_radius / rms) if rms > 0 else 1.0
+        targets = (targets * np.float32(scale)).astype(np.float32)
+        self.anchor_scale_ = float(scale)
+        logging.info(
+            "File anchor targets from %s: %d rows, source RMS %.3f -> scale "
+            "%.4f (target RMS %.1f).", path, n_train, rms, scale, target_rms_radius)
         return targets
 
     def _anchored_pretrain(self, dataset, targets, n_train, random_state):
@@ -500,6 +575,9 @@ class ParametricUMAP:
                 "anchored_init": self.anchored_init,
                 "anchored_init_epochs": self.anchored_init_epochs,
                 "anchored_init_lr": self.anchored_init_lr,
+                "anchored_init_path": self.anchored_init_path,
+                "anchor_hold_weight": self.anchor_hold_weight,
+                "anchor_hold_fraction": self.anchor_hold_fraction,
                 "midnear_enabled": self.midnear_enabled,
                 "mn_pairs_per_batch": self.mn_pairs_per_batch,
                 "mn_weight_scale": self.mn_weight_scale,
@@ -602,23 +680,40 @@ class ParametricUMAP:
 
         n_train_rows = int(len(dataset))
 
-        # ── Anchored initialization (plan §4.2) ──
+        # ── Anchored initialization (plan §4.2) + hold distillation (§4.3) ──
         # Pretrain the encoder to regress deterministic 2D targets before the
         # UMAP-loss phase, so every seed starts in the same basin. The main
         # optimizer/scheduler are created *after* this block, resetting their
-        # state relative to pretraining.
+        # state relative to pretraining. When anchor_hold_weight>0, the same
+        # targets are kept resident and an ongoing MSE term is added throughout
+        # the main phase (reference-atlas distillation proper).
         self.anchor_targets_ = None
-        if self.anchored_init and self.anchored_init != "none":
-            if self.anchored_init != "pca":
-                raise ValueError(f"Unknown anchored_init: {self.anchored_init}")
-            logging.info(
-                "Anchored init: computing PCA-2D targets (%d epochs pretrain)...",
-                self.anchored_init_epochs,
-            )
-            targets = self._compute_pca_anchor_targets(
+        self.anchor_scale_ = None
+        self._anchor_targets_dev = None
+        want_hold = bool(self.anchor_hold_weight and self.anchor_hold_weight > 0)
+        has_init = bool(self.anchored_init and self.anchored_init != "none")
+        if want_hold and not has_init:
+            raise ValueError(
+                "anchor_hold_weight>0 requires anchored_init in {pca,file} to "
+                "define the target source (use anchored_init_epochs=0 for a "
+                "hold-only run with no pretrain).")
+        if has_init:
+            targets = self._compute_anchor_targets(
                 X, n_train_rows, random_state=random_state)
             self.anchor_targets_ = targets
-            self._anchored_pretrain(dataset, targets, n_train_rows, random_state)
+            if self.anchored_init_epochs and self.anchored_init_epochs > 0:
+                logging.info(
+                    "Anchored init (%s): pretraining encoder to regress 2D "
+                    "targets (%d epochs)...",
+                    self.anchored_init, self.anchored_init_epochs)
+                self._anchored_pretrain(dataset, targets, n_train_rows, random_state)
+            if want_hold:
+                logging.info(
+                    "Anchor-hold distillation enabled (w=%.3g, frac=%.3g): "
+                    "ongoing MSE to targets during the main phase.",
+                    self.anchor_hold_weight, self.anchor_hold_fraction)
+                self._anchor_targets_dev = torch.from_numpy(
+                    np.asarray(targets, dtype=np.float32)).to(self.device)
 
         # ── Mid-near pair loss setup (plan §6 Phase 1, PaCMAP-style) ──
         mn_rng = np.random.RandomState(random_state + 104729)
@@ -626,6 +721,13 @@ class ParametricUMAP:
         if self._fast_device_path:
             mn_gen = torch.Generator(device=self.device)
             mn_gen.manual_seed(int(random_state) + 104729)
+
+        # ── Anchor-hold sampler setup (reference-atlas distillation, §4.3) ──
+        hold_rng = np.random.RandomState(random_state + 92821)
+        hold_gen = None
+        if self._fast_device_path:
+            hold_gen = torch.Generator(device=self.device)
+            hold_gen.manual_seed(int(random_state) + 92821)
         mn_total_steps = (
             self.total_steps_estimate if self.total_steps_estimate > 0
             else max(len(loader) * self.n_epochs, 1)
@@ -773,6 +875,32 @@ class ParametricUMAP:
                         loss = loss + w_mn * mn_loss
                         mn_loss_val = mn_loss.item() if use_wandb else 0.0
 
+                # ── Anchor-hold term (reference-atlas distillation, §4.3) ──
+                # Draw anchor_hold_fraction of the batch as random anchors and
+                # pull their projections toward the frozen teacher targets. Tiny
+                # n x 2 target tensor is resident on the training device; gathers
+                # reuse the fast-path feature matrix when active, else the lazy
+                # dataset (memmap-safe). Composes with midnear + the fast path.
+                hold_loss_val = 0.0
+                if self._anchor_targets_dev is not None:
+                    h_m = max(1, int(self.batch_size * self.anchor_hold_fraction))
+                    if self._fast_device_path:
+                        h_idx = torch.randint(0, n_train_rows, (h_m,),
+                                              generator=hold_gen, device=self.device)
+                        h_feats = self._X_dev.index_select(h_idx)
+                    else:
+                        h_np = hold_rng.randint(0, n_train_rows, size=h_m)
+                        h_feats = self._gather_feature_rows(dataset, h_np)
+                        h_idx = torch.as_tensor(h_np, dtype=torch.long,
+                                                device=self.device)
+                    h_tgt = self._anchor_targets_dev.index_select(0, h_idx)
+                    with torch.autocast(device_type='cuda' if use_amp else 'cpu',
+                                        enabled=use_amp):
+                        z_h = self.model(h_feats)
+                    hold_loss = (z_h.float() - h_tgt.float()).pow(2).sum(dim=1).mean()
+                    loss = loss + self.anchor_hold_weight * hold_loss
+                    hold_loss_val = hold_loss.item() if use_wandb else 0.0
+
                 if not torch.isfinite(loss):
                     consecutive_nonfinite_losses += 1
                     logging.warning(
@@ -861,6 +989,7 @@ class ParametricUMAP:
                         'corr_loss': corr_loss.item(),
                         'mn_loss': mn_loss_val,
                         'mn_weight': w_mn,
+                        'anchor_hold_loss': hold_loss_val,
                         'learning_rate': current_lr,
                         'mean_distance': dists.mean().item(),
                         'std_distance': dists.std().item(),

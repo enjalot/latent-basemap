@@ -483,6 +483,9 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         anchored_init=tc.anchored_init,
         anchored_init_epochs=tc.anchored_init_epochs,
         anchored_init_lr=tc.anchored_init_lr,
+        anchored_init_path=tc.anchored_init_path,
+        anchor_hold_weight=tc.anchor_hold_weight,
+        anchor_hold_fraction=tc.anchor_hold_fraction,
         midnear_enabled=tc.midnear_enabled,
         mn_pairs_per_batch=tc.mn_pairs_per_batch,
         mn_weight_scale=tc.mn_weight_scale,
@@ -519,6 +522,9 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
     train_time = time.time() - t0
     if graph_cache is not None:
         run_manifest["graph_cache"] = graph_cache.to_dict()
+    # Record the anchored-init RMS-radius scale factor (plan §4.3): needed to
+    # map persisted coords back onto the teacher layout's original units.
+    run_manifest["anchor_scale"] = getattr(pumap, "anchor_scale_", None)
     n_train = len(X_train)
     samples_per_sec = n_train * tc.n_epochs / train_time
 
