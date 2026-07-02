@@ -839,6 +839,30 @@ def _json_default(o):
     raise TypeError(f"not serialisable: {type(o)}")
 
 
+def check_unit_norm(X, sample=10000, tol=0.01, seed=0):
+    """Sample row norms and report unit-norm status.
+
+    The whole pipeline treats L2 / cosine / dot as rank-equivalent, which is
+    only true for unit-normalized embeddings. Any space that fails this check
+    must be explicitly normalized (or the metric choice reconsidered) before
+    its numbers are trusted — see plan-basemap-atlas.md §3.
+    """
+    rng = np.random.RandomState(seed)
+    idx = np.sort(rng.choice(_n_rows(X), min(sample, _n_rows(X)), replace=False))
+    norms = np.linalg.norm(read_rows(X, idx).astype(np.float32), axis=1)
+    stats = {"mean": float(norms.mean()), "std": float(norms.std()),
+             "min": float(norms.min()), "max": float(norms.max())}
+    stats["is_unit_norm"] = bool(abs(stats["mean"] - 1.0) < tol and stats["std"] < tol)
+    if not stats["is_unit_norm"]:
+        import warnings
+        warnings.warn(
+            f"embeddings are NOT unit-normalized (mean norm {stats['mean']:.4f}, "
+            f"std {stats['std']:.4f}): L2/cosine/dot are no longer rank-equivalent; "
+            "distance-based metrics depend on the metric convention. Normalize the "
+            "space or interpret with care.")
+    return stats
+
+
 def cmd_score(args):
     Z, row_id = load_coords(args.coords)
     X = load_embeddings(args.embeddings, dim=args.dim)
@@ -864,6 +888,7 @@ def cmd_score(args):
         config.k_list = tuple(args.k)
 
     metrics, per_df, extras = score_map(X, Z, config=config)
+    metrics["norm_check"] = check_unit_norm(X)
 
     if args.floors:
         metrics["floors"] = compute_floors(X, config=config)
