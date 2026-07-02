@@ -106,6 +106,16 @@ class TrainConfig:
     # sampler (self-pairs are always rejected). Off by default — the rejection
     # set costs memory at 150M scale.
     reject_neighbors: bool = False
+    # Anchored initialization (plan §4.2): pretrain the encoder to regress
+    # deterministic 2D targets before the UMAP-loss phase. "none" or "pca".
+    anchored_init: str = "none"
+    anchored_init_epochs: int = 2
+    anchored_init_lr: float = 1e-3
+    # Mid-near pair loss (plan §6 Phase 1, PaCMAP-style global term). When
+    # enabled, add an annealed mid-near attractive term to the edge-list BCE.
+    midnear_enabled: bool = False
+    mn_pairs_per_batch: int = 0   # 0 = auto (match num positives in the batch)
+    mn_weight_scale: float = 1.0
 
 
 @dataclass

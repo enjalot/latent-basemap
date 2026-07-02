@@ -1,0 +1,59 @@
+name: test_midnear_smoke
+description: >
+  CPU smoke test for the PaCMAP-style mid-near pair loss (plan §6 Phase 1).
+  Same synthetic gaussian-blobs edge-list setup as test_edgelist_smoke, with
+  train.midnear_enabled=true so an annealed mid-near attractive term is added to
+  the edge-list BCE. Checks that training runs without NaN and still separates
+  the blobs. The data + edge .npz paths below are placeholders;
+  tests/test_variants.py generates them under a tmp dir and overrides these
+  fields at runtime.
+
+data:
+  source: memmap
+  memmap_dirs:
+    - /tmp/basemap_variants_smoke/blobs_32d
+  input_dim: 32
+  precomputed_edges_path: /tmp/basemap_variants_smoke/blobs_edges_k10.npz
+  n_neighbors: 10
+  random_seed: 42
+
+model:
+  architecture: residual_bottleneck
+  hidden_dim: 128
+  n_layers: 3
+  n_components: 2
+  a: 1.0
+  b: 1.0
+
+train:
+  n_epochs: 8
+  batch_size: 1024
+  learning_rate: 0.01
+  correlation_weight: 0.0
+  pos_ratio: 0.2
+  clip_grad_norm: 1.0
+  positive_target_mode: binary
+  lr_schedule: cosine
+  warmup_steps: 20
+  total_steps_estimate: 1200
+  use_amp: false
+  device: cpu
+  verbose: false
+  midnear_enabled: true
+  mn_pairs_per_batch: 0
+  mn_weight_scale: 1.0
+
+eval:
+  metrics:
+    - trustworthiness
+    - distance_correlation
+    - knn_preservation
+    - silhouette
+  knn_k: 10
+  metric_sample_size: 5000
+
+logging:
+  use_wandb: false
+  results_dir: /tmp/basemap_variants_smoke/results
+  persist_run: true
+  save_embeddings: false

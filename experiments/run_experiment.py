@@ -73,6 +73,23 @@ def _write_coords_parquet(path, Z, ls_index):
     pq.write_table(table, path)
 
 
+def _write_anchor_targets_parquet(path, T, ls_index):
+    """Write the deterministic anchored-init targets as anchor_targets.parquet
+    (columns x, y, ls_index) so stability analysis can reuse the exact targets
+    the encoder was pretrained on."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    T = np.asarray(T, dtype=np.float32)
+    ls_index = np.asarray(ls_index, dtype=np.int64)
+    table = pa.table({
+        "x": pa.array(T[:, 0], type=pa.float32()),
+        "y": pa.array(T[:, 1], type=pa.float32()),
+        "ls_index": pa.array(ls_index, type=pa.int64()),
+    })
+    pq.write_table(table, path)
+
+
 # ─── Data Loading ────────────────────────────────────────────────────────────
 
 def load_data(cfg: ExperimentConfig) -> np.ndarray:
@@ -463,6 +480,12 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         use_amp=tc.use_amp,
         positive_target_mode=tc.positive_target_mode,
         reject_neighbors=tc.reject_neighbors,
+        anchored_init=tc.anchored_init,
+        anchored_init_epochs=tc.anchored_init_epochs,
+        anchored_init_lr=tc.anchored_init_lr,
+        midnear_enabled=tc.midnear_enabled,
+        mn_pairs_per_batch=tc.mn_pairs_per_batch,
+        mn_weight_scale=tc.mn_weight_scale,
     )
 
     # Count parameters
@@ -567,6 +590,15 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         logging.info("Saved coords: %s (%d rows)", coords_path, len(Z_train))
         pumap.save(os.path.join(run_dir, "model.pt"))
         model_saved = True
+
+        # Persist anchored-init targets (if used) so cross-seed stability
+        # analysis can reuse the exact deterministic targets.
+        anchor_targets = getattr(pumap, "anchor_targets_", None)
+        if anchor_targets is not None:
+            anchor_path = os.path.join(run_dir, "anchor_targets.parquet")
+            _write_anchor_targets_parquet(anchor_path, anchor_targets, train_indices)
+            logging.info("Saved anchor targets: %s (%d rows)", anchor_path,
+                         len(anchor_targets))
 
     if cfg.logging.save_model and not model_saved:
         pumap.save(os.path.join(run_dir, "model.pt"))

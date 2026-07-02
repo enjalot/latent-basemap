@@ -48,6 +48,12 @@ class ParametricUMAP:
         use_amp=True,
         positive_target_mode="probability",
         reject_neighbors=False,
+        anchored_init="none",
+        anchored_init_epochs=2,
+        anchored_init_lr=1e-3,
+        midnear_enabled=False,
+        mn_pairs_per_batch=0,
+        mn_weight_scale=1.0,
     ):
         if device is None:
             if torch.cuda.is_available():
@@ -81,10 +87,19 @@ class ParametricUMAP:
         self.use_amp = use_amp
         self.positive_target_mode = positive_target_mode
         self.reject_neighbors = reject_neighbors
+        self.anchored_init = anchored_init
+        self.anchored_init_epochs = anchored_init_epochs
+        self.anchored_init_lr = anchored_init_lr
+        self.midnear_enabled = midnear_enabled
+        self.mn_pairs_per_batch = mn_pairs_per_batch
+        self.mn_weight_scale = mn_weight_scale
         self.model = None
         self.input_dim = None
         self.loss_fn = nn.BCELoss()
         self.is_fitted = False
+        # Populated by anchored initialization; persisted by the runner so that
+        # stability analysis can reuse the exact deterministic targets used.
+        self.anchor_targets_ = None
 
     def _init_model(self, input_dim):
         """Initialize the configured parametric model."""
@@ -169,6 +184,140 @@ class ParametricUMAP:
 
         return dataset, loader, n_pos_edges
 
+    # ── Anchored initialization (plan §4.2 / §6 Phase 1) ────────────────────
+    def _compute_pca_anchor_targets(self, X, n_train, subsample=100_000,
+                                    target_rms_radius=5.0, random_state=0,
+                                    batch_size=50_000):
+        """Deterministic PCA-2D target coordinates for anchored initialization.
+
+        Fit a 2-component PCA on a ``<=subsample`` row sample of ``X`` (which may
+        be a lazy memmap / MemmapArrayConcatenator — only the sampled rows and
+        per-batch slices are ever materialised), then project every training row.
+
+        Determinism: PCA components are sign-fixed so that the largest-|loading|
+        entry of each component is positive, removing PCA's arbitrary sign
+        freedom. The resulting cloud is isotropically scaled so its RMS radius
+        (sqrt(mean(x^2 + y^2))) equals ``target_rms_radius`` (~5, matching
+        typical UMAP layout extents).
+
+        Returns a float32 array of shape ``(n_train, n_components)``.
+        """
+        from sklearn.decomposition import PCA
+
+        rng = np.random.RandomState(random_state)
+        n_sub = min(subsample, n_train)
+        if n_sub < n_train:
+            sub_idx = np.sort(rng.choice(n_train, n_sub, replace=False))
+            X_sub = np.asarray(X[sub_idx], dtype=np.float32)
+        else:
+            X_sub = np.asarray(X[0:n_train], dtype=np.float32)
+
+        pca = PCA(n_components=self.n_components, random_state=random_state)
+        pca.fit(X_sub)
+        mean = pca.mean_.astype(np.float32)
+        components = pca.components_.astype(np.float32)  # (n_components, n_features)
+
+        # Fix the sign of each component deterministically.
+        for c in range(components.shape[0]):
+            j = int(np.argmax(np.abs(components[c])))
+            if components[c, j] < 0:
+                components[c] = -components[c]
+
+        # Project all rows in batches (memmap-safe).
+        targets = np.empty((n_train, self.n_components), dtype=np.float32)
+        comp_t = components.T  # (n_features, n_components)
+        for i in range(0, n_train, batch_size):
+            end = min(i + batch_size, n_train)
+            rows = np.asarray(X[i:end], dtype=np.float32)
+            targets[i:end] = (rows - mean) @ comp_t
+
+        # Isotropic scale to the requested RMS radius.
+        rms = float(np.sqrt(np.mean(np.sum(targets.astype(np.float64) ** 2, axis=1))))
+        if rms > 0:
+            targets *= (target_rms_radius / rms)
+        return targets
+
+    def _anchored_pretrain(self, dataset, targets, n_train, random_state):
+        """Pretrain the encoder to regress deterministic 2D anchor targets (MSE).
+
+        Plain minibatch MSE over the training rows for ``anchored_init_epochs``
+        epochs with a fresh AdamW optimizer (``anchored_init_lr``). Runs in fp32
+        (no AMP/scaler) — it is only a couple of epochs and numerically simple.
+        The optimizer/scheduler for the main UMAP phase are created afterwards,
+        so their state is reset relative to this pretraining phase.
+        """
+        rng = np.random.RandomState(random_state + 7919)
+        opt = AdamW(self.model.parameters(), lr=self.anchored_init_lr)
+        mse = nn.MSELoss()
+        targets_t = torch.from_numpy(np.asarray(targets, dtype=np.float32))
+        self.model.train()
+
+        n_batches = int(np.ceil(n_train / self.batch_size))
+        for epoch in range(self.anchored_init_epochs):
+            perm = rng.permutation(n_train)
+            running = 0.0
+            for bi in range(n_batches):
+                idx = perm[bi * self.batch_size:(bi + 1) * self.batch_size]
+                if len(idx) == 0:
+                    continue
+                feats = self._gather_feature_rows(dataset, idx)
+                tgt = targets_t[idx].to(self.device)
+                opt.zero_grad(set_to_none=True)
+                pred = self.model(feats)
+                loss = mse(pred, tgt)
+                loss.backward()
+                if self.clip_grad_norm is not None:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(),
+                                                   max_norm=self.clip_grad_norm)
+                opt.step()
+                running += loss.item()
+            logging.info(
+                "Anchored pretrain epoch %d/%d — MSE: %.4f",
+                epoch + 1, self.anchored_init_epochs, running / max(n_batches, 1),
+            )
+
+    def _gather_feature_rows(self, dataset, idx):
+        """Gather feature rows for ``idx`` from ``dataset`` as a device tensor.
+
+        Works for both the device-resident ``VariableDataset`` (indexing returns
+        a tensor already on ``self.device``) and the lazy ``LazyArrayDataset``
+        (returns a CPU tensor gathered per-batch from a memmap). Only the
+        requested rows are ever materialised.
+        """
+        idx_list = idx.tolist() if isinstance(idx, np.ndarray) else list(idx)
+        vals = dataset[idx_list]
+        if not torch.is_tensor(vals):
+            vals = torch.as_tensor(np.asarray(vals, dtype=np.float32))
+        return vals.to(self.device, non_blocking=True)
+
+    def _sample_midnear_features(self, dataset, n_anchors, n_train, rng,
+                                 n_candidates=6, rank=1):
+        """Sample mid-near anchor/partner feature pairs (PaCMAP-style).
+
+        For each of ``n_anchors`` random anchors, draw ``n_candidates`` random
+        rows, compute high-D distances anchor→candidates on the training device,
+        and keep the ``rank``-th nearest (rank=1 → 2nd nearest) as the mid-near
+        partner. Returns ``(anchor_feats, partner_feats)`` device tensors of
+        shape ``(n_anchors, n_features)`` each. Fully vectorized; only the
+        sampled rows are gathered from ``X`` (memmap-safe).
+        """
+        anchors = rng.randint(0, n_train, size=n_anchors)
+        cands = rng.randint(0, n_train, size=n_anchors * n_candidates)
+        anchor_feats = self._gather_feature_rows(dataset, anchors)          # (m, D)
+        cand_feats = self._gather_feature_rows(dataset, cands)              # (m*C, D)
+        cand_feats = cand_feats.view(n_anchors, n_candidates, -1)           # (m, C, D)
+
+        with torch.no_grad():
+            d = torch.linalg.vector_norm(
+                anchor_feats.unsqueeze(1).float() - cand_feats.float(), dim=2
+            )  # (m, C)
+            k = min(rank + 1, n_candidates)
+            # topk smallest: partner is the `rank`-th nearest candidate.
+            near_idx = torch.topk(d, k=k, dim=1, largest=False).indices[:, rank]
+        partner_feats = cand_feats[torch.arange(n_anchors, device=cand_feats.device),
+                                   near_idx]  # (m, D)
+        return anchor_feats, partner_feats
+
     def fit(self, X, y=None,
             resample_negatives=False,
             n_processes=6,
@@ -245,6 +394,12 @@ class ParametricUMAP:
                 "warmup_steps": self.warmup_steps,
                 "total_steps_estimate": self.total_steps_estimate,
                 "use_amp": self.use_amp,
+                "anchored_init": self.anchored_init,
+                "anchored_init_epochs": self.anchored_init_epochs,
+                "anchored_init_lr": self.anchored_init_lr,
+                "midnear_enabled": self.midnear_enabled,
+                "mn_pairs_per_batch": self.mn_pairs_per_batch,
+                "mn_weight_scale": self.mn_weight_scale,
             }
             wandb.init(project=wandb_project, name=wandb_run_name, config=config)
             self.wandb_run = wandb.run
@@ -340,6 +495,34 @@ class ParametricUMAP:
             n_pos_edges = len(ed.pos_edges)
             neg_desc = str(len(ed.neg_edges))
 
+        n_train_rows = int(len(dataset))
+
+        # ── Anchored initialization (plan §4.2) ──
+        # Pretrain the encoder to regress deterministic 2D targets before the
+        # UMAP-loss phase, so every seed starts in the same basin. The main
+        # optimizer/scheduler are created *after* this block, resetting their
+        # state relative to pretraining.
+        self.anchor_targets_ = None
+        if self.anchored_init and self.anchored_init != "none":
+            if self.anchored_init != "pca":
+                raise ValueError(f"Unknown anchored_init: {self.anchored_init}")
+            logging.info(
+                "Anchored init: computing PCA-2D targets (%d epochs pretrain)...",
+                self.anchored_init_epochs,
+            )
+            targets = self._compute_pca_anchor_targets(
+                X, n_train_rows, random_state=random_state)
+            self.anchor_targets_ = targets
+            self._anchored_pretrain(dataset, targets, n_train_rows, random_state)
+
+        # ── Mid-near pair loss setup (plan §6 Phase 1, PaCMAP-style) ──
+        mn_rng = np.random.RandomState(random_state + 104729)
+        mn_total_steps = (
+            self.total_steps_estimate if self.total_steps_estimate > 0
+            else max(len(loader) * self.n_epochs, 1)
+        )
+        mn_t_phase1 = max(0.1 * mn_total_steps, 1.0)
+
         if 'cuda' in str(self.device):
             torch.backends.cudnn.benchmark = True
 
@@ -426,6 +609,37 @@ class ParametricUMAP:
 
                 loss = umap_loss + self.correlation_weight * corr_loss
 
+                # ── Mid-near attractive term (PaCMAP-style global structure) ──
+                mn_loss_val = 0.0
+                w_mn = 0.0
+                if self.midnear_enabled:
+                    if self.mn_pairs_per_batch > 0:
+                        mn_m = self.mn_pairs_per_batch
+                    else:
+                        # auto: match the number of positive edges in this batch.
+                        mn_m = int((targets > 0.5).sum().item())
+                    if mn_m > 0:
+                        anchor_feats, partner_feats = self._sample_midnear_features(
+                            dataset, mn_m, n_train_rows, mn_rng)
+                        with torch.autocast(device_type='cuda' if use_amp else 'cpu',
+                                            enabled=use_amp):
+                            z_a = self.model(anchor_feats)
+                            z_b = self.model(partner_feats)
+                        # PaCMAP mid-near loss: d~ = ||z_a - z_b||^2 + 1;
+                        # L_mn = mean( d~ / (10000 + d~) ). Bounded per pair.
+                        d_mn = (z_a.float() - z_b.float()).pow(2).sum(dim=1) + 1.0
+                        mn_loss = (d_mn / (10000.0 + d_mn)).mean()
+                        # PaCMAP weight schedule: 1000 -> 3 over the first 10% of
+                        # steps, then hold at 3, scaled by mn_weight_scale.
+                        if global_step < mn_t_phase1:
+                            frac = global_step / mn_t_phase1
+                            w_mn = 1000.0 * (1.0 - frac) + 3.0 * frac
+                        else:
+                            w_mn = 3.0
+                        w_mn *= self.mn_weight_scale
+                        loss = loss + w_mn * mn_loss
+                        mn_loss_val = mn_loss.item()
+
                 if not torch.isfinite(loss):
                     consecutive_nonfinite_losses += 1
                     logging.warning(
@@ -495,6 +709,8 @@ class ParametricUMAP:
                         'batch_loss': loss.item(),
                         'umap_loss': umap_loss.item(),
                         'corr_loss': corr_loss.item(),
+                        'mn_loss': mn_loss_val,
+                        'mn_weight': w_mn,
                         'learning_rate': current_lr,
                         'mean_distance': dists.mean().item(),
                         'std_distance': dists.std().item(),
