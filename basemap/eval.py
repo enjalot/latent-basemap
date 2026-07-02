@@ -589,6 +589,161 @@ def random_projection_2d(X_high, seed: int = 42) -> np.ndarray:
     X = read_rows(X_high, np.arange(_n_rows(X_high)))
     return GaussianRandomProjection(n_components=2, random_state=seed).fit_transform(X).astype(np.float32)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Global structure: Grassmann Score (lit ``172-generalizable-spectral-umap.md``)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _knn_graph_symmetric(P: np.ndarray, k: int):
+    """Binary symmetric kNN adjacency (scipy CSR) from points ``P`` ``[m, d]``.
+
+    Each point connects to its ``k`` nearest neighbours (self excluded); the
+    result is symmetrised with a binary OR so ``W[i, j] == W[j, i]``.
+    """
+    import faiss
+    from scipy.sparse import csr_matrix
+
+    P = np.ascontiguousarray(P, dtype=np.float32)
+    m = len(P)
+    k = min(k, m - 1)
+    index = faiss.IndexFlatL2(P.shape[1])
+    index.add(P)
+    _, I = index.search(P, k + 1)
+    rows = np.repeat(np.arange(m), k)
+    cols = I[:, 1:].reshape(-1)  # drop self column
+    data = np.ones(len(rows), dtype=np.float64)
+    A = csr_matrix((data, (rows, cols)), shape=(m, m))
+    A = A.maximum(A.T)  # binary symmetrisation
+    return A
+
+
+def laplacian_eigenvectors(P: np.ndarray, k: int = 15, t: int = 10):
+    """First ``t`` non-trivial eigenvectors of the normalized graph Laplacian.
+
+    Builds a symmetric kNN graph of ``P``, forms the symmetric normalized
+    Laplacian ``L_sym = I - D^{-1/2} W D^{-1/2}`` and returns its ``t``
+    eigenvectors of smallest eigenvalue, **skipping** the trivial (constant)
+    eigenvector at eigenvalue 0. Returns an ``[m, t]`` orthonormal array.
+
+    Raises on eigensolver non-convergence (caller is expected to catch).
+    """
+    from scipy.sparse import csgraph
+    from scipy.sparse.linalg import eigsh
+
+    W = _knn_graph_symmetric(P, k)
+    L = csgraph.laplacian(W, normed=True).tocsr().astype(np.float64)
+
+    # Smallest ``t+1`` eigenvalues (including the trivial one). Shift-invert
+    # around sigma just below 0 is the robust way to reach the low end of a
+    # PSD Laplacian's spectrum; fall back to a plain smallest-algebraic solve.
+    try:
+        vals, vecs = eigsh(L, k=t + 1, sigma=-1e-3, which="LM", tol=0, maxiter=10_000)
+    except Exception:
+        vals, vecs = eigsh(L, k=t + 1, which="SA", tol=1e-6, maxiter=20_000)
+    order = np.argsort(vals)
+    vecs = vecs[:, order]
+    return vecs[:, 1 : t + 1]  # drop the constant eigenvector
+
+
+def grassmann_score(X_high, Z_low, t: int = 10, sample: int = 10_000, k: int = 15,
+                    seed: int = 42):
+    """Grassmann Score global-structure metric (note 172, lower is better).
+
+    On a shared subsample of rows, compares the subspaces spanned by the first
+    ``t`` non-trivial Laplacian eigenvectors of the high-D data ``X`` and of the
+    2D embedding ``Y``. The principal angles ``theta_i`` between the two
+    ``[m, t]`` eigenvector matrices come from the singular values (= ``cos``
+    of the angles) of ``V_X^T V_Y``. Returns a dict with:
+
+    * ``grassmann_distance`` = ``sqrt(sum theta_i^2)`` (the note's ``d_Gr``);
+    * ``grassmann_affinity_error`` = ``1 - mean(cos^2 theta_i)`` (in ``[0, 1]``).
+
+    Both are lower-is-better. On eigensolver non-convergence returns ``None``
+    (with a warning) so the panel degrades gracefully.
+    """
+    n = _n_rows(X_high)
+    idx = sample_indices(n, sample, seed=seed)
+    Xs = read_rows(X_high, idx)
+    Zs = read_rows(Z_low, idx)
+    try:
+        Vx = laplacian_eigenvectors(Xs, k=k, t=t)
+        Vy = laplacian_eigenvectors(Zs, k=k, t=t)
+    except Exception as e:  # ArpackError / ArpackNoConvergence / linalg failures
+        import warnings
+        warnings.warn(f"grassmann_score: Laplacian eigensolver failed ({e!r}); returning None")
+        return None
+
+    s = np.linalg.svd(Vx.T @ Vy, compute_uv=False)
+    s = np.clip(s, 0.0, 1.0)  # singular values are cos(theta_i) in [0, 1]
+    thetas = np.arccos(s)
+    return {
+        "grassmann_distance": float(np.sqrt(np.sum(thetas ** 2))),
+        "grassmann_affinity_error": float(1.0 - np.mean(s ** 2)),
+        "t": int(t),
+        "sample": int(len(idx)),
+        "k": int(k),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Collapse index: degenerate-layout diagnostics
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def collapse_index(Z_low, grid: int = 64, clip=(0.5, 99.5)):
+    """Diagnose degenerate collapsed layouts (tight clumps + empty space).
+
+    Collapsed maps pack points into a few near-overlapping clumps surrounded by
+    empty canvas, which inflates trustworthiness while destroying the usable
+    spread of the map. Two complementary scalars capture that:
+
+    * ``collapse_nn_ratio`` -- median 2D nearest-neighbour distance divided by
+      the bounding-box diagonal of the percentile-clipped extent. Tiny values
+      (points sit on top of each other relative to the canvas) flag collapse.
+    * ``occupancy_entropy`` -- Shannon entropy of the point-count distribution
+      over a ``grid x grid`` lattice on the clipped extent, normalized by
+      ``log(grid*grid)``. ``1.0`` == points uniformly fill the canvas; ``-> 0``
+      == everything crammed into a handful of cells.
+
+    ``clip`` percentiles resist a few runaway outliers stretching the extent.
+    Returns a dict with both scalars plus the raw extent for diagnostics.
+    """
+    import faiss
+
+    n = _n_rows(Z_low)
+    Z = read_rows(Z_low, np.arange(n)).astype(np.float32)
+    x, y = Z[:, 0], Z[:, 1]
+    xlo, xhi = np.percentile(x, clip)
+    ylo, yhi = np.percentile(y, clip)
+    xspan = max(xhi - xlo, 1e-12)
+    yspan = max(yhi - ylo, 1e-12)
+    diag = float(np.hypot(xspan, yspan))
+
+    # (a) median nearest-neighbour distance / bbox diagonal
+    index = faiss.IndexFlatL2(2)
+    index.add(np.ascontiguousarray(Z))
+    D, _ = index.search(np.ascontiguousarray(Z), 2)
+    nn_dist = np.sqrt(np.maximum(D[:, 1], 0.0))
+    nn_ratio = float(np.median(nn_dist) / diag) if diag > 0 else float("nan")
+
+    # (b) occupancy entropy over the clipped grid (outliers clamp to edge cells)
+    xi = np.clip(((x - xlo) / xspan * grid).astype(np.int64), 0, grid - 1)
+    yi = np.clip(((y - ylo) / yspan * grid).astype(np.int64), 0, grid - 1)
+    counts = np.zeros(grid * grid, dtype=np.float64)
+    np.add.at(counts, xi * grid + yi, 1.0)
+    occupied = counts[counts > 0]
+    p = occupied / occupied.sum()
+    entropy = float(-(p * np.log(p)).sum() / np.log(grid * grid))
+
+    return {
+        "collapse_nn_ratio": nn_ratio,
+        "occupancy_entropy": entropy,
+        "n_occupied_cells": int(len(occupied)),
+        "bbox_diagonal": diag,
+        "grid": int(grid),
+    }
+
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Spatially-resolved trustworthiness / continuity
@@ -650,6 +805,12 @@ class PanelConfig:
     do_clusters: bool = True
     do_density: bool = True
     do_floors: bool = False
+    do_grassmann: bool = True
+    do_collapse: bool = True
+    grassmann_t: int = 10
+    grassmann_sample: int = 10_000
+    grassmann_k: int = 15
+    collapse_grid: int = 64
     cache_dir: Optional[str] = None
     spatial_gridsize: int = 30
 
@@ -728,6 +889,16 @@ def score_map(X_high, Z_low, config: Optional[PanelConfig] = None, labels=None):
         metrics["density_preservation"] = corr
         per_cols["density_log_radius_high"] = log_rh
         per_cols["density_log_radius_low"] = log_rl
+
+    # ── Global structure: Grassmann Score (note 172) ──
+    if config.do_grassmann:
+        metrics["grassmann"] = grassmann_score(
+            X_high, Z_low, t=config.grassmann_t, sample=config.grassmann_sample,
+            k=config.grassmann_k, seed=config.seed)  # None on eigensolver failure
+
+    # ── Collapse index (degenerate-layout diagnostics) ──
+    if config.do_collapse:
+        metrics["collapse"] = collapse_index(Z_low, grid=config.collapse_grid)
 
     # ── Cluster / task level ──
     if config.do_clusters:
@@ -881,6 +1052,10 @@ def cmd_score(args):
         tc_subsample=args.tc_subsample,
         do_floors=args.floors,
         do_clusters=not args.no_clusters,
+        do_grassmann=not args.no_grassmann,
+        do_collapse=not args.no_collapse,
+        grassmann_t=args.grassmann_t,
+        grassmann_sample=args.grassmann_sample,
         cache_dir=args.cache_dir,
         seed=args.seed,
     )
@@ -935,6 +1110,10 @@ def build_parser():
     s.add_argument("--k", type=int, nargs="*", default=None, help="k values (default 10 50)")
     s.add_argument("--floors", action="store_true", help="also compute PCA / random-projection floors")
     s.add_argument("--no-clusters", action="store_true", help="skip Leiden cluster metrics")
+    s.add_argument("--no-grassmann", action="store_true", help="skip Grassmann global-structure score")
+    s.add_argument("--no-collapse", action="store_true", help="skip collapse-index diagnostics")
+    s.add_argument("--grassmann-t", type=int, default=10, help="# Laplacian eigenvectors for Grassmann score")
+    s.add_argument("--grassmann-sample", type=int, default=10_000, help="subsample size for Grassmann score")
     s.add_argument("--cache-dir", default=None, help="dir to cache Leiden labels")
     s.add_argument("--seed", type=int, default=42)
     s.set_defaults(func=cmd_score)
