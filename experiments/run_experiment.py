@@ -486,6 +486,8 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         midnear_enabled=tc.midnear_enabled,
         mn_pairs_per_batch=tc.mn_pairs_per_batch,
         mn_weight_scale=tc.mn_weight_scale,
+        gpu_resident_data=tc.gpu_resident_data,
+        gpu_resident_vram_budget_gb=tc.gpu_resident_vram_budget_gb,
     )
 
     # Count parameters

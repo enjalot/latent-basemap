@@ -13,6 +13,7 @@ from tqdm.auto import tqdm
 import pickle
 import logging
 import os
+import time
 from pathlib import Path
 
 logging.basicConfig(
@@ -54,6 +55,8 @@ class ParametricUMAP:
         midnear_enabled=False,
         mn_pairs_per_batch=0,
         mn_weight_scale=1.0,
+        gpu_resident_data="auto",
+        gpu_resident_vram_budget_gb=10.0,
     ):
         if device is None:
             if torch.cuda.is_available():
@@ -93,6 +96,17 @@ class ParametricUMAP:
         self.midnear_enabled = midnear_enabled
         self.mn_pairs_per_batch = mn_pairs_per_batch
         self.mn_weight_scale = mn_weight_scale
+        # GPU-resident fast path (input-pipeline optimisation). "auto" enables it
+        # when X fits in VRAM within the budget on CUDA; True forces it on any
+        # device (fp16 storage on CUDA, fp32 on CPU); False keeps the legacy path.
+        self.gpu_resident_data = gpu_resident_data
+        self.gpu_resident_vram_budget_gb = gpu_resident_vram_budget_gb
+        self._fast_device_path = False   # set True by _prepare_edge_list_training
+        self._X_dev = None               # DeviceArrayDataset when fast path active
+        self._max_train_steps = None     # benchmark hook: stop after N global steps
+        self._bench_warmup = 0           # benchmark hook: steps to exclude from timing
+        self._bench_t0 = 0.0
+        self._bench_seconds = None       # measured steady-state loop seconds
         self.model = None
         self.input_dim = None
         self.loss_fn = nn.BCELoss()
@@ -123,6 +137,48 @@ class ParametricUMAP:
         else:
             raise ValueError(f"Unknown architecture: {self.architecture}")
 
+    def _decide_gpu_resident(self, n_train, n_features, n_pos_edges,
+                             edge_set, low_memory):
+        """Decide whether to use the GPU-resident fast path.
+
+        Returns ``(use_fast, reason)``. ``gpu_resident_data`` may be:
+          * ``False`` / ``"false"`` -> always legacy.
+          * ``True`` / ``"true"``   -> force resident on any device.
+          * ``"auto"`` (default)    -> resident only on CUDA when the resident
+            footprint (X fp16 + edge index int64 [+ weights]) fits within
+            ``min(gpu_resident_vram_budget_gb, 0.9 * free_vram)``.
+
+        Neighbour-rejection (``edge_set``) is unsupported on the fast path, so it
+        forces the legacy sampler.
+        """
+        mode = str(self.gpu_resident_data).lower()
+        if mode in ("false", "0", "off", "none"):
+            return False, "gpu_resident_data=false"
+        if edge_set is not None:
+            return False, "reject_neighbors set -> legacy path"
+        is_cuda = "cuda" in str(self.device)
+        storage_bytes = 2 if is_cuda else 4  # fp16 on cuda, fp32 elsewhere
+        x_bytes = n_train * n_features * storage_bytes
+        edge_bytes = n_pos_edges * 2 * 8      # src + dst int64 resident
+        if self.positive_target_mode == "probability":
+            edge_bytes += n_pos_edges * 4     # fp32 weights
+        need = x_bytes + edge_bytes
+        if mode in ("true", "1", "on", "force"):
+            return True, f"forced (need ~{need/1e9:.2f} GB on device)"
+        if not is_cuda:
+            return False, "auto: non-CUDA device -> legacy path"
+        budget = float(self.gpu_resident_vram_budget_gb) * 1e9
+        try:
+            free_bytes, _total = torch.cuda.mem_get_info(self.device)
+        except Exception:
+            free_bytes = budget
+        avail = min(budget, free_bytes * 0.9)  # 10% headroom for model+activations
+        if need <= avail:
+            return True, (f"auto: fits (need ~{need/1e9:.2f} GB <= "
+                          f"avail ~{avail/1e9:.2f} GB)")
+        return False, (f"auto: too large (need ~{need/1e9:.2f} GB > "
+                       f"avail ~{avail/1e9:.2f} GB) -> legacy path")
+
     def _prepare_edge_list_training(self, X, edges_path, n_train, low_memory, random_state):
         """Build the (dataset, loader) pair for the precomputed edge-list path.
 
@@ -133,6 +189,7 @@ class ParametricUMAP:
         """
         from .datasets.edge_list_dataset import (
             EdgeListBalancedIterator, LazyArrayDataset,
+            DeviceArrayDataset, DeviceEdgeSampler,
             load_edge_arrays, build_edge_key_set,
         )
         from .datasets.covariates_datasets import VariableDataset
@@ -165,6 +222,26 @@ class ParametricUMAP:
             logging.info("Building positive-edge rejection set (reject_neighbors=True)...")
             edge_set = build_edge_key_set(np.asarray(sources), np.asarray(targets), n_train)
 
+        # GPU-resident fast path: upload X once (fp16 on CUDA) and do all
+        # gathers + negative sampling on-device. See _decide_gpu_resident.
+        n_features = int(X.shape[1])
+        use_fast, reason = self._decide_gpu_resident(
+            n_train, n_features, n_pos_edges, edge_set, low_memory)
+        if use_fast:
+            logging.info("Edge-list mode: GPU-resident fast path (%s).", reason)
+            ddataset = DeviceArrayDataset(X, self.device)
+            self._X_dev = ddataset
+            self._fast_device_path = True
+            loader = DeviceEdgeSampler(
+                ddataset, sources, targets, weights, n_nodes=n_train,
+                pos_ratio=self.pos_ratio, batch_size=self.batch_size,
+                shuffle=True, random_state=random_state,
+                positive_target_mode=self.positive_target_mode,
+                device=self.device,
+            )
+            return ddataset, loader, n_pos_edges
+
+        logging.info("Edge-list mode: legacy sampler path (%s).", reason)
         loader = EdgeListBalancedIterator(
             sources, targets, weights, n_nodes=n_train,
             pos_ratio=self.pos_ratio, batch_size=self.batch_size,
@@ -318,6 +395,32 @@ class ParametricUMAP:
                                    near_idx]  # (m, D)
         return anchor_feats, partner_feats
 
+    def _sample_midnear_features_device(self, n_anchors, n_train, gen,
+                                        n_candidates=6, rank=1):
+        """Device-resident mid-near sampling (GPU-resident fast path).
+
+        Same PaCMAP mid-near candidate selection as ``_sample_midnear_features``
+        but anchors/candidates are drawn with ``torch.randint`` on-device and
+        gathered via ``index_select`` from the resident feature matrix. The
+        distance ranking stays in fp32 (matching the legacy ``.float()`` path) so
+        the mid-near partner selection is distribution-equivalent.
+        """
+        X_dev = self._X_dev
+        anchors = torch.randint(0, n_train, (n_anchors,), generator=gen,
+                                device=self.device)
+        cands = torch.randint(0, n_train, (n_anchors * n_candidates,),
+                              generator=gen, device=self.device)
+        anchor_feats = X_dev.index_select(anchors)                 # (m, D) fp32
+        cand_feats = X_dev.index_select(cands).view(n_anchors, n_candidates, -1)
+        with torch.no_grad():
+            d = torch.linalg.vector_norm(
+                anchor_feats.unsqueeze(1) - cand_feats, dim=2)     # (m, C)
+            k = min(rank + 1, n_candidates)
+            near_idx = torch.topk(d, k=k, dim=1, largest=False).indices[:, rank]
+        partner_feats = cand_feats[torch.arange(n_anchors, device=self.device),
+                                   near_idx]                       # (m, D)
+        return anchor_feats, partner_feats
+
     def fit(self, X, y=None,
             resample_negatives=False,
             n_processes=6,
@@ -400,6 +503,8 @@ class ParametricUMAP:
                 "midnear_enabled": self.midnear_enabled,
                 "mn_pairs_per_batch": self.mn_pairs_per_batch,
                 "mn_weight_scale": self.mn_weight_scale,
+                "gpu_resident_data": str(self.gpu_resident_data),
+                "gpu_resident_vram_budget_gb": self.gpu_resident_vram_budget_gb,
             }
             wandb.init(project=wandb_project, name=wandb_run_name, config=config)
             self.wandb_run = wandb.run
@@ -517,6 +622,10 @@ class ParametricUMAP:
 
         # ── Mid-near pair loss setup (plan §6 Phase 1, PaCMAP-style) ──
         mn_rng = np.random.RandomState(random_state + 104729)
+        mn_gen = None
+        if self._fast_device_path:
+            mn_gen = torch.Generator(device=self.device)
+            mn_gen.manual_seed(int(random_state) + 104729)
         mn_total_steps = (
             self.total_steps_estimate if self.total_steps_estimate > 0
             else max(len(loader) * self.n_epochs, 1)
@@ -557,12 +666,18 @@ class ParametricUMAP:
         logging.info(f"Mixed precision: {use_amp}")
         logging.info(f"Positive target mode: {self.positive_target_mode}")
 
+        # Per-batch GPU->CPU syncs (grad-norm diagnostics + per-class stats) are
+        # only needed by wandb / the tqdm postfix. Skipping them when nothing
+        # consumes them keeps the GPU from stalling on .item() every step.
+        collect_diag = bool(use_wandb)
+        collect_stats = bool(use_wandb or verbose)
+
         global_step = 0
         consecutive_nonfinite_losses = 0
         for epoch in range(self.n_epochs):
-            epoch_loss = 0.0
-            epoch_umap_loss = 0.0
-            epoch_corr_loss = 0.0
+            epoch_loss_t = torch.zeros((), device=self.device)
+            epoch_umap_t = torch.zeros((), device=self.device)
+            epoch_corr_t = torch.zeros((), device=self.device)
             num_batches = 0
             pbar = tqdm(
                 range(len(loader)),
@@ -571,8 +686,20 @@ class ParametricUMAP:
                 disable=not verbose,
             )
 
-            prefetcher = DataPrefetcher(loader, dataset, self.device)
-            batch = prefetcher.next()
+            if self._fast_device_path:
+                # DeviceEdgeSampler yields (src, dst, targets) already on-device.
+                _batch_iter = iter(loader)
+
+                def _get_next(_it=_batch_iter):
+                    try:
+                        return next(_it)
+                    except StopIteration:
+                        return None
+            else:
+                prefetcher = DataPrefetcher(loader, dataset, self.device)
+                _get_next = prefetcher.next
+
+            batch = _get_next()
             while batch is not None:
                 optimizer.zero_grad(set_to_none=True)
                 src_values, dst_values, targets = batch
@@ -619,8 +746,14 @@ class ParametricUMAP:
                         # auto: match the number of positive edges in this batch.
                         mn_m = int((targets > 0.5).sum().item())
                     if mn_m > 0:
-                        anchor_feats, partner_feats = self._sample_midnear_features(
-                            dataset, mn_m, n_train_rows, mn_rng)
+                        if self._fast_device_path:
+                            anchor_feats, partner_feats = \
+                                self._sample_midnear_features_device(
+                                    mn_m, n_train_rows, mn_gen)
+                        else:
+                            anchor_feats, partner_feats = \
+                                self._sample_midnear_features(
+                                    dataset, mn_m, n_train_rows, mn_rng)
                         with torch.autocast(device_type='cuda' if use_amp else 'cpu',
                                             enabled=use_amp):
                             z_a = self.model(anchor_feats)
@@ -638,7 +771,7 @@ class ParametricUMAP:
                             w_mn = 3.0
                         w_mn *= self.mn_weight_scale
                         loss = loss + w_mn * mn_loss
-                        mn_loss_val = mn_loss.item()
+                        mn_loss_val = mn_loss.item() if use_wandb else 0.0
 
                 if not torch.isfinite(loss):
                     consecutive_nonfinite_losses += 1
@@ -652,7 +785,7 @@ class ParametricUMAP:
                             f"Aborting training after {consecutive_nonfinite_losses} "
                             "consecutive non-finite losses"
                         )
-                    batch = prefetcher.next()
+                    batch = _get_next()
                     pbar.update(1)
                     continue
                 consecutive_nonfinite_losses = 0
@@ -663,18 +796,26 @@ class ParametricUMAP:
                 else:
                     loss.backward()
 
-                # Gradient diagnostics
-                pre_clip_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
-                grad_norm_pre = float(np.mean(pre_clip_norms)) if pre_clip_norms else 0.0
+                # Gradient clipping is always applied; the norm read-backs it
+                # needs for logging are gated so we don't sync every step.
+                if collect_diag:
+                    pre_clip_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
+                    grad_norm_pre = float(np.mean(pre_clip_norms)) if pre_clip_norms else 0.0
+                else:
+                    grad_norm_pre = 0.0
 
                 if self.clip_grad_norm is not None:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.clip_grad_norm)
                 if self.clip_grad_value is not None:
                     torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=self.clip_grad_value)
 
-                post_clip_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
-                grad_norm_post = float(np.mean(post_clip_norms)) if post_clip_norms else 0.0
-                clipping_ratio = grad_norm_post / grad_norm_pre if grad_norm_pre > 0 else 1.0
+                if collect_diag:
+                    post_clip_norms = [p.grad.norm().item() for p in self.model.parameters() if p.grad is not None]
+                    grad_norm_post = float(np.mean(post_clip_norms)) if post_clip_norms else 0.0
+                    clipping_ratio = grad_norm_post / grad_norm_pre if grad_norm_pre > 0 else 1.0
+                else:
+                    grad_norm_post = 0.0
+                    clipping_ratio = 1.0
 
                 optimizer_was_run = True
                 if scaler is not None:
@@ -690,19 +831,28 @@ class ParametricUMAP:
 
                 current_lr = optimizer.param_groups[0]['lr']
 
-                # Per-class stats
-                pos_mask = targets > 0.5
-                neg_mask = ~pos_mask
-                pos_qs_mean = qs[pos_mask].mean().item() if pos_mask.any() else 0.0
-                neg_qs_mean = qs[neg_mask].mean().item() if neg_mask.any() else 0.0
-                mean_pos_dist = dists[pos_mask].mean().item() if pos_mask.any() else 0.0
-                mean_neg_dist = dists[neg_mask].mean().item() if neg_mask.any() else 0.0
+                # Per-class stats only when a consumer (wandb/pbar) needs them.
+                if collect_stats:
+                    pos_mask = targets > 0.5
+                    neg_mask = ~pos_mask
+                    pos_qs_mean = qs[pos_mask].mean().item() if pos_mask.any() else 0.0
+                    neg_qs_mean = qs[neg_mask].mean().item() if neg_mask.any() else 0.0
+                    mean_pos_dist = dists[pos_mask].mean().item() if pos_mask.any() else 0.0
+                    mean_neg_dist = dists[neg_mask].mean().item() if neg_mask.any() else 0.0
+                else:
+                    pos_qs_mean = neg_qs_mean = mean_pos_dist = mean_neg_dist = 0.0
 
-                epoch_loss += loss.item()
-                epoch_umap_loss += umap_loss.item()
-                epoch_corr_loss += corr_loss.item()
+                # Accumulate epoch losses on-device; sync once per epoch below.
+                epoch_loss_t += loss.detach()
+                epoch_umap_t += umap_loss.detach()
+                epoch_corr_t += corr_loss.detach()
                 num_batches += 1
                 global_step += 1
+
+                if self._max_train_steps is not None and global_step == self._bench_warmup:
+                    if 'cuda' in str(self.device):
+                        torch.cuda.synchronize(self.device)
+                    self._bench_t0 = time.perf_counter()
 
                 if use_wandb:
                     wandb.log({
@@ -724,7 +874,7 @@ class ParametricUMAP:
                         'global_step': global_step,
                     })
 
-                batch = prefetcher.next()
+                batch = _get_next()
                 pbar.update(1)
                 if verbose:
                     pbar.set_postfix({
@@ -734,7 +884,16 @@ class ParametricUMAP:
                         'neg_q': f'{neg_qs_mean:.3f}',
                     })
 
+                if self._max_train_steps is not None and global_step >= self._max_train_steps:
+                    batch = None  # benchmark hook: stop this epoch early
+
             pbar.close()
+
+            if self._max_train_steps is not None and global_step >= self._max_train_steps:
+                if 'cuda' in str(self.device):
+                    torch.cuda.synchronize(self.device)
+                self._bench_seconds = time.perf_counter() - self._bench_t0
+                break  # benchmark hook: stop the whole run, not just the epoch
 
             if resample_negatives and ed is not None:
                 ed.neg_edges = None  # Force re-sampling
@@ -746,6 +905,9 @@ class ParametricUMAP:
                     n_processes=n_processes,
                     verbose=verbose)
 
+            epoch_loss = float(epoch_loss_t.item())
+            epoch_umap_loss = float(epoch_umap_t.item())
+            epoch_corr_loss = float(epoch_corr_t.item())
             avg_loss = epoch_loss / max(num_batches, 1)
             avg_umap = epoch_umap_loss / max(num_batches, 1)
             avg_corr = epoch_corr_loss / max(num_batches, 1)

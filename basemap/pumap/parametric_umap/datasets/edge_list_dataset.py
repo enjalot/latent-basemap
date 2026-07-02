@@ -77,6 +77,180 @@ class LazyArrayDataset:
         return torch.from_numpy(arr)
 
 
+class DeviceArrayDataset:
+    """Feature matrix held resident on the training device as a single tensor.
+
+    Used by the GPU-resident fast path: ``X`` is uploaded **once** (typically as
+    fp16 on CUDA to halve VRAM; fp32 on CPU where fp16 matmul is slow) and every
+    per-batch gather is a device-side ``index_select`` -- zero host-to-device
+    transfers per step. Indexing returns fp32 rows so the downstream model /
+    correlation loss see the same dtype as the legacy path (the fp16 storage is
+    the only precision change, and it is intentional per the scale plan).
+    """
+
+    def __init__(self, X, device, storage_dtype=None, upload_chunk=1_000_000):
+        if storage_dtype is None:
+            storage_dtype = torch.float16 if "cuda" in str(device) else torch.float32
+        if torch.is_tensor(X):
+            self.tensor = X.to(device=device, dtype=storage_dtype).contiguous()
+        else:
+            # Upload row-chunks so a memmap-backed X never materialises a full
+            # host fp32 copy (respects the >=2 GB no-materialise rule); only one
+            # ``upload_chunk``-row slice is transiently held on the host.
+            n = int(X.shape[0]); d = int(X.shape[1])
+            self.tensor = torch.empty((n, d), dtype=storage_dtype, device=device)
+            for i in range(0, n, upload_chunk):
+                end = min(i + upload_chunk, n)
+                chunk = np.asarray(X[i:end], dtype=np.float32)
+                self.tensor[i:end].copy_(torch.from_numpy(chunk).to(storage_dtype))
+        self.device = device
+        self.storage_dtype = storage_dtype
+        self._n = int(self.tensor.shape[0])
+
+    def __len__(self):
+        return self._n
+
+    def to(self, device):  # already resident; keep the contract
+        if str(device) != str(self.device):
+            self.tensor = self.tensor.to(device)
+            self.device = device
+        return self
+
+    def index_select(self, idx):
+        """Gather rows for a device LongTensor ``idx`` as fp32 device rows."""
+        return self.tensor.index_select(0, idx).float()
+
+    def __getitem__(self, idx):
+        if not torch.is_tensor(idx):
+            idx = torch.as_tensor(np.asarray(idx), dtype=torch.long,
+                                  device=self.device)
+        else:
+            idx = idx.to(device=self.device, dtype=torch.long)
+        return self.index_select(idx)
+
+
+class DeviceEdgeSampler:
+    """Fully device-resident balanced edge sampler (GPU-resident fast path).
+
+    Drop-in replacement for ``EdgeListBalancedIterator`` + ``DataPrefetcher``:
+    each ``__next__`` yields ``(src_feats, dst_feats, targets)`` already on the
+    training device, gathered via ``index_select`` from a resident feature
+    matrix. No Python list-of-tuples round-trip, no per-batch host-to-device
+    feature copy, no rejection-loop sync.
+
+    Semantics vs the legacy path (documented distribution-level equivalence):
+
+    * Positive edges: same directed edges, streamed in a per-epoch random
+      permutation (``torch.randperm``). In-batch shuffling is dropped because the
+      BCE + correlation losses are permutation-invariant over the batch, so it
+      never affected the gradient.
+    * Negatives: ``neg_src`` uniform over ``[0, n_nodes)``; ``neg_dst`` drawn as
+      ``(neg_src + offset) mod n_nodes`` with ``offset`` uniform over
+      ``[1, n_nodes)``. This is *exactly* the conditional distribution of
+      independent-uniform sampling with self-pair rejection (dst uniform over the
+      ``n_nodes-1`` non-self nodes), but needs no rejection loop / sync.
+    * RNG stream differs from the numpy path (torch generator, per-seed
+      deterministic). Distribution is equivalent; bitwise values are not.
+    * ``edge_set`` (graph-neighbour rejection) is **not** supported here -- the
+      caller must fall back to the legacy path when ``reject_neighbors`` is set.
+    """
+
+    def __init__(self, dataset, sources, targets, weights, n_nodes,
+                 pos_ratio=0.2, batch_size=4096, shuffle=True,
+                 random_state=0, positive_target_mode="binary",
+                 device="cpu"):
+        self.dataset = dataset          # DeviceArrayDataset
+        self.device = device
+        self.n_nodes = int(n_nodes)
+        self.pos_ratio = pos_ratio
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.positive_target_mode = positive_target_mode
+        self.n_pos = int(len(sources))
+        self.num_pos = max(1, int(batch_size * pos_ratio))
+        self.num_neg = batch_size - self.num_pos
+
+        if positive_target_mode not in ("binary", "probability"):
+            raise ValueError(f"Unknown positive_target_mode: {positive_target_mode}")
+        if positive_target_mode == "probability" and weights is None:
+            raise ValueError(
+                "positive_target_mode='probability' requires edge weights, "
+                "but none were loaded."
+            )
+        if self.n_nodes < 2:
+            raise ValueError("DeviceEdgeSampler requires n_nodes >= 2.")
+
+        # Directed edges resident on the device as int64 for index_select.
+        self.sources_t = torch.as_tensor(np.asarray(sources), dtype=torch.long,
+                                         device=device)
+        self.targets_t = torch.as_tensor(np.asarray(targets), dtype=torch.long,
+                                         device=device)
+        if positive_target_mode == "probability":
+            self.weights_t = torch.as_tensor(np.asarray(weights),
+                                             dtype=torch.float32, device=device)
+        else:
+            self.weights_t = None
+
+        # Persistent generator: state advances across batches AND epochs, so
+        # negatives + permutations differ every epoch (matches the numpy path's
+        # "rng advances across epochs" behaviour without an explicit resample).
+        self.gen = torch.Generator(device=device)
+        self.gen.manual_seed(int(random_state))
+        self.perm = None
+        self.pos_idx = 0
+
+    def __len__(self):
+        return int(np.ceil(self.n_pos / self.num_pos))
+
+    def __iter__(self):
+        if self.shuffle:
+            self.perm = torch.randperm(self.n_pos, generator=self.gen,
+                                       device=self.device)
+        else:
+            self.perm = torch.arange(self.n_pos, device=self.device)
+        self.pos_idx = 0
+        return self
+
+    def _sample_negatives(self, n):
+        neg_src = torch.randint(0, self.n_nodes, (n,), generator=self.gen,
+                                device=self.device)
+        # offset in [1, n_nodes-1] -> dst != src, uniform over non-self nodes.
+        offset = torch.randint(1, self.n_nodes, (n,), generator=self.gen,
+                               device=self.device)
+        neg_dst = (neg_src + offset) % self.n_nodes
+        return neg_src, neg_dst
+
+    def __next__(self):
+        if self.perm is None:
+            iter(self)
+        if self.pos_idx >= self.n_pos:
+            raise StopIteration
+
+        end = min(self.pos_idx + self.num_pos, self.n_pos)
+        idx = self.perm[self.pos_idx:end]
+        self.pos_idx += self.num_pos
+
+        p_src = self.sources_t.index_select(0, idx)
+        p_dst = self.targets_t.index_select(0, idx)
+        if self.positive_target_mode == "binary":
+            p_labels = torch.ones(p_src.shape[0], dtype=torch.float32,
+                                  device=self.device)
+        else:
+            p_labels = self.weights_t.index_select(0, idx)
+
+        neg_src, neg_dst = self._sample_negatives(self.num_neg)
+        neg_labels = torch.zeros(self.num_neg, dtype=torch.float32,
+                                 device=self.device)
+
+        all_src = torch.cat([p_src, neg_src])
+        all_dst = torch.cat([p_dst, neg_dst])
+        targets = torch.cat([p_labels, neg_labels])
+
+        src_feats = self.dataset.index_select(all_src)
+        dst_feats = self.dataset.index_select(all_dst)
+        return src_feats, dst_feats, targets
+
+
 class EdgeListBalancedIterator:
     """Balanced batch iterator over a precomputed edge list with on-the-fly
     negatives.

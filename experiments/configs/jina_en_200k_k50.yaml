@@ -36,6 +36,12 @@ train:
   clip_grad_norm: 1.0
   device: cuda
   verbose: false
+  # Input-pipeline optimisation: keep the 200k x 768 matrix fp16-resident on the
+  # 5090 and do all gathers + negative sampling on-device (eliminates per-batch
+  # memmap reads + host->device copies). "auto" already engages here (~0.34 GB
+  # << 10 GB budget); set to "true" to force, "false" for the legacy sampler.
+  gpu_resident_data: auto
+  gpu_resident_vram_budget_gb: 10.0
 
 eval:
   metrics:

@@ -116,6 +116,12 @@ class TrainConfig:
     midnear_enabled: bool = False
     mn_pairs_per_batch: int = 0   # 0 = auto (match num positives in the batch)
     mn_weight_scale: float = 1.0
+    # Input-pipeline optimisation: keep the feature matrix resident on the
+    # training device (fp16 on CUDA) and do all gathers + negative / mid-near
+    # sampling on-device. "auto" = enable on CUDA when X fits the VRAM budget;
+    # True forces it (any device); False keeps the legacy per-batch sampler.
+    gpu_resident_data: str = "auto"          # "auto" | "true" | "false"
+    gpu_resident_vram_budget_gb: float = 10.0
 
 
 @dataclass
