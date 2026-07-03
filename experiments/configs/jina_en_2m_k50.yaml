@@ -1,0 +1,59 @@
+name: jina_en_2m_k50
+description: >
+  Phase 1 baseline: jina-v5-nano 768d fineweb-edu English, 200k-row testbed
+  (seed-42 sample, /data/latent-basemap/jina-en-2m), exact GPU k=50 cosine
+  edge list, binary targets, on-the-fly negatives. Carries the proven mxbai
+  recipe onto the target substrate per plan-basemap-atlas.md Phase 1.
+
+data:
+  source: memmap
+  memmap_dirs:
+    - /data/latent-basemap/jina-en-2m/train
+  input_dim: 768
+  precomputed_edges_path: /data/latent-basemap/jina-en-2m/edges_k50.npz
+  n_neighbors: 50
+  random_seed: 42
+
+model:
+  architecture: residual_bottleneck
+  hidden_dim: 1024
+  n_layers: 3
+  n_components: 2
+  a: 1.0
+  b: 1.0
+
+train:
+  n_epochs: 60
+  batch_size: 8192
+  learning_rate: 0.001
+  correlation_weight: 0.0
+  lr_schedule: cosine
+  warmup_steps: 200
+  total_steps_estimate: 366000
+  use_amp: true
+  pos_ratio: 0.20
+  positive_target_mode: binary
+  clip_grad_norm: 1.0
+  device: cuda
+  verbose: false
+  # Input-pipeline optimisation: keep the 200k x 768 matrix fp16-resident on the
+  # 5090 and do all gathers + negative sampling on-device (eliminates per-batch
+  # memmap reads + host->device copies). "auto" already engages here (~0.34 GB
+  # << 10 GB budget); set to "true" to force, "false" for the legacy sampler.
+  gpu_resident_data: auto
+  gpu_resident_vram_budget_gb: 10.0
+
+eval:
+  metrics:
+    - trustworthiness
+    - distance_correlation
+    - knn_preservation
+  knn_k: 10
+  metric_sample_size: 5000
+  compare_umap: false
+
+logging:
+  use_wandb: false
+  results_dir: experiments/results
+  persist_run: true
+  save_embeddings: false
