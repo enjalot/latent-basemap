@@ -131,6 +131,10 @@ class TrainConfig:
     midnear_enabled: bool = False
     mn_pairs_per_batch: int = 0   # 0 = auto (match num positives in the batch)
     mn_weight_scale: float = 1.0
+    # Weighted edge sampling: draw positive edges ∝ fuzzy membership strength
+    # (reference-UMAP SGD behaviour) instead of a uniform once-per-epoch pass.
+    # Loads edge weights even in binary-target mode. GPU-resident fast path only.
+    weighted_edge_sampling: bool = False
     # Input-pipeline optimisation: keep the feature matrix resident on the
     # training device (fp16 on CUDA) and do all gathers + negative / mid-near
     # sampling on-device. "auto" = enable on CUDA when X fits the VRAM budget;

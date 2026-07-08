@@ -158,6 +158,7 @@ class DeviceEdgeSampler:
     def __init__(self, dataset, sources, targets, weights, n_nodes,
                  pos_ratio=0.2, batch_size=4096, shuffle=True,
                  random_state=0, positive_target_mode="binary",
+                 weighted_edge_sampling=False,
                  device="cpu"):
         self.dataset = dataset          # DeviceArrayDataset
         self.device = device
@@ -180,16 +181,38 @@ class DeviceEdgeSampler:
         if self.n_nodes < 2:
             raise ValueError("DeviceEdgeSampler requires n_nodes >= 2.")
 
-        # Directed edges resident on the device as int64 for index_select.
-        self.sources_t = torch.as_tensor(np.asarray(sources), dtype=torch.long,
+        # Directed edges resident on the device as int32 (half the memory of
+        # int64; matters at >=8M edges). The per-batch selection is cast to long
+        # in __next__ for the feature gather — result-identical, far leaner.
+        self.sources_t = torch.as_tensor(np.asarray(sources), dtype=torch.int32,
                                          device=device)
-        self.targets_t = torch.as_tensor(np.asarray(targets), dtype=torch.long,
+        self.targets_t = torch.as_tensor(np.asarray(targets), dtype=torch.int32,
                                          device=device)
         if positive_target_mode == "probability":
             self.weights_t = torch.as_tensor(np.asarray(weights),
                                              dtype=torch.float32, device=device)
         else:
             self.weights_t = None
+
+        # Weighted edge sampling (reference-UMAP behaviour): draw positive edges
+        # with frequency proportional to their fuzzy membership strength, instead
+        # of a uniform once-per-epoch permutation. Strong local edges get
+        # attracted many more times; weak/long-range edges rarely. Implemented as
+        # inverse-CDF sampling (searchsorted over the normalised cumulative
+        # weights) so it is O(n_pos log n_pos)/epoch and has no category cap.
+        self.weighted_edge_sampling = bool(weighted_edge_sampling)
+        self.sample_cdf = None
+        if self.weighted_edge_sampling:
+            if weights is None:
+                raise ValueError(
+                    "weighted_edge_sampling=True requires edge weights, "
+                    "but none were loaded."
+                )
+            w = torch.as_tensor(np.asarray(weights), dtype=torch.float64,
+                                 device=device)
+            cdf = torch.cumsum(w, dim=0)
+            cdf = cdf / cdf[-1].clamp_min(1e-12)
+            self.sample_cdf = cdf  # float64, monotonic in (0, 1]
 
         # Persistent generator: state advances across batches AND epochs, so
         # negatives + permutations differ every epoch (matches the numpy path's
@@ -203,7 +226,15 @@ class DeviceEdgeSampler:
         return int(np.ceil(self.n_pos / self.num_pos))
 
     def __iter__(self):
-        if self.shuffle:
+        if self.weighted_edge_sampling:
+            # Inverse-CDF draw of n_pos edges ∝ membership strength (with
+            # replacement). Keeps the epoch length identical (n_pos positive
+            # slots) but concentrates attraction on strong local edges.
+            u = torch.rand(self.n_pos, generator=self.gen, device=self.device,
+                           dtype=torch.float64)
+            self.perm = torch.searchsorted(self.sample_cdf, u).clamp_(
+                max=self.n_pos - 1)
+        elif self.shuffle:
             self.perm = torch.randperm(self.n_pos, generator=self.gen,
                                        device=self.device)
         else:
@@ -230,8 +261,8 @@ class DeviceEdgeSampler:
         idx = self.perm[self.pos_idx:end]
         self.pos_idx += self.num_pos
 
-        p_src = self.sources_t.index_select(0, idx)
-        p_dst = self.targets_t.index_select(0, idx)
+        p_src = self.sources_t.index_select(0, idx).long()
+        p_dst = self.targets_t.index_select(0, idx).long()
         if self.positive_target_mode == "binary":
             p_labels = torch.ones(p_src.shape[0], dtype=torch.float32,
                                   device=self.device)

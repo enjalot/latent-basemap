@@ -58,6 +58,7 @@ class ParametricUMAP:
         midnear_enabled=False,
         mn_pairs_per_batch=0,
         mn_weight_scale=1.0,
+        weighted_edge_sampling=False,
         gpu_resident_data="auto",
         gpu_resident_vram_budget_gb=10.0,
     ):
@@ -102,6 +103,7 @@ class ParametricUMAP:
         self.midnear_enabled = midnear_enabled
         self.mn_pairs_per_batch = mn_pairs_per_batch
         self.mn_weight_scale = mn_weight_scale
+        self.weighted_edge_sampling = weighted_edge_sampling
         # GPU-resident fast path (input-pipeline optimisation). "auto" enables it
         # when X fits in VRAM within the budget on CUDA; True forces it on any
         # device (fp16 storage on CUDA, fp32 on CPU); False keeps the legacy path.
@@ -202,7 +204,8 @@ class ParametricUMAP:
         )
         from .datasets.covariates_datasets import VariableDataset
 
-        load_weights = self.positive_target_mode == "probability"
+        load_weights = (self.positive_target_mode == "probability"
+                        or self.weighted_edge_sampling)
         sources, targets, weights, n_nodes = load_edge_arrays(
             edges_path, load_weights=load_weights)
         logging.info(
@@ -245,6 +248,7 @@ class ParametricUMAP:
                 pos_ratio=self.pos_ratio, batch_size=self.batch_size,
                 shuffle=True, random_state=random_state,
                 positive_target_mode=self.positive_target_mode,
+                weighted_edge_sampling=self.weighted_edge_sampling,
                 device=self.device,
             )
             return ddataset, loader, n_pos_edges
