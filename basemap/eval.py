@@ -152,11 +152,16 @@ def knn_ids_full(X, anchor_idx: np.ndarray, k: int, index=None) -> np.ndarray:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _gpu_knn_ids(X, anchor_idx: np.ndarray, k: int, device="cuda", achunk: int = 128):
+def _gpu_knn_ids(X, anchor_idx: np.ndarray, k: int, device="cuda", achunk: int = 128,
+                 return_dist: bool = False):
     """Exact L2 k-NN of ``anchor_idx`` among the full corpus X, self-excluded —
     same result as ``knn_ids_full`` but via chunked GPU matmul (~100x faster at
     scale). fp32 (fp16 misranks near-unit-norm neighbours). Corpus resident on
     device (fp32 ≈ N*d*4 B; fits to ~10M on 32 GB, >10M needs corpus chunking).
+
+    ``return_dist``: also return (m,k) true L2 distances to those neighbours
+    (radii for density_preservation) — computed from the *same* topk matrix, so
+    recall and density share one GPU pass instead of two full-corpus kNNs.
     """
     import torch
     Xt = torch.from_numpy(np.ascontiguousarray(np.asarray(X))).to(device, torch.float32)
@@ -165,21 +170,86 @@ def _gpu_knn_ids(X, anchor_idx: np.ndarray, k: int, device="cuda", achunk: int =
     for j in range(0, Xt.shape[0], 1_000_000):
         xn[j:j + 1_000_000] = Xt[j:j + 1_000_000].pow(2).sum(1)
     aidx = np.asarray(anchor_idx)
-    A = Xt.index_select(0, torch.as_tensor(aidx, device=device, dtype=torch.long))
+    aidx_t = torch.as_tensor(aidx, device=device, dtype=torch.long)
+    A = Xt.index_select(0, aidx_t)
+    # cap anchor-chunk so the (achunk x N) distance matrix stays small at scale
+    # (128 x 8M x 4B = 3.8 GB would OOM on top of the 24.6 GB fp32 corpus).
+    N, D = Xt.shape
+    achunk = min(achunk, max(8, int(2e8 // max(N, 1))))
+    # Low-dim spaces (2-D atlas coords) need EXACT ranking: the ||q||^2+||x||^2
+    # -2q·x expansion can't resolve near-zero distances between duplicate points
+    # (fp cancellation on values that are truly 0), which corrupts the smallest
+    # radii and destroys the density log-log correlation. Unit-norm high-D has
+    # no such cancellation, so it keeps the fast matmul path.
+    low_dim = D <= 16
     out = np.empty((len(aidx), k), dtype=np.int64)
+    dout = np.empty((len(aidx), k), dtype=np.float64) if return_dist else None
     for i in range(0, A.shape[0], achunk):
         q = A[i:i + achunk]
-        # rank by L2^2 = ||q||^2 + ||x||^2 - 2 q·x; the ||q||^2 term is constant
-        # per row (irrelevant to per-anchor ranking). In-place to avoid copies.
-        d2 = q @ Xt.T                          # (c,N)
-        d2.mul_(-2.0).add_(xn)                 # -> ||x||^2 - 2 q·x  (rank-equiv)
-        ti = torch.topk(d2, k + 1, dim=1, largest=False).indices.cpu().numpy()
+        if low_dim:
+            d2 = torch.zeros((q.shape[0], N), device=device)   # exact sum of sq diffs
+            for c in range(D):
+                diff = q[:, c:c + 1] - Xt[:, c]                # (c,N) broadcast
+                d2.addcmul_(diff, diff)
+        else:
+            # rank by L2^2 = ||q||^2 + ||x||^2 - 2 q·x; the ||q||^2 term is
+            # constant per row (irrelevant to ranking). In-place to avoid copies.
+            d2 = q @ Xt.T                      # (c,N)
+            d2.mul_(-2.0).add_(xn)            # -> ||x||^2 - 2 q·x  (rank-equiv)
+        ti = torch.topk(d2, k + 1, dim=1, largest=False).indices   # (c,k+1) on GPU
+        if return_dist:
+            # Exact L2 to the k+1 candidates by *gathering* them and subtracting
+            # directly — NOT the ||q||^2+||x||^2-2q·x expansion, which loses all
+            # precision for small low-D radii (coords O(10), gaps O(0.01) →
+            # catastrophic fp32 cancellation). Only k+1 neighbours, so cheap.
+            nb = Xt.index_select(0, ti.reshape(-1)).reshape(ti.shape[0], k + 1, -1)
+            tv = (nb - q[:, None, :]).norm(dim=2).cpu().numpy()     # (c,k+1) exact
+        ti = ti.cpu().numpy()
         s = aidx[i:i + achunk]
         for r in range(ti.shape[0]):
-            row = ti[r][ti[r] != s[r]][:k]
-            out[i + r] = row if len(row) == k else ti[r][:k]
+            keep = ti[r] != s[r]
+            row = ti[r][keep][:k]
+            if len(row) == k:
+                out[i + r] = row
+                if return_dist:
+                    dout[i + r] = tv[r][keep][:k]
+            else:                              # anchor not in its own top-(k+1)
+                out[i + r] = ti[r][:k]
+                if return_dist:
+                    dout[i + r] = tv[r][:k]
     del Xt, xn, A
     torch.cuda.empty_cache()
+    return (out, dout) if return_dist else out
+
+
+def gpu_score(X_high, Z_low, anchor_idx: np.ndarray, k_recall=(10, 50),
+              k_density: int = 15, device="cuda"):
+    """Fused GPU scoring — recall@k *and* density_preservation from a single
+    high-D and a single low-D full-corpus kNN pass (two passes total instead of
+    four). The recall neighbours (indices) and the density radii (distances) both
+    come out of the same topk matrix, so density is essentially free once recall
+    is computed. Matches ``knn_recall`` + ``density_preservation`` semantics
+    (exact L2, self-excluded, radius = mean dist to k nearest). Returns a dict
+    ``{"recall@10":…, "recall@50":…, "density":…}``.
+    """
+    kr = tuple(k_recall) if not isinstance(k_recall, int) else (k_recall,)
+    kmax = max(max(kr), k_density)
+    hi_idx, hi_dist = _gpu_knn_ids(X_high, anchor_idx, kmax, device=device, return_dist=True)
+    lo_idx, lo_dist = _gpu_knn_ids(Z_low, anchor_idx, kmax, device=device, return_dist=True)
+    m = len(anchor_idx)
+    out = {}
+    for k in kr:
+        per = np.fromiter(
+            (len(np.intersect1d(hi_idx[i, :k], lo_idx[i, :k])) / k for i in range(m)),
+            dtype=np.float64, count=m)
+        out[f"recall@{k}"] = float(per.mean())
+    # density: mean radius to k nearest (self already excluded, dists ascending)
+    rh = hi_dist[:, :k_density].mean(axis=1)
+    rl = lo_dist[:, :k_density].mean(axis=1)
+    eps = 1e-12
+    log_rh, log_rl = np.log(rh + eps), np.log(rl + eps)
+    out["density"] = (float(np.corrcoef(log_rh, log_rl)[0, 1])
+                      if np.std(log_rh) > eps and np.std(log_rl) > eps else float("nan"))
     return out
 
 
@@ -339,14 +409,32 @@ def triplet_accuracy(X_high, Z_low, n_triplets: int = 100_000, seed: int = 42):
 
 
 def density_preservation(X_high, Z_low, anchor_idx: np.ndarray, k: int = 15,
-                         high_index=None, low_index=None):
+                         high_index=None, low_index=None, use_gpu=False):
     """densMAP-style density preservation (lit ``05-densmap.md``).
 
     Local radius = mean distance to the k nearest neighbours. Reports the
     Pearson correlation of log local radii (high-D vs 2D). Returns
     ``(corr, log_r_high, log_r_low)`` where the log-radius arrays align with
     ``anchor_idx``.
+
+    ``use_gpu=True`` computes exact radii via chunked GPU matmul (100x faster and
+    numerically correct). PREFER IT for low-D atlas coords: the default FAISS path
+    (``IndexFlatL2`` batched search) evaluates L2 through the ``||x||^2+||q||^2
+    -2xq`` BLAS expansion, which catastrophically cancels for near-duplicate 2-D
+    points (coords O(10), true dist^2 O(1e-6) -> clamped to 0 by ``max(.,0)``).
+    That manufactures spurious zero radii and biases the correlation (upward at
+    low N, downward at high density) — the CPU numbers are NOT reliable at scale.
     """
+    if use_gpu:
+        _, rh = _gpu_knn_ids(np.asarray(X_high), anchor_idx, k, return_dist=True)
+        _, rl = _gpu_knn_ids(np.asarray(Z_low), anchor_idx, k, return_dist=True)
+        rh, rl = rh.mean(axis=1), rl.mean(axis=1)
+        eps = 1e-12
+        log_rh, log_rl = np.log(rh + eps), np.log(rl + eps)
+        corr = (float(np.corrcoef(log_rh, log_rl)[0, 1])
+                if np.std(log_rh) > eps and np.std(log_rl) > eps else float("nan"))
+        return corr, log_rh, log_rl
+
     import faiss
 
     if high_index is None:
