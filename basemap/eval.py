@@ -160,14 +160,19 @@ def _gpu_knn_ids(X, anchor_idx: np.ndarray, k: int, device="cuda", achunk: int =
     """
     import torch
     Xt = torch.from_numpy(np.ascontiguousarray(np.asarray(X))).to(device, torch.float32)
-    xn = (Xt * Xt).sum(1)                                    # (N,) ||row||^2
+    # ||row||^2 in blocks — (Xt*Xt) would materialize a full second copy of Xt.
+    xn = torch.empty(Xt.shape[0], device=device)
+    for j in range(0, Xt.shape[0], 1_000_000):
+        xn[j:j + 1_000_000] = Xt[j:j + 1_000_000].pow(2).sum(1)
     aidx = np.asarray(anchor_idx)
     A = Xt.index_select(0, torch.as_tensor(aidx, device=device, dtype=torch.long))
-    an = (A * A).sum(1)
     out = np.empty((len(aidx), k), dtype=np.int64)
     for i in range(0, A.shape[0], achunk):
         q = A[i:i + achunk]
-        d2 = an[i:i + achunk, None] + xn[None, :] - 2.0 * (q @ Xt.T)   # (c,N) L2^2
+        # rank by L2^2 = ||q||^2 + ||x||^2 - 2 q·x; the ||q||^2 term is constant
+        # per row (irrelevant to per-anchor ranking). In-place to avoid copies.
+        d2 = q @ Xt.T                          # (c,N)
+        d2.mul_(-2.0).add_(xn)                 # -> ||x||^2 - 2 q·x  (rank-equiv)
         ti = torch.topk(d2, k + 1, dim=1, largest=False).indices.cpu().numpy()
         s = aidx[i:i + achunk]
         for r in range(ti.shape[0]):
