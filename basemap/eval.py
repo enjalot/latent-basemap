@@ -152,6 +152,32 @@ def knn_ids_full(X, anchor_idx: np.ndarray, k: int, index=None) -> np.ndarray:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _gpu_knn_ids(X, anchor_idx: np.ndarray, k: int, device="cuda", achunk: int = 128):
+    """Exact L2 k-NN of ``anchor_idx`` among the full corpus X, self-excluded —
+    same result as ``knn_ids_full`` but via chunked GPU matmul (~100x faster at
+    scale). fp32 (fp16 misranks near-unit-norm neighbours). Corpus resident on
+    device (fp32 ≈ N*d*4 B; fits to ~10M on 32 GB, >10M needs corpus chunking).
+    """
+    import torch
+    Xt = torch.from_numpy(np.ascontiguousarray(np.asarray(X))).to(device, torch.float32)
+    xn = (Xt * Xt).sum(1)                                    # (N,) ||row||^2
+    aidx = np.asarray(anchor_idx)
+    A = Xt.index_select(0, torch.as_tensor(aidx, device=device, dtype=torch.long))
+    an = (A * A).sum(1)
+    out = np.empty((len(aidx), k), dtype=np.int64)
+    for i in range(0, A.shape[0], achunk):
+        q = A[i:i + achunk]
+        d2 = an[i:i + achunk, None] + xn[None, :] - 2.0 * (q @ Xt.T)   # (c,N) L2^2
+        ti = torch.topk(d2, k + 1, dim=1, largest=False).indices.cpu().numpy()
+        s = aidx[i:i + achunk]
+        for r in range(ti.shape[0]):
+            row = ti[r][ti[r] != s[r]][:k]
+            out[i + r] = row if len(row) == k else ti[r][:k]
+    del Xt, xn, A
+    torch.cuda.empty_cache()
+    return out
+
+
 def knn_recall(
     X_high,
     Z_low,
@@ -160,22 +186,31 @@ def knn_recall(
     high_index=None,
     low_index=None,
     true_neighbors: Optional[np.ndarray] = None,
+    use_gpu: bool = False,
 ):
     """kNN recall: fraction of each anchor's true high-D neighbours that are also
     among its 2D neighbours, both computed against the **full** dataset.
 
-    Returns ``(mean_recall, per_anchor_recall)`` where ``per_anchor_recall`` is a
-    float array aligned with ``anchor_idx``.
-    """
-    if high_index is None:
-        high_index = build_flat_l2_index(X_high)
-    if low_index is None:
-        low_index = build_flat_l2_index(Z_low)
+    ``use_gpu=True`` computes both neighbour sets via GPU matmul (validated to
+    match the CPU FAISS path; ~100-400x faster at scale). ``true_neighbors`` can
+    be precomputed and passed to skip recomputing the (map-independent) high-D
+    neighbours across many maps of the same corpus.
 
-    if true_neighbors is None:
-        true_neighbors = knn_ids_full(X_high, anchor_idx, k, index=high_index)
-    q_low = read_rows(Z_low, anchor_idx)
-    pred = _knn_excluding_self(low_index, q_low, anchor_idx, k)
+    Returns ``(mean_recall, per_anchor_recall)``.
+    """
+    if use_gpu:
+        if true_neighbors is None:
+            true_neighbors = _gpu_knn_ids(X_high, anchor_idx, k)
+        pred = _gpu_knn_ids(Z_low, anchor_idx, k)
+    else:
+        if high_index is None:
+            high_index = build_flat_l2_index(X_high)
+        if low_index is None:
+            low_index = build_flat_l2_index(Z_low)
+        if true_neighbors is None:
+            true_neighbors = knn_ids_full(X_high, anchor_idx, k, index=high_index)
+        q_low = read_rows(Z_low, anchor_idx)
+        pred = _knn_excluding_self(low_index, q_low, anchor_idx, k)
 
     per = np.empty(len(anchor_idx), dtype=np.float64)
     for i in range(len(anchor_idx)):
