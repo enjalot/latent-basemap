@@ -221,12 +221,34 @@ class DeviceEdgeSampler:
         self.gen.manual_seed(int(random_state))
         self.perm = None
         self.pos_idx = 0
+        self.batch_no = 0
+        # Per-batch sampling: for very large edge lists, building a full-epoch
+        # permutation is prohibitive — torch.randperm(n_pos) needs ~3x the array
+        # in transient sort workspace (e.g. ~14 GB at 605M edges), which OOMs the
+        # fast path. Above the threshold, draw each batch's indices on the fly
+        # (with replacement) — O(batch) memory, statistically equivalent for SGD.
+        import os
+        self._per_batch = self.n_pos > int(
+            os.environ.get("PER_BATCH_EDGE_THRESHOLD", 400_000_000))
 
     def __len__(self):
         return int(np.ceil(self.n_pos / self.num_pos))
 
-    def __iter__(self):
+    def _draw_idx(self, m):
+        """Draw m positive-edge indices (per-batch mode)."""
         if self.weighted_edge_sampling:
+            u = torch.rand(m, generator=self.gen, device=self.device,
+                           dtype=torch.float64)
+            return torch.searchsorted(self.sample_cdf, u).clamp_(max=self.n_pos - 1)
+        return torch.randint(0, self.n_pos, (m,), generator=self.gen,
+                             device=self.device)
+
+    def __iter__(self):
+        self.pos_idx = 0
+        self.batch_no = 0
+        if self._per_batch:
+            self.perm = None            # sampled per batch in __next__
+        elif self.weighted_edge_sampling:
             # Inverse-CDF draw of n_pos edges ∝ membership strength (with
             # replacement). Keeps the epoch length identical (n_pos positive
             # slots) but concentrates attraction on strong local edges.
@@ -239,7 +261,6 @@ class DeviceEdgeSampler:
                                        device=self.device)
         else:
             self.perm = torch.arange(self.n_pos, device=self.device)
-        self.pos_idx = 0
         return self
 
     def _sample_negatives(self, n):
@@ -252,14 +273,19 @@ class DeviceEdgeSampler:
         return neg_src, neg_dst
 
     def __next__(self):
-        if self.perm is None:
-            iter(self)
-        if self.pos_idx >= self.n_pos:
-            raise StopIteration
-
-        end = min(self.pos_idx + self.num_pos, self.n_pos)
-        idx = self.perm[self.pos_idx:end]
-        self.pos_idx += self.num_pos
+        if self._per_batch:
+            if self.batch_no >= len(self):
+                raise StopIteration
+            self.batch_no += 1
+            idx = self._draw_idx(self.num_pos)
+        else:
+            if self.perm is None:
+                iter(self)
+            if self.pos_idx >= self.n_pos:
+                raise StopIteration
+            end = min(self.pos_idx + self.num_pos, self.n_pos)
+            idx = self.perm[self.pos_idx:end]
+            self.pos_idx += self.num_pos
 
         p_src = self.sources_t.index_select(0, idx).long()
         p_dst = self.targets_t.index_select(0, idx).long()
