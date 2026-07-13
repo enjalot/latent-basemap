@@ -427,3 +427,121 @@ class EdgeListBalancedIterator:
             edge_batch = [edge_batch[i] for i in perm]
             labels = labels[perm]
         return edge_batch, labels
+
+
+class HostStreamEdgeSampler:
+    """Hybrid edge sampler (plan-100m B1): X resident on GPU, positive edges +
+    weighted-sampling CDF resident on the HOST. A background daemon thread
+    pre-draws positive-edge batches (weighted searchsorted or uniform) and
+    pushes pinned (src_node, dst_node) index tensors into a bounded queue;
+    ``__next__`` copies them H2D (non_blocking), draws negatives on-device, and
+    gathers features from the resident X via ``DeviceArrayDataset.index_select``.
+
+    Motivation: at k=50 fuzzy the edge arrays + weighted CDF (~23 GB at 1.157B
+    edges) don't fit GPU alongside X, but X alone does. Keeping edges/CDF on
+    host (plentiful RAM) and prefetching batches keeps the GPU fed without the
+    fully-host legacy path's input-bound stall. Same on-device output contract
+    as ``DeviceEdgeSampler`` -> plugs into ``_fast_device_path``.
+    """
+
+    def __init__(self, dataset, sources, targets, weights, n_nodes,
+                 pos_ratio=0.2, batch_size=4096, random_state=0,
+                 positive_target_mode="binary", weighted_edge_sampling=False,
+                 device="cuda", n_workers=2, queue_size=8):
+        import threading, queue
+        self.dataset = dataset            # DeviceArrayDataset (X resident)
+        self.device = device
+        self.n_nodes = int(n_nodes)
+        self.batch_size = batch_size
+        self.positive_target_mode = positive_target_mode
+        self.weighted_edge_sampling = weighted_edge_sampling
+        self.n_pos = int(len(sources))
+        self.num_pos = max(1, int(batch_size * pos_ratio))
+        self.num_neg = batch_size - self.num_pos
+        if self.n_nodes < 2:
+            raise ValueError("HostStreamEdgeSampler requires n_nodes >= 2.")
+
+        # Host-resident edges (int32) + f64 CDF (precision-safe on host RAM).
+        self._src_h = np.ascontiguousarray(np.asarray(sources), dtype=np.int32)
+        self._dst_h = np.ascontiguousarray(np.asarray(targets), dtype=np.int32)
+        self._cdf_h = None
+        if weighted_edge_sampling:
+            w = np.asarray(weights, dtype=np.float64)
+            cdf = np.cumsum(w)
+            self._cdf_h = cdf / max(cdf[-1], 1e-12)   # f64 host, monotonic (0,1]
+        # binary targets use a constant ones vector; probability mode gathers weights
+        self._w_h = (np.asarray(weights, dtype=np.float32)
+                     if positive_target_mode == "probability" else None)
+
+        self._q = queue.Queue(maxsize=queue_size)
+        self._stop = threading.Event()
+        self._threads = []
+        for wi in range(n_workers):
+            t = threading.Thread(target=self._produce, args=(random_state + 1 + wi,),
+                                 daemon=True)
+            t.start()
+            self._threads.append(t)
+        # device-side RNG for negatives (matches DeviceEdgeSampler semantics)
+        self._gen = torch.Generator(device=device)
+        self._gen.manual_seed(int(random_state))
+
+    def _produce(self, seed):
+        """Background: draw positive-edge node batches, pin, enqueue."""
+        rng = np.random.default_rng(seed)
+        m = self.num_pos
+        while not self._stop.is_set():
+            if self.weighted_edge_sampling:
+                u = rng.random(m)                                   # GIL-free-ish
+                idx = np.searchsorted(self._cdf_h, u)              # releases GIL
+                np.clip(idx, 0, self.n_pos - 1, out=idx)
+            else:
+                idx = rng.integers(0, self.n_pos, size=m)
+            ps = torch.from_numpy(self._src_h[idx].astype(np.int64))
+            pd = torch.from_numpy(self._dst_h[idx].astype(np.int64))
+            item = (ps.pin_memory(), pd.pin_memory())
+            if self._w_h is not None:
+                pw = torch.from_numpy(self._w_h[idx]).pin_memory()
+                item = item + (pw,)
+            try:
+                self._q.put(item, timeout=1.0)
+            except Exception:
+                if self._stop.is_set():
+                    break
+
+    def __len__(self):
+        return int(np.ceil(self.n_pos / self.num_pos))
+
+    def _sample_negatives(self, n):
+        neg_src = torch.randint(0, self.n_nodes, (n,), generator=self._gen,
+                                device=self.device)
+        offset = torch.randint(1, self.n_nodes, (n,), generator=self._gen,
+                               device=self.device)
+        neg_dst = (neg_src + offset) % self.n_nodes
+        return neg_src, neg_dst
+
+    def __iter__(self):
+        self._batch_no = 0
+        return self
+
+    def __next__(self):
+        if self._batch_no >= len(self):
+            raise StopIteration
+        self._batch_no += 1
+        item = self._q.get()
+        p_src = item[0].to(self.device, non_blocking=True)
+        p_dst = item[1].to(self.device, non_blocking=True)
+        if self.positive_target_mode == "binary":
+            p_labels = torch.ones(p_src.shape[0], dtype=torch.float32, device=self.device)
+        else:
+            p_labels = item[2].to(self.device, non_blocking=True)
+        neg_src, neg_dst = self._sample_negatives(self.num_neg)
+        neg_labels = torch.zeros(self.num_neg, dtype=torch.float32, device=self.device)
+        all_src = torch.cat([p_src, neg_src])
+        all_dst = torch.cat([p_dst, neg_dst])
+        targets = torch.cat([p_labels, neg_labels])
+        src_feats = self.dataset.index_select(all_src)
+        dst_feats = self.dataset.index_select(all_dst)
+        return src_feats, dst_feats, targets
+
+    def close(self):
+        self._stop.set()

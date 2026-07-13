@@ -199,7 +199,7 @@ class ParametricUMAP:
         """
         from .datasets.edge_list_dataset import (
             EdgeListBalancedIterator, LazyArrayDataset,
-            DeviceArrayDataset, DeviceEdgeSampler,
+            DeviceArrayDataset, DeviceEdgeSampler, HostStreamEdgeSampler,
             load_edge_arrays, build_edge_key_set,
         )
         from .datasets.covariates_datasets import VariableDataset
@@ -252,6 +252,36 @@ class ParametricUMAP:
                 device=self.device,
             )
             return ddataset, loader, n_pos_edges
+
+        # Hybrid path (B1): X alone fits resident but X+edges+CDF don't (the
+        # k=50 fuzzy edge wall). Keep X on GPU; stream positive edges + weighted
+        # CDF from host via background workers with pinned prefetch. Negatives
+        # + gathers stay on-device. Enabled when gpu_resident_data is not False,
+        # device is CUDA, edge_set is unused, and X fits the resident budget.
+        is_cuda = "cuda" in str(self.device)
+        want_resident = str(self.gpu_resident_data).lower() not in ("false", "0", "off", "none")
+        if want_resident and is_cuda and edge_set is None:
+            x_bytes = n_train * n_features * 2  # fp16 on cuda
+            try:
+                free_bytes, _ = torch.cuda.mem_get_info(self.device)
+            except Exception:
+                free_bytes = float(self.gpu_resident_vram_budget_gb) * 1e9
+            x_budget = min(float(self.gpu_resident_vram_budget_gb) * 1e9, free_bytes * 0.9)
+            if x_bytes <= x_budget:
+                logging.info("Edge-list mode: HYBRID (X resident %.1f GB + host-streamed "
+                             "edges/CDF; %s).", x_bytes / 1e9, reason)
+                ddataset = DeviceArrayDataset(X, self.device)
+                self._X_dev = ddataset
+                self._fast_device_path = True
+                loader = HostStreamEdgeSampler(
+                    ddataset, sources, targets, weights, n_nodes=n_train,
+                    pos_ratio=self.pos_ratio, batch_size=self.batch_size,
+                    random_state=random_state,
+                    positive_target_mode=self.positive_target_mode,
+                    weighted_edge_sampling=self.weighted_edge_sampling,
+                    device=self.device,
+                )
+                return ddataset, loader, n_pos_edges
 
         logging.info("Edge-list mode: legacy sampler path (%s).", reason)
         loader = EdgeListBalancedIterator(
@@ -779,6 +809,7 @@ class ParametricUMAP:
         collect_stats = bool(use_wandb or verbose)
 
         global_step = 0
+        self._train_t0 = time.perf_counter()
         consecutive_nonfinite_losses = 0
         for epoch in range(self.n_epochs):
             epoch_loss_t = torch.zeros((), device=self.device)
@@ -980,6 +1011,24 @@ class ParametricUMAP:
                 epoch_corr_t += corr_loss.detach()
                 num_batches += 1
                 global_step += 1
+
+                # Step-rate logging every 10k steps (plan B1: never fly blind on
+                # a long run again). Reports steps/s over the last window + ETA.
+                if global_step % 10000 == 0:
+                    now = time.perf_counter()
+                    if not hasattr(self, "_rate_t0"):
+                        self._rate_t0 = self._train_t0 if hasattr(self, "_train_t0") else now
+                        self._rate_s0 = 0
+                    dt = now - self._rate_t0
+                    dsteps = global_step - self._rate_s0
+                    rate = dsteps / dt if dt > 0 else 0.0
+                    total_planned = self.n_epochs * len(loader)
+                    remaining = max(0, total_planned - global_step)
+                    eta_h = (remaining / rate / 3600.0) if rate > 0 else float("nan")
+                    logging.info("  step %d/%d | %.0f steps/s | ETA %.1fh",
+                                 global_step, total_planned, rate, eta_h)
+                    self._rate_t0 = now
+                    self._rate_s0 = global_step
 
                 if self._max_train_steps is not None and global_step == self._bench_warmup:
                     if 'cuda' in str(self.device):
