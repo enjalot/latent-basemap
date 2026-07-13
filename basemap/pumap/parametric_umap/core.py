@@ -169,9 +169,15 @@ class ParametricUMAP:
         is_cuda = "cuda" in str(self.device)
         storage_bytes = 2 if is_cuda else 4  # fp16 on cuda, fp32 elsewhere
         x_bytes = n_train * n_features * storage_bytes
-        edge_bytes = n_pos_edges * 2 * 8      # src + dst int64 resident
+        # DeviceEdgeSampler holds src+dst as int32 pairs (8 B/edge). Weighted
+        # sampling adds an f64 CDF (8 B/edge); probability mode adds f32 weights
+        # (4 B/edge). The old `2*8` int64 figure was only accidentally right for
+        # the binary+weighted case (8+8=16 B/edge).
+        edge_bytes = n_pos_edges * 2 * 4      # src + dst int32 resident
+        if self.weighted_edge_sampling:
+            edge_bytes += n_pos_edges * 8     # f64 sampling CDF
         if self.positive_target_mode == "probability":
-            edge_bytes += n_pos_edges * 4     # fp32 weights
+            edge_bytes += n_pos_edges * 4     # f32 weights
         need = x_bytes + edge_bytes
         if mode in ("true", "1", "on", "force"):
             return True, f"forced (need ~{need/1e9:.2f} GB on device)"
@@ -1112,6 +1118,10 @@ class ParametricUMAP:
                 wandb.log(log_dict)
 
         self.is_fitted = True
+        # Stop HostStreamEdgeSampler producer threads so they don't keep drawing
+        # and discarding batches during the final transform / downstream scoring.
+        if hasattr(loader, "close"):
+            loader.close()
         if use_wandb:
             wandb.finish()
         return self

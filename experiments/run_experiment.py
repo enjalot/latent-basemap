@@ -58,19 +58,19 @@ logging.basicConfig(
 # ─── Run persistence ─────────────────────────────────────────────────────────
 
 def _write_coords_parquet(path, Z, ls_index):
-    """Write the final 2D projection as coords.parquet with columns
-    x, y (float32) and ls_index (int64 original row index)."""
+    """Write the final projection as coords.parquet with one float32 column
+    per component (x, y[, z, c3, c4, ...]) and ls_index (int64 original row
+    index). Historically hardcoded x,y, which silently dropped z on
+    n_components=3 runs."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     Z = np.asarray(Z, dtype=np.float32)
     ls_index = np.asarray(ls_index, dtype=np.int64)
-    table = pa.table({
-        "x": pa.array(Z[:, 0], type=pa.float32()),
-        "y": pa.array(Z[:, 1], type=pa.float32()),
-        "ls_index": pa.array(ls_index, type=pa.int64()),
-    })
-    pq.write_table(table, path)
+    names = ["x", "y", "z"] + [f"c{i}" for i in range(3, Z.shape[1])]
+    cols = {names[i]: pa.array(Z[:, i], type=pa.float32()) for i in range(Z.shape[1])}
+    cols["ls_index"] = pa.array(ls_index, type=pa.int64())
+    pq.write_table(pa.table(cols), path)
 
 
 def _write_anchor_targets_parquet(path, T, ls_index):

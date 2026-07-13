@@ -475,6 +475,7 @@ class HostStreamEdgeSampler:
 
         self._q = queue.Queue(maxsize=queue_size)
         self._stop = threading.Event()
+        self._worker_err = None   # first worker exception, surfaced by __next__
         self._threads = []
         for wi in range(n_workers):
             t = threading.Thread(target=self._produce, args=(random_state + 1 + wi,),
@@ -486,27 +487,36 @@ class HostStreamEdgeSampler:
         self._gen.manual_seed(int(random_state))
 
     def _produce(self, seed):
-        """Background: draw positive-edge node batches, pin, enqueue."""
+        """Background: draw positive-edge node batches, pin, enqueue. Captures
+        any exception into ``self._worker_err`` so ``__next__`` can re-raise it
+        instead of hanging on a silently-dead worker pool."""
+        import queue as _queue
         rng = np.random.default_rng(seed)
         m = self.num_pos
-        while not self._stop.is_set():
-            if self.weighted_edge_sampling:
-                u = rng.random(m)                                   # GIL-free-ish
-                idx = np.searchsorted(self._cdf_h, u)              # releases GIL
-                np.clip(idx, 0, self.n_pos - 1, out=idx)
-            else:
-                idx = rng.integers(0, self.n_pos, size=m)
-            ps = torch.from_numpy(self._src_h[idx].astype(np.int64))
-            pd = torch.from_numpy(self._dst_h[idx].astype(np.int64))
-            item = (ps.pin_memory(), pd.pin_memory())
-            if self._w_h is not None:
-                pw = torch.from_numpy(self._w_h[idx]).pin_memory()
-                item = item + (pw,)
-            try:
-                self._q.put(item, timeout=1.0)
-            except Exception:
-                if self._stop.is_set():
-                    break
+        try:
+            while not self._stop.is_set():
+                if self.weighted_edge_sampling:
+                    u = rng.random(m)                                   # GIL-free-ish
+                    idx = np.searchsorted(self._cdf_h, u)              # releases GIL
+                    np.clip(idx, 0, self.n_pos - 1, out=idx)
+                else:
+                    idx = rng.integers(0, self.n_pos, size=m)
+                ps = torch.from_numpy(self._src_h[idx].astype(np.int64))
+                pd = torch.from_numpy(self._dst_h[idx].astype(np.int64))
+                item = (ps.pin_memory(), pd.pin_memory())
+                if self._w_h is not None:
+                    pw = torch.from_numpy(self._w_h[idx]).pin_memory()
+                    item = item + (pw,)
+                # Retry the SAME drawn batch until enqueued (no-discard) or stop.
+                while not self._stop.is_set():
+                    try:
+                        self._q.put(item, timeout=1.0)
+                        break
+                    except _queue.Full:
+                        continue
+        except BaseException as e:   # noqa: BLE001 — surface to the main thread
+            if self._worker_err is None:
+                self._worker_err = e
 
     def __len__(self):
         return int(np.ceil(self.n_pos / self.num_pos))
@@ -524,10 +534,24 @@ class HostStreamEdgeSampler:
         return self
 
     def __next__(self):
+        import queue as _queue
         if self._batch_no >= len(self):
             raise StopIteration
         self._batch_no += 1
-        item = self._q.get()
+        # Hang-safe pull: bounded wait + worker-liveness check. Never blocks
+        # forever if the producer pool dies mid-run (unattended multi-hour runs).
+        while True:
+            try:
+                item = self._q.get(timeout=60)
+                break
+            except _queue.Empty:
+                if self._worker_err is not None:
+                    raise RuntimeError(
+                        "HostStreamEdgeSampler producer died") from self._worker_err
+                if not any(t.is_alive() for t in self._threads):
+                    raise RuntimeError(
+                        "HostStreamEdgeSampler: all producer threads dead, no batch in 60s")
+                # workers alive but slow — keep waiting
         p_src = item[0].to(self.device, non_blocking=True)
         p_dst = item[1].to(self.device, non_blocking=True)
         if self.positive_target_mode == "binary":
@@ -544,4 +568,8 @@ class HostStreamEdgeSampler:
         return src_feats, dst_feats, targets
 
     def close(self):
+        """Stop producer threads (call when training ends so daemons don't keep
+        drawing-and-discarding batches during scoring/transform)."""
         self._stop.set()
+        for t in getattr(self, "_threads", []):
+            t.join(timeout=2.0)
