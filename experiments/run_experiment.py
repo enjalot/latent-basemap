@@ -383,6 +383,12 @@ def run_umap_baseline(X_train, X_test, cfg: ExperimentConfig) -> dict:
 
 def run_single_experiment(cfg: ExperimentConfig) -> dict:
     """Run one experiment end-to-end. Returns results dict."""
+    # P0-5: a CUDA training run must hold the GPU lease (launched via the
+    # controller or an in-process GpuLease). Refuses a direct unleased CUDA
+    # launch unless BASEMAP_UNSAFE_NO_LEASE=1. CPU runs are exempt.
+    if "cuda" in str(getattr(cfg.train, "device", "cpu")):
+        from basemap.run_controller import require_active_lease
+        require_active_lease()
     run_dir = cfg.run_dir()
     os.makedirs(run_dir, exist_ok=True)
 

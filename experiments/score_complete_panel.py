@@ -97,6 +97,13 @@ def main():
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
+    # P0-5: the GPU decision scorer must run under a held lease (controller or
+    # in-process). Exempt when no CUDA (CPU scoring) or explicit unsafe override.
+    import torch as _torch
+    if _torch.cuda.is_available():
+        from basemap.run_controller import require_active_lease
+        require_active_lease()
+
     from basemap.pumap.parametric_umap.core import ParametricUMAP
     # cap corpus_chunk so query-tile × corpus-chunk cross matrices stay bounded
     # (4096 × 500k ≈ 2 GB fp32) even when the corpus is 2M+.

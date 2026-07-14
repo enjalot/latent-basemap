@@ -22,7 +22,16 @@ from __future__ import annotations
 import os, sys, json, time, uuid, fcntl, signal, subprocess, datetime, dataclasses, hashlib
 from typing import Optional
 
-LEASE_PATH = os.environ.get("BASEMAP_GPU_LEASE", "/data/latent-basemap/.gpu_lease")
+_DEFAULT_LEASE = "/data/latent-basemap/.gpu_lease"
+
+
+def _lease_path() -> str:
+    """Resolve the lease path at CALL time so BASEMAP_GPU_LEASE set after import
+    (e.g. in tests, or per-launch) is honoured."""
+    return os.environ.get("BASEMAP_GPU_LEASE", _DEFAULT_LEASE)
+
+
+LEASE_PATH = _lease_path()   # back-compat module constant (import-time value)
 
 
 def _utcnow() -> str:
@@ -46,6 +55,51 @@ def _file_sha(path: str, cap=1 << 20) -> Optional[str]:
         return h.hexdigest()[:16]
     except Exception:
         return None
+
+
+def _output_sig(path: str) -> Optional[dict]:
+    """Content signature of an output (size + full-stream sha), or None if absent."""
+    try:
+        st = os.stat(path)
+        h = hashlib.sha1()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return {"size": st.st_size, "sha": h.hexdigest()[:16]}
+    except FileNotFoundError:
+        return None
+
+
+def _job_spec_digest(job) -> str:
+    """Bind a done record to the job's identity: argv + cwd + declared outputs.
+    A changed argv/config/output set cannot reuse an old done record (P0-5)."""
+    payload = json.dumps({"argv": list(job.argv), "cwd": job.cwd or "",
+                          "outputs": sorted(job.outputs)}, sort_keys=True)
+    return hashlib.sha1(payload.encode()).hexdigest()[:16]
+
+
+def require_active_lease(path: str = None) -> None:
+    """Refuse to run a GPU entry point unless the GPU lease is currently HELD (by
+    this process's in-process GpuLease, or by a controller parent via an inherited
+    fd) — P0-5. Detects "held" by trying a non-blocking exclusive flock on a fresh
+    fd: it fails iff some open-file-description already holds the lock. Bypass only
+    with BASEMAP_UNSAFE_NO_LEASE=1 for explicit unsafe diagnostics."""
+    if os.environ.get("BASEMAP_UNSAFE_NO_LEASE") == "1":
+        return
+    path = path or _lease_path()
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # We acquired it → nobody held it → this process is NOT under a lease.
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        raise RuntimeError(
+            f"GPU lease {path} is not held — refuse to run a GPU entry point without a "
+            f"lease (P0-5). Launch via run_controller/GpuLease, or set "
+            f"BASEMAP_UNSAFE_NO_LEASE=1 for an explicit unsafe diagnostic run.")
+    except BlockingIOError:
+        return  # held by us or a controller parent → protected
+    finally:
+        os.close(fd)
 
 
 def gpu_snapshot() -> dict:
@@ -78,9 +132,9 @@ class GpuLease:
     """Exclusive, atomic, crash-safe GPU lease. The lock is held by the OPEN
     FILE DESCRIPTION, so passing the fd to a child keeps it held past controller
     death. ``timeout=0`` fails fast, ``None`` blocks, ``N`` retries for N s."""
-    def __init__(self, path: str = LEASE_PATH, timeout: Optional[float] = 0,
+    def __init__(self, path: str = None, timeout: Optional[float] = 0,
                  controller_id: Optional[str] = None):
-        self.path = path
+        self.path = path or _lease_path()
         self.timeout = timeout
         self.controller_id = controller_id or f"ctl-{uuid.uuid4().hex[:8]}"
         self._fd = None
@@ -164,11 +218,17 @@ def run_jobs(jobs: list, controller_id: Optional[str] = None, allowed_pids=(),
     with GpuLease(controller_id=cid, timeout=0) as lease:
         for job in jobs:
             rec = {"name": job.name}
-            # idempotency: a VALID completion record (not a stray output) skips.
+            spec_digest = _job_spec_digest(job)
+            # idempotency: skip only if the done record matches THIS job's spec
+            # digest AND every output still matches its recorded signature (P0-5:
+            # a changed argv/config or a mutated output invalidates the skip).
             if os.path.exists(job.done_marker):
                 try:
                     m = json.load(open(job.done_marker))
-                    if m.get("status") == "ok" and all(os.path.exists(o) for o in job.outputs):
+                    sigs_ok = all(_output_sig(o) == (m.get("output_sigs") or {}).get(o)
+                                  and _output_sig(o) is not None for o in job.outputs)
+                    if (m.get("status") == "ok" and m.get("spec_digest") == spec_digest
+                            and sigs_ok):
                         rec["status"] = "skipped_done"; done.add(job.name)
                         summary["jobs"].append(rec); continue
                 except Exception:
@@ -197,32 +257,47 @@ def run_jobs(jobs: list, controller_id: Optional[str] = None, allowed_pids=(),
                 _atomic_write_json(job.manifest, {"controller_id": cid, "job": job.name,
                                                   "argv": job.argv, "gpu_pre": snap_pre,
                                                   "status": "running", "started": _utcnow()})
+            # snapshot pre-existing output signatures — an exit-0 no-op that
+            # leaves a stale output unchanged must NOT be certified (P0-5).
+            pre_sigs = {o: _output_sig(o) for o in job.outputs}
             logf = open(job.log, "w") if job.log else None
             t0 = time.time()
-            # child in its own process group, inheriting the lease fd (lock survives us)
+            # child in its own process group. pass_fds keeps the inherited lease
+            # fd open (lock survives controller death); close_fds stays default
+            # True so no other fds leak (the old close_fds=False warned every run).
             p = subprocess.Popen(job.argv, cwd=job.cwd, stdout=logf, stderr=subprocess.STDOUT,
-                                 start_new_session=True, close_fds=False,
+                                 start_new_session=True,
                                  pass_fds=(lease.fileno(),) if lease.fileno() is not None else ())
             rec["child_pid"] = p.pid; rec["pgid"] = os.getpgid(p.pid)
             rc = p.wait()
             if logf:
                 logf.close()
-            outs_ok = all(os.path.exists(o) for o in job.outputs)
-            success = (rc == 0) and outs_ok
-            rec["status"] = "ok" if success else ("exit_%d" % rc if rc != 0 else "missing_outputs")
+            post_sigs = {o: _output_sig(o) for o in job.outputs}
+            outs_ok = all(post_sigs[o] is not None for o in job.outputs)
+            # every declared output must be freshly produced or changed vs pre-run
+            fresh_ok = all(post_sigs[o] is not None and post_sigs[o] != pre_sigs[o]
+                           for o in job.outputs)
+            stale = outs_ok and not fresh_ok
+            success = (rc == 0) and outs_ok and fresh_ok
+            rec["status"] = ("ok" if success else
+                             ("exit_%d" % rc if rc != 0 else
+                              "stale_outputs" if stale else "missing_outputs"))
             rec["seconds"] = round(time.time() - t0, 1)
             rec["outputs_present"] = outs_ok
             snap_post = gpu_snapshot()
             final = {"controller_id": cid, "job": job.name, "argv": job.argv,
                      "status": rec["status"], "exit_code": rc, "seconds": rec["seconds"],
-                     "outputs": {o: _file_sha(o) for o in job.outputs},
+                     "spec_digest": spec_digest, "output_sigs": post_sigs,
                      "gpu_pre": snap_pre, "gpu_post": snap_post, "finished": _utcnow()}
             if job.manifest:
                 _atomic_write_json(job.manifest, final)
             if success:
-                # completion record is controller-written, AFTER validation.
+                # completion record is controller-written, AFTER validation, and
+                # bound to the spec digest + output signatures.
                 _atomic_write_json(job.done_marker, {"status": "ok", "job": job.name,
-                                                     "finished": _utcnow(), "exit_code": 0})
+                                                     "finished": _utcnow(), "exit_code": 0,
+                                                     "spec_digest": spec_digest,
+                                                     "output_sigs": post_sigs})
                 done.add(job.name)
             summary["jobs"].append(rec)
             if not success and not job.continue_on_failure:
