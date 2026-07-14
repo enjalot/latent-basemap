@@ -36,16 +36,17 @@ STD_A, STD_B = 1.57694346, 0.895060879
 SEEDS = (42, 43, 44)
 
 
-def run_specs():
+def run_specs(seeds=SEEDS, tag=""):
+    t = f"{tag}_" if tag else ""
     specs = []
-    for s in SEEDS:                        # Q1 formula isolation @ a=b=1
+    for s in seeds:                        # Q1 formula isolation @ a=b=1
         specs.append(dict(q="Q1_formula_isolation", kernel="legacy_lp", a=1.0, b=1.0, seed=s,
-                          name=f"r1_kernel_legacy_a1b1_s{s}"))
+                          name=f"r1_kernel_{t}legacy_a1b1_s{s}"))
         specs.append(dict(q="Q1_formula_isolation", kernel="umap", a=1.0, b=1.0, seed=s,
-                          name=f"r1_kernel_umap_a1b1_s{s}"))
-    for s in SEEDS:                        # Q2 standard UMAP curve
+                          name=f"r1_kernel_{t}umap_a1b1_s{s}"))
+    for s in seeds:                        # Q2 standard UMAP curve
         specs.append(dict(q="Q2_std_umap_curve", kernel="umap", a=STD_A, b=STD_B, seed=s,
-                          name=f"r1_kernel_umap_stdcurve_s{s}"))
+                          name=f"r1_kernel_{t}umap_stdcurve_s{s}"))
     return specs
 
 
@@ -79,9 +80,12 @@ def main():
     ap.add_argument("--budget", type=int, default=500000, help="active-update budget (LR horizon)")
     ap.add_argument("--out", default="/data/latent-basemap/r1_kernel/summary.json")
     ap.add_argument("--required-free-gb", type=float, default=6.0)
+    ap.add_argument("--seeds", default="42,43,44", help="comma list of seeds")
+    ap.add_argument("--tag", default="", help="run-name tag (e.g. 2m) to distinguish rungs")
     args = ap.parse_args()
 
-    specs = run_specs()
+    seeds = tuple(int(s) for s in args.seeds.split(","))
+    specs = run_specs(seeds=seeds, tag=args.tag)
     cfgs = [(s, build_cfg(args.base, s, args.budget)) for s in specs]
 
     # CONFIG DISCIPLINE: print + assert every kernel BEFORE the lease.
@@ -95,7 +99,8 @@ def main():
     allowed = gpu_snapshot()["compute_pids"]   # tolerate the current viewer PID
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     summary = {"budget": args.budget, "base": args.base, "std_curve": [STD_A, STD_B],
-               "seeds": list(SEEDS), "runs": {}, "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+               "seeds": list(seeds), "tag": args.tag, "runs": {},
+               "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
     with GpuLease(timeout=0) as lease:
         check_co_tenants(args.required_free_gb, allowed_pids=allowed)
