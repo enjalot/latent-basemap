@@ -25,7 +25,20 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from basemap.panel_v2 import (score_panel, PanelV2Config, load_embeddings, load_coords,
-                              ffr_from_neighbors, recall_at_k_from_neighbors, _ids_hash)
+                              ffr_from_neighbors, recall_at_k_from_neighbors, _ids_hash,
+                              cross_knn)
+
+
+def _sha_file(path):
+    import hashlib
+    try:
+        h = hashlib.sha1()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()[:16]
+    except Exception:
+        return None
 
 
 def frozen_centroids(X, ks, cache_dir, seed=0, iters=25):
@@ -54,40 +67,12 @@ def frozen_centroids(X, ks, cache_dir, seed=0, iters=25):
     return out
 
 
-def _cross_topk(Q, corpus, k, lo, cfg, q_tile=4096):
-    """Top-k of each Q row over corpus (cross, not self). Tiles BOTH the query rows
-    (q_tile) and the corpus (cfg.corpus_chunk) so peak VRAM is bounded — a single
-    (all-queries × corpus) matrix is ~16 GB at 20k×200k and OOMs. lo=True → exact
-    cdist on tiny coords; else normalised-matmul expansion."""
-    import torch
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
-    # chunk the corpus in BOTH cases — a low-D cdist(4096 queries × 2M coords) is
-    # 32 GB and OOMs; merging top-k across chunks is exact for cross-projection.
-    cc = min(len(corpus), max(1, cfg.corpus_chunk))
-    out = np.empty((len(Q), k), dtype=np.int64)
-    for q0 in range(0, len(Q), q_tile):
-        Qt = torch.from_numpy(np.asarray(Q[q0:q0 + q_tile], dtype=np.float32)).to(dev)
-        qn = (Qt * Qt).sum(1, keepdim=True)
-        best_d = torch.full((len(Qt), k), float("inf"), device=dev)
-        best_i = torch.full((len(Qt), k), -1, dtype=torch.long, device=dev)
-        for j in range(0, len(corpus), cc):
-            Xc = torch.from_numpy(np.asarray(corpus[j:j + cc], dtype=np.float32)).to(dev)
-            d2 = (torch.cdist(Qt, Xc) ** 2) if lo else (qn - 2.0 * (Qt @ Xc.T) + (Xc * Xc).sum(1))
-            kloc = min(k, len(Xc))
-            ld, li = torch.topk(d2, kloc, dim=1, largest=False)
-            best_d = torch.cat([best_d, ld], 1); best_i = torch.cat([best_i, li + j], 1)
-            best_d, sel = torch.topk(best_d, k, dim=1, largest=False)
-            best_i = torch.gather(best_i, 1, sel); del Xc, d2
-        out[q0:q0 + len(Qt)] = best_i.cpu().numpy(); del Qt, best_d, best_i
-    return out
-
-
 def projection_ffr(X, Z, Xq, Zq, cfg):
     """Held-out FFR: hi-D query→corpus top-k_hit vs projected-query→map top-k_frac,
-    via the canonical ffr formula. Returns (ffr, recall@k)."""
+    via the canonical panel_v2.cross_knn + ffr formula (P0-4). Returns (ffr, r@k)."""
     kf = max(cfg.k_hit, int(np.ceil(cfg.frac * len(Z))))
-    hi = _cross_topk(Xq, X, cfg.k_hit, lo=False, cfg=cfg)
-    lo = _cross_topk(Zq, Z, kf, lo=True, cfg=cfg)
+    hi = cross_knn(Xq, X, cfg.k_hit, cfg, hi_dim=True)
+    lo = cross_knn(Zq, Z, kf, cfg, hi_dim=False)
     return (round(ffr_from_neighbors(hi, lo, cfg.k_hit), 4),
             round(recall_at_k_from_neighbors(hi, lo, cfg.k_hit), 5))
 
@@ -95,7 +80,7 @@ def projection_ffr(X, Z, Xq, Zq, cfg):
 def knn_regress_coords(Xq, X, Z, cfg, k=15):
     """Non-parametric OOS map: each held-out query's 2D = mean of the map coords of
     its k nearest TRAIN rows in high-D. The baseline the neural map must beat."""
-    nb = _cross_topk(Xq, X, k, lo=False, cfg=cfg)     # (nq, k) train-row ids
+    nb = cross_knn(Xq, X, k, cfg, hi_dim=True)         # (nq, k) train-row ids
     return Z[nb].mean(axis=1)
 
 
@@ -122,36 +107,56 @@ def main():
     si = np.load(os.path.join(args.testbed, "sample_indices.npy"))
     centroids = frozen_centroids(X, (256, 1024), args.testbed)
 
-    # held-out queries: source rows NOT in the testbed sample (real OOS proof)
+    # held-out queries: source rows NOT in the testbed sample (real OOS proof),
+    # sampled WITHOUT replacement so the effective query count equals n_holdout
+    # (P0-4 — the old with-replacement sampler yielded ~19.8k unique of 20k).
     src = load_embeddings(args.source, dim=args.dim)
     train_set = set(int(i) for i in si)
+    complement = np.setdiff1d(np.arange(len(src), dtype=np.int64),
+                              np.asarray(sorted(train_set), dtype=np.int64), assume_unique=False)
+    if len(complement) < args.n_holdout:
+        raise ValueError(f"only {len(complement)} held-out candidates < n_holdout {args.n_holdout}")
     rng = np.random.RandomState(args.seed)
-    held = []
-    while len(held) < args.n_holdout:
-        cand = rng.randint(0, len(src), args.n_holdout * 2)
-        held += [int(c) for c in cand if int(c) not in train_set]
-    held = np.sort(np.array(held[:args.n_holdout], dtype=np.int64))
+    held = np.sort(rng.choice(complement, args.n_holdout, replace=False))
+    assert len(np.unique(held)) == args.n_holdout, "held-out not unique"
     assert len(set(held.tolist()) & train_set) == 0, "held-out overlaps training rows"
     Xq = np.asarray(src[held], dtype=np.float32)
 
+    import subprocess
+    try:
+        _commit = subprocess.check_output(["git", "-C", os.path.dirname(os.path.abspath(__file__)),
+                                           "rev-parse", "HEAD"], text=True).strip()[:12]
+        _dirty = bool(subprocess.check_output(["git", "-C", os.path.dirname(os.path.abspath(__file__)),
+                                               "status", "--porcelain"], text=True).strip())
+    except Exception:
+        _commit = _dirty = None
     summary = {"testbed": args.testbed, "n": int(len(X)), "n_holdout": int(len(held)),
+               "n_holdout_unique": int(len(np.unique(held))),
                "held_disjoint_from_train": True, "held_hash": _ids_hash(held),
-               "frac": cfg.frac, "runs": {},
+               "source": args.source, "sample_indices_hash": _ids_hash(np.asarray(si, np.int64)),
+               "frac": cfg.frac, "n_anchors": cfg.n_anchors, "seed": args.seed,
+               "scorer_commit": _commit, "scorer_dirty": _dirty,
+               "formula_version": cfg.formula_version, "runs": {},
                "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
     for label, rd in runs.items():
         t0 = time.time()
         Z, z_ids = load_coords(os.path.join(rd, "coords.parquet"))
-        panel = score_panel(X, Z, config=cfg, centroids_by_k=centroids,
-                            provenance={"scorer": "complete_panel", "run": os.path.basename(rd)})
+        # pass z_ids through — the exact-alignment contract must hold for the
+        # decision scorer too (P0-4), not just the transductive panel.
+        panel = score_panel(X, Z, config=cfg, z_ids=z_ids, centroids_by_k=centroids,
+                            provenance={"scorer": "complete_panel", "run": os.path.basename(rd),
+                                        "coords_sha": _sha_file(os.path.join(rd, "coords.parquet")),
+                                        "model_sha": _sha_file(os.path.join(rd, "model.pt"))})
+        Xa = X[np.asarray(z_ids, np.int64)] if z_ids is not None else X
         model = ParametricUMAP.load(os.path.join(rd, "model.pt"), device="cuda")
         Zq = np.asarray(model.transform(Xq), dtype=np.float32)
-        proj_ffr, proj_rk = projection_ffr(X, Z, Xq, Zq, cfg)
-        Zq_knn = knn_regress_coords(Xq, X, Z, cfg)
-        knn_ffr, _ = projection_ffr(X, Z, Xq, Zq_knn, cfg)
+        proj_ffr, proj_rk = projection_ffr(Xa, Z, Xq, Zq, cfg)
+        Zq_knn = knn_regress_coords(Xq, Xa, Z, cfg)
+        knn_ffr, _ = projection_ffr(Xa, Z, Xq, Zq_knn, cfg)
         lo, hi = Z.min(0), Z.max(0)
         Zq_rand = (rng.rand(len(Xq), Z.shape[1]).astype(np.float32) * (hi - lo) + lo)
-        floor_ffr, _ = projection_ffr(X, Z, Xq, Zq_rand, cfg)
+        floor_ffr, _ = projection_ffr(Xa, Z, Xq, Zq_rand, cfg)
         summary["runs"][label] = {
             "run_dir": os.path.basename(rd), "wall_s": round(time.time() - t0, 1),
             "ffr": panel["ffr"], "recall@k": panel["recall@k"],
@@ -161,7 +166,9 @@ def main():
             "proj_ffr": proj_ffr, "proj_recall@k": proj_rk,
             "proj_knn_regressor_ffr": knn_ffr, "proj_random_floor_ffr": floor_ffr,
             "proj_beats_knn": bool(proj_ffr > knn_ffr),
-            "proj_margin_over_knn": round(proj_ffr - knn_ffr, 4)}
+            "proj_margin_over_knn": round(proj_ffr - knn_ffr, 4),
+            # P0-4: retain the full panel audit trail, not just scalar leaves.
+            "panel_full": panel}
         json.dump(summary, open(args.out, "w"), indent=1)
         r = summary["runs"][label]
         print(f"[panel] {label:10s} ffr={r['ffr']} purity1024={r['purity_k1024']} dens={r['density']} "

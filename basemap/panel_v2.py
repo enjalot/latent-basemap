@@ -85,18 +85,22 @@ def load_coords(path: str):
     have = [c for c in ("ls_index", "row_id") if c in df.columns]
     ids = None
     if len(have) == 2:
-        a = df["ls_index"].values.astype("int64"); b = df["row_id"].values.astype("int64")
+        a = _coerce_int_ids(df["ls_index"].values, "ls_index")   # integral-check BEFORE cast
+        b = _coerce_int_ids(df["row_id"].values, "row_id")
         if not np.array_equal(a, b):
             raise ValueError(f"{path}: ls_index and row_id disagree; choose one explicitly (P0-C).")
         ids = a
     elif len(have) == 1:
-        ids = df[have[0]].values.astype("int64")
+        ids = _coerce_int_ids(df[have[0]].values, have[0])
     coord_cols = [c for c in df.columns if c not in ("ls_index", "row_id")]
     order = [c for c in ["x", "y", "z"] if c in coord_cols] + \
             sorted([c for c in coord_cols if c not in ("x", "y", "z")])
     Z = df[order].values.astype("float32")
     if ids is not None:
-        _check_ids(ids, len(ids), name="coord ids")
+        # nonneg + unique + integral, but NOT bounded by len(coords): a valid
+        # offset subset (e.g. rows 10..12 of a larger X) must load (P0-4). The
+        # universe bound is checked at alignment against X.
+        _check_ids_no_universe(ids, name="coord ids")
     return Z, ids
 
 
@@ -195,10 +199,33 @@ def _ids_hash(a: np.ndarray) -> str:
     return hashlib.sha1(np.ascontiguousarray(np.asarray(a)).tobytes()).hexdigest()[:12]
 
 
+def _coerce_int_ids(values, name="ids") -> np.ndarray:
+    """Validate that ``values`` are INTEGRAL before any int cast (P0-4): a float
+    column like [0.2,1.2,2.2] must FAIL, not be silently floored to [0,1,2].
+    Returns an int64 array."""
+    arr = np.asarray(values)
+    if np.issubdtype(arr.dtype, np.integer):
+        return arr.astype(np.int64)
+    if np.issubdtype(arr.dtype, np.floating):
+        if not np.isfinite(arr).all() or not np.all(arr == np.floor(arr)):
+            raise ValueError(f"{name}: non-integral / non-finite ids (P0-4).")
+        return arr.astype(np.int64)
+    raise ValueError(f"{name}: ids must be integer or integral-float, got dtype {arr.dtype} (P0-4).")
+
+
+def _check_ids_no_universe(ids: np.ndarray, name="ids") -> None:
+    """Nonnegative + unique + integral, WITHOUT assuming a universe size (P0-4):
+    a valid subset like [10,11,12] with 3 rows must NOT be rejected. The universe
+    bound is enforced later at alignment against X."""
+    ids = _coerce_int_ids(ids, name)
+    if ids.min() < 0:
+        raise ValueError(f"{name}: negative id {int(ids.min())} (P0-4).")
+    if len(np.unique(ids)) != len(ids):
+        raise ValueError(f"{name}: duplicate ids (P0-4).")
+
+
 def _check_ids(ids: np.ndarray, n_universe: int, name="ids") -> None:
-    ids = np.asarray(ids)
-    if not np.issubdtype(ids.dtype, np.integer):
-        raise ValueError(f"{name}: non-integral ids (P0-C).")
+    ids = _coerce_int_ids(ids, name)
     if ids.min() < 0:
         raise ValueError(f"{name}: negative id {int(ids.min())} (P0-C).")
     if ids.max() >= n_universe:
@@ -221,14 +248,15 @@ def align_x_to_z(X, Z, x_ids, z_ids):
             raise ValueError(f"len(X)={len(X)} != len(Z)={len(Z)} and no ids to align (P0-C).")
         return X, None, "positional_1to1"
     if x_ids is None and z_ids is not None:
+        z_ids = _coerce_int_ids(z_ids, "z_ids")          # validate integral BEFORE cast
         _check_ids(z_ids, n_full, name="z_ids(into X)")
         if len(z_ids) != len(Z):
             raise ValueError(f"z_ids len {len(z_ids)} != len(Z) {len(Z)} (P0-C).")
-        return X[np.asarray(z_ids, np.int64)], np.asarray(z_ids, np.int64), "gather_X_by_z_ids"
+        return X[z_ids], z_ids, "gather_X_by_z_ids"
     if x_ids is not None and z_ids is None:
         raise ValueError("x_ids given but z_ids missing: cannot align without coord ids (P0-C).")
     # both present: same universe, reorder X rows into Z order
-    x_ids = np.asarray(x_ids, np.int64); z_ids = np.asarray(z_ids, np.int64)
+    x_ids = _coerce_int_ids(x_ids, "x_ids"); z_ids = _coerce_int_ids(z_ids, "z_ids")
     _check_ids(x_ids, max(int(x_ids.max()) + 1, len(X)), name="x_ids")
     _check_ids(z_ids, max(int(z_ids.max()) + 1, len(X)), name="z_ids")
     if len(x_ids) != len(X):
@@ -380,18 +408,46 @@ def _peak_rss_gb():
 
 # ── projection fidelity (P0-C) ───────────────────────────────────────────────────
 
+def cross_knn(Q, corpus, k, cfg: PanelV2Config, hi_dim=True, q_tile=4096):
+    """Canonical tiled top-k of each query row over a corpus (cross, not self).
+    Tiles BOTH the query rows (q_tile) and the corpus (cfg.corpus_chunk) so a full
+    (all-queries × corpus) matrix is never materialised — safe for 20k queries
+    against a 2M map. This is the ONE cross-neighbour implementation used by both
+    projection and the decision scorer (P0-4). hi_dim uses the normalised-matmul
+    expansion; low-D uses exact cdist."""
+    import torch
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    cc = min(len(corpus), max(1, cfg.corpus_chunk))
+    out = np.empty((len(Q), k), dtype=np.int64)
+    for q0 in range(0, len(Q), q_tile):
+        Qt = torch.from_numpy(np.asarray(Q[q0:q0 + q_tile], dtype=np.float32)).to(dev)
+        qn = (Qt * Qt).sum(1, keepdim=True)
+        best_d = torch.full((len(Qt), k), float("inf"), device=dev)
+        best_i = torch.full((len(Qt), k), -1, dtype=torch.long, device=dev)
+        for j in range(0, len(corpus), cc):
+            Xc = torch.from_numpy(np.asarray(corpus[j:j + cc], dtype=np.float32)).to(dev)
+            d2 = (qn - 2.0 * (Qt @ Xc.T) + (Xc * Xc).sum(1)) if hi_dim else (torch.cdist(Qt, Xc) ** 2)
+            kloc = min(k, len(Xc))
+            ld, li = torch.topk(d2, kloc, dim=1, largest=False)
+            best_d = torch.cat([best_d, ld], 1); best_i = torch.cat([best_i, li + j], 1)
+            best_d, sel = torch.topk(best_d, k, dim=1, largest=False)
+            best_i = torch.gather(best_i, 1, sel); del Xc, d2
+        out[q0:q0 + len(Qt)] = best_i.cpu().numpy(); del Qt, best_d, best_i
+    return out
+
+
 def score_projection(Xa, Z, cfg: PanelV2Config, projection: dict, x_ids=None):
     """Out-of-sample FFR: high-D query→corpus top-k_hit vs projected query→map
-    top-k_frac, via the SAME ffr formula. ``projection`` carries:
-      Xq (nq, D) held-out query embeddings, Zq (nq, d) their projected coords,
-      query_ids (nq,) ids proven disjoint from the training rows, and optional
-      checkpoint/query fingerprints. Returns metrics + provenance."""
-    import torch
+    top-k_frac, via the SAME ffr formula and the canonical ``cross_knn`` (P0-4).
+    ``projection`` carries Xq (nq, D), Zq (nq, d), query_ids (proven disjoint from
+    training rows), and optional checkpoint/query fingerprints."""
     Xq = np.asarray(projection["Xq"], dtype=np.float32)
     Zq = np.asarray(projection["Zq"], dtype=np.float32)
-    qids = np.asarray(projection.get("query_ids", np.arange(len(Xq))), np.int64)
+    qids = _coerce_int_ids(projection.get("query_ids", np.arange(len(Xq))), "query_ids")
     if len(Xq) != len(Zq) or len(Xq) != len(qids):
         raise ValueError("projection Xq/Zq/query_ids length mismatch (P0-C).")
+    if len(np.unique(qids)) != len(qids):
+        raise ValueError("projection query_ids contain duplicates (P0-4).")
     # PROOF that queries are out-of-sample: their ids must not be training rows.
     train_ids = set((np.asarray(x_ids, np.int64) if x_ids is not None
                      else np.arange(len(Xa))).tolist())
@@ -399,31 +455,9 @@ def score_projection(Xa, Z, cfg: PanelV2Config, projection: dict, x_ids=None):
     if overlap:
         raise ValueError(f"{overlap} projection query ids overlap training rows — "
                          f"not held-out (P0-C).")
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
     kf = max(cfg.k_hit, int(np.ceil(cfg.frac * len(Z))))
-
-    def cross_topk(Q, corpus, ksel, lo):
-        Qt = torch.from_numpy(np.asarray(Q, dtype=np.float32)).to(dev)
-        out = np.empty((len(Q), ksel), dtype=np.int64)
-        best_d = torch.full((len(Q), ksel), float("inf"), device=dev)
-        best_i = torch.full((len(Q), ksel), -1, dtype=torch.long, device=dev)
-        cc = len(corpus) if lo else min(len(corpus), cfg.corpus_chunk)
-        qn = (Qt * Qt).sum(1, keepdim=True)
-        for j in range(0, len(corpus), cc):
-            Xc = torch.from_numpy(np.asarray(corpus[j:j + cc], dtype=np.float32)).to(dev)
-            if lo:
-                d2 = torch.cdist(Qt, Xc) ** 2
-            else:
-                d2 = qn - 2.0 * (Qt @ Xc.T) + (Xc * Xc).sum(1)
-            kloc = min(ksel, len(Xc))
-            ld, li = torch.topk(d2, kloc, dim=1, largest=False)
-            best_d = torch.cat([best_d, ld], 1); best_i = torch.cat([best_i, li + j], 1)
-            best_d, sel = torch.topk(best_d, ksel, dim=1, largest=False)
-            best_i = torch.gather(best_i, 1, sel); del Xc, d2
-        return best_i.cpu().numpy()
-
-    hi = cross_topk(Xq, Xa, cfg.k_hit, lo=False)     # query → high-D corpus
-    lo = cross_topk(Zq, Z, kf, lo=True)              # projected query → map
+    hi = cross_knn(Xq, Xa, cfg.k_hit, cfg, hi_dim=True)     # query → high-D corpus
+    lo = cross_knn(Zq, Z, kf, cfg, hi_dim=False)            # projected query → map
     ffr = ffr_from_neighbors(hi, lo, cfg.k_hit)
     r_at = recall_at_k_from_neighbors(hi, lo, cfg.k_hit)
     return {"proj_ffr": round(ffr, 4), "proj_recall@k": round(r_at, 5),
@@ -519,7 +553,12 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
         "code_commit": commit, "code_dirty": dirty,
         "alignment": align_note,
         "aligned_ids_hash": _ids_hash(aligned_ids) if aligned_ids is not None else None,
-        "exactness": "hi:overselect+exact_rerank; lo:single_pass_exact",
+        # P0-4: honest label. Overselect+rerank cannot recover a true neighbour
+        # the float32 expansion pushed out of the candidate pool, and the
+        # boundary guard only inspects the selected pool — so this is
+        # VALIDATED_APPROXIMATE (agrees with fp64 in the golden-gate aggregate),
+        # not a proof of exact top-k. Low-D is a single exact pass.
+        "exactness": "hi:validated_approximate(overselect+rerank); lo:single_pass_exact",
         "device": "cuda" if torch.cuda.is_available() else "cpu",
         "peak_gpu_gb": (round(torch.cuda.max_memory_allocated() / (1024 ** 3), 3)
                         if torch.cuda.is_available() else None),

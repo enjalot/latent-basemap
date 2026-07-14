@@ -136,7 +136,7 @@ def test_score_panel_matches_brute():
     res = pv.score_panel(X, Z, config=cfg, provenance={"t": "unit"})
     assert abs(res["ffr"] - _brute_panel(X, Z, cfg)) <= 0.02, res["ffr"]
     assert res["recall@k"] <= res["ffr"] + 1e-9
-    assert res["provenance"]["exactness"].startswith("hi:overselect")
+    assert "validated_approximate" in res["provenance"]["exactness"]
     assert res["guards"]["coords_finite"] is True
 
 
@@ -175,6 +175,43 @@ def test_projection_scores_when_held_out():
     assert "projection" in res and res["projection"]["proj_n_queries"] == 8
     assert 0.0 <= res["projection"]["proj_ffr"] <= 1.0
     assert res["projection"]["proj_checkpoint"] == "abc123"
+
+
+def test_load_coords_id_validation(tmp_path):
+    import pandas as pd
+    # valid OFFSET subset ids [10,11,12] with 3 rows must LOAD (not be rejected).
+    p = tmp_path / "sub.parquet"
+    pd.DataFrame({"x": [0.0, 1.0, 2.0], "y": [0.0, 1.0, 2.0], "ls_index": [10, 11, 12]}).to_parquet(p)
+    Z, ids = pv.load_coords(str(p))
+    assert ids.tolist() == [10, 11, 12] and len(Z) == 3
+    # fractional ids must FAIL, not be silently floored to [0,1,2].
+    pf = tmp_path / "frac.parquet"
+    pd.DataFrame({"x": [0.0, 1.0, 2.0], "y": [0.0, 1.0, 2.0], "ls_index": [0.2, 1.2, 2.2]}).to_parquet(pf)
+    with pytest.raises(ValueError, match="non-integral"):
+        pv.load_coords(str(pf))
+    # duplicate ids fail
+    pd_ = tmp_path / "dup.parquet"
+    pd.DataFrame({"x": [0.0, 1.0], "y": [0.0, 1.0], "ls_index": [5, 5]}).to_parquet(pd_)
+    with pytest.raises(ValueError, match="duplicate"):
+        pv.load_coords(str(pd_))
+
+
+def test_align_both_ids_rejects_fractional():
+    X = np.zeros((4, 2), 'float32'); Z = np.zeros((4, 2), 'float32')
+    with pytest.raises(ValueError, match="non-integral"):
+        pv.align_x_to_z(X, Z, np.array([0.0, 1.5, 2.0, 3.0]), np.array([0, 1, 2, 3]))
+
+
+def test_cross_knn_matches_brute_and_is_tiled():
+    rng = np.random.RandomState(0)
+    corpus = rng.randn(3000, 16).astype('float32')
+    Q = rng.randn(50, 16).astype('float32')
+    cfg = pv.PanelV2Config(corpus_chunk=256)          # forces multi-chunk tiling
+    got = pv.cross_knn(Q, corpus, 10, cfg, hi_dim=True, q_tile=16)
+    Cd = corpus.astype('float64'); Qd = Q.astype('float64')
+    for r in range(len(Q)):
+        d = np.linalg.norm(Cd - Qd[r], axis=1)
+        assert set(got[r].tolist()) == set(np.argsort(d)[:10].tolist()), r
 
 
 def test_runner_and_cli_payloads_byte_equivalent(tmp_path):
