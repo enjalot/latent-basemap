@@ -170,7 +170,7 @@ class ParametricUMAP:
             radial = r2.pow(self.b)
         else:  # legacy_lp
             radial = torch.norm(delta, dim=1, p=2 * self.b)
-        return torch.pow(1 + self.a * radial, -1)
+        return torch.pow(1 + self.a * radial, -1), radial
 
     def _decide_gpu_resident(self, n_train, n_features, n_pos_edges,
                              edge_set, low_memory):
@@ -823,6 +823,28 @@ class ParametricUMAP:
         else:
             raise ValueError(f"Unknown lr_schedule: {self.lr_schedule}")
 
+        # P0.2: stop at the effective LR horizon. Past total_steps the cosine
+        # schedule is clamped to LR=0, so further iterations run forward/backward/
+        # step but never change weights (82–90% of the loop in past configs).
+        # Stop there — identical weights, ~5.6× less wall time — unless the caller
+        # forces a step cap. Persist honest step accounting.
+        planned_loop = int(len(loader)) * int(self.n_epochs)
+        lr_horizon = (max(int(self.total_steps_estimate), 1)
+                      if self.lr_schedule == "cosine" else planned_loop)
+        stop_step = lr_horizon
+        if self._max_train_steps is not None:
+            stop_step = min(stop_step, int(self._max_train_steps))
+        if self.lr_schedule == "cosine" and planned_loop > int(lr_horizon * 1.05):
+            logging.warning(
+                "P0.2: planned loop %d >> LR horizon %d — training stops at the "
+                "horizon (the extra %.0f%% would be LR=0). Set total_steps_estimate "
+                "to the intended optimizer-step budget.",
+                planned_loop, lr_horizon, 100.0 * (planned_loop - lr_horizon) / planned_loop)
+        self._train_stats = {"planned_loop_iters": planned_loop, "lr_horizon": lr_horizon,
+                             "stop_step": stop_step, "optimizer_steps": 0,
+                             "nonfinite_skips": 0, "final_lr": None}
+        stop_training = False
+
         self.model.train()
         losses = []
 
@@ -877,8 +899,10 @@ class ParametricUMAP:
                     src_embeddings = self.model(src_values)
                     dst_embeddings = self.model(dst_values)
 
-                    # Low-D similarity kernel (P0.1 switch).
-                    qs = self._low_dim_qs(src_embeddings, dst_embeddings)
+                    # Low-D similarity kernel (P0.1 switch). `dists` is the
+                    # kernel's radial term (‖Δ‖_{2b} legacy / ‖Δ‖²^b umap), used
+                    # only for optional per-batch stats below.
+                    qs, dists = self._low_dim_qs(src_embeddings, dst_embeddings)
 
                     # Keep BCE inputs in its valid probability domain. Larger
                     # scale pilots can occasionally produce non-finite low-dim
@@ -891,15 +915,23 @@ class ParametricUMAP:
                 targets_for_loss = torch.nan_to_num(targets.float(), nan=0.0, posinf=1.0, neginf=0.0)
                 targets_for_loss = torch.clamp(targets_for_loss, min=0.0, max=1.0)
                 umap_loss = self.loss_fn(qs.float(), targets_for_loss)
-                # Correlation loss in full precision (distance correlation is numerically sensitive)
-                corr_loss = compute_correlation_loss(
-                    self._transform_correlation_distances(torch.norm(src_values - dst_values, dim=1)),
-                    self._transform_correlation_distances(
-                        torch.norm(src_embeddings.float() - dst_embeddings.float(), dim=1)
+                # P0.3: skip the correlation branch entirely when its weight is 0
+                # (the frozen recipe). It computed two 384-D distance vectors +
+                # a sync-forcing Pearson every batch, and `0 * NaN = NaN` could
+                # spuriously skip a whole batch. Use an on-device scalar 0 for
+                # aggregate logging only.
+                if self.correlation_weight != 0.0:
+                    # Correlation loss in full precision (numerically sensitive)
+                    corr_loss = compute_correlation_loss(
+                        self._transform_correlation_distances(torch.norm(src_values - dst_values, dim=1)),
+                        self._transform_correlation_distances(
+                            torch.norm(src_embeddings.float() - dst_embeddings.float(), dim=1)
+                        )
                     )
-                )
-
-                loss = umap_loss + self.correlation_weight * corr_loss
+                    loss = umap_loss + self.correlation_weight * corr_loss
+                else:
+                    corr_loss = torch.zeros((), device=umap_loss.device)
+                    loss = umap_loss
 
                 # ── Mid-near attractive term (PaCMAP-style global structure) ──
                 mn_loss_val = 0.0
@@ -966,6 +998,7 @@ class ParametricUMAP:
 
                 if not torch.isfinite(loss):
                     consecutive_nonfinite_losses += 1
+                    self._train_stats["nonfinite_skips"] += 1
                     logging.warning(
                         "Non-finite loss detected at step %d, skipping batch (%d consecutive)",
                         global_step,
@@ -1039,6 +1072,19 @@ class ParametricUMAP:
                 epoch_corr_t += corr_loss.detach()
                 num_batches += 1
                 global_step += 1
+                if optimizer_was_run and current_lr > 0:
+                    self._train_stats["optimizer_steps"] += 1
+                self._train_stats["final_lr"] = current_lr
+
+                # P0.2: stop at the effective horizon (LR=0 past here → no weight
+                # change). Ends the run in ~1/5.6 the wall time with identical
+                # weights.
+                if global_step >= stop_step:
+                    stop_training = True
+                    logging.info("P0.2: reached LR horizon at step %d/%d (planned loop %d) — "
+                                 "stopping; %d optimizer steps.", global_step, stop_step,
+                                 planned_loop, self._train_stats["optimizer_steps"])
+                    break
 
                 # Step-rate logging every 10k steps (plan B1: never fly blind on
                 # a long run again). Reports steps/s over the last window + ETA.
@@ -1099,6 +1145,9 @@ class ParametricUMAP:
 
             pbar.close()
 
+            if stop_training:
+                break  # P0.2: LR horizon reached — end the run, not just the epoch
+
             if self._max_train_steps is not None and global_step >= self._max_train_steps:
                 if 'cuda' in str(self.device):
                     torch.cuda.synchronize(self.device)
@@ -1140,6 +1189,12 @@ class ParametricUMAP:
                 wandb.log(log_dict)
 
         self.is_fitted = True
+        # P0.2: honest step accounting (loop iters vs effective optimizer steps).
+        s = self._train_stats
+        logging.info("Step accounting: %d optimizer steps (LR>0) / %d planned loop iters "
+                     "(horizon %d); %d non-finite skips; final LR %.2e.",
+                     s["optimizer_steps"], s["planned_loop_iters"], s["lr_horizon"],
+                     s["nonfinite_skips"], s["final_lr"] or 0.0)
         # Stop HostStreamEdgeSampler producer threads so they don't keep drawing
         # and discarding batches during the final transform / downstream scoring.
         if hasattr(loader, "close"):

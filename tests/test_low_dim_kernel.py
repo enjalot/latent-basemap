@@ -10,7 +10,7 @@ def _qs(kernel, a, b, delta):
     m = ParametricUMAP(a=a, b=b, low_dim_kernel=kernel, device='cpu')
     src = torch.zeros(1, len(delta))
     dst = torch.tensor([delta], dtype=torch.float32)
-    return m._low_dim_qs(src, dst)
+    return m._low_dim_qs(src, dst)[0]
 
 
 def test_values_b1():
@@ -37,7 +37,7 @@ def test_zero_distance():
         m = ParametricUMAP(a=1.0, b=1.0, low_dim_kernel=k, device='cpu')
         src = torch.zeros(1, 2, requires_grad=True)
         dst = torch.zeros(1, 2, requires_grad=True)
-        q = m._low_dim_qs(src, dst)
+        q, _ = m._low_dim_qs(src, dst)
         assert abs(q.item() - 1.0) < 1e-6
         q.sum().backward()
         assert torch.isfinite(src.grad).all(), f"{k}: non-finite grad at zero dist"
@@ -48,7 +48,7 @@ def test_large_distance_and_grad():
         m = ParametricUMAP(a=1.0, b=1.0, low_dim_kernel=k, device='cpu')
         src = torch.zeros(1, 2, requires_grad=True)
         dst = torch.tensor([[1e3, 1e3]], requires_grad=True)
-        q = m._low_dim_qs(src, dst)
+        q, _ = m._low_dim_qs(src, dst)
         assert 0.0 <= q.item() < 1e-3, f"{k}: q should -> 0 at large dist"
         q.sum().backward()
         assert torch.isfinite(src.grad).all() and torch.isfinite(dst.grad).all()
@@ -60,7 +60,7 @@ def test_gradient_matches_autograd_umap():
     src = torch.zeros(1, 2)
     dst = torch.tensor([[0.6, 0.8]], requires_grad=True)   # r2=1.0
     m = ParametricUMAP(a=a, b=1.0, low_dim_kernel='umap', device='cpu')
-    q = m._low_dim_qs(src, dst)
+    q, _ = m._low_dim_qs(src, dst)
     q.backward()
     # analytic dq/ddst = dq/dr2 * dr2/ddst = (-a/(1+a)^2) * 2*(dst-src)
     r2 = 1.0
