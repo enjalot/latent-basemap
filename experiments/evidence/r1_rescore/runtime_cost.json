@@ -1,0 +1,124 @@
+{
+ "200k": {
+  "legacy_a1b1": [
+   {
+    "train_s": 1680.148565530777,
+    "upd_s": 297.8,
+    "transform_s": 0.4965991973876953,
+    "model_mb": 14.186139,
+    "infer_rows_per_s": 402739.2735471134
+   },
+   {
+    "train_s": 1681.892025232315,
+    "upd_s": 297.4,
+    "transform_s": 0.46436572074890137,
+    "model_mb": 14.186139,
+    "infer_rows_per_s": 430695.01270992163
+   },
+   {
+    "train_s": 1681.5222465991974,
+    "upd_s": 297.5,
+    "transform_s": 0.462496280670166,
+    "model_mb": 14.186139,
+    "infer_rows_per_s": 432435.9099930407
+   }
+  ],
+  "umap_a1b1": [
+   {
+    "train_s": 1711.50980758667,
+    "upd_s": 292.2,
+    "transform_s": 0.4599025249481201,
+    "model_mb": 14.186075,
+    "infer_rows_per_s": 434874.75965164846
+   },
+   {
+    "train_s": 1712.9733126163483,
+    "upd_s": 292.0,
+    "transform_s": 0.4636657238006592,
+    "model_mb": 14.186075,
+    "infer_rows_per_s": 431345.2337183861
+   },
+   {
+    "train_s": 1712.2819592952728,
+    "upd_s": 292.1,
+    "transform_s": 0.46642422676086426,
+    "model_mb": 14.186075,
+    "infer_rows_per_s": 428794.1931938712
+   }
+  ],
+  "umap_stdcurve": [
+   {
+    "train_s": 1712.7667531967163,
+    "upd_s": 292.0,
+    "transform_s": 0.4548017978668213,
+    "model_mb": 14.186075,
+    "infer_rows_per_s": 439751.9995261004
+   },
+   {
+    "train_s": 1711.817993402481,
+    "upd_s": 292.2,
+    "transform_s": 0.48761510848999023,
+    "model_mb": 14.186075,
+    "infer_rows_per_s": 410159.56338872464
+   },
+   {
+    "train_s": 1712.7511956691742,
+    "upd_s": 292.0,
+    "transform_s": 0.4758005142211914,
+    "model_mb": 14.186075,
+    "infer_rows_per_s": 420344.2283524382
+   }
+  ]
+ },
+ "2m": {
+  "legacy_a1b1": [
+   {
+    "train_s": 1686.487203836441,
+    "upd_s": 297.7,
+    "transform_s": 4.588257312774658,
+    "model_mb": 14.186139,
+    "infer_rows_per_s": 435895.34406267625
+   },
+   {
+    "train_s": 1689.1445307731628,
+    "upd_s": 297.2,
+    "transform_s": 4.602439880371094,
+    "model_mb": 14.186139,
+    "infer_rows_per_s": 434552.118438262
+   }
+  ],
+  "umap_a1b1": [
+   {
+    "train_s": 1760.7105662822723,
+    "upd_s": 285.3,
+    "transform_s": 4.622764825820923,
+    "model_mb": 14.186075,
+    "infer_rows_per_s": 432641.5198170577
+   },
+   {
+    "train_s": 1780.009052991867,
+    "upd_s": 282.2,
+    "transform_s": 4.57708215713501,
+    "model_mb": 14.186075,
+    "infer_rows_per_s": 436959.60250184475
+   }
+  ],
+  "umap_stdcurve": [
+   {
+    "train_s": 1759.7760310173035,
+    "upd_s": 285.4,
+    "transform_s": 4.614676475524902,
+    "model_mb": 14.186075,
+    "infer_rows_per_s": 433399.8300005435
+   },
+   {
+    "train_s": 1768.0866487026215,
+    "upd_s": 284.1,
+    "transform_s": 4.549912214279175,
+    "model_mb": 14.186075,
+    "infer_rows_per_s": 439568.9204119848
+   }
+  ]
+ },
+ "note": "train_s=wall; upd/s=positive-LR updates/s; transform_s=full-corpus inference; model_MB=checkpoint. kNN-regressor index/query cost measured separately (GPU) as follow-up."
+}
