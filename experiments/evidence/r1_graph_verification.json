@@ -1,0 +1,32 @@
+{
+ "assets": [
+  {
+   "name": "jina-en-200k",
+   "graph": "/data/latent-basemap/jina-en-200k/edges_k50_fuzzy.npz",
+   "n_nodes": 200000,
+   "n_edges": 14120602,
+   "endpoint_cosine": {
+    "edge_cosine": 0.5208,
+    "random_cosine": 0.1151,
+    "margin": 0.4058
+   },
+   "manifest": "/data/latent-basemap/jina-en-200k/edges_k50_fuzzy.npz.manifest.json",
+   "graph_sha": "0ef6febf6b52e241",
+   "data_fingerprint": "74a3e857e877cfc0"
+  },
+  {
+   "name": "jina-en-2m",
+   "graph": "/data/latent-basemap/jina-en-2m/edges_k50_fuzzy.npz",
+   "n_nodes": 2000000,
+   "n_edges": 149267874,
+   "endpoint_cosine": {
+    "edge_cosine": 0.612,
+    "random_cosine": 0.1148,
+    "margin": 0.4972
+   },
+   "manifest": "/data/latent-basemap/jina-en-2m/edges_k50_fuzzy.npz.manifest.json",
+   "graph_sha": "8cd8c564f584ca81",
+   "data_fingerprint": "8675546d49363821"
+  }
+ ]
+}

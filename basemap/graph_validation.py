@@ -133,3 +133,52 @@ def validate_graph_data_pair(sources, targets, n_nodes, n_train, *,
 def write_manifest(path: str, manifest: dict) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     json.dump(manifest, open(path, "w"), indent=1)
+
+
+def stream_sha(path: str, chunk=1 << 20) -> str:
+    """Full-content streamed sha (P0-2): the whole file, not a 1 MiB prefix."""
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for blk in iter(lambda: f.read(chunk), b""):
+            h.update(blk)
+    return h.hexdigest()[:16]
+
+
+def graph_manifest_v2(sources, targets, n_nodes, *, X=None, graph_path=None,
+                      data_paths=None, sample_indices_path=None, k=None, metric="cosine",
+                      directed=True, weight_semantics=None, builder_commit=None,
+                      builder_dirty=None, cosine_probe=None, parent_manifest_sha=None,
+                      extra=None) -> dict:
+    """A content-bound graph manifest (schema graph_manifest.v2, P0-2): full graph
+    artifact hash, endpoint bounds, node namespace, ordered data-shard hashes,
+    sample-index hash, k/metric/weight semantics, builder commit, and the
+    endpoint-cosine probe result. Enough to prove a graph/data pairing post-hoc."""
+    s = np.asarray(sources); t = np.asarray(targets)
+    man = {
+        "schema": "graph_manifest.v2", "n_nodes": int(n_nodes), "n_edges": int(len(s)),
+        "source_min": int(s.min()), "source_max": int(s.max()),
+        "target_min": int(t.min()), "target_max": int(t.max()),
+        "node_namespace": "contiguous_0..n_nodes", "directed": bool(directed),
+        "k": (int(k) if k is not None else None), "metric": metric,
+        "weight_semantics": weight_semantics,
+        "builder_commit": builder_commit, "builder_dirty": builder_dirty,
+        "parent_manifest_sha": parent_manifest_sha,
+    }
+    if graph_path:
+        man["graph_path"] = os.path.basename(graph_path)
+        man["graph_sha"] = stream_sha(graph_path)
+        man["graph_bytes"] = int(os.path.getsize(graph_path))
+    if data_paths:
+        man["data_shards"] = [os.path.basename(p) for p in data_paths]
+        man["data_shard_sha"] = {os.path.basename(p): stream_sha(p) for p in data_paths}
+    if sample_indices_path and os.path.exists(sample_indices_path):
+        man["sample_indices_sha"] = stream_sha(sample_indices_path)
+    if X is not None:
+        ids, fp = data_fingerprint(X)
+        man["data_len"] = int(len(X)); man["data_fingerprint"] = fp
+        man["data_fingerprint_n"] = len(ids)
+    if cosine_probe is not None:
+        man["endpoint_cosine"] = cosine_probe
+    if extra:
+        man.update(extra)
+    return man
