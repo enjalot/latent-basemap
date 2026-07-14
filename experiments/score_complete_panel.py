@@ -61,7 +61,9 @@ def _cross_topk(Q, corpus, k, lo, cfg, q_tile=4096):
     cdist on tiny coords; else normalised-matmul expansion."""
     import torch
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    cc = len(corpus) if lo else min(len(corpus), max(1, cfg.corpus_chunk))
+    # chunk the corpus in BOTH cases — a low-D cdist(4096 queries × 2M coords) is
+    # 32 GB and OOMs; merging top-k across chunks is exact for cross-projection.
+    cc = min(len(corpus), max(1, cfg.corpus_chunk))
     out = np.empty((len(Q), k), dtype=np.int64)
     for q0 in range(0, len(Q), q_tile):
         Qt = torch.from_numpy(np.asarray(Q[q0:q0 + q_tile], dtype=np.float32)).to(dev)
