@@ -1,0 +1,67 @@
+{
+ "budget": 500000,
+ "seed": 42,
+ "base": "experiments/configs/jina_en_200k_k50_fuzzy.yaml",
+ "runs": {
+  "mn0_ws0": {
+   "name": "r1_abl_mn0_ws0_s42",
+   "midnear": false,
+   "weighted": false,
+   "wall_s": 1692.2,
+   "ffr": 0.5815,
+   "recall@k": 0.09643,
+   "density": 0.2892,
+   "run_dir": null,
+   "stop_reason": "lr_horizon",
+   "positive_lr_updates": 499999
+  },
+  "mn0_ws1": {
+   "name": "r1_abl_mn0_ws1_s42",
+   "midnear": false,
+   "weighted": true,
+   "wall_s": 1691.6,
+   "ffr": 0.6473,
+   "recall@k": 0.1852,
+   "density": 0.3125,
+   "run_dir": null,
+   "stop_reason": "lr_horizon",
+   "positive_lr_updates": 499999
+  },
+  "mn1_ws0": {
+   "name": "r1_abl_mn1_ws0_s42",
+   "midnear": true,
+   "weighted": false,
+   "wall_s": 2294.0,
+   "ffr": 0.5798,
+   "recall@k": 0.09588,
+   "density": 0.304,
+   "run_dir": null,
+   "stop_reason": "lr_horizon",
+   "positive_lr_updates": 499999
+  },
+  "mn1_ws1": {
+   "name": "r1_abl_mn1_ws1_s42",
+   "midnear": true,
+   "weighted": true,
+   "wall_s": 2283.8,
+   "ffr": 0.6481,
+   "recall@k": 0.18942,
+   "density": 0.3932,
+   "run_dir": null,
+   "stop_reason": "lr_horizon",
+   "positive_lr_updates": 499999
+  }
+ },
+ "started": "2026-07-14T10:33:49Z",
+ "main_effects": {
+  "midnear_on_minus_off": {
+   "ffr": -0.0005,
+   "density": 0.0477
+  },
+  "weighted_on_minus_off": {
+   "ffr": 0.0671,
+   "density": 0.0562
+  }
+ },
+ "finished": "2026-07-14T12:46:30Z"
+}
