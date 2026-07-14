@@ -31,6 +31,7 @@ class ParametricUMAP:
         n_neighbors=15,
         a=0.1,
         b=1.0,
+        low_dim_kernel="legacy_lp",
         correlation_weight=0.1,
         learning_rate=1e-4,
         n_epochs=10,
@@ -76,6 +77,13 @@ class ParametricUMAP:
         self.n_neighbors = n_neighbors
         self.a = a
         self.b = b
+        # Low-D similarity kernel (P0.1). "legacy_lp" = the historically-shipped
+        # 1/(1+a·‖Δ‖_{2b}) (an Lp/quasi-norm curve, NOT UMAP). "umap" = the
+        # standard 1/(1+a·‖Δ‖²^b). Default legacy_lp so old checkpoints keep
+        # their trained semantics; new runs opt into "umap" explicitly.
+        if low_dim_kernel not in ("legacy_lp", "umap"):
+            raise ValueError(f"low_dim_kernel must be 'legacy_lp' or 'umap', got {low_dim_kernel!r}")
+        self.low_dim_kernel = low_dim_kernel
         self.correlation_weight = correlation_weight
         self.learning_rate = learning_rate
         self.n_epochs = n_epochs
@@ -146,6 +154,23 @@ class ParametricUMAP:
             ).to(self.device)
         else:
             raise ValueError(f"Unknown architecture: {self.architecture}")
+
+    def _low_dim_qs(self, src, dst):
+        """Low-D similarity q_ij for an edge batch, per ``self.low_dim_kernel``.
+
+        - ``legacy_lp`` (shipped historically): ``1 / (1 + a·‖Δ‖_{2b})`` where
+          ``‖Δ‖_{2b}`` is the p=2b vector norm — an Lp/quasi-norm radial curve,
+          NOT the UMAP kernel. Kept so old checkpoints retain their semantics.
+        - ``umap`` (standard): ``1 / (1 + a·(‖Δ‖²)^b)`` = ``1/(1+a·r²^b)``.
+          At b=1 these differ: legacy 1/(1+a·r) vs umap 1/(1+a·r²).
+        """
+        delta = src - dst
+        if self.low_dim_kernel == "umap":
+            r2 = delta.square().sum(dim=1)
+            radial = r2.pow(self.b)
+        else:  # legacy_lp
+            radial = torch.norm(delta, dim=1, p=2 * self.b)
+        return torch.pow(1 + self.a * radial, -1)
 
     def _decide_gpu_resident(self, n_train, n_features, n_pos_edges,
                              edge_set, low_memory):
@@ -852,11 +877,8 @@ class ParametricUMAP:
                     src_embeddings = self.model(src_values)
                     dst_embeddings = self.model(dst_values)
 
-                    # Compute pairwise distances in embedding space
-                    dists = torch.norm(src_embeddings - dst_embeddings, dim=1, p=2*self.b)
-
-                    # UMAP similarity in low-dim: q_ij = (1 + a * ||z_i - z_j||^{2b})^{-1}
-                    qs = torch.pow(1 + self.a * dists, -1)
+                    # Low-D similarity kernel (P0.1 switch).
+                    qs = self._low_dim_qs(src_embeddings, dst_embeddings)
 
                     # Keep BCE inputs in its valid probability domain. Larger
                     # scale pilots can occasionally produce non-finite low-dim
@@ -1190,6 +1212,7 @@ class ParametricUMAP:
             'n_neighbors': self.n_neighbors,
             'a': self.a,
             'b': self.b,
+            'low_dim_kernel': self.low_dim_kernel,
             'correlation_weight': self.correlation_weight,
             'learning_rate': self.learning_rate,
             'use_batchnorm': self.use_batchnorm,
@@ -1220,6 +1243,9 @@ class ParametricUMAP:
             n_neighbors=save_dict.get('n_neighbors', 15),
             a=save_dict['a'],
             b=save_dict['b'],
+            # Checkpoints predating the P0.1 switch were trained with the
+            # legacy Lp kernel; load them as such (never silently upgrade).
+            low_dim_kernel=save_dict.get('low_dim_kernel', 'legacy_lp'),
             correlation_weight=save_dict['correlation_weight'],
             device=device,
             use_batchnorm=save_dict['use_batchnorm'],

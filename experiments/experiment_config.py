@@ -79,6 +79,7 @@ class ModelConfig:
     # UMAP curve parameters
     a: float = 1.0
     b: float = 1.0
+    low_dim_kernel: str = "legacy_lp"  # P0.1: "legacy_lp" | "umap"
 
 
 @dataclass

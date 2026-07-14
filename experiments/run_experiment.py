@@ -462,6 +462,7 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         n_neighbors=cfg.data.n_neighbors,
         a=mc.a,
         b=mc.b,
+        low_dim_kernel=getattr(mc, "low_dim_kernel", "legacy_lp"),
         correlation_weight=tc.correlation_weight,
         learning_rate=tc.learning_rate,
         n_epochs=tc.n_epochs,
