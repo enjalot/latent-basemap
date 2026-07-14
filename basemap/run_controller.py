@@ -176,6 +176,25 @@ class GpuLease:
         return False
 
 
+DEFAULT_SERVICE_MARKERS = ("ls-serve", "moonshine-web")   # known always-on viewers
+
+
+def known_service_pids(markers=DEFAULT_SERVICE_MARKERS) -> list:
+    """Compute PIDs whose /proc cmdline matches a KNOWN background-service marker
+    (P0-5). Unlike snapshotting every observed PID, this allow-lists only named
+    services by identity — an unknown training process is NOT auto-tolerated."""
+    out = []
+    for pid in gpu_snapshot()["compute_pids"]:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmd = f.read().replace(b"\x00", b" ").decode(errors="replace")
+            if any(m in cmd for m in markers):
+                out.append(int(pid))
+        except Exception:
+            pass
+    return out
+
+
 def check_co_tenants(required_free_gb: float, allowed_pids=(), wait_s: float = 0) -> dict:
     """Enforce the co-tenant policy before a GPU launch. Fails (or waits up to
     ``wait_s``) if an unknown compute PID is present or free VRAM < requirement.

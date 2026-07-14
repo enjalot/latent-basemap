@@ -138,6 +138,19 @@ def test_p0_5_mutated_output_invalidates_skip():
     assert rc.run_jobs([j])['jobs'][0]['status'] == 'ok'             # re-runs, not skipped
 
 
+def test_p0_5_known_service_pids_matches_by_identity(monkeypatch):
+    # P0-5: allow-list by identity (cmdline marker), NOT snapshot-all. The current
+    # process is a known service iff its cmdline matches a marker; unknown markers
+    # never tolerate it.
+    import basemap.run_controller as rc
+    mypid = os.getpid()
+    monkeypatch.setattr(rc, "gpu_snapshot", lambda: {"compute_pids": [mypid]})
+    cmd = open(f"/proc/{mypid}/cmdline", "rb").read().replace(b"\x00", b" ").decode()
+    token = "python" if "python" in cmd else os.path.basename(cmd.split()[0]) if cmd.split() else "x"
+    assert mypid in rc.known_service_pids([token])
+    assert rc.known_service_pids(["zzz_no_such_service_marker"]) == []
+
+
 def test_p0_5_require_active_lease():
     d = tempfile.mkdtemp(); lp = os.path.join(d, '.lease')
     os.environ['BASEMAP_GPU_LEASE'] = lp

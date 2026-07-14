@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from experiments.experiment_config import load_config
 from experiments.run_experiment import run_single_experiment
 from experiments.run_r1_kernel import extract_panel
-from basemap.run_controller import GpuLease, check_co_tenants, gpu_snapshot
+from basemap.run_controller import GpuLease, check_co_tenants, known_service_pids
 
 MN_ON_SCALE = 4.0                                   # the historical A3 mn4 dose
 CELLS = [(mn, ws) for mn in (False, True) for ws in (False, True)]
@@ -127,7 +127,7 @@ def main():
             to_run.append((tag, scale, cfg))
 
     if to_run:
-        allowed = gpu_snapshot()["compute_pids"]
+        allowed = known_service_pids()   # P0-5: allow-list known viewers by identity, not snapshot-all
         with GpuLease(timeout=0) as lease:
             check_co_tenants(args.required_free_gb, allowed_pids=allowed)
             for tag, scale, cfg in to_run:

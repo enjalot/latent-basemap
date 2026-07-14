@@ -29,7 +29,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from experiments.experiment_config import load_config
 from experiments.run_experiment import run_single_experiment
-from basemap.run_controller import GpuLease, check_co_tenants, gpu_snapshot
+from basemap.run_controller import GpuLease, check_co_tenants, known_service_pids
 
 # fitted standard-UMAP curve (min_dist=0.1) — the shipped kernel for Q2.
 STD_A, STD_B = 1.57694346, 0.895060879
@@ -96,7 +96,7 @@ def main():
         print(f"[R1] pre-lease OK  {cfg.name:32s} kernel={got:9s} a={cfg.model.a:.5f} "
               f"b={cfg.model.b:.5f} seed={cfg.data.random_seed}", flush=True)
 
-    allowed = gpu_snapshot()["compute_pids"]   # tolerate the current viewer PID
+    allowed = known_service_pids()   # P0-5: allow-list known viewers by identity, not snapshot-all
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     summary = {"budget": args.budget, "base": args.base, "std_curve": [STD_A, STD_B],
                "seeds": list(seeds), "tag": args.tag, "runs": {},
