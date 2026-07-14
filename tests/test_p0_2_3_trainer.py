@@ -58,6 +58,26 @@ def test_p0b_bench_hook_populates_seconds_and_stops():
     assert m._train_stats['executed_iters'] == 120
 
 
+def test_p0a_amp_skip_path_does_not_break_scaler():
+    # Regression: the P0-A gradient guard unscale_()s then may skip a batch; under
+    # AMP that must call scaler.update() or the NEXT unscale_ raises
+    # "unscale_() has already been called". Exercise the real AMP path on CUDA
+    # (GradScaler is a no-op on CPU). The high initial scale reliably overflows on
+    # the first steps → drives the skip path.
+    if not torch.cuda.is_available():
+        pytest.skip("AMP scaler path only meaningful on CUDA")
+    X = np.random.RandomState(2).randn(600, 8).astype(np.float32)
+    s, t, w = _edges(600, 20000, 2); np.savez('/tmp/_pb_amp.npz', sources=s, targets=t, weights=w, n_nodes=600, k=15)
+    m = ParametricUMAP(a=1., b=1., correlation_weight=0.0, n_epochs=20, batch_size=64,
+                       total_steps_estimate=150, lr_schedule='cosine', warmup_steps=0,
+                       device='cuda', positive_target_mode='binary', gpu_resident_data=False,
+                       use_amp=True)
+    m.fit(X, precomputed_edges_path='/tmp/_pb_amp.npz')   # must NOT raise
+    assert m.is_fitted
+    assert np.isfinite(m.transform(X)).all()
+    assert m._train_stats['stop_reason'] == 'lr_horizon'
+
+
 def test_p03_zero_weight_correlation_skips_and_survives_nonfinite():
     m = _fit(horizon=50, epochs=1)
     assert m.is_fitted

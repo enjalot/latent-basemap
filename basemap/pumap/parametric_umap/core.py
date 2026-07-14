@@ -1084,6 +1084,15 @@ class ParametricUMAP:
                 if not bool(torch.isfinite(total_norm)):
                     self._train_stats["nonfinite_gradient_skips"] += 1
                     optimizer.zero_grad(set_to_none=True)
+                    # AMP: unscale_() already ran on this optimizer, so the
+                    # scaler's per-optimizer state is UNSCALED. Skipping via a
+                    # bare `continue` would make the next iteration's unscale_()
+                    # raise "unscale_() has already been called". Call update()
+                    # to reset the state machine; since unscale_ already flagged
+                    # found_inf, this also lowers the scale — the correct AMP
+                    # response to an overflow (common on the first steps).
+                    if scaler is not None:
+                        scaler.update()
                     consecutive_nonfinite_losses += 1
                     logging.warning("Non-finite GRADIENT at step %d (finite loss); skipping batch "
                                     "(%d consecutive).", global_step, consecutive_nonfinite_losses)

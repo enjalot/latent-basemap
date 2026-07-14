@@ -652,7 +652,11 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
     logging.info(f"  Transform time:   {transform_time:.2f}s")
     report_metrics = metrics_test if metrics_test else metrics_train
     for k, v in report_metrics.items():
-        logging.info(f"  {k}: {v:.4f}")
+        if isinstance(v, (int, float)):
+            logging.info(f"  {k}: {v:.4f}")
+        elif isinstance(v, dict):   # e.g. panel_v2 — log its scalar leaves
+            scal = {kk: vv for kk, vv in v.items() if isinstance(vv, (int, float))}
+            logging.info(f"  {k}: {scal}")
     if umap_baseline.get("metrics_test"):
         logging.info(f"  --- UMAP baseline ---")
         for k, v in umap_baseline["metrics_test"].items():
