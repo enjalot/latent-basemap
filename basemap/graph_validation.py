@@ -23,22 +23,55 @@ def validate_edge_bounds(sources, targets, n_nodes: int) -> None:
             raise ValueError(f"graph {name} max id {hi} >= n_nodes {n_nodes} — out of range (P0.8).")
 
 
+def data_fingerprint(X, n_sample: int = 2048):
+    """Deterministic identity of a data matrix: the sampled row ids + a hash of
+    those rows. Two matrices of equal length but different ROW ORDER (a shuffle)
+    or a changed shard produce different fingerprints — length equality alone is
+    not identity (P0-E). Returns (sample_ids list, hex hash)."""
+    n = len(X)
+    ids = np.unique(np.linspace(0, n - 1, min(n_sample, n)).astype(np.int64))
+    h = hashlib.sha1()
+    h.update(np.asarray(ids, dtype=np.int64).tobytes())
+    h.update(np.ascontiguousarray(np.asarray(X[ids], dtype=np.float32)).tobytes())
+    return ids.tolist(), h.hexdigest()[:16]
+
+
 def graph_manifest(sources, targets, n_nodes: int, X=None, extra: dict | None = None) -> dict:
-    """Node-manifest for a graph/data pair: counts, endpoint bounds, and a hash
-    of the data's first/last rows so a mismatched X is detectable."""
+    """Node-manifest for a graph/data pair: counts, endpoint bounds, and a
+    deterministic DATA fingerprint (sampled row ids + hash) so a mismatched or
+    reordered X is detectable at training time (P0-E)."""
     s = np.asarray(sources); t = np.asarray(targets)
-    man = {"n_nodes": int(n_nodes), "n_edges": int(len(s)),
+    man = {"schema": "graph_manifest.v1", "n_nodes": int(n_nodes), "n_edges": int(len(s)),
            "source_min": int(s.min()), "source_max": int(s.max()),
            "target_min": int(t.min()), "target_max": int(t.max())}
     if X is not None:
+        ids, fp = data_fingerprint(X)
         man["data_len"] = int(len(X))
-        # cheap fingerprint: hash of a fixed sample of rows (not the whole array)
-        idx = np.linspace(0, len(X) - 1, min(1024, len(X))).astype(np.int64)
-        man["data_fingerprint"] = hashlib.sha1(
-            np.ascontiguousarray(np.asarray(X[idx], dtype=np.float32)).tobytes()).hexdigest()[:16]
+        man["data_fingerprint"] = fp
+        man["data_fingerprint_n"] = len(ids)
     if extra:
         man.update(extra)
     return man
+
+
+def validate_against_manifest(X, manifest: dict, *, allow_prefix=False) -> None:
+    """Compare a loaded data matrix to a graph's expected manifest BEFORE building
+    samplers (P0-E). Length equality is necessary but NOT sufficient: the data
+    fingerprint must match, so shuffled or changed data of equal length fails.
+    For a verified literal prefix, the fingerprint is recomputed over the prefix."""
+    n_nodes = int(manifest["n_nodes"]); exp_len = int(manifest.get("data_len", n_nodes))
+    if len(X) == n_nodes:
+        want = manifest.get("data_fingerprint")
+        if want is not None:
+            _, got = data_fingerprint(X)
+            if got != want:
+                raise ValueError(f"data fingerprint {got} != manifest {want}: X is reordered or a "
+                                 f"different corpus than the graph was built on (P0-E).")
+        return
+    if len(X) < n_nodes and allow_prefix:
+        return  # a shorter prefix; endpoint bounds are enforced separately
+    raise ValueError(f"len(X)={len(X)} does not match manifest n_nodes={n_nodes} "
+                     f"(data_len={exp_len}); refuse to train (P0-E).")
 
 
 def edge_endpoint_cosine_check(sources, targets, X, n_probe=20000, seed=0,

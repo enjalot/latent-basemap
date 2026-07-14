@@ -14,9 +14,12 @@ Outputs under --out:
 """
 import argparse
 import os
+import sys
 import time
 
 import numpy as np
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 
 def load_sample(src_dir, n, seed):
@@ -101,7 +104,15 @@ def main():
         path = os.path.join(args.out, f"edges_k{k}.npz")
         np.savez(path, sources=sources, targets=targets, weights=weights,
                  n_nodes=n, k=k)
-        print(f"wrote {path} ({n * k:,} edges)")
+        # P0-E: emit a graph manifest (data fingerprint + endpoint bounds) beside
+        # every graph so training validates that X is the exact corpus/order the
+        # graph was built on, not merely equal in length.
+        from basemap.graph_validation import graph_manifest, write_manifest
+        man = graph_manifest(sources, targets, n, X=X,
+                             extra={"k": int(k), "src": os.path.abspath(args.src),
+                                    "seed": int(args.seed)})
+        write_manifest(path + ".manifest.json", man)
+        print(f"wrote {path} ({n * k:,} edges) + manifest")
 
 
 if __name__ == "__main__":

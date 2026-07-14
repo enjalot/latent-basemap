@@ -261,7 +261,18 @@ class ParametricUMAP:
         # prefix-filter of a larger graph onto a balanced/sampled matrix (which
         # silently connects unrelated cross-corpus rows) unless explicitly opted
         # into for a verified literal prefix.
-        from ...graph_validation import validate_graph_data_pair
+        from ...graph_validation import validate_graph_data_pair, validate_against_manifest
+        # P0-E: if the graph ships a node/data manifest, verify the loaded X's
+        # identity (fingerprint) against it BEFORE building samplers. Length
+        # equality is not identity — this catches a reordered or wrong-corpus X.
+        import json as _json
+        for man_path in (edges_path + ".manifest.json",
+                         edges_path.rsplit(".", 1)[0] + ".manifest.json"):
+            if os.path.exists(man_path):
+                logging.info("P0-E: validating X identity against graph manifest %s", man_path)
+                validate_against_manifest(X, _json.load(open(man_path)),
+                                          allow_prefix=getattr(self, "allow_prefix_edge_filter", False))
+                break
         mask = validate_graph_data_pair(
             sources, targets, n_nodes, n_train,
             allow_prefix_filter=getattr(self, "allow_prefix_edge_filter", False))

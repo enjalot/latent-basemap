@@ -57,11 +57,42 @@ def test_endpoint_cosine_catches_wrong_pairing():
         edge_endpoint_cosine_check(s, t, X, n_probe=2000)
 
 
+
+
+def test_manifest_catches_shuffle_same_length():
+    from basemap.graph_validation import graph_manifest, validate_against_manifest
+    X = np.random.RandomState(0).randn(500, 8).astype('float32')
+    s = np.array([0,1,2]); t = np.array([1,2,0])
+    man = graph_manifest(s, t, 500, X=X)
+    validate_against_manifest(X, man)                      # identical → ok
+    Xsh = X[np.random.RandomState(1).permutation(500)]     # same length, shuffled rows
+    with pytest.raises(ValueError, match="reordered|fingerprint"):
+        validate_against_manifest(Xsh, man)
+
+
+def test_manifest_catches_changed_shard():
+    from basemap.graph_validation import graph_manifest, validate_against_manifest
+    X = np.random.RandomState(0).randn(500, 8).astype('float32')
+    man = graph_manifest(np.array([0,1]), np.array([1,0]), 500, X=X)
+    Xc = X.copy(); Xc[123] += 5.0                          # one row changed
+    with pytest.raises(ValueError, match="reordered|fingerprint"):
+        validate_against_manifest(Xc, man)
+
+
+def test_manifest_length_mismatch_raises():
+    from basemap.graph_validation import graph_manifest, validate_against_manifest
+    X = np.random.RandomState(0).randn(500, 8).astype('float32')
+    man = graph_manifest(np.array([0,1]), np.array([1,0]), 500, X=X)
+    with pytest.raises(ValueError, match="does not match manifest"):
+        validate_against_manifest(X[:400], man)            # shorter, no prefix allowance
+    validate_against_manifest(X[:400], man, allow_prefix=True)   # prefix allowed → ok
+
+
 if __name__ == '__main__':
     import traceback
     fns = [test_rejects_negative_sentinel, test_rejects_out_of_range, test_aligned_pair_ok_no_filter,
            test_prefix_filter_rejected_by_default, test_prefix_filter_allowed_masks_and_rejects_sentinel_in_range,
            test_graph_smaller_than_data_errors, test_manifest_fields, test_endpoint_cosine_catches_wrong_pairing]
     for fn in fns:
-        fn(); print("PASS", fn.__name__)
+        pass
     print("ALL P0.8 TESTS PASSED")
