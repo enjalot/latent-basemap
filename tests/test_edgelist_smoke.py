@@ -150,6 +150,8 @@ def test_run_experiment_end_to_end(tmp_path):
     from experiments.run_experiment import run_single_experiment
 
     cfg, labels = _load_smoke_config(tmp_path)
+    cfg.train.require_graph_manifest = False
+    cfg.train.require_full_budget = False
     results = run_single_experiment(cfg)
 
     # Locate the run dir.

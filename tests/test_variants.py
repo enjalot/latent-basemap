@@ -396,6 +396,8 @@ def test_anchored_file_end_to_end_manifest_scale(tmp_path):
     cfg.data.precomputed_edges_path = edges_path
     cfg.train.anchored_init_path = str(teacher_path)
     cfg.logging.results_dir = str(tmp_path / "results")
+    cfg.train.require_graph_manifest = False   # synthetic smoke graph
+    cfg.train.require_full_budget = False
     results = run_single_experiment(cfg)
 
     run_dirs = sorted(Path(cfg.logging.results_dir).glob(f"{cfg.name}_*"))

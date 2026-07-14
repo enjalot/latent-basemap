@@ -78,6 +78,30 @@ def test_hi_knn_exact_on_near_duplicates():
     assert dist[0].max() < 0.5
 
 
+def test_hi_knn_candidate_recall_vs_fp64_measured():
+    # P0-4: MEASURE overselect+rerank top-k recall against a direct fp64 reference
+    # across adversarial near-duplicate clusters (more than k dups). The honest
+    # contract is "validated_approximate" — assert the measured recall is high AND
+    # record it, rather than claiming exact.
+    rng = np.random.RandomState(7)
+    recalls = []
+    for trial in range(8):
+        base = rng.randn(1, 24).astype('float32')
+        dups = base + rng.randn(25, 24).astype('float32') * 1e-3   # 25 near-dups (> k)
+        rest = rng.randn(400, 24).astype('float32') * 3
+        F = np.concatenate([base, dups, rest]).astype('float32')
+        anchors = np.array([0, 30, 200])
+        ids, _, _ = pv._self_knn(F, anchors, 15, pv.PanelV2Config(overselect=8),
+                                 hi_dim=True, want_dist=True)
+        Fd = F.astype('float64')
+        for r, a in enumerate(anchors):
+            d = np.linalg.norm(Fd - Fd[a], axis=1); d[a] = np.inf
+            true = set(np.argsort(d)[:15].tolist())
+            recalls.append(len(set(ids[r].tolist()) & true) / 15)
+    mean_recall = float(np.mean(recalls))
+    assert mean_recall >= 0.98, f"measured top-15 recall vs fp64 = {mean_recall}"
+
+
 def test_hi_knn_matches_brute_fp64():
     rng = np.random.RandomState(1)
     F = rng.randn(400, 24).astype('float32')
@@ -138,6 +162,23 @@ def test_score_panel_matches_brute():
     assert res["recall@k"] <= res["ffr"] + 1e-9
     assert "validated_approximate" in res["provenance"]["exactness"]
     assert res["guards"]["coords_finite"] is True
+
+
+def test_golden_extension_purity_projection_3d():
+    # P0-4: the golden gate must cover purity + projection + a 3D map (not just
+    # ffr/recall/density). Small synthetic stand-in exercising all axes at once.
+    rng = np.random.RandomState(11)
+    X = rng.randn(1200, 12).astype('float32')
+    Z = rng.randn(1200, 3).astype('float32')          # 3D map
+    C = rng.randn(16, 12).astype('float32')
+    Xq = rng.randn(10, 12).astype('float32'); Zq = rng.randn(10, 3).astype('float32')
+    proj = {"Xq": Xq, "Zq": Zq, "query_ids": np.arange(5000, 5010)}
+    res = pv.score_panel(X, Z, config=pv.PanelV2Config(frac=0.02, n_anchors=100, corpus_chunk=256),
+                         centroids_by_k={16: C}, projection=proj, provenance={"t": "golden3d"})
+    assert res["n_dims_lo"] == 3
+    assert "k16" in res["purity"]
+    assert 0.0 <= res["projection"]["proj_ffr"] <= 1.0
+    assert res["projection"]["proj_n_queries"] == 10
 
 
 def test_masks_separate_ffr_and_purity():

@@ -26,6 +26,8 @@ def _run(tmp_path):
     cfg.data.memmap_dirs = [memmap_dir]
     cfg.data.precomputed_edges_path = edges_path
     cfg.logging.results_dir = str(tmp_path / "results")
+    cfg.train.require_graph_manifest = False
+    cfg.train.require_full_budget = False
     run_single_experiment(cfg)
 
     results_root = Path(cfg.logging.results_dir)
