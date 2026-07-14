@@ -54,25 +54,30 @@ def frozen_centroids(X, ks, cache_dir, seed=0, iters=25):
     return out
 
 
-def _cross_topk(Q, corpus, k, lo, cfg):
-    """Top-k of each Q row over corpus (cross, not self). lo=True → exact cdist on
-    tiny coords; else normalised-matmul expansion. Bounded by cfg.corpus_chunk."""
+def _cross_topk(Q, corpus, k, lo, cfg, q_tile=4096):
+    """Top-k of each Q row over corpus (cross, not self). Tiles BOTH the query rows
+    (q_tile) and the corpus (cfg.corpus_chunk) so peak VRAM is bounded — a single
+    (all-queries × corpus) matrix is ~16 GB at 20k×200k and OOMs. lo=True → exact
+    cdist on tiny coords; else normalised-matmul expansion."""
     import torch
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    Qt = torch.from_numpy(np.asarray(Q, dtype=np.float32)).to(dev)
-    qn = (Qt * Qt).sum(1, keepdim=True)
-    best_d = torch.full((len(Q), k), float("inf"), device=dev)
-    best_i = torch.full((len(Q), k), -1, dtype=torch.long, device=dev)
-    cc = len(corpus) if lo else min(len(corpus), cfg.corpus_chunk)
-    for j in range(0, len(corpus), cc):
-        Xc = torch.from_numpy(np.asarray(corpus[j:j + cc], dtype=np.float32)).to(dev)
-        d2 = (torch.cdist(Qt, Xc) ** 2) if lo else (qn - 2.0 * (Qt @ Xc.T) + (Xc * Xc).sum(1))
-        kloc = min(k, len(Xc))
-        ld, li = torch.topk(d2, kloc, dim=1, largest=False)
-        best_d = torch.cat([best_d, ld], 1); best_i = torch.cat([best_i, li + j], 1)
-        best_d, sel = torch.topk(best_d, k, dim=1, largest=False)
-        best_i = torch.gather(best_i, 1, sel); del Xc, d2
-    return best_i.cpu().numpy()
+    cc = len(corpus) if lo else min(len(corpus), max(1, cfg.corpus_chunk))
+    out = np.empty((len(Q), k), dtype=np.int64)
+    for q0 in range(0, len(Q), q_tile):
+        Qt = torch.from_numpy(np.asarray(Q[q0:q0 + q_tile], dtype=np.float32)).to(dev)
+        qn = (Qt * Qt).sum(1, keepdim=True)
+        best_d = torch.full((len(Qt), k), float("inf"), device=dev)
+        best_i = torch.full((len(Qt), k), -1, dtype=torch.long, device=dev)
+        for j in range(0, len(corpus), cc):
+            Xc = torch.from_numpy(np.asarray(corpus[j:j + cc], dtype=np.float32)).to(dev)
+            d2 = (torch.cdist(Qt, Xc) ** 2) if lo else (qn - 2.0 * (Qt @ Xc.T) + (Xc * Xc).sum(1))
+            kloc = min(k, len(Xc))
+            ld, li = torch.topk(d2, kloc, dim=1, largest=False)
+            best_d = torch.cat([best_d, ld], 1); best_i = torch.cat([best_i, li + j], 1)
+            best_d, sel = torch.topk(best_d, k, dim=1, largest=False)
+            best_i = torch.gather(best_i, 1, sel); del Xc, d2
+        out[q0:q0 + len(Qt)] = best_i.cpu().numpy(); del Qt, best_d, best_i
+    return out
 
 
 def projection_ffr(X, Z, Xq, Zq, cfg):
@@ -106,7 +111,9 @@ def main():
     args = ap.parse_args()
 
     from basemap.pumap.parametric_umap.core import ParametricUMAP
-    cfg = PanelV2Config(frac=args.frac, n_anchors=args.n_anchors)
+    # cap corpus_chunk so query-tile × corpus-chunk cross matrices stay bounded
+    # (4096 × 500k ≈ 2 GB fp32) even when the corpus is 2M+.
+    cfg = PanelV2Config(frac=args.frac, n_anchors=args.n_anchors, corpus_chunk=500_000)
     runs = dict(kv.split("=", 1) for kv in args.runs)
 
     X = load_embeddings(os.path.join(args.testbed, "train"), dim=args.dim)
