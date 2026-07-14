@@ -47,6 +47,7 @@ class ParametricUMAP:
         lr_schedule="plateau",
         warmup_steps=0,
         total_steps_estimate=0,
+        require_full_budget=True,
         use_amp=True,
         positive_target_mode="probability",
         reject_neighbors=False,
@@ -102,6 +103,7 @@ class ParametricUMAP:
         self.lr_schedule = lr_schedule
         self.warmup_steps = warmup_steps
         self.total_steps_estimate = total_steps_estimate
+        self.require_full_budget = require_full_budget
         self.use_amp = use_amp
         self.positive_target_mode = positive_target_mode
         self.reject_neighbors = reject_neighbors
@@ -837,42 +839,45 @@ class ParametricUMAP:
         scaler = torch.amp.GradScaler(self.device, enabled=use_amp) if use_amp else None
 
         optimizer = AdamW(self.model.parameters(), lr=self.learning_rate)
-        if self.lr_schedule == "plateau":
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode='min', factor=0.5, patience=5)
-        elif self.lr_schedule == "cosine":
-            total_steps = max(self.total_steps_estimate, 1)
 
-            def lr_lambda(step):
-                if self.warmup_steps > 0 and step < self.warmup_steps:
-                    return step / self.warmup_steps
-                progress = (step - self.warmup_steps) / max(1, total_steps - self.warmup_steps)
-                return 0.5 * (1.0 + np.cos(np.pi * min(progress, 1.0)))
-
-            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-        else:
-            raise ValueError(f"Unknown lr_schedule: {self.lr_schedule}")
-
-        # P0-B: the LR horizon is an OPTIMIZER-UPDATE budget (successful,
-        # positive-LR updates), NOT a loop-iteration count. Training stops the
-        # instant the cosine schedule anneals to LR=0 — past there no update
-        # changes weights (82–90% of the loop in past configs). AMP-overflow and
-        # non-finite batches do NOT consume the horizon. Accounting below is
-        # persisted to results.json + the manifest.
+        # P0-3 (review): the LR horizon H is a budget of SUCCESSFUL, POSITIVE-LR
+        # optimizer updates — derived and VALIDATED **before** the scheduler is
+        # built, so the cosine lambda anneals over H (not over a stale
+        # max(total_steps_estimate,1)=1). AMP-overflow / non-finite batches never
+        # consume H. Warmup uses (u+1)/W so update u=0 already has positive LR
+        # (the old step/W made update 0 an LR=0 update → "500k" was really
+        # 499,999 positive-LR updates). We stop after H positive-LR updates and
+        # never apply the LR=0 endpoint.
         planned_loop = int(len(loader)) * int(self.n_epochs)
         if self.lr_schedule == "cosine":
             if int(self.total_steps_estimate) <= 0:
-                lr_horizon = planned_loop   # derive from the plan; never a 1-step run
-                logging.warning("P0-B: total_steps_estimate<=0 → deriving cosine horizon "
-                                "from the planned loop (%d updates).", planned_loop)
+                lr_horizon = planned_loop
+                logging.warning("P0-3: total_steps_estimate<=0 → cosine horizon = planned "
+                                "loop (%d positive-LR updates).", planned_loop)
             else:
                 lr_horizon = int(self.total_steps_estimate)
-            if self.warmup_steps >= lr_horizon:
-                raise ValueError(f"warmup_steps ({self.warmup_steps}) >= LR horizon "
-                                 f"({lr_horizon}); the schedule would never reach full LR (P0-B).")
-        else:
+            W = int(self.warmup_steps); H = int(lr_horizon)
+            if W >= H:
+                raise ValueError(f"warmup_steps ({W}) >= LR horizon ({H}); the schedule "
+                                 f"would never reach full LR (P0-3).")
+
+            def lr_lambda(u):
+                # u = successful positive-LR updates already taken (0-based).
+                if W > 0 and u < W:
+                    return (u + 1) / W          # u=0 → positive LR, not 0
+                if u >= H:
+                    return 0.0                  # never applied — we stop at H
+                progress = (u - W) / max(1, H - W)
+                return 0.5 * (1.0 + np.cos(np.pi * min(progress, 1.0)))
+
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        elif self.lr_schedule == "plateau":
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', factor=0.5, patience=5)
             lr_horizon = planned_loop
-        schedule_version = "cosine-v2-update-budget" if self.lr_schedule == "cosine" else self.lr_schedule
+        else:
+            raise ValueError(f"Unknown lr_schedule: {self.lr_schedule}")
+        schedule_version = "cosine-v3-positive-budget" if self.lr_schedule == "cosine" else self.lr_schedule
         self._train_stats = {
             "schedule_version": schedule_version, "planned_loop_iters": planned_loop,
             "lr_horizon": lr_horizon, "attempted_batches": 0, "finite_loss_batches": 0,
@@ -881,6 +886,9 @@ class ParametricUMAP:
             "nonfinite_loss_skips": 0, "nonfinite_gradient_skips": 0, "amp_overflow_skips": 0,
             "first_lr": None, "peak_lr": 0.0, "final_lr": None, "stop_reason": None,
             "executed_iters": 0, "n_pos_edges": int(n_pos_edges),
+            # P0-3: budget accounting — H successful positive-LR updates.
+            "lr_used_first": None, "lr_used_last": None, "next_lr": None,
+            "budget_satisfied": None, "use_amp": bool(use_amp),
         }
         stop_training = False
 
@@ -903,6 +911,7 @@ class ParametricUMAP:
         global_step = 0
         self._train_t0 = time.perf_counter()
         consecutive_nonfinite_losses = 0
+        consecutive_nonfinite_gradients = 0   # P0-3: separate from the loss counter
         for epoch in range(self.n_epochs):
             epoch_loss_t = torch.zeros((), device=self.device)
             epoch_umap_t = torch.zeros((), device=self.device)
@@ -1082,22 +1091,37 @@ class ParametricUMAP:
                         p.grad.detach().norm() for p in self.model.parameters()
                         if p.grad is not None]))
                 if not bool(torch.isfinite(total_norm)):
-                    self._train_stats["nonfinite_gradient_skips"] += 1
                     optimizer.zero_grad(set_to_none=True)
-                    # AMP: unscale_() already ran on this optimizer, so the
-                    # scaler's per-optimizer state is UNSCALED. Skipping via a
-                    # bare `continue` would make the next iteration's unscale_()
-                    # raise "unscale_() has already been called". Call update()
-                    # to reset the state machine; since unscale_ already flagged
-                    # found_inf, this also lowers the scale — the correct AMP
-                    # response to an overflow (common on the first steps).
                     if scaler is not None:
+                        # P0-3: with AMP, unscale_() already flagged found_inf; a
+                        # non-finite UNSCALED gradient here is overwhelmingly a
+                        # scaler overflow (transient, recovers as the scale
+                        # lowers), NOT a model-gradient failure. update() lowers
+                        # the scale and resets the state machine. Count it as an
+                        # AMP overflow, on its OWN consecutive counter.
                         scaler.update()
-                    consecutive_nonfinite_losses += 1
-                    logging.warning("Non-finite GRADIENT at step %d (finite loss); skipping batch "
-                                    "(%d consecutive).", global_step, consecutive_nonfinite_losses)
-                    if consecutive_nonfinite_losses >= 100:
-                        raise RuntimeError("Aborting: 100 consecutive non-finite-gradient batches")
+                        self._train_stats["amp_overflow_skips"] += 1
+                        kind = "amp_overflow"
+                    else:
+                        # No scaler → a genuine non-finite MODEL gradient.
+                        self._train_stats["nonfinite_gradient_skips"] += 1
+                        kind = "model_grad"
+                    consecutive_nonfinite_gradients += 1
+                    # rate-limited (per-batch spam suppressed; aggregate kept)
+                    if consecutive_nonfinite_gradients <= 3 or consecutive_nonfinite_gradients % 500 == 0:
+                        logging.warning("Non-finite gradient at step %d (%s); skipping (%d consecutive, "
+                                        "%d amp / %d model total).", global_step, kind,
+                                        consecutive_nonfinite_gradients,
+                                        self._train_stats["amp_overflow_skips"],
+                                        self._train_stats["nonfinite_gradient_skips"])
+                    if consecutive_nonfinite_gradients >= 100:
+                        raise RuntimeError(f"Aborting: 100 consecutive non-finite gradients ({kind})")
+                    st = self._train_stats
+                    total_skips = (st["nonfinite_gradient_skips"] + st["amp_overflow_skips"]
+                                   + st["nonfinite_loss_skips"])
+                    if st["attempted_batches"] > 2000 and total_skips > 0.5 * st["attempted_batches"]:
+                        raise RuntimeError(f"Aborting: skip fraction {total_skips}/"
+                                           f"{st['attempted_batches']} exceeds 50% (P0-3).")
                     batch = _get_next(); pbar.update(1); continue
                 if self.clip_grad_value is not None:
                     torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=self.clip_grad_value)
@@ -1131,14 +1155,21 @@ class ParametricUMAP:
 
                 if optimizer_was_run:
                     st["optimizer_steps_succeeded"] += 1
+                    consecutive_nonfinite_gradients = 0   # P0-3: reset on real progress
                     if lr_used > 0:
                         st["positive_lr_optimizer_steps"] += 1
+                        if st["lr_used_first"] is None:
+                            st["lr_used_first"] = lr_used
+                        st["lr_used_last"] = lr_used
                     # Advance the schedule ONLY on a successful update, so an
                     # AMP-overflow skip does not consume the LR horizon.
                     if self.lr_schedule == "cosine":
                         scheduler.step()
                         st["scheduler_steps"] += 1
+                        st["next_lr"] = optimizer.param_groups[0]['lr']
                 else:
+                    # scaler.step skipped (scale decreased) → an AMP overflow at
+                    # THIS step; the schedule was NOT advanced, so H is preserved.
                     st["amp_overflow_skips"] += 1
                 st["final_lr"] = lr_used
 
@@ -1294,6 +1325,22 @@ class ParametricUMAP:
         s = self._train_stats
         if s["stop_reason"] is None:
             s["stop_reason"] = "exhausted_plan"
+        # P0-3: the budget is H successful positive-LR updates. It is satisfied
+        # only if we actually took H of them (a cosine run that stopped at the
+        # horizon), NOT if the epoch plan ran out first. A matched-budget run that
+        # exhausted its plan below H must fail closed — never be reported as a
+        # completed H-update run.
+        s["budget_satisfied"] = bool(
+            self.lr_schedule != "cosine"
+            or s["positive_lr_optimizer_steps"] >= s["lr_horizon"]
+            or s["stop_reason"] == "bench_cap")
+        if not s["budget_satisfied"] and self.require_full_budget:
+            raise RuntimeError(
+                f"P0-3: matched-budget run exhausted its {s['planned_loop_iters']}-iter plan "
+                f"with only {s['positive_lr_optimizer_steps']}/{s['lr_horizon']} positive-LR "
+                f"updates (stop={s['stop_reason']}). Increase n_epochs or lower the horizon, or "
+                f"set require_full_budget=False for an exploratory run; refuse to silently report "
+                f"this as a satisfied {s['lr_horizon']}-update budget.")
         train_secs = time.perf_counter() - getattr(self, "_train_t0", time.perf_counter())
         s["train_seconds"] = round(train_secs, 1)
         s["updates_per_s"] = round(s["positive_lr_optimizer_steps"] / train_secs, 1) if train_secs > 0 else 0.0

@@ -100,7 +100,7 @@ def test_midnear_fit_separates_blobs_no_nan():
         n_components=2, a=1.0, b=1.0, correlation_weight=0.0,
         learning_rate=0.01, n_epochs=12, batch_size=1024, pos_ratio=0.2,
         device="cpu", use_amp=False, positive_target_mode="binary",
-        lr_schedule="cosine", warmup_steps=30, total_steps_estimate=5000,
+        lr_schedule="cosine", warmup_steps=30, total_steps_estimate=5000, require_full_budget=False,
         midnear_enabled=True, mn_pairs_per_batch=0, mn_weight_scale=1.0,
     )
     pumap.fit(X, precomputed_edges_path=edges_path, random_state=42,
@@ -126,6 +126,7 @@ def _run_variant_config(cfg_name, tmp_path):
     cfg.data.memmap_dirs = [memmap_dir]
     cfg.data.precomputed_edges_path = edges_path
     cfg.logging.results_dir = str(tmp_path / "results")
+    cfg.train.require_full_budget = False   # smoke: tiny data, horizon may exceed plan
     results = run_single_experiment(cfg)
 
     run_dirs = sorted(Path(cfg.logging.results_dir).glob(f"{cfg.name}_*"))
@@ -300,7 +301,7 @@ def test_anchor_hold_keeps_layout_near_targets_with_midnear(tmp_path):
         n_components=2, a=1.0, b=1.0, correlation_weight=0.0,
         learning_rate=0.01, n_epochs=20, batch_size=512, pos_ratio=0.2,
         device="cpu", use_amp=False, positive_target_mode="binary",
-        lr_schedule="cosine", warmup_steps=30, total_steps_estimate=6000,
+        lr_schedule="cosine", warmup_steps=30, total_steps_estimate=6000, require_full_budget=False,
         anchored_init="file", anchored_init_path=str(teacher_path),
         anchored_init_epochs=0,  # hold-only: no pretrain, pure ongoing distill
         anchor_hold_weight=30.0, anchor_hold_fraction=0.1,
@@ -336,7 +337,7 @@ def test_fast_path_anchor_hold_midnear_cpu(tmp_path):
         n_components=2, a=1.0, b=1.0, correlation_weight=0.0,
         learning_rate=0.01, n_epochs=15, batch_size=512, pos_ratio=0.2,
         device="cpu", use_amp=False, positive_target_mode="binary",
-        lr_schedule="cosine", warmup_steps=30, total_steps_estimate=3000,
+        lr_schedule="cosine", warmup_steps=30, total_steps_estimate=3000, require_full_budget=False,
         anchored_init="file", anchored_init_path=str(teacher_path),
         anchored_init_epochs=3, anchored_init_lr=1e-3,
         anchor_hold_weight=1.0, anchor_hold_fraction=0.1,
@@ -366,7 +367,7 @@ def test_hold_without_target_source_raises(tmp_path):
     pumap = ParametricUMAP(
         n_components=2, device="cpu", use_amp=False, n_epochs=1,
         batch_size=256, positive_target_mode="binary", lr_schedule="cosine",
-        total_steps_estimate=100, anchored_init="none", anchor_hold_weight=5.0,
+        total_steps_estimate=100, require_full_budget=False, anchored_init="none", anchor_hold_weight=5.0,
     )
     with pytest.raises(ValueError, match="anchor_hold_weight"):
         pumap.fit(X, precomputed_edges_path=str(edges_path), random_state=0,

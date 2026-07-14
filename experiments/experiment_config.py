@@ -101,6 +101,7 @@ class TrainConfig:
     lr_schedule: str = "plateau"
     warmup_steps: int = 0
     total_steps_estimate: int = 0
+    require_full_budget: bool = True   # P0-3: fail closed if plan exhausts below horizon
     use_amp: bool = True
     positive_target_mode: str = "probability"  # "probability" or "binary"
     # Edge-list scale path: reject actual graph neighbours in the negative

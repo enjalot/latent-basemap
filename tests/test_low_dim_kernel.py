@@ -111,8 +111,10 @@ def test_umap_self_edges_end_to_end_finite_b_std():
     dst = np.array([10, 11, 12, 13, 14, 1, 2, 3] * 200, dtype=np.int32)  # incl. i==i self-edges
     w = np.ones(len(src), dtype=np.float32)
     np.savez('/tmp/_pa_edges.npz', sources=src, targets=dst, weights=w, n_nodes=n, k=15)
+    # horizon (100) <= planned loop (50 batches x 4 epochs = 200) so the P0-3
+    # budget is satisfiable — the guard rejects horizon > plan.
     m = ParametricUMAP(a=1.5769, b=B_STD, low_dim_kernel='umap', correlation_weight=0.0,
-                       n_epochs=2, batch_size=64, total_steps_estimate=200, lr_schedule='cosine',
+                       n_epochs=4, batch_size=64, total_steps_estimate=100, lr_schedule='cosine',
                        device='cpu', positive_target_mode='binary', gpu_resident_data=False, use_amp=False)
     m.fit(X, precomputed_edges_path='/tmp/_pa_edges.npz')
     for p in m.model.parameters():

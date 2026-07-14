@@ -491,6 +491,7 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         lr_schedule=tc.lr_schedule,
         warmup_steps=tc.warmup_steps,
         total_steps_estimate=tc.total_steps_estimate,
+        require_full_budget=getattr(tc, "require_full_budget", True),
         use_amp=tc.use_amp,
         positive_target_mode=tc.positive_target_mode,
         reject_neighbors=tc.reject_neighbors,

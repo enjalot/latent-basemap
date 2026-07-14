@@ -78,6 +78,36 @@ def test_p0a_amp_skip_path_does_not_break_scaler():
     assert m._train_stats['stop_reason'] == 'lr_horizon'
 
 
+def test_p0_3_schedule_version_and_warmup_first_update_positive():
+    # P0-3: with warmup, update 0 must have POSITIVE LR (the old step/W made it 0,
+    # so a "500k" run was really 499,999 positive-LR updates). Exactly H positive
+    # updates; schedule version is the new positive-budget schedule.
+    m = _fit(horizon=100, warmup_steps=10)
+    s = m._train_stats
+    assert s['schedule_version'] == 'cosine-v3-positive-budget', s['schedule_version']
+    assert s['lr_used_first'] is not None and s['lr_used_first'] > 0.0, s
+    assert s['positive_lr_optimizer_steps'] == 100, s
+    assert s['budget_satisfied'] is True
+    assert s['stop_reason'] == 'lr_horizon'
+
+
+def test_p0_3_zero_horizon_takes_planned_positive_updates():
+    # total_steps_estimate<=0 must actually TAKE planned_loop positive-LR updates,
+    # not merely report the derived horizon while annealing over one step.
+    m = _fit(horizon=0, epochs=1)
+    s = m._train_stats
+    assert s['lr_horizon'] == s['planned_loop_iters'] > 1, s
+    assert s['positive_lr_optimizer_steps'] == s['lr_horizon'], s   # every update had +LR
+    assert s['budget_satisfied'] is True
+
+
+def test_p0_3_exhausted_plan_below_budget_fails():
+    # A horizon larger than the epoch plan must fail closed, not silently report a
+    # satisfied budget.
+    with pytest.raises(RuntimeError, match="exhausted|budget"):
+        _fit(horizon=10_000_000, epochs=1)
+
+
 def test_p03_zero_weight_correlation_skips_and_survives_nonfinite():
     m = _fit(horizon=50, epochs=1)
     assert m.is_fitted
