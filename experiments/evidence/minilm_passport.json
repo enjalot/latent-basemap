@@ -30,9 +30,9 @@
   "data-00000.npy"
  ],
  "shard_sha": {
-  "data-00000.npy": "0c26a44efc8dc1e4"
+  "data-00000.npy": "a62af6530ccc42cd"
  },
- "code_commit": "72e2b0d8c41f",
- "code_dirty": true,
+ "code_commit": "9c3a747e02f4",
+ "code_dirty": false,
  "generated_cmd": "python experiments/minilm_passport.py --emb /data/latent-basemap/minilm-15m/train/data-00000.npy --dim 384 --n 201000 --out experiments/evidence/minilm_passport.json"
 }
