@@ -85,7 +85,22 @@ def test_manifest_length_mismatch_raises():
     man = graph_manifest(np.array([0,1]), np.array([1,0]), 500, X=X)
     with pytest.raises(ValueError, match="does not match manifest"):
         validate_against_manifest(X[:400], man)            # shorter, no prefix allowance
-    validate_against_manifest(X[:400], man, allow_prefix=True)   # prefix allowed → ok
+
+
+def test_prefix_refused_without_stored_fingerprint():
+    # P0-2: allow_prefix must NOT be an unconditional pass — a prefix with no
+    # stored fingerprint to verify against is refused.
+    from basemap.graph_validation import graph_manifest, validate_against_manifest, data_fingerprint
+    X = np.random.RandomState(0).randn(500, 8).astype('float32')
+    man = graph_manifest(np.array([0,1]), np.array([1,0]), 500, X=X)
+    with pytest.raises(ValueError, match="no stored prefix fingerprint|refuse the prefix"):
+        validate_against_manifest(X[:400], man, allow_prefix=True)
+    # with a stored prefix fingerprint, the verified prefix passes; a mismatched one fails
+    man["prefix_fingerprints"] = {"400": data_fingerprint(X[:400])[1]}
+    validate_against_manifest(X[:400], man, allow_prefix=True)
+    Xbad = X.copy(); Xbad[123] += 9.0
+    with pytest.raises(ValueError, match="prefix fingerprint"):
+        validate_against_manifest(Xbad[:400], man, allow_prefix=True)
 
 
 if __name__ == '__main__':

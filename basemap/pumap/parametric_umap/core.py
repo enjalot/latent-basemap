@@ -48,6 +48,7 @@ class ParametricUMAP:
         warmup_steps=0,
         total_steps_estimate=0,
         require_full_budget=True,
+        require_graph_manifest=False,   # class default lenient; run_experiment/config default True (P0-2)
         use_amp=True,
         positive_target_mode="probability",
         reject_neighbors=False,
@@ -104,6 +105,7 @@ class ParametricUMAP:
         self.warmup_steps = warmup_steps
         self.total_steps_estimate = total_steps_estimate
         self.require_full_budget = require_full_budget
+        self.require_graph_manifest = require_graph_manifest
         self.use_amp = use_amp
         self.positive_target_mode = positive_target_mode
         self.reject_neighbors = reject_neighbors
@@ -268,13 +270,24 @@ class ParametricUMAP:
         # identity (fingerprint) against it BEFORE building samplers. Length
         # equality is not identity — this catches a reordered or wrong-corpus X.
         import json as _json
+        man_found = None
         for man_path in (edges_path + ".manifest.json",
                          edges_path.rsplit(".", 1)[0] + ".manifest.json"):
             if os.path.exists(man_path):
                 logging.info("P0-E: validating X identity against graph manifest %s", man_path)
                 validate_against_manifest(X, _json.load(open(man_path)),
                                           allow_prefix=getattr(self, "allow_prefix_edge_filter", False))
+                man_found = man_path
                 break
+        # P0-2: manifests are MANDATORY by default — a graph without a matching
+        # content-bound manifest cannot be trained on (that was how every R1 run
+        # trained ungated). Opt out only for synthetic/smoke graphs.
+        if man_found is None and getattr(self, "require_graph_manifest", True):
+            raise ValueError(
+                f"graph {edges_path} has no manifest ({edges_path}.manifest.json) — refuse to "
+                f"train without a content-bound graph identity (P0-2). Run "
+                f"experiments/backfill_graph_manifests.py, or set require_graph_manifest=False "
+                f"for a synthetic/smoke graph.")
         mask = validate_graph_data_pair(
             sources, targets, n_nodes, n_train,
             allow_prefix_filter=getattr(self, "allow_prefix_edge_filter", False))

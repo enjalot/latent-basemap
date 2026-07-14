@@ -78,6 +78,28 @@ def test_p0a_amp_skip_path_does_not_break_scaler():
     assert m._train_stats['stop_reason'] == 'lr_horizon'
 
 
+def test_p0_2_mandatory_manifest_gate():
+    # P0-2: require_graph_manifest=True refuses a graph with no manifest; writing a
+    # matching manifest lets it proceed.
+    from basemap.graph_validation import graph_manifest, write_manifest
+    import os as _os
+    X = np.random.RandomState(1).randn(400, 8).astype(np.float32)
+    s, t, w = _edges(400, 8000, 1)
+    ep = '/tmp/_p02_edges.npz'; np.savez(ep, sources=s, targets=t, weights=w, n_nodes=400, k=15)
+    if _os.path.exists(ep + '.manifest.json'):
+        _os.remove(ep + '.manifest.json')
+    def mk(req):
+        return ParametricUMAP(a=1., b=1., correlation_weight=0.0, n_epochs=4, batch_size=64,
+                              total_steps_estimate=50, lr_schedule='cosine', warmup_steps=0,
+                              device='cpu', positive_target_mode='binary', gpu_resident_data=False,
+                              use_amp=False, require_graph_manifest=req)
+    with pytest.raises(ValueError, match="no manifest|content-bound graph identity"):
+        mk(True).fit(X, precomputed_edges_path=ep)
+    write_manifest(ep + '.manifest.json', graph_manifest(s, t, 400, X=X, extra={'k': 15}))
+    m = mk(True); m.fit(X, precomputed_edges_path=ep)     # manifest present → proceeds
+    assert m.is_fitted
+
+
 def test_p0_3_schedule_version_and_warmup_first_update_positive():
     # P0-3: with warmup, update 0 must have POSITIVE LR (the old step/W made it 0,
     # so a "500k" run was really 499,999 positive-LR updates). Exactly H positive

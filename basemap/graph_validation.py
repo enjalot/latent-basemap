@@ -69,7 +69,21 @@ def validate_against_manifest(X, manifest: dict, *, allow_prefix=False) -> None:
                                  f"different corpus than the graph was built on (P0-E).")
         return
     if len(X) < n_nodes and allow_prefix:
-        return  # a shorter prefix; endpoint bounds are enforced separately
+        # P0-2: a prefix is accepted ONLY if its identity can be PROVEN against a
+        # stored prefix fingerprint. An unconditional pass would re-open the
+        # balanced-vs-blocked hazard the manifest exists to prevent.
+        pref = (manifest.get("prefix_fingerprints") or {})
+        want = pref.get(str(len(X)))
+        if want is None:
+            raise ValueError(f"prefix of length {len(X)} requested but manifest has no stored "
+                             f"prefix fingerprint to verify it against — refuse the prefix (P0-2). "
+                             f"Provide an aligned graph/data pair or a manifest with "
+                             f"prefix_fingerprints.")
+        _, got = data_fingerprint(X)
+        if got != want:
+            raise ValueError(f"prefix fingerprint {got} != manifest prefix[{len(X)}] {want} "
+                             f"(P0-2): X is not the graph's literal first {len(X)} rows.")
+        return
     raise ValueError(f"len(X)={len(X)} does not match manifest n_nodes={n_nodes} "
                      f"(data_len={exp_len}); refuse to train (P0-E).")
 

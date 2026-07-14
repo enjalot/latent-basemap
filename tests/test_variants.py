@@ -127,6 +127,7 @@ def _run_variant_config(cfg_name, tmp_path):
     cfg.data.precomputed_edges_path = edges_path
     cfg.logging.results_dir = str(tmp_path / "results")
     cfg.train.require_full_budget = False   # smoke: tiny data, horizon may exceed plan
+    cfg.train.require_graph_manifest = False  # synthetic blob graph has no manifest
     results = run_single_experiment(cfg)
 
     run_dirs = sorted(Path(cfg.logging.results_dir).glob(f"{cfg.name}_*"))
