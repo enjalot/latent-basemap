@@ -296,6 +296,19 @@ def compute_metrics(X_high, X_low, cfg: ExperimentConfig, labels=None) -> dict:
         if 2 <= len(unique) <= 100:
             results["silhouette"] = float(silhouette_score(X_l, lab.astype(int)))
 
+    # P0-C: the canonical decision panel. Runner and standalone CLI both route
+    # through basemap.panel_v2.score_panel so every R1 number is byte-identical
+    # regardless of entry point. Runs on the FULL X/Z (bounded-memory), not the
+    # subsample used by the legacy diagnostics above.
+    if "panel_v2" in ec.metrics:
+        from basemap.panel_v2 import score_panel, PanelV2Config
+        pcfg = PanelV2Config(frac=getattr(ec, "panel_frac", 0.001),
+                             n_anchors=getattr(ec, "panel_n_anchors", 10000),
+                             anchor_seed=getattr(ec, "panel_anchor_seed", 42))
+        results["panel_v2"] = score_panel(
+            X_high, X_low, config=pcfg,
+            provenance={"caller": "run_experiment", "eval_mode": getattr(ec, "mode", None)})
+
     return results
 
 
