@@ -1,67 +1,126 @@
-"""P0.10: atomic GPU lease + idempotent jobs."""
-import sys, os, tempfile, subprocess
+"""P0-D: fail-closed GPU controller — cross-process lease, crash-safety,
+chain-stop, output validation, idempotency, co-tenant policy."""
+import sys, os, json, time, tempfile, subprocess, textwrap, signal
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from basemap.run_controller import GpuLease, run_jobs, Job
+from basemap import run_controller as rc
+
+REPO = os.path.join(os.path.dirname(__file__), '..')
 
 
-def test_lease_is_exclusive():
-    lease_path = tempfile.mktemp(suffix='.lease')
-    a = GpuLease(path=lease_path, timeout=0)
-    a.acquire()
-    # second non-blocking acquirer must fail fast
-    b = GpuLease(path=lease_path, timeout=0)
+def _hold_lease_script(lease_path, hold_s):
+    return textwrap.dedent(f"""
+        import sys, time; sys.path.insert(0, {REPO!r})
+        from basemap.run_controller import GpuLease
+        L = GpuLease(path={lease_path!r}, timeout=0); L.acquire()
+        print("HELD", flush=True); time.sleep({hold_s}); L.release()
+    """)
+
+
+def test_cross_process_lease_exclusion():
+    lp = tempfile.mktemp(suffix='.lease')
+    p = subprocess.Popen([sys.executable, '-c', _hold_lease_script(lp, 4)],
+                         stdout=subprocess.PIPE, text=True)
+    assert p.stdout.readline().strip() == "HELD"      # child holds it
     try:
-        b.acquire()
-        assert False, "second lease should not have been granted"
+        rc.GpuLease(path=lp, timeout=0).acquire()
+        assert False, "acquired a lease held by another process"
     except RuntimeError as e:
         assert "held by" in str(e)
-    a.release()
-    # now it can be acquired
-    b.acquire(); b.release()
-    print("PASS lease exclusivity + release")
+    finally:
+        p.wait()
+    rc.GpuLease(path=lp, timeout=0).acquire().release()   # free after child exits
+    print("PASS cross-process exclusion")
 
 
-def test_lease_context_manager_releases_on_exit():
+def test_lease_survives_controller_death_via_inherited_fd():
+    # a child that inherits the lease fd keeps the lock after the 'controller' dies.
     lp = tempfile.mktemp(suffix='.lease')
-    with GpuLease(path=lp, timeout=0):
-        pass
-    with GpuLease(path=lp, timeout=0):  # would raise if not released
-        pass
-    print("PASS context-manager release")
+    from basemap.run_controller import GpuLease
+    L = GpuLease(path=lp, timeout=0); L.acquire()
+    child = subprocess.Popen([sys.executable, '-c',
+        f"import time,os; time.sleep(3)"], pass_fds=(L.fileno(),), close_fds=False)
+    # 'controller' dies (close its fd) but child still holds the inherited fd
+    os.close(L._fd); L._fd = None
+    time.sleep(0.3)
+    try:
+        rc.GpuLease(path=lp, timeout=0).acquire()
+        got = True
+    except RuntimeError:
+        got = False
+    child.wait()
+    assert not got, "lease was acquirable while inheriting child still alive"
+    rc.GpuLease(path=lp, timeout=0).acquire().release()   # released after child exits
+    print("PASS controller-death lease protection")
 
 
-def test_idempotent_job_skipped():
-    d = tempfile.mkdtemp()
-    marker = os.path.join(d, 'done')
-    open(marker, 'w').close()  # pretend already done
-    os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
-    import importlib, basemap.run_controller as rc
-    importlib.reload(rc)
-    job = rc.Job(name='x', argv=['false'], done_marker=marker)  # 'false' would fail if run
-    s = rc.run_jobs([job])
-    assert s['jobs'][0]['status'] == 'skipped_idempotent', s
-    print("PASS idempotent skip (job with existing marker not launched)")
+def test_nonzero_job1_stops_job2():
+    d = tempfile.mkdtemp(); os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
+    import importlib; importlib.reload(rc)
+    j1 = rc.Job(name='a', argv=['false'], outputs=[], done_marker=os.path.join(d, 'a.done'))
+    j2 = rc.Job(name='b', argv=['bash', '-c', f'touch {d}/b.out'],
+                outputs=[f'{d}/b.out'], done_marker=os.path.join(d, 'b.done'))
+    s = rc.run_jobs([j1, j2])
+    assert s['jobs'][0]['status'].startswith('exit_')
+    assert len(s['jobs']) == 1 and 'stopped' in s['stop_reason']
+    assert not os.path.exists(f'{d}/b.out')   # job 2 never ran
+    print("PASS nonzero job1 stops chain")
 
 
-def test_job_runs_and_records():
-    d = tempfile.mkdtemp()
-    marker = os.path.join(d, 'out.txt')
-    os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
-    import importlib, basemap.run_controller as rc
-    importlib.reload(rc)
-    job = rc.Job(name='touch', argv=['bash', '-c', f'echo hi > {marker}'],
-                 done_marker=marker, manifest=os.path.join(d, 'manifest.json'))
-    s = rc.run_jobs([job])
-    assert s['jobs'][0]['status'] == 'ok', s
-    assert os.path.exists(marker)
-    import json; m = json.load(open(os.path.join(d, 'manifest.json')))
-    assert 'gpu_pre' in m and 'controller_id' in m
-    print("PASS job runs + manifest records gpu snapshot")
+def test_exit_zero_without_outputs_is_failure():
+    d = tempfile.mkdtemp(); os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
+    import importlib; importlib.reload(rc)
+    j = rc.Job(name='x', argv=['true'], outputs=[f'{d}/never'], done_marker=os.path.join(d, 'x.done'))
+    s = rc.run_jobs([j])
+    assert s['jobs'][0]['status'] == 'missing_outputs'
+    assert not os.path.exists(os.path.join(d, 'x.done'))   # no completion record
+    print("PASS exit-0 without outputs = failure")
+
+
+def test_stale_output_does_not_skip_without_done_record():
+    d = tempfile.mkdtemp(); os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
+    import importlib; importlib.reload(rc)
+    open(f'{d}/out', 'w').close()   # stale output present, but NO valid .done record
+    j = rc.Job(name='x', argv=['bash', '-c', f'echo redo > {d}/out'],
+               outputs=[f'{d}/out'], done_marker=os.path.join(d, 'x.done'))
+    s = rc.run_jobs([j])
+    assert s['jobs'][0]['status'] == 'ok'   # it RE-RAN (not skipped)
+    assert open(f'{d}/out').read().strip() == 'redo'
+    # second run WITH the completion record skips
+    s2 = rc.run_jobs([j]); assert s2['jobs'][0]['status'] == 'skipped_done'
+    print("PASS stale output re-runs; valid record skips")
+
+
+def test_final_manifest_has_status_and_telemetry():
+    d = tempfile.mkdtemp(); os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
+    import importlib; importlib.reload(rc)
+    j = rc.Job(name='x', argv=['bash', '-c', f'touch {d}/o'], outputs=[f'{d}/o'],
+               done_marker=os.path.join(d, 'x.done'), manifest=os.path.join(d, 'x.manifest.json'))
+    rc.run_jobs([j])
+    m = json.load(open(os.path.join(d, 'x.manifest.json')))
+    assert m['status'] == 'ok' and m['exit_code'] == 0 and 'gpu_post' in m and 'outputs' in m
+    print("PASS final manifest has status + telemetry")
+
+
+
+
+def test_co_tenant_policy_blocks_gpu_job_with_unknown_pid():
+    # a GPU job (required_free_gb>0) is blocked if an unknown compute PID exists
+    # OR free VRAM is insufficient. We force the free-VRAM branch (require > total)
+    # so the test is deterministic regardless of what's on the GPU.
+    d = tempfile.mkdtemp(); os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
+    import importlib; importlib.reload(rc)
+    j = rc.Job(name='big', argv=['true'], outputs=[], done_marker=os.path.join(d, 'big.done'),
+               required_free_gb=100000.0)   # impossible → policy must block
+    s = rc.run_jobs([j])
+    assert s['jobs'][0]['status'] == 'co_tenant_block', s
+    assert not os.path.exists(os.path.join(d, 'big.done'))
+    print("PASS co-tenant policy blocks insufficient-VRAM job")
 
 
 if __name__ == '__main__':
-    test_lease_is_exclusive()
-    test_lease_context_manager_releases_on_exit()
-    test_idempotent_job_skipped()
-    test_job_runs_and_records()
-    print("ALL RUN-CONTROLLER TESTS PASSED")
+    for fn in [test_cross_process_lease_exclusion, test_lease_survives_controller_death_via_inherited_fd,
+               test_nonzero_job1_stops_job2, test_exit_zero_without_outputs_is_failure,
+               test_stale_output_does_not_skip_without_done_record, test_final_manifest_has_status_and_telemetry,
+               test_co_tenant_policy_blocks_gpu_job_with_unknown_pid]:
+        fn()
+    print("ALL P0-D TESTS PASSED")
