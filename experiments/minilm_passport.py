@@ -40,11 +40,14 @@ def top2_total_variance_fraction(sample: np.ndarray):
                   "top2_over_top10_denom_bug": round(bug, 4)}
 
 
-def _sha_file(p, cap=1 << 20):
+def _sha_file(p, chunk=1 << 20):
+    """P0-6: FULL streamed content hash (the earlier 1 MiB prefix was a fingerprint,
+    not an artifact hash)."""
     try:
         h = hashlib.sha1()
         with open(p, "rb") as f:
-            h.update(f.read(cap))
+            for blk in iter(lambda: f.read(chunk), b""):
+                h.update(blk)
         return h.hexdigest()[:16]
     except Exception:
         return None
