@@ -86,9 +86,13 @@ def knn_regress_coords(Xq, X, Z, cfg, k=15):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--runs", nargs="+", required=True, help="label=run_dir pairs")
+    ap.add_argument("--runs", nargs="+", required=True,
+                    help="label=run_dir pairs (or label=coords.parquet with --no-model)")
     ap.add_argument("--testbed", required=True)
-    ap.add_argument("--source", required=True, help="dir of source shards for held-out queries")
+    ap.add_argument("--source", default=None, help="dir of source shards for held-out queries")
+    ap.add_argument("--no-model", action="store_true",
+                    help="coord-only references (cuML/umap-learn): transductive panel only, "
+                         "no projection/kNN-regressor (run values are coords.parquet paths)")
     ap.add_argument("--dim", type=int, default=768)
     ap.add_argument("--n-holdout", type=int, default=20000)
     ap.add_argument("--frac", type=float, default=0.001)
@@ -116,18 +120,22 @@ def main():
 
     # held-out queries: source rows NOT in the testbed sample (real OOS proof),
     # sampled WITHOUT replacement so the effective query count equals n_holdout
-    # (P0-4 — the old with-replacement sampler yielded ~19.8k unique of 20k).
-    src = load_embeddings(args.source, dim=args.dim)
-    train_set = set(int(i) for i in si)
-    complement = np.setdiff1d(np.arange(len(src), dtype=np.int64),
-                              np.asarray(sorted(train_set), dtype=np.int64), assume_unique=False)
-    if len(complement) < args.n_holdout:
-        raise ValueError(f"only {len(complement)} held-out candidates < n_holdout {args.n_holdout}")
+    # (P0-4). Skipped for --no-model coord-only references (transductive only).
     rng = np.random.RandomState(args.seed)
-    held = np.sort(rng.choice(complement, args.n_holdout, replace=False))
-    assert len(np.unique(held)) == args.n_holdout, "held-out not unique"
-    assert len(set(held.tolist()) & train_set) == 0, "held-out overlaps training rows"
-    Xq = np.asarray(src[held], dtype=np.float32)
+    held = np.array([], dtype=np.int64); Xq = None
+    if not args.no_model:
+        if not args.source:
+            raise ValueError("--source is required unless --no-model")
+        src = load_embeddings(args.source, dim=args.dim)
+        train_set = set(int(i) for i in si)
+        complement = np.setdiff1d(np.arange(len(src), dtype=np.int64),
+                                  np.asarray(sorted(train_set), dtype=np.int64), assume_unique=False)
+        if len(complement) < args.n_holdout:
+            raise ValueError(f"only {len(complement)} held-out candidates < n_holdout {args.n_holdout}")
+        held = np.sort(rng.choice(complement, args.n_holdout, replace=False))
+        assert len(np.unique(held)) == args.n_holdout, "held-out not unique"
+        assert len(set(held.tolist()) & train_set) == 0, "held-out overlaps training rows"
+        Xq = np.asarray(src[held], dtype=np.float32)
 
     import subprocess
     try:
@@ -148,32 +156,39 @@ def main():
 
     for label, rd in runs.items():
         t0 = time.time()
-        Z, z_ids = load_coords(os.path.join(rd, "coords.parquet"))
+        coords_path = rd if args.no_model else os.path.join(rd, "coords.parquet")
+        Z, z_ids = load_coords(coords_path)
         # pass z_ids through — the exact-alignment contract must hold for the
         # decision scorer too (P0-4), not just the transductive panel.
         panel = score_panel(X, Z, config=cfg, z_ids=z_ids, centroids_by_k=centroids,
                             provenance={"scorer": "complete_panel", "run": os.path.basename(rd),
-                                        "coords_sha": _sha_file(os.path.join(rd, "coords.parquet")),
-                                        "model_sha": _sha_file(os.path.join(rd, "model.pt"))})
-        Xa = X[np.asarray(z_ids, np.int64)] if z_ids is not None else X
-        model = ParametricUMAP.load(os.path.join(rd, "model.pt"), device="cuda")
-        Zq = np.asarray(model.transform(Xq), dtype=np.float32)
-        proj_ffr, proj_rk = projection_ffr(Xa, Z, Xq, Zq, cfg)
-        Zq_knn = knn_regress_coords(Xq, Xa, Z, cfg)
-        knn_ffr, _ = projection_ffr(Xa, Z, Xq, Zq_knn, cfg)
-        lo, hi = Z.min(0), Z.max(0)
-        Zq_rand = (rng.rand(len(Xq), Z.shape[1]).astype(np.float32) * (hi - lo) + lo)
-        floor_ffr, _ = projection_ffr(Xa, Z, Xq, Zq_rand, cfg)
+                                        "coords_sha": _sha_file(coords_path),
+                                        "no_model_reference": bool(args.no_model)})
+        if args.no_model:
+            # coord-only reference (cuML/umap-learn): transductive metrics only —
+            # no model to project held-out queries, so proj/kNN-regressor are N/A.
+            proj_ffr = proj_rk = knn_ffr = floor_ffr = None
+        else:
+            Xa = X[np.asarray(z_ids, np.int64)] if z_ids is not None else X
+            model = ParametricUMAP.load(os.path.join(rd, "model.pt"), device="cuda")
+            Zq = np.asarray(model.transform(Xq), dtype=np.float32)
+            proj_ffr, proj_rk = projection_ffr(Xa, Z, Xq, Zq, cfg)
+            Zq_knn = knn_regress_coords(Xq, Xa, Z, cfg)
+            knn_ffr, _ = projection_ffr(Xa, Z, Xq, Zq_knn, cfg)
+            lo, hi = Z.min(0), Z.max(0)
+            Zq_rand = (rng.rand(len(Xq), Z.shape[1]).astype(np.float32) * (hi - lo) + lo)
+            floor_ffr, _ = projection_ffr(Xa, Z, Xq, Zq_rand, cfg)
         summary["runs"][label] = {
             "run_dir": os.path.basename(rd), "wall_s": round(time.time() - t0, 1),
+            "no_model_reference": bool(args.no_model),
             "ffr": panel["ffr"], "recall@k": panel["recall@k"],
             "purity_k256": (panel.get("purity") or {}).get("k256"),
             "purity_k1024": (panel.get("purity") or {}).get("k1024"),
             "density": panel["density"],
             "proj_ffr": proj_ffr, "proj_recall@k": proj_rk,
             "proj_knn_regressor_ffr": knn_ffr, "proj_random_floor_ffr": floor_ffr,
-            "proj_beats_knn": bool(proj_ffr > knn_ffr),
-            "proj_margin_over_knn": round(proj_ffr - knn_ffr, 4),
+            "proj_beats_knn": (None if args.no_model else bool(proj_ffr > knn_ffr)),
+            "proj_margin_over_knn": (None if args.no_model else round(proj_ffr - knn_ffr, 4)),
             # P0-4: retain the full panel audit trail, not just scalar leaves.
             "panel_full": panel}
         json.dump(summary, open(args.out, "w"), indent=1)
