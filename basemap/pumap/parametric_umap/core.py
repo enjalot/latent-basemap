@@ -84,6 +84,9 @@ class ParametricUMAP:
         if low_dim_kernel not in ("legacy_lp", "umap"):
             raise ValueError(f"low_dim_kernel must be 'legacy_lp' or 'umap', got {low_dim_kernel!r}")
         self.low_dim_kernel = low_dim_kernel
+        # P0.8: only allow prefix-filtering a larger graph onto X for a verified
+        # literal prefix (never for balanced/sampled matrices).
+        self.allow_prefix_edge_filter = False
         self.correlation_weight = correlation_weight
         self.learning_rate = learning_rate
         self.n_epochs = n_epochs
@@ -244,13 +247,20 @@ class ParametricUMAP:
             edges_path, len(sources), n_nodes,
         )
 
-        # Filter to the training range if the index spans more nodes than X.
-        if n_nodes > n_train:
-            logging.info(
-                "Filtering edges to training range (n_nodes=%d > n_train=%d)...",
-                n_nodes, n_train,
-            )
-            mask = (np.asarray(sources) < n_train) & (np.asarray(targets) < n_train)
+        # P0.8: validate the graph/data pairing. Rejects n_nodes<n_train, ANN
+        # sentinel (-1) endpoints, out-of-range ids, and — critically — the
+        # prefix-filter of a larger graph onto a balanced/sampled matrix (which
+        # silently connects unrelated cross-corpus rows) unless explicitly opted
+        # into for a verified literal prefix.
+        from ...graph_validation import validate_graph_data_pair
+        mask = validate_graph_data_pair(
+            sources, targets, n_nodes, n_train,
+            allow_prefix_filter=getattr(self, "allow_prefix_edge_filter", False))
+        if mask is not None:
+            logging.warning(
+                "P0.8: prefix-filtering a larger graph (n_nodes=%d > n_train=%d) — "
+                "valid ONLY if X is the graph's literal first %d rows.",
+                n_nodes, n_train, n_train)
             sources = np.ascontiguousarray(np.asarray(sources)[mask])
             targets = np.ascontiguousarray(np.asarray(targets)[mask])
             if weights is not None:
