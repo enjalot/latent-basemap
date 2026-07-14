@@ -842,27 +842,35 @@ class ParametricUMAP:
         else:
             raise ValueError(f"Unknown lr_schedule: {self.lr_schedule}")
 
-        # P0.2: stop at the effective LR horizon. Past total_steps the cosine
-        # schedule is clamped to LR=0, so further iterations run forward/backward/
-        # step but never change weights (82–90% of the loop in past configs).
-        # Stop there — identical weights, ~5.6× less wall time — unless the caller
-        # forces a step cap. Persist honest step accounting.
+        # P0-B: the LR horizon is an OPTIMIZER-UPDATE budget (successful,
+        # positive-LR updates), NOT a loop-iteration count. Training stops the
+        # instant the cosine schedule anneals to LR=0 — past there no update
+        # changes weights (82–90% of the loop in past configs). AMP-overflow and
+        # non-finite batches do NOT consume the horizon. Accounting below is
+        # persisted to results.json + the manifest.
         planned_loop = int(len(loader)) * int(self.n_epochs)
-        lr_horizon = (max(int(self.total_steps_estimate), 1)
-                      if self.lr_schedule == "cosine" else planned_loop)
-        stop_step = lr_horizon
-        if self._max_train_steps is not None:
-            stop_step = min(stop_step, int(self._max_train_steps))
-        if self.lr_schedule == "cosine" and planned_loop > int(lr_horizon * 1.05):
-            logging.warning(
-                "P0.2: planned loop %d >> LR horizon %d — training stops at the "
-                "horizon (the extra %.0f%% would be LR=0). Set total_steps_estimate "
-                "to the intended optimizer-step budget.",
-                planned_loop, lr_horizon, 100.0 * (planned_loop - lr_horizon) / planned_loop)
-        self._train_stats = {"planned_loop_iters": planned_loop, "lr_horizon": lr_horizon,
-                             "stop_step": stop_step, "optimizer_steps": 0,
-                             "nonfinite_skips": 0, "nonfinite_gradient_skips": 0,
-                             "final_lr": None}
+        if self.lr_schedule == "cosine":
+            if int(self.total_steps_estimate) <= 0:
+                lr_horizon = planned_loop   # derive from the plan; never a 1-step run
+                logging.warning("P0-B: total_steps_estimate<=0 → deriving cosine horizon "
+                                "from the planned loop (%d updates).", planned_loop)
+            else:
+                lr_horizon = int(self.total_steps_estimate)
+            if self.warmup_steps >= lr_horizon:
+                raise ValueError(f"warmup_steps ({self.warmup_steps}) >= LR horizon "
+                                 f"({lr_horizon}); the schedule would never reach full LR (P0-B).")
+        else:
+            lr_horizon = planned_loop
+        schedule_version = "cosine-v2-update-budget" if self.lr_schedule == "cosine" else self.lr_schedule
+        self._train_stats = {
+            "schedule_version": schedule_version, "planned_loop_iters": planned_loop,
+            "lr_horizon": lr_horizon, "attempted_batches": 0, "finite_loss_batches": 0,
+            "optimizer_steps_attempted": 0, "optimizer_steps_succeeded": 0,
+            "positive_lr_optimizer_steps": 0, "scheduler_steps": 0,
+            "nonfinite_loss_skips": 0, "nonfinite_gradient_skips": 0, "amp_overflow_skips": 0,
+            "first_lr": None, "peak_lr": 0.0, "final_lr": None, "stop_reason": None,
+            "executed_iters": 0, "n_pos_edges": int(n_pos_edges),
+        }
         stop_training = False
 
         self.model.train()
@@ -911,6 +919,7 @@ class ParametricUMAP:
 
             batch = _get_next()
             while batch is not None:
+                self._train_stats["attempted_batches"] += 1
                 optimizer.zero_grad(set_to_none=True)
                 src_values, dst_values, targets = batch
 
@@ -1018,7 +1027,7 @@ class ParametricUMAP:
 
                 if not torch.isfinite(loss):
                     consecutive_nonfinite_losses += 1
-                    self._train_stats["nonfinite_skips"] += 1
+                    self._train_stats["nonfinite_loss_skips"] += 1
                     logging.warning(
                         "Non-finite loss detected at step %d, skipping batch (%d consecutive)",
                         global_step,
@@ -1033,6 +1042,7 @@ class ParametricUMAP:
                     pbar.update(1)
                     continue
                 consecutive_nonfinite_losses = 0
+                self._train_stats["finite_loss_batches"] += 1
 
                 if scaler is not None:
                     scaler.scale(loss).backward()
@@ -1080,6 +1090,16 @@ class ParametricUMAP:
                     grad_norm_post = 0.0
                     clipping_ratio = 1.0
 
+                # P0-B: capture the LR that is APPLIED to THIS update, before
+                # optimizer/scheduler step (reading it after scheduler.step gave
+                # the next step's LR → off-by-one that miscounted zero-LR work).
+                lr_used = optimizer.param_groups[0]['lr']
+                st = self._train_stats
+                if st["first_lr"] is None:
+                    st["first_lr"] = lr_used
+                st["peak_lr"] = max(st["peak_lr"], lr_used)
+                st["optimizer_steps_attempted"] += 1
+
                 optimizer_was_run = True
                 if scaler is not None:
                     scale_before = scaler.get_scale()
@@ -1089,10 +1109,20 @@ class ParametricUMAP:
                 else:
                     optimizer.step()
 
-                if self.lr_schedule == "cosine" and optimizer_was_run:
-                    scheduler.step()
+                if optimizer_was_run:
+                    st["optimizer_steps_succeeded"] += 1
+                    if lr_used > 0:
+                        st["positive_lr_optimizer_steps"] += 1
+                    # Advance the schedule ONLY on a successful update, so an
+                    # AMP-overflow skip does not consume the LR horizon.
+                    if self.lr_schedule == "cosine":
+                        scheduler.step()
+                        st["scheduler_steps"] += 1
+                else:
+                    st["amp_overflow_skips"] += 1
+                st["final_lr"] = lr_used
 
-                current_lr = optimizer.param_groups[0]['lr']
+                current_lr = optimizer.param_groups[0]['lr']  # LR for the NEXT update
 
                 # Per-class stats only when a consumer (wandb/pbar) needs them.
                 if collect_stats:
@@ -1111,18 +1141,28 @@ class ParametricUMAP:
                 epoch_corr_t += corr_loss.detach()
                 num_batches += 1
                 global_step += 1
-                if optimizer_was_run and current_lr > 0:
-                    self._train_stats["optimizer_steps"] += 1
-                self._train_stats["final_lr"] = current_lr
+                st["executed_iters"] = global_step
 
-                # P0.2: stop at the effective horizon (LR=0 past here → no weight
-                # change). Ends the run in ~1/5.6 the wall time with identical
-                # weights.
-                if global_step >= stop_step:
+                # P0-B: stop when the cosine update budget is spent — i.e. the
+                # schedule has taken `lr_horizon` successful steps (progress=1,
+                # LR≈0). Counting scheduler_steps is exact; testing current_lr<=0
+                # is not, because float cos(π)≈−1 leaves a tiny positive LR. AMP
+                # skips don't advance scheduler_steps, so they don't consume the
+                # budget. Or stop on the benchmark step cap; finalize bench timing
+                # on this path too (the old horizon branch left it None).
+                horizon_done = (self.lr_schedule == "cosine" and st["scheduler_steps"] >= lr_horizon)
+                bench_cap = (self._max_train_steps is not None and global_step >= self._max_train_steps)
+                if horizon_done or bench_cap:
                     stop_training = True
-                    logging.info("P0.2: reached LR horizon at step %d/%d (planned loop %d) — "
-                                 "stopping; %d optimizer steps.", global_step, stop_step,
-                                 planned_loop, self._train_stats["optimizer_steps"])
+                    st["stop_reason"] = "bench_cap" if bench_cap else "lr_horizon"
+                    if bench_cap and self._bench_t0:
+                        if 'cuda' in str(self.device):
+                            torch.cuda.synchronize(self.device)
+                        self._bench_seconds = time.perf_counter() - self._bench_t0
+                    logging.info("P0-B: stop (%s) after %d positive-LR updates / horizon %d "
+                                 "(loop iter %d, %d AMP-skips).", st["stop_reason"],
+                                 st["positive_lr_optimizer_steps"], lr_horizon, global_step,
+                                 st["amp_overflow_skips"])
                     break
 
                 # Step-rate logging every 10k steps (plan B1: never fly blind on
@@ -1133,15 +1173,16 @@ class ParametricUMAP:
                         self._rate_t0 = self._train_t0 if hasattr(self, "_train_t0") else now
                         self._rate_s0 = 0
                     dt = now - self._rate_t0
-                    dsteps = global_step - self._rate_s0
-                    rate = dsteps / dt if dt > 0 else 0.0
-                    total_planned = self.n_epochs * len(loader)
-                    remaining = max(0, total_planned - global_step)
+                    dsteps = st["positive_lr_optimizer_steps"] - self._rate_s0
+                    rate = dsteps / dt if dt > 0 else 0.0   # positive-LR updates/s
+                    # P0-B: ETA against the actual stop budget (the LR horizon in
+                    # update units), not the full epoch plan.
+                    remaining = max(0, lr_horizon - st["positive_lr_optimizer_steps"])
                     eta_h = (remaining / rate / 3600.0) if rate > 0 else float("nan")
-                    logging.info("  step %d/%d | %.0f steps/s | ETA %.1fh",
-                                 global_step, total_planned, rate, eta_h)
+                    logging.info("  update %d/%d | %.0f upd/s | ETA %.1fh",
+                                 st["positive_lr_optimizer_steps"], lr_horizon, rate, eta_h)
                     self._rate_t0 = now
-                    self._rate_s0 = global_step
+                    self._rate_s0 = st["positive_lr_optimizer_steps"]
 
                 if self._max_train_steps is not None and global_step == self._bench_warmup:
                     if 'cuda' in str(self.device):
@@ -1228,13 +1269,23 @@ class ParametricUMAP:
                 wandb.log(log_dict)
 
         self.is_fitted = True
-        # P0.2: honest step accounting (loop iters vs effective optimizer steps).
+        # P0-B: honest step accounting. Also compute throughput in meaningful
+        # units (positive-LR updates/s and edge-pairs/s), not n*epochs/time.
         s = self._train_stats
-        logging.info("Step accounting: %d optimizer steps (LR>0) / %d planned loop iters "
-                     "(horizon %d); %d non-finite-loss skips; %d non-finite-gradient skips; "
-                     "final LR %.2e.",
-                     s["optimizer_steps"], s["planned_loop_iters"], s["lr_horizon"],
-                     s["nonfinite_skips"], s["nonfinite_gradient_skips"], s["final_lr"] or 0.0)
+        if s["stop_reason"] is None:
+            s["stop_reason"] = "exhausted_plan"
+        train_secs = time.perf_counter() - getattr(self, "_train_t0", time.perf_counter())
+        s["train_seconds"] = round(train_secs, 1)
+        s["updates_per_s"] = round(s["positive_lr_optimizer_steps"] / train_secs, 1) if train_secs > 0 else 0.0
+        s["edge_pairs_per_s"] = round(s["optimizer_steps_succeeded"] * self.batch_size / train_secs, 0) if train_secs > 0 else 0.0
+        logging.info("Step accounting (%s): %d positive-LR updates / %d planned loop iters "
+                     "(horizon %d, executed %d); succeeded %d, AMP-skips %d, "
+                     "nonfinite loss/grad %d/%d; LR first %.2e peak %.2e final %.2e; "
+                     "%.0f upd/s.",
+                     s["stop_reason"], s["positive_lr_optimizer_steps"], s["planned_loop_iters"],
+                     s["lr_horizon"], s["executed_iters"], s["optimizer_steps_succeeded"],
+                     s["amp_overflow_skips"], s["nonfinite_loss_skips"], s["nonfinite_gradient_skips"],
+                     s["first_lr"] or 0.0, s["peak_lr"], s["final_lr"] or 0.0, s["updates_per_s"])
         # Stop HostStreamEdgeSampler producer threads so they don't keep drawing
         # and discarding batches during the final transform / downstream scoring.
         if hasattr(loader, "close"):

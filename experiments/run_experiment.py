@@ -528,7 +528,14 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
     # map persisted coords back onto the teacher layout's original units.
     run_manifest["anchor_scale"] = getattr(pumap, "anchor_scale_", None)
     n_train = len(X_train)
-    samples_per_sec = n_train * tc.n_epochs / train_time
+    # P0-B: n_train*n_epochs/time is meaningless for edge SGD and grossly inflated
+    # after early stop. Use the trainer's honest accounting (positive-LR
+    # updates/s) as the headline; keep the legacy figure only as a diagnostic.
+    train_stats = dict(getattr(pumap, "_train_stats", {}) or {})
+    samples_per_sec = train_stats.get("updates_per_s", 0.0)
+    legacy_samples_per_sec_diag = n_train * tc.n_epochs / train_time
+    run_manifest["train_accounting"] = train_stats
+    run_manifest["low_dim_kernel"] = getattr(pumap, "low_dim_kernel", "legacy_lp")
 
     # ── Transform ──
     t0 = time.time()
@@ -569,8 +576,11 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
             "data_load_s": data_load_time,
             "train_s": train_time,
             "transform_s": transform_time,
-            "samples_per_sec": samples_per_sec,
+            "updates_per_sec": samples_per_sec,
+            "legacy_samples_per_sec_diag": legacy_samples_per_sec_diag,
         },
+        # P0-B: honest schedule/update accounting, persisted for reproducibility.
+        "train_accounting": train_stats,
         "metrics_train": metrics_train,
         "metrics_test": metrics_test,
         "embedding_stats": {
@@ -623,7 +633,9 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
     logging.info(f"  RESULTS: {cfg.name}")
     logging.info(f"{'─'*60}")
     logging.info(f"  Params:           {n_params:,}")
-    logging.info(f"  Train time:       {train_time:.1f}s ({samples_per_sec:.0f} samples/sec)")
+    logging.info(f"  Train time:       {train_time:.1f}s ({samples_per_sec:.0f} pos-LR updates/sec; "
+                 f"{train_stats.get('positive_lr_optimizer_steps', 0)}/{train_stats.get('lr_horizon', 0)} "
+                 f"updates, stop={train_stats.get('stop_reason')})")
     logging.info(f"  Transform time:   {transform_time:.2f}s")
     report_metrics = metrics_test if metrics_test else metrics_train
     for k, v in report_metrics.items():
