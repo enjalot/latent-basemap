@@ -1,0 +1,11 @@
+{
+ "substrate": "MiniLM-384-mixed",
+ "n": 201000,
+ "norm_mean": 1.0,
+ "norm_std": 0.0,
+ "unit_norm": true,
+ "mean_random_cosine": 0.0216,
+ "top2_pc_var": 0.0453,
+ "top2_pc_var_bug_top10denom": 0.2823,
+ "pca_note": "top2 fraction of TOTAL variance (all 384 dims); prior 0.298 used a top-10 denominator (R6)"
+}

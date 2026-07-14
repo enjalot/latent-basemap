@@ -1,0 +1,98 @@
+{
+ "per_run": {
+  "mn4_s42": {
+   "n": 8000000,
+   "k_frac": 8000,
+   "ffr": 0.506,
+   "ffr_buggy_recall10": 0.00436,
+   "metric": "fixed_fraction_recall",
+   "formula": "|hi[:10] \u2229 lo[:k_frac]|/10",
+   "formula_version": "v2-corrected",
+   "anchor_hash": "ab2e4ee5a2e1",
+   "code_rev": "6a304ae",
+   "purity_k256": 0.818,
+   "purity_k1024": 0.623
+  },
+  "mn4_s43": {
+   "n": 8000000,
+   "k_frac": 8000,
+   "ffr": 0.5014,
+   "ffr_buggy_recall10": 0.00444,
+   "metric": "fixed_fraction_recall",
+   "formula": "|hi[:10] \u2229 lo[:k_frac]|/10",
+   "formula_version": "v2-corrected",
+   "anchor_hash": "ab2e4ee5a2e1",
+   "code_rev": "6a304ae",
+   "purity_k256": 0.8096,
+   "purity_k1024": 0.6288
+  },
+  "mn4_s44": {
+   "n": 8000000,
+   "k_frac": 8000,
+   "ffr": 0.5022,
+   "ffr_buggy_recall10": 0.00405,
+   "metric": "fixed_fraction_recall",
+   "formula": "|hi[:10] \u2229 lo[:k_frac]|/10",
+   "formula_version": "v2-corrected",
+   "anchor_hash": "ab2e4ee5a2e1",
+   "code_rev": "6a304ae",
+   "purity_k256": 0.8085,
+   "purity_k1024": 0.6106
+  },
+  "nomn_s42": {
+   "n": 8000000,
+   "k_frac": 8000,
+   "ffr": 0.5695,
+   "ffr_buggy_recall10": 0.00506,
+   "metric": "fixed_fraction_recall",
+   "formula": "|hi[:10] \u2229 lo[:k_frac]|/10",
+   "formula_version": "v2-corrected",
+   "anchor_hash": "ab2e4ee5a2e1",
+   "code_rev": "6a304ae",
+   "purity_k256": 1.0241,
+   "purity_k1024": 0.7697
+  },
+  "nomn_s43": {
+   "n": 8000000,
+   "k_frac": 8000,
+   "ffr": 0.5565,
+   "ffr_buggy_recall10": 0.00524,
+   "metric": "fixed_fraction_recall",
+   "formula": "|hi[:10] \u2229 lo[:k_frac]|/10",
+   "formula_version": "v2-corrected",
+   "anchor_hash": "ab2e4ee5a2e1",
+   "code_rev": "6a304ae",
+   "purity_k256": 0.9787,
+   "purity_k1024": 0.7365
+  },
+  "nomn_s44": {
+   "n": 8000000,
+   "k_frac": 8000,
+   "ffr": 0.5639,
+   "ffr_buggy_recall10": 0.00515,
+   "metric": "fixed_fraction_recall",
+   "formula": "|hi[:10] \u2229 lo[:k_frac]|/10",
+   "formula_version": "v2-corrected",
+   "anchor_hash": "ab2e4ee5a2e1",
+   "code_rev": "6a304ae",
+   "purity_k256": 0.9789,
+   "purity_k1024": 0.7586
+  }
+ },
+ "seed_means": {
+  "nomn": {
+   "ffr": 0.5633,
+   "purity_k256": 0.9939,
+   "purity_k1024": 0.7549,
+   "n_seeds": 3
+  },
+  "mn4": {
+   "ffr": 0.5032,
+   "purity_k256": 0.812,
+   "purity_k1024": 0.6208,
+   "n_seeds": 3
+  }
+ },
+ "anchor_hash": "ab2e4ee5a2e1",
+ "code_rev": "6a304ae"
+}

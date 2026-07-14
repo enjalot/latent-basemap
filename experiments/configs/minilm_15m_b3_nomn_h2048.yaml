@@ -1,0 +1,94 @@
+name: minilm_15m_b3_nomn_h2048
+description: "Phase B3 (plan-100m): 15M MiniLM, FROZEN recipe (nomn: mid-near off,\
+  \ fuzzy k=50, pr05, weighted-edge, binary) at FROZEN capacity h2048 (2048x3). Matched\
+  \ compute (n_epochs=1 ~= 8M nomn 2ep step count). GPU-resident (15M x 384 fp16 =\
+  \ 11.5 GB). MiniLM baseline for the scale ladder; panel vs MiniLM centroids/queries.\
+  \ [REVISED: gpu_resident_data=False \u2014 1.157B fuzzy edges + f64 weighted-CDF\
+  \ (9.3GB) OOM the resident path even at 15M; host path is the B1(b) bench.]"
+data:
+  source: memmap
+  h5_path: ''
+  h5_dataset: embeddings
+  reference_umap_path: ''
+  memmap_dirs:
+  - /data/latent-basemap/minilm-15m/train
+  input_dim: 384
+  lancedb_path: ''
+  lancedb_table: scopes-001
+  lancedb_columns:
+  - vector
+  n_samples: null
+  random_seed: 42
+  precomputed_p_sym_path: null
+  precomputed_negatives_path: null
+  precomputed_edges_path: /data/latent-basemap/minilm-15m/edges_k50_fuzzy.npz
+  precomputed_index_path: null
+  use_graph_cache: false
+  graph_cache_dir: experiments/cache/graphs
+  n_neighbors: 50
+model:
+  architecture: residual_bottleneck
+  n_components: 2
+  hidden_dim: 2048
+  n_layers: 3
+  use_batchnorm: false
+  use_dropout: false
+  dropout_prob: 0.5
+  a: 1.0
+  b: 1.0
+train:
+  n_epochs: 1
+  batch_size: 8192
+  learning_rate: 0.001
+  correlation_weight: 0.0
+  pos_ratio: 0.05
+  clip_grad_norm: 1.0
+  clip_grad_value: null
+  low_memory: false
+  resample_negatives: false
+  n_processes: 6
+  device: cuda
+  verbose: false
+  correlation_distance_transform: raw
+  lr_schedule: cosine
+  warmup_steps: 200
+  total_steps_estimate: 500000
+  use_amp: true
+  positive_target_mode: binary
+  reject_neighbors: false
+  anchored_init: none
+  anchored_init_epochs: 2
+  anchored_init_lr: 0.001
+  anchored_init_path: ''
+  anchor_hold_weight: 0.0
+  anchor_hold_fraction: 0.05
+  midnear_enabled: false
+  mn_pairs_per_batch: 0
+  mn_weight_scale: 1.0
+  weighted_edge_sampling: true
+  gpu_resident_data: false
+  gpu_resident_vram_budget_gb: 30.0
+eval:
+  eval_every_n_epochs: 0
+  metrics:
+  - trustworthiness
+  - distance_correlation
+  - knn_preservation
+  knn_k: 10
+  metric_sample_size: 5000
+  compare_umap: false
+  umap_kwargs:
+    n_components: 2
+    n_neighbors: 15
+    min_dist: 0.1
+    metric: euclidean
+logging:
+  use_wandb: false
+  wandb_project: parametric-umap
+  wandb_run_name: null
+  wandb_tags: []
+  wandb_group: null
+  results_dir: experiments/results
+  save_model: true
+  save_embeddings: false
+  persist_run: true

@@ -1,0 +1,91 @@
+data:
+  graph_cache_dir: experiments/cache/graphs
+  h5_dataset: embeddings
+  h5_path: ''
+  input_dim: 768
+  lancedb_columns:
+  - vector
+  lancedb_path: ''
+  lancedb_table: scopes-001
+  memmap_dirs:
+  - /data/latent-basemap/jina-en-2m/train
+  n_neighbors: 50
+  n_samples: null
+  precomputed_edges_path: /data/latent-basemap/jina-en-2m/edges_k50_fuzzy.npz
+  precomputed_index_path: null
+  precomputed_negatives_path: null
+  precomputed_p_sym_path: null
+  random_seed: 42
+  reference_umap_path: ''
+  source: memmap
+  use_graph_cache: false
+description: 'Phase A5 (plan-100m): 2M nomn + distill+hold (teacher=cuml_rand_ne2000,
+  anchor_hold_weight=10, 5% rows). Q: does hold cost recall under the frozen recipe?
+  (fuzzy-era distill+hold cliff predates this.)'
+eval:
+  compare_umap: false
+  eval_every_n_epochs: 0
+  knn_k: 10
+  metric_sample_size: 5000
+  metrics:
+  - trustworthiness
+  - distance_correlation
+  - knn_preservation
+  umap_kwargs:
+    metric: euclidean
+    min_dist: 0.1
+    n_components: 2
+    n_neighbors: 15
+logging:
+  persist_run: true
+  results_dir: experiments/results
+  save_embeddings: false
+  save_model: true
+  use_wandb: false
+  wandb_group: null
+  wandb_project: parametric-umap
+  wandb_run_name: null
+  wandb_tags: []
+model:
+  a: 1.0
+  architecture: residual_bottleneck
+  b: 1.0
+  dropout_prob: 0.5
+  hidden_dim: 1024
+  n_components: 2
+  n_layers: 3
+  use_batchnorm: false
+  use_dropout: false
+name: jina_en_2m_track1_a5_nomn_hold
+train:
+  anchor_hold_fraction: 0.05
+  anchor_hold_weight: 10.0
+  anchored_init: file
+  anchored_init_epochs: 2
+  anchored_init_lr: 0.001
+  anchored_init_path: /data/latent-basemap/jina-en-2m/cuml_rand_ne2000.parquet
+  batch_size: 8192
+  clip_grad_norm: 1.0
+  clip_grad_value: null
+  correlation_distance_transform: raw
+  correlation_weight: 0.0
+  device: cuda
+  gpu_resident_data: auto
+  gpu_resident_vram_budget_gb: 10.0
+  learning_rate: 0.001
+  low_memory: false
+  lr_schedule: cosine
+  midnear_enabled: false
+  mn_pairs_per_batch: 0
+  mn_weight_scale: 4.0
+  n_epochs: 10
+  n_processes: 6
+  pos_ratio: 0.05
+  positive_target_mode: binary
+  reject_neighbors: false
+  resample_negatives: false
+  total_steps_estimate: 366000
+  use_amp: true
+  verbose: false
+  warmup_steps: 200
+  weighted_edge_sampling: true

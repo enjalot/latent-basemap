@@ -1,0 +1,38 @@
+{
+ "substrate": "MiniLM-384-mixed",
+ "n_total": 15000000,
+ "n_sample": 201000,
+ "seed": 42,
+ "dim": 384,
+ "norm_mean": 1.0,
+ "norm_std": 0.0,
+ "unit_norm": true,
+ "mean_random_cosine": 0.0215,
+ "top2_pc_var": 0.0443,
+ "pca": {
+  "method": "centered_svd_full_spectrum",
+  "formula": "(s0^2+s1^2)/sum(all s^2)",
+  "n_components": 384,
+  "top2_over_top10_denom_bug": 0.2831
+ },
+ "sample_ids_hash": "ce59589f15a6",
+ "sample_ids_head": [
+  141,
+  230,
+  297,
+  412,
+  462,
+  537,
+  565,
+  586
+ ],
+ "ordered_shards": [
+  "data-00000.npy"
+ ],
+ "shard_sha": {
+  "data-00000.npy": "0c26a44efc8dc1e4"
+ },
+ "code_commit": "72e2b0d8c41f",
+ "code_dirty": true,
+ "generated_cmd": "python experiments/minilm_passport.py --emb /data/latent-basemap/minilm-15m/train/data-00000.npy --dim 384 --n 201000 --out experiments/evidence/minilm_passport.json"
+}

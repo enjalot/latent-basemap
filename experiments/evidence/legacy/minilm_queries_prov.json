@@ -1,0 +1,19 @@
+{
+ "n": 10002,
+ "per_corpus": 3334,
+ "rows_per_corpus": {
+  "fineweb": [
+   50000000,
+   50003334
+  ],
+  "rpj": [
+   50000000,
+   50003334
+  ],
+  "pile": [
+   50000000,
+   50003334
+  ]
+ },
+ "note": "tail rows past the 50M/corpus 150M block -> excluded from every rung"
+}

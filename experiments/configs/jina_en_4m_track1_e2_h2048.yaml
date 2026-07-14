@@ -1,0 +1,91 @@
+data:
+  graph_cache_dir: experiments/cache/graphs
+  h5_dataset: embeddings
+  h5_path: ''
+  input_dim: 768
+  lancedb_columns:
+  - vector
+  lancedb_path: ''
+  lancedb_table: scopes-001
+  memmap_dirs:
+  - /data/latent-basemap/jina-en-4M-nested/train
+  n_neighbors: 50
+  n_samples: null
+  precomputed_edges_path: /data/latent-basemap/jina-en-4M-nested/edges_k50_fuzzy.npz
+  precomputed_index_path: null
+  precomputed_negatives_path: null
+  precomputed_p_sym_path: null
+  random_seed: 42
+  reference_umap_path: ''
+  source: memmap
+  use_graph_cache: false
+description: 'Track 1 E2 follow-up: capacity-vs-N. Exact clone of the 4M law run 4bdf9c22
+  (fuzzy+pr05+mn4, 5ep matched compute) with hidden_dim 2048. 2M h2048 gave +20% recall
+  at 1x compute; does the width gain grow with N?'
+eval:
+  compare_umap: false
+  eval_every_n_epochs: 0
+  knn_k: 10
+  metric_sample_size: 5000
+  metrics:
+  - trustworthiness
+  - distance_correlation
+  - knn_preservation
+  umap_kwargs:
+    metric: euclidean
+    min_dist: 0.1
+    n_components: 2
+    n_neighbors: 15
+logging:
+  persist_run: true
+  results_dir: experiments/results
+  save_embeddings: false
+  save_model: true
+  use_wandb: false
+  wandb_group: null
+  wandb_project: parametric-umap
+  wandb_run_name: null
+  wandb_tags: []
+model:
+  a: 1.0
+  architecture: residual_bottleneck
+  b: 1.0
+  dropout_prob: 0.5
+  hidden_dim: 2048
+  n_components: 2
+  n_layers: 3
+  use_batchnorm: false
+  use_dropout: false
+name: jina_en_4m_track1_e2_h2048
+train:
+  anchor_hold_fraction: 0.05
+  anchor_hold_weight: 0.0
+  anchored_init: none
+  anchored_init_epochs: 2
+  anchored_init_lr: 0.001
+  anchored_init_path: ''
+  batch_size: 8192
+  clip_grad_norm: 1.0
+  clip_grad_value: null
+  correlation_distance_transform: raw
+  correlation_weight: 0.0
+  device: cuda
+  gpu_resident_data: auto
+  gpu_resident_vram_budget_gb: 16.0
+  learning_rate: 0.001
+  low_memory: false
+  lr_schedule: cosine
+  midnear_enabled: true
+  mn_pairs_per_batch: 0
+  mn_weight_scale: 4.0
+  n_epochs: 5
+  n_processes: 6
+  pos_ratio: 0.05
+  positive_target_mode: binary
+  reject_neighbors: false
+  resample_negatives: false
+  total_steps_estimate: 500000
+  use_amp: true
+  verbose: false
+  warmup_steps: 200
+  weighted_edge_sampling: true
