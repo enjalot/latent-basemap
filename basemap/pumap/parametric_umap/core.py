@@ -167,11 +167,20 @@ class ParametricUMAP:
         - ``umap`` (standard): ``1 / (1 + a·(‖Δ‖²)^b)`` = ``1/(1+a·r²^b)``.
           At b=1 these differ: legacy 1/(1+a·r) vs umap 1/(1+a·r²).
         """
-        delta = src - dst
+        # fp32 throughout: the singular derivative at r=0 must not run in fp16.
+        delta = src.float() - dst.float()
         if self.low_dim_kernel == "umap":
             r2 = delta.square().sum(dim=1)
-            radial = r2.pow(self.b)
-        else:  # legacy_lp
+            # P0-A: r2.pow(b) has a singular derivative b·r2^(b-1) at r2=0 for
+            # b<1 → autograd yields 0·inf = NaN, silently corrupting the model on
+            # self/duplicate edges (forward stays q=1, so the loss guard misses
+            # it). Clamp the power's input away from 0 and select an exact 0
+            # radial where r2==0, so both value (q=1) and gradient (0) are finite
+            # while small nonzero radii keep the true r^(2b) curve.
+            tiny = torch.finfo(r2.dtype).tiny
+            radial_nz = r2.clamp_min(tiny).pow(self.b)
+            radial = torch.where(r2 == 0, torch.zeros_like(radial_nz), radial_nz)
+        else:  # legacy_lp — unchanged shipped behaviour
             radial = torch.norm(delta, dim=1, p=2 * self.b)
         return torch.pow(1 + self.a * radial, -1), radial
 
@@ -852,7 +861,8 @@ class ParametricUMAP:
                 planned_loop, lr_horizon, 100.0 * (planned_loop - lr_horizon) / planned_loop)
         self._train_stats = {"planned_loop_iters": planned_loop, "lr_horizon": lr_horizon,
                              "stop_step": stop_step, "optimizer_steps": 0,
-                             "nonfinite_skips": 0, "final_lr": None}
+                             "nonfinite_skips": 0, "nonfinite_gradient_skips": 0,
+                             "final_lr": None}
         stop_training = False
 
         self.model.train()
@@ -1038,8 +1048,27 @@ class ParametricUMAP:
                 else:
                     grad_norm_pre = 0.0
 
+                # P0-A: a finite forward loss can still produce non-finite
+                # GRADIENTS (the r²^b singularity at r=0). The pre-clip total
+                # norm exposes it with no extra sync beyond clipping's own; if
+                # non-finite, drop the batch so a corrupted gradient can never
+                # reach optimizer.step()/the saved model.
                 if self.clip_grad_norm is not None:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.clip_grad_norm)
+                    total_norm = torch.nn.utils.clip_grad_norm_(
+                        self.model.parameters(), max_norm=self.clip_grad_norm)
+                else:
+                    total_norm = torch.norm(torch.stack([
+                        p.grad.detach().norm() for p in self.model.parameters()
+                        if p.grad is not None]))
+                if not bool(torch.isfinite(total_norm)):
+                    self._train_stats["nonfinite_gradient_skips"] += 1
+                    optimizer.zero_grad(set_to_none=True)
+                    consecutive_nonfinite_losses += 1
+                    logging.warning("Non-finite GRADIENT at step %d (finite loss); skipping batch "
+                                    "(%d consecutive).", global_step, consecutive_nonfinite_losses)
+                    if consecutive_nonfinite_losses >= 100:
+                        raise RuntimeError("Aborting: 100 consecutive non-finite-gradient batches")
+                    batch = _get_next(); pbar.update(1); continue
                 if self.clip_grad_value is not None:
                     torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=self.clip_grad_value)
 
@@ -1202,9 +1231,10 @@ class ParametricUMAP:
         # P0.2: honest step accounting (loop iters vs effective optimizer steps).
         s = self._train_stats
         logging.info("Step accounting: %d optimizer steps (LR>0) / %d planned loop iters "
-                     "(horizon %d); %d non-finite skips; final LR %.2e.",
+                     "(horizon %d); %d non-finite-loss skips; %d non-finite-gradient skips; "
+                     "final LR %.2e.",
                      s["optimizer_steps"], s["planned_loop_iters"], s["lr_horizon"],
-                     s["nonfinite_skips"], s["final_lr"] or 0.0)
+                     s["nonfinite_skips"], s["nonfinite_gradient_skips"], s["final_lr"] or 0.0)
         # Stop HostStreamEdgeSampler producer threads so they don't keep drawing
         # and discarding batches during the final transform / downstream scoring.
         if hasattr(loader, "close"):

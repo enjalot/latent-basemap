@@ -74,3 +74,58 @@ if __name__ == '__main__':
                test_large_distance_and_grad, test_gradient_matches_autograd_umap]:
         fn(); print(f"PASS {fn.__name__}")
     print("ALL KERNEL TESTS PASSED")
+
+
+# ── P0-A regression: zero-distance safety at the standard b≈0.895 ────────────────
+B_STD = 0.895060879
+
+
+def test_umap_zero_distance_grad_finite_b_std():
+    m = ParametricUMAP(a=1.5769, b=B_STD, low_dim_kernel='umap', device='cpu')
+    src = torch.zeros(4, 2, requires_grad=True); dst = torch.zeros(4, 2, requires_grad=True)
+    q, _ = m._low_dim_qs(src, dst)
+    assert torch.allclose(q, torch.ones_like(q))
+    q.sum().backward()
+    assert torch.isfinite(src.grad).all() and torch.isfinite(dst.grad).all()
+    assert torch.allclose(src.grad, torch.zeros_like(src.grad))   # zero grad at equality
+
+
+def test_umap_small_nonzero_grad_finite_and_curved_b_std():
+    m = ParametricUMAP(a=1.5769, b=B_STD, low_dim_kernel='umap', device='cpu')
+    for r in (1e-4, 1e-2, 0.5, 2.0):
+        src = torch.zeros(1, 2); dst = torch.tensor([[r, 0.0]], requires_grad=True)
+        q, radial = m._low_dim_qs(src, dst)
+        q.backward()
+        assert torch.isfinite(dst.grad).all()
+        # radial follows r^(2b), not flattened
+        assert abs(radial.item() - (r * r) ** B_STD) < 1e-5 * max(1.0, (r*r)**B_STD)
+
+
+def test_umap_self_edges_end_to_end_finite_b_std():
+    # a batch with exact self-edges (dup rows) must leave params + coords finite.
+    import numpy as np
+    n, d = 400, 8
+    X = np.random.RandomState(3).randn(n, d).astype(np.float32)
+    X[10:20] = X[10]                       # exact duplicates (self-edge-like)
+    src = np.array([10, 11, 12, 13, 14, 0, 1, 2] * 200, dtype=np.int32)
+    dst = np.array([10, 11, 12, 13, 14, 1, 2, 3] * 200, dtype=np.int32)  # incl. i==i self-edges
+    w = np.ones(len(src), dtype=np.float32)
+    np.savez('/tmp/_pa_edges.npz', sources=src, targets=dst, weights=w, n_nodes=n, k=15)
+    m = ParametricUMAP(a=1.5769, b=B_STD, low_dim_kernel='umap', correlation_weight=0.0,
+                       n_epochs=2, batch_size=64, total_steps_estimate=200, lr_schedule='cosine',
+                       device='cpu', positive_target_mode='binary', gpu_resident_data=False, use_amp=False)
+    m.fit(X, precomputed_edges_path='/tmp/_pa_edges.npz')
+    for p in m.model.parameters():
+        assert torch.isfinite(p).all(), "non-finite parameter after self-edge training"
+    Z = m.transform(X)
+    assert np.isfinite(Z).all(), "non-finite coords after self-edge training"
+
+
+if __name__ == '__main__':
+    for fn in [test_values_b1, test_values_b0895, test_zero_distance,
+               test_large_distance_and_grad, test_gradient_matches_autograd_umap,
+               test_umap_zero_distance_grad_finite_b_std,
+               test_umap_small_nonzero_grad_finite_and_curved_b_std,
+               test_umap_self_edges_end_to_end_finite_b_std]:
+        fn(); print(f"PASS {fn.__name__}")
+    print("ALL KERNEL TESTS PASSED")
