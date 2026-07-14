@@ -1,0 +1,164 @@
+{
+ "testbed": "/data/latent-basemap/jina-en-200k",
+ "n": 200000,
+ "n_holdout": 0,
+ "n_holdout_unique": 0,
+ "held_disjoint_from_train": true,
+ "held_hash": "da39a3ee5e6b",
+ "source": null,
+ "sample_indices_hash": "f85a1b82368c",
+ "frac": 0.001,
+ "n_anchors": 10000,
+ "seed": 123,
+ "scorer_commit": "5692784d433e",
+ "scorer_dirty": false,
+ "formula_version": "panel_v2.1-2026-07-14",
+ "runs": {
+  "umaplearn_k50": {
+   "run_dir": "ceiling_umaplearn_k50.parquet",
+   "wall_s": 3.9,
+   "no_model_reference": true,
+   "ffr": 0.4603,
+   "recall@k": 0.05878,
+   "purity_k256": 0.6987,
+   "purity_k1024": 0.6021,
+   "density": 0.2127,
+   "proj_ffr": null,
+   "proj_recall@k": null,
+   "proj_knn_regressor_ffr": null,
+   "proj_random_floor_ffr": null,
+   "proj_beats_knn": null,
+   "proj_margin_over_knn": null,
+   "panel_full": {
+    "schema": "panel_v2",
+    "formula_version": "panel_v2.1-2026-07-14",
+    "n": 200000,
+    "n_dims_hi": 768,
+    "n_dims_lo": 2,
+    "frac": 0.001,
+    "k_hit": 10,
+    "k_frac": 200,
+    "k_density": 15,
+    "anchor_seed": 42,
+    "n_anchors": 10000,
+    "anchor_hash": "94ade67d4451",
+    "ffr": 0.4603,
+    "recall@k": 0.05878,
+    "n_ffr_anchors": 10000,
+    "purity": {
+     "k256": 0.6987,
+     "k1024": 0.6021
+    },
+    "centroid_hashes": {
+     "k256": "2a7f1e2f3c76",
+     "k1024": "a5b2d8a1dc75"
+    },
+    "n_purity_anchors": 10000,
+    "density": 0.2127,
+    "n_density_anchors": 10000,
+    "provenance": {
+     "scorer": "complete_panel",
+     "run": "ceiling_umaplearn_k50.parquet",
+     "coords_sha": "1aa2a7dd5aaaf7de",
+     "no_model_reference": true,
+     "code_commit": "5692784d433e",
+     "code_dirty": false,
+     "alignment": "gather_X_by_z_ids",
+     "aligned_ids_hash": "963505beb96e",
+     "exactness": "hi:validated_approximate(overselect+rerank); lo:single_pass_exact",
+     "device": "cuda",
+     "peak_gpu_gb": 5.616,
+     "peak_rss_gb": 3.833,
+     "wall_s": 3.7
+    },
+    "guards": {
+     "coords_finite": true,
+     "coords_collapsed": false,
+     "emb_finite": true,
+     "emb_norm_mean": 1.0,
+     "emb_zero_rows": 0,
+     "boundary_min_gap": 0.0,
+     "overselect": 8,
+     "density_guard": {
+      "boundary_min_gap": 0.0,
+      "overselect": 8
+     }
+    }
+   }
+  },
+  "cuml_k50": {
+   "run_dir": "cuml_umap_k50.parquet",
+   "wall_s": 3.3,
+   "no_model_reference": true,
+   "ffr": 0.3621,
+   "recall@k": 0.03754,
+   "purity_k256": 0.4975,
+   "purity_k1024": 0.4182,
+   "density": -0.188,
+   "proj_ffr": null,
+   "proj_recall@k": null,
+   "proj_knn_regressor_ffr": null,
+   "proj_random_floor_ffr": null,
+   "proj_beats_knn": null,
+   "proj_margin_over_knn": null,
+   "panel_full": {
+    "schema": "panel_v2",
+    "formula_version": "panel_v2.1-2026-07-14",
+    "n": 200000,
+    "n_dims_hi": 768,
+    "n_dims_lo": 2,
+    "frac": 0.001,
+    "k_hit": 10,
+    "k_frac": 200,
+    "k_density": 15,
+    "anchor_seed": 42,
+    "n_anchors": 10000,
+    "anchor_hash": "94ade67d4451",
+    "ffr": 0.3621,
+    "recall@k": 0.03754,
+    "n_ffr_anchors": 10000,
+    "purity": {
+     "k256": 0.4975,
+     "k1024": 0.4182
+    },
+    "centroid_hashes": {
+     "k256": "2a7f1e2f3c76",
+     "k1024": "a5b2d8a1dc75"
+    },
+    "n_purity_anchors": 10000,
+    "density": -0.188,
+    "n_density_anchors": 10000,
+    "provenance": {
+     "scorer": "complete_panel",
+     "run": "cuml_umap_k50.parquet",
+     "coords_sha": "4c6ff4ae73aecbed",
+     "no_model_reference": true,
+     "code_commit": "5692784d433e",
+     "code_dirty": false,
+     "alignment": "positional_1to1",
+     "aligned_ids_hash": null,
+     "exactness": "hi:validated_approximate(overselect+rerank); lo:single_pass_exact",
+     "device": "cuda",
+     "peak_gpu_gb": 5.616,
+     "peak_rss_gb": 3.833,
+     "wall_s": 3.31
+    },
+    "guards": {
+     "coords_finite": true,
+     "coords_collapsed": false,
+     "emb_finite": true,
+     "emb_norm_mean": 1.0,
+     "emb_zero_rows": 0,
+     "boundary_min_gap": 0.0,
+     "overselect": 8,
+     "density_guard": {
+      "boundary_min_gap": 0.0,
+      "overselect": 8
+     }
+    }
+   }
+  }
+ },
+ "started": "2026-07-14T14:52:30Z",
+ "finished": "2026-07-14T14:52:37Z"
+}
