@@ -1,0 +1,264 @@
+{
+ "budget": 500000,
+ "base": "experiments/configs/jina_en_2m_k50_fuzzy.yaml",
+ "std_curve": [
+  1.57694346,
+  0.895060879
+ ],
+ "seeds": [
+  42
+ ],
+ "tag": "2m",
+ "runs": {
+  "r1_kernel_2m_legacy_a1b1_s42": {
+   "q": "Q1_formula_isolation",
+   "kernel": "legacy_lp",
+   "a": 1.0,
+   "b": 1.0,
+   "seed": 42,
+   "wall_s": 2142.2,
+   "panel": {
+    "schema": "panel_v2",
+    "formula_version": "panel_v2.1-2026-07-14",
+    "n": 2000000,
+    "n_dims_hi": 768,
+    "n_dims_lo": 2,
+    "frac": 0.001,
+    "k_hit": 10,
+    "k_frac": 2000,
+    "k_density": 15,
+    "anchor_seed": 42,
+    "n_anchors": 10000,
+    "anchor_hash": "a42f40e8cd59",
+    "ffr": 0.6307,
+    "recall@k": 0.01467,
+    "n_ffr_anchors": 10000,
+    "density": 0.453,
+    "n_density_anchors": 10000,
+    "provenance": {
+     "caller": "run_experiment",
+     "eval_mode": null,
+     "code_commit": "3b1baf3000be",
+     "code_dirty": false,
+     "alignment": "positional_1to1",
+     "aligned_ids_hash": null,
+     "exactness": "hi:overselect+exact_rerank; lo:single_pass_exact",
+     "device": "cuda",
+     "peak_gpu_gb": 16.244,
+     "peak_rss_gb": 13.889,
+     "wall_s": 449.69
+    },
+    "guards": {
+     "coords_finite": true,
+     "coords_collapsed": false,
+     "emb_finite": true,
+     "emb_norm_mean": 1.0,
+     "emb_zero_rows": 0,
+     "boundary_min_gap": 0.0,
+     "overselect": 8,
+     "density_guard": {
+      "boundary_min_gap": 0.0,
+      "overselect": 8
+     }
+    }
+   },
+   "train_accounting": {
+    "schedule_version": "cosine-v2-update-budget",
+    "planned_loop_iters": 5467740,
+    "lr_horizon": 500000,
+    "attempted_batches": 500190,
+    "finite_loss_batches": 500190,
+    "optimizer_steps_attempted": 500000,
+    "optimizer_steps_succeeded": 500000,
+    "positive_lr_optimizer_steps": 499999,
+    "scheduler_steps": 500000,
+    "nonfinite_loss_skips": 0,
+    "nonfinite_gradient_skips": 190,
+    "amp_overflow_skips": 0,
+    "first_lr": 0.0,
+    "peak_lr": 0.001,
+    "final_lr": 9.877487716636325e-15,
+    "stop_reason": "lr_horizon",
+    "executed_iters": 500000,
+    "n_pos_edges": 149267874,
+    "train_seconds": 1679.6,
+    "updates_per_s": 297.7,
+    "edge_pairs_per_s": 2438613.0
+   },
+   "throughput": null
+  },
+  "r1_kernel_2m_umap_a1b1_s42": {
+   "q": "Q1_formula_isolation",
+   "kernel": "umap",
+   "a": 1.0,
+   "b": 1.0,
+   "seed": 42,
+   "wall_s": 2218.8,
+   "panel": {
+    "schema": "panel_v2",
+    "formula_version": "panel_v2.1-2026-07-14",
+    "n": 2000000,
+    "n_dims_hi": 768,
+    "n_dims_lo": 2,
+    "frac": 0.001,
+    "k_hit": 10,
+    "k_frac": 2000,
+    "k_density": 15,
+    "anchor_seed": 42,
+    "n_anchors": 10000,
+    "anchor_hash": "a42f40e8cd59",
+    "ffr": 0.5693,
+    "recall@k": 0.01128,
+    "n_ffr_anchors": 10000,
+    "density": 0.7425,
+    "n_density_anchors": 10000,
+    "provenance": {
+     "caller": "run_experiment",
+     "eval_mode": null,
+     "code_commit": "3b1baf3000be",
+     "code_dirty": false,
+     "alignment": "positional_1to1",
+     "aligned_ids_hash": null,
+     "exactness": "hi:overselect+exact_rerank; lo:single_pass_exact",
+     "device": "cuda",
+     "peak_gpu_gb": 16.243,
+     "peak_rss_gb": 15.267,
+     "wall_s": 452.6
+    },
+    "guards": {
+     "coords_finite": true,
+     "coords_collapsed": false,
+     "emb_finite": true,
+     "emb_norm_mean": 1.0,
+     "emb_zero_rows": 0,
+     "boundary_min_gap": 0.0,
+     "overselect": 8,
+     "density_guard": {
+      "boundary_min_gap": 0.0,
+      "overselect": 8
+     }
+    }
+   },
+   "train_accounting": {
+    "schedule_version": "cosine-v2-update-budget",
+    "planned_loop_iters": 5467740,
+    "lr_horizon": 500000,
+    "attempted_batches": 500183,
+    "finite_loss_batches": 500183,
+    "optimizer_steps_attempted": 500000,
+    "optimizer_steps_succeeded": 500000,
+    "positive_lr_optimizer_steps": 499999,
+    "scheduler_steps": 500000,
+    "nonfinite_loss_skips": 0,
+    "nonfinite_gradient_skips": 183,
+    "amp_overflow_skips": 0,
+    "first_lr": 0.0,
+    "peak_lr": 0.001,
+    "final_lr": 9.877487716636325e-15,
+    "stop_reason": "lr_horizon",
+    "executed_iters": 500000,
+    "n_pos_edges": 149267874,
+    "train_seconds": 1752.6,
+    "updates_per_s": 285.3,
+    "edge_pairs_per_s": 2337109.0
+   },
+   "throughput": null
+  },
+  "r1_kernel_2m_umap_stdcurve_s42": {
+   "q": "Q2_std_umap_curve",
+   "kernel": "umap",
+   "a": 1.57694346,
+   "b": 0.895060879,
+   "seed": 42,
+   "wall_s": 2215.1,
+   "panel": {
+    "schema": "panel_v2",
+    "formula_version": "panel_v2.1-2026-07-14",
+    "n": 2000000,
+    "n_dims_hi": 768,
+    "n_dims_lo": 2,
+    "frac": 0.001,
+    "k_hit": 10,
+    "k_frac": 2000,
+    "k_density": 15,
+    "anchor_seed": 42,
+    "n_anchors": 10000,
+    "anchor_hash": "a42f40e8cd59",
+    "ffr": 0.6278,
+    "recall@k": 0.01522,
+    "n_ffr_anchors": 10000,
+    "density": 0.6864,
+    "n_density_anchors": 10000,
+    "provenance": {
+     "caller": "run_experiment",
+     "eval_mode": null,
+     "code_commit": "3b1baf3000be",
+     "code_dirty": false,
+     "alignment": "positional_1to1",
+     "aligned_ids_hash": null,
+     "exactness": "hi:overselect+exact_rerank; lo:single_pass_exact",
+     "device": "cuda",
+     "peak_gpu_gb": 16.243,
+     "peak_rss_gb": 15.31,
+     "wall_s": 449.92
+    },
+    "guards": {
+     "coords_finite": true,
+     "coords_collapsed": false,
+     "emb_finite": true,
+     "emb_norm_mean": 1.0,
+     "emb_zero_rows": 0,
+     "boundary_min_gap": 0.0,
+     "overselect": 8,
+     "density_guard": {
+      "boundary_min_gap": 0.0,
+      "overselect": 8
+     }
+    }
+   },
+   "train_accounting": {
+    "schedule_version": "cosine-v2-update-budget",
+    "planned_loop_iters": 5467740,
+    "lr_horizon": 500000,
+    "attempted_batches": 500190,
+    "finite_loss_batches": 500190,
+    "optimizer_steps_attempted": 500000,
+    "optimizer_steps_succeeded": 500000,
+    "positive_lr_optimizer_steps": 499999,
+    "scheduler_steps": 500000,
+    "nonfinite_loss_skips": 0,
+    "nonfinite_gradient_skips": 190,
+    "amp_overflow_skips": 0,
+    "first_lr": 0.0,
+    "peak_lr": 0.001,
+    "final_lr": 9.877487716636325e-15,
+    "stop_reason": "lr_horizon",
+    "executed_iters": 500000,
+    "n_pos_edges": 149267874,
+    "train_seconds": 1751.6,
+    "updates_per_s": 285.4,
+    "edge_pairs_per_s": 2338381.0
+   },
+   "throughput": null
+  }
+ },
+ "started": "2026-07-14T08:32:47Z",
+ "group_means": {
+  "Q1_legacy_a1b1": {
+   "ffr": 0.6307,
+   "recall@k": 0.0147,
+   "density": 0.453
+  },
+  "Q1_umap_a1b1": {
+   "ffr": 0.5693,
+   "recall@k": 0.0113,
+   "density": 0.7425
+  },
+  "Q2_umap_stdcurve": {
+   "ffr": 0.6278,
+   "recall@k": 0.0152,
+   "density": 0.6864
+  }
+ },
+ "finished": "2026-07-14T10:22:23Z"
+}

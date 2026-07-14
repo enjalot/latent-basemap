@@ -1,0 +1,57 @@
+{
+ "testbed": "/data/latent-basemap/jina-en-2m",
+ "n": 2000000,
+ "n_holdout": 20000,
+ "held_disjoint_from_train": true,
+ "held_hash": "48a4d5a027b4",
+ "frac": 0.001,
+ "runs": {
+  "legacy": {
+   "run_dir": "r1_kernel_2m_legacy_a1b1_s42_20260714_083247_055217e4",
+   "wall_s": 63.6,
+   "ffr": 0.6307,
+   "recall@k": 0.01467,
+   "purity_k256": 1.041,
+   "purity_k1024": 0.9466,
+   "density": 0.453,
+   "proj_ffr": 0.5972,
+   "proj_recall@k": 0.01087,
+   "proj_knn_regressor_ffr": 0.4444,
+   "proj_random_floor_ffr": 0.0008,
+   "proj_beats_knn": true,
+   "proj_margin_over_knn": 0.1528
+  },
+  "umap": {
+   "run_dir": "r1_kernel_2m_umap_a1b1_s42_20260714_090830_ab007a49",
+   "wall_s": 62.8,
+   "ffr": 0.5693,
+   "recall@k": 0.01128,
+   "purity_k256": 0.7432,
+   "purity_k1024": 0.6123,
+   "density": 0.7425,
+   "proj_ffr": 0.5301,
+   "proj_recall@k": 0.0105,
+   "proj_knn_regressor_ffr": 0.5146,
+   "proj_random_floor_ffr": 0.001,
+   "proj_beats_knn": true,
+   "proj_margin_over_knn": 0.0155
+  },
+  "stdcurve": {
+   "run_dir": "r1_kernel_2m_umap_stdcurve_s42_20260714_094528_09aee1f8",
+   "wall_s": 62.8,
+   "ffr": 0.6278,
+   "recall@k": 0.01522,
+   "purity_k256": 0.8569,
+   "purity_k1024": 0.7485,
+   "density": 0.6864,
+   "proj_ffr": 0.5809,
+   "proj_recall@k": 0.01313,
+   "proj_knn_regressor_ffr": 0.5274,
+   "proj_random_floor_ffr": 0.0009,
+   "proj_beats_knn": true,
+   "proj_margin_over_knn": 0.0535
+  }
+ },
+ "started": "2026-07-14T10:27:50Z",
+ "finished": "2026-07-14T10:30:59Z"
+}
