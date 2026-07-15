@@ -1,0 +1,32 @@
+{
+ "gate": "r0_1_closure",
+ "closed": false,
+ "items": {
+  "1_corrected_2x2": {
+   "passed": true,
+   "detail": "12 maps, unique held-out=20000",
+   "sha": "d5991746ddd61090"
+  },
+  "2_a3_regen": {
+   "passed": false,
+   "detail": "decision=nomn clean_commit=73c84096e7b1",
+   "sha": "c4c66d649e195c11"
+  },
+  "3a_knn_cost": {
+   "passed": true,
+   "detail": "testbeds=['200k', '2m'] contract=True",
+   "sha": "5dc96c14e74cea77"
+  },
+  "3b_golden_2m_extended": {
+   "passed": true,
+   "detail": "passed=True metrics=['density', 'ffr', 'proj_ffr', 'purity_k1024', 'recall@k']",
+   "sha": "80123b481a5b3831"
+  },
+  "4_weighted_8m_bridge": {
+   "passed": true,
+   "detail": "seeds={'s42': ('device', 'weighted_with_replacement', 500000), 's43': ('device', 'weighted_with_replacement', 500000)}",
+   "sha": "cfe6a410e9b349f2"
+  }
+ },
+ "rule": "closed=true only if every registered item points to a passing content-bound artifact and every training result's ACTUAL pipeline/semantics match its recipe."
+}
