@@ -1,0 +1,88 @@
+{
+ "gate": "panel_v2_golden_2m",
+ "schema": "panel_v2",
+ "formula_version": "panel_v2.2-2026-07-15",
+ "passed": true,
+ "config": {
+  "frac": 0.001,
+  "n_anchors": 512,
+  "k_hit": 10,
+  "k_frac": 2000,
+  "k_density": 15,
+  "overselect": 8,
+  "corpus_chunk": 500000,
+  "anchor_seed": 42
+ },
+ "corpus": {
+  "emb": "/data/latent-basemap/jina-en-2m/train/data-00000.npy",
+  "coords": "experiments/results/r1_kernel_2m_legacy_a1b1_s42_20260714_083247_055217e4/coords.parquet",
+  "n": 2000000,
+  "dim_hi": 768,
+  "dim_lo": 2
+ },
+ "metrics_validated": [
+  "ffr",
+  "recall@k",
+  "density",
+  "purity_k1024",
+  "proj_ffr"
+ ],
+ "streamed": {
+  "ffr": 0.6227,
+  "recall@k": 0.01367,
+  "density": 0.2992,
+  "purity_k1024": 0.9724,
+  "proj_ffr": 0.5983
+ },
+ "reference": {
+  "ffr": 0.6227,
+  "recall@k": 0.01367,
+  "density": 0.2992,
+  "purity_k1024": 0.9724,
+  "proj_ffr": 0.5994
+ },
+ "deltas": {
+  "ffr": 0.0,
+  "recall@k": 0.0,
+  "density": 0.0,
+  "purity_k1024": 0.0,
+  "proj_ffr": 0.0011
+ },
+ "tolerances": {
+  "ffr": 0.01,
+  "recall@k": 0.01,
+  "density": 0.02,
+  "purity_k1024": 0.05,
+  "proj_ffr": 0.02
+ },
+ "per_metric_pass": {
+  "ffr": true,
+  "recall@k": true,
+  "density": true,
+  "purity_k1024": true,
+  "proj_ffr": true
+ },
+ "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact",
+ "n_holdout": 2000,
+ "peak_gpu_gb": 5.629,
+ "peak_rss_gb": 18.93,
+ "wall_streamed_s": 5.6,
+ "wall_reference_s": 12.8,
+ "code_commit": "98c5664f2f7d",
+ "code_dirty": true,
+ "guards": {
+  "coords_finite": true,
+  "coords_collapsed": false,
+  "emb_finite": true,
+  "emb_norm_mean": 1.0,
+  "emb_zero_rows": 0,
+  "hit_guard": {
+   "boundary_min_gap": null,
+   "overselect": 8
+  },
+  "density_guard": {
+   "boundary_min_gap": 0.0,
+   "overselect": 8
+  }
+ }
+}
