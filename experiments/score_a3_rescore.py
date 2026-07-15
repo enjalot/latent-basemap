@@ -63,6 +63,11 @@ def main():
     ap.add_argument("--frac", type=float, default=0.001)
     ap.add_argument("--n-anchors", type=int, default=10000)
     args = ap.parse_args()
+    # S1: GPU scorer must run under a held/inherited lease (controller or in-process).
+    import torch as _t
+    if _t.cuda.is_available():
+        from basemap.run_controller import require_active_lease
+        require_active_lease()
 
     for (r, s), d in RUNS.items():
         if not os.path.isdir(d):

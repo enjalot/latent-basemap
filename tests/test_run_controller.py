@@ -56,7 +56,7 @@ def test_lease_survives_controller_death_via_inherited_fd():
 def test_nonzero_job1_stops_job2():
     d = tempfile.mkdtemp(); os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
     import importlib; importlib.reload(rc)
-    j1 = rc.Job(name='a', argv=['false'], outputs=[], done_marker=os.path.join(d, 'a.done'))
+    j1 = rc.Job(name='a', argv=['false'], outputs=[], done_marker=os.path.join(d, 'a.done'), certifying=False)
     j2 = rc.Job(name='b', argv=['bash', '-c', f'touch {d}/b.out'],
                 outputs=[f'{d}/b.out'], done_marker=os.path.join(d, 'b.done'))
     s = rc.run_jobs([j1, j2])
@@ -151,6 +151,25 @@ def test_p0_5_known_service_pids_matches_by_identity(monkeypatch):
     assert rc.known_service_pids(["zzz_no_such_service_marker"]) == []
 
 
+def test_s1_certifying_job_needs_outputs():
+    d = tempfile.mkdtemp(); os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
+    import importlib; importlib.reload(rc)
+    j = rc.Job(name='x', argv=['true'], outputs=[], done_marker=os.path.join(d, 'x.done'))  # certifying default
+    s = rc.run_jobs([j])
+    assert s['jobs'][0]['status'].startswith('config_error'), s['jobs'][0]
+    assert 'stop_reason' in s
+
+
+def test_s1_missing_declared_input_fails():
+    d = tempfile.mkdtemp(); os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
+    import importlib; importlib.reload(rc)
+    j = rc.Job(name='x', argv=['bash', '-c', f'touch {d}/o'], outputs=[f'{d}/o'],
+               done_marker=os.path.join(d, 'x.done'), input_paths=[f'{d}/does_not_exist'])
+    s = rc.run_jobs([j])
+    assert s['jobs'][0]['status'].startswith('missing_inputs'), s['jobs'][0]
+    assert not os.path.exists(f'{d}/o')   # never launched
+
+
 def test_p1_lease_ownership_not_any_holder():
     # P1: a lease held by ANOTHER process must NOT satisfy require_active_lease();
     # only an owned in-process lease (or an inherited BASEMAP_GPU_LEASE_FD) counts.
@@ -217,7 +236,7 @@ def test_co_tenant_policy_blocks_gpu_job_with_unknown_pid():
     # so the test is deterministic regardless of what's on the GPU.
     d = tempfile.mkdtemp(); os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
     import importlib; importlib.reload(rc)
-    j = rc.Job(name='big', argv=['true'], outputs=[], done_marker=os.path.join(d, 'big.done'),
+    j = rc.Job(name='big', argv=['true'], outputs=[], done_marker=os.path.join(d, 'big.done'), certifying=False,
                required_free_gb=100000.0)   # impossible → policy must block
     s = rc.run_jobs([j])
     assert s['jobs'][0]['status'] == 'co_tenant_block', s

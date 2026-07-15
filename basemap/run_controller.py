@@ -264,6 +264,8 @@ class Job:
     input_paths: list = dataclasses.field(default_factory=list)   # P1: files whose
     # content binds the job identity (config, scorer/trainer code, input artifacts).
     # A change to any of them (or the repo commit) invalidates a stale done marker.
+    certifying: bool = True   # S1: a certifying job MUST declare outputs; outputs=[]
+    # is only allowed for an explicitly non-certifying job (certifying=False).
 
 
 def run_jobs(jobs: list, controller_id: Optional[str] = None, allowed_pids=(),
@@ -274,6 +276,21 @@ def run_jobs(jobs: list, controller_id: Optional[str] = None, allowed_pids=(),
     with GpuLease(controller_id=cid, timeout=0) as lease:
         for job in jobs:
             rec = {"name": job.name}
+            # S1: a certifying job MUST declare outputs (exit-0 alone can't certify);
+            # and every declared input MUST exist (fail on missing input).
+            if job.certifying and not job.outputs:
+                rec["status"] = "config_error:certifying_job_without_outputs"
+                summary["jobs"].append(rec)
+                if not job.continue_on_failure:
+                    summary["stop_reason"] = f"{job.name}: certifying job declares no outputs (S1)"; break
+                continue
+            missing_inputs = [p for p in (job.input_paths or []) if not os.path.exists(p)]
+            if missing_inputs:
+                rec["status"] = f"missing_inputs:{missing_inputs}"
+                summary["jobs"].append(rec)
+                if not job.continue_on_failure:
+                    summary["stop_reason"] = f"{job.name}: missing declared inputs {missing_inputs} (S1)"; break
+                continue
             spec_digest = _job_spec_digest(job)
             # idempotency: skip only if the done record matches THIS job's spec
             # digest AND every output still matches its recorded signature (P0-5:

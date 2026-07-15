@@ -118,6 +118,11 @@ def main():
     ap.add_argument("--n-holdout", type=int, default=2000)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
+    # S1: GPU scorer must run under a held/inherited lease (controller or in-process).
+    import torch as _t
+    if _t.cuda.is_available():
+        from basemap.run_controller import require_active_lease
+        require_active_lease()
 
     cfg = PanelV2Config(frac=args.frac, n_anchors=args.n_anchors, corpus_chunk=500_000)
     X = load_embeddings(args.emb, dim=args.dim)

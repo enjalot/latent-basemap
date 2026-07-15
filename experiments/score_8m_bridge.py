@@ -25,6 +25,11 @@ def main():
     ap.add_argument("--n-anchors", type=int, default=2000)
     ap.add_argument("--out", default="experiments/evidence/r1_8m/bridge_weighted.json")
     args = ap.parse_args()
+    # S1: GPU scorer must run under a held/inherited lease (controller or in-process).
+    import torch as _t
+    if _t.cuda.is_available():
+        from basemap.run_controller import require_active_lease
+        require_active_lease()
     X = load_embeddings(TRAIN8M, dim=768); n = len(X)
     labels = np.asarray(np.load(LABELS8M, mmap_mode="r")[:n])
     cents = {256: np.load(C256), 1024: np.load(C1024)}

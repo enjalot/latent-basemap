@@ -190,6 +190,14 @@ def phase_8m_program(out_path, summary):
 
 
 def main():
+    # S1: RETIRED — same-process multi-GPU-phase launcher (caused the overnight
+    # VRAM-pollution → legacy-fallback + scoring OOM). Use the controller subprocess
+    # DAG template (one GPU phase per process): canary -> train seed(s) -> shared
+    # reference -> score -> gate. Set BASEMAP_UNSAFE_SAME_PROCESS=1 only for diagnostics.
+    import os as _os
+    if _os.environ.get("BASEMAP_UNSAFE_SAME_PROCESS") != "1":
+        raise SystemExit("run_overnight_program is RETIRED (S1): use the controller subprocess "
+                         "DAG (canary->train->ref->score->gate). Override with BASEMAP_UNSAFE_SAME_PROCESS=1.")
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="/data/latent-basemap/overnight/summary.json")
     ap.add_argument("--required-free-gb", type=float, default=14.0)

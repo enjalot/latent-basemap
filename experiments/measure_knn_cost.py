@@ -27,6 +27,11 @@ def main():
     ap.add_argument("--k", type=int, default=15)
     ap.add_argument("--out", default="experiments/evidence/r1_rescore/knn_cost.json")
     args = ap.parse_args()
+    # S1: GPU scorer must run under a held/inherited lease (controller or in-process).
+    import torch as _t
+    if _t.cuda.is_available():
+        from basemap.run_controller import require_active_lease
+        require_active_lease()
     cfg = PanelV2Config(corpus_chunk=500_000)
     rec = {"contract": "zero-build streamed brute hi-D search: the training X IS the reference "
                        "index (no separate build/add/load); cost = query + coordinate regression + "
