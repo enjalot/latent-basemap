@@ -126,13 +126,18 @@ def check_bridge():
         if not graph_ok:
             try:
                 from basemap.graph_validation import validate_graph_content
-                import yaml as _yaml
+                import yaml as _yaml, glob as _glob
                 dc = _yaml.safe_load(open(cfg_persisted)).get("data", {})
                 ep = dc.get("precomputed_edges_path")
                 man = _load(ep + ".manifest.json") if ep else None
+                # resolve the ordered data shards the run's memmap_dirs would load
+                shards = []
+                for md in (dc.get("memmap_dirs") or []):
+                    shards += sorted(_glob.glob(os.path.join(md, "*.npy")))
                 if man:
-                    validate_graph_content(ep, man, require_manifest_sha=True); graph_ok = True
-            except Exception:
+                    validate_graph_content(ep, man, shard_paths=shards, require_manifest_sha=True)
+                    graph_ok = True
+            except Exception as _e:
                 graph_ok = False
         this = (acct.get("pipeline_pipeline") == "device"
                 and acct.get("pipeline_positive_sampling") == "weighted_with_replacement"
