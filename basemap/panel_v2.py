@@ -595,14 +595,20 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
     # purity per centroid granularity — uses the APPROXIMATE high-D k_frac membership
     if centroids_by_k:
         res["purity"] = {}
+        res["purity_numerators"] = {}     # R2: high-D vs map label agreement, not just the ratio
         res["purity_exactness"] = "hi_frac_membership: approximate (fast expansion, no rerank)"
         res["centroid_hashes"] = {}
         lab = _label_by_centroids(Xa, centroids_by_k)   # {k: labels[N]}
         for kc, labels in lab.items():
             alab = labels[aidx][sel_pur]
-            hd = float((labels[hi_frac[sel_pur]] == alab[:, None]).mean())
-            mp = float((labels[lo_kf[sel_pur]] == alab[:, None]).mean())
+            hd = float((labels[hi_frac[sel_pur]] == alab[:, None]).mean())   # high-D agreement
+            mp = float((labels[lo_kf[sel_pur]] == alab[:, None]).mean())     # map agreement
             res["purity"][f"k{kc}"] = round(mp / hd, 4) if hd else None
+            # R2: ratio > 1 (map > high-D) means the map OVER-separates centroid
+            # labels vs the source; report both numerators so the ratio can be read
+            # as fidelity vs over-separation, not treated as pure fidelity.
+            res["purity_numerators"][f"k{kc}"] = {"hi_D_agreement": round(hd, 4),
+                                                  "map_agreement": round(mp, 4)}
             res["centroid_hashes"][f"k{kc}"] = _ids_hash(
                 np.round(np.asarray(centroids_by_k[kc], np.float32), 4))
         res["n_purity_anchors"] = int(len(sel_pur))

@@ -1,6 +1,6 @@
 {
  "gate": "r0_1_closure",
- "closed": false,
+ "closed": true,
  "items": {
   "1_corrected_2x2": {
    "passed": true,
@@ -8,9 +8,9 @@
    "sha": "d5991746ddd61090"
   },
   "2_a3_regen": {
-   "passed": false,
-   "detail": "decision=nomn clean_commit=73c84096e7b1",
-   "sha": "c4c66d649e195c11"
+   "passed": true,
+   "detail": "decision=nomn clean_commit=7a4ae3d31d2d",
+   "sha": "e60f82a2af8a4380"
   },
   "3a_knn_cost": {
    "passed": true,
