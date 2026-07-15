@@ -30,6 +30,10 @@ ASSETS = [
          graph="/data/latent-basemap/jina-en-2m/edges_k50_fuzzy.npz",
          train="/data/latent-basemap/jina-en-2m/train",
          sample_idx="/data/latent-basemap/jina-en-2m/sample_indices.npy", dim=768),
+    dict(name="jina-en-8M-nested",
+         graph="/data/latent-basemap/jina-en-8M-nested/edges_k50_fuzzy.npz",
+         train="/data/latent-basemap/jina-en-8M-nested/train",
+         sample_idx="/data/latent-basemap/jina-en-8M-nested/sample_indices.npy", dim=768),
 ]
 
 

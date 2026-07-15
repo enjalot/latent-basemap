@@ -27,6 +27,20 @@
    "manifest": "/data/latent-basemap/jina-en-2m/edges_k50_fuzzy.npz.manifest.json",
    "graph_sha": "8cd8c564f584ca81",
    "data_fingerprint": "8675546d49363821"
+  },
+  {
+   "name": "jina-en-8M-nested",
+   "graph": "/data/latent-basemap/jina-en-8M-nested/edges_k50_fuzzy.npz",
+   "n_nodes": 8000000,
+   "n_edges": 605184300,
+   "endpoint_cosine": {
+    "edge_cosine": 0.6172,
+    "random_cosine": 0.1136,
+    "margin": 0.5037
+   },
+   "manifest": "/data/latent-basemap/jina-en-8M-nested/edges_k50_fuzzy.npz.manifest.json",
+   "graph_sha": "2774b4994aab8c87",
+   "data_fingerprint": "03c8c1ee8ec6743d"
   }
  ]
 }
