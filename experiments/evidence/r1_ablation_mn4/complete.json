@@ -10,13 +10,13 @@
  "frac": 0.001,
  "n_anchors": 10000,
  "seed": 123,
- "scorer_commit": "8af4483f53c9",
- "scorer_dirty": true,
+ "scorer_commit": "78b187088624",
+ "scorer_dirty": false,
  "formula_version": "panel_v2.2-2026-07-15",
  "runs": {
   "mn0_s1_ws0_s42": {
    "run_dir": "r1_abl_mn0_s1_ws0_s42_20260714_181646_c8044b6c",
-   "wall_s": 7.3,
+   "wall_s": 7.4,
    "no_model_reference": false,
    "ffr": 0.5821,
    "recall@k": 0.09693,
@@ -72,15 +72,15 @@
      "run": "r1_abl_mn0_s1_ws0_s42_20260714_181646_c8044b6c",
      "coords_sha": "6feeefb2cfdbbfb3",
      "no_model_reference": false,
-     "code_commit": "8af4483f53c9",
-     "code_dirty": true,
+     "code_commit": "78b187088624",
+     "code_dirty": false,
      "alignment": "gather_X_by_z_ids",
      "aligned_ids_hash": "963505beb96e",
      "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact",
      "device": "cuda",
      "peak_gpu_gb": 5.615,
-     "peak_rss_gb": 3.689,
-     "wall_s": 2.03
+     "peak_rss_gb": 3.688,
+     "wall_s": 2.04
     },
     "guards": {
      "coords_finite": true,
@@ -157,15 +157,15 @@
      "run": "r1_abl_mn0_s1_ws1_s42_20260714_184505_7f881e5e",
      "coords_sha": "6aef2d4b5bf9818d",
      "no_model_reference": false,
-     "code_commit": "8af4483f53c9",
+     "code_commit": "78b187088624",
      "code_dirty": true,
      "alignment": "gather_X_by_z_ids",
      "aligned_ids_hash": "963505beb96e",
      "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact",
      "device": "cuda",
      "peak_gpu_gb": 5.629,
-     "peak_rss_gb": 4.3,
-     "wall_s": 1.78
+     "peak_rss_gb": 4.298,
+     "wall_s": 1.77
     },
     "guards": {
      "coords_finite": true,
@@ -242,15 +242,15 @@
      "run": "r1_abl_mn1_s4_ws0_s42_20260714_191317_2438fcbe",
      "coords_sha": "8ff1dd55a6a83c1c",
      "no_model_reference": false,
-     "code_commit": "8af4483f53c9",
+     "code_commit": "78b187088624",
      "code_dirty": true,
      "alignment": "gather_X_by_z_ids",
      "aligned_ids_hash": "963505beb96e",
      "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact",
      "device": "cuda",
      "peak_gpu_gb": 5.629,
-     "peak_rss_gb": 4.303,
-     "wall_s": 1.76
+     "peak_rss_gb": 4.302,
+     "wall_s": 1.78
     },
     "guards": {
      "coords_finite": true,
@@ -271,7 +271,7 @@
   },
   "mn1_s4_ws1_s42": {
    "run_dir": "r1_abl_mn1_s4_ws1_s42_20260714_195123_74f21108",
-   "wall_s": 6.9,
+   "wall_s": 7.0,
    "no_model_reference": false,
    "ffr": 0.6382,
    "recall@k": 0.1781,
@@ -327,15 +327,15 @@
      "run": "r1_abl_mn1_s4_ws1_s42_20260714_195123_74f21108",
      "coords_sha": "f53b015788aa2e95",
      "no_model_reference": false,
-     "code_commit": "8af4483f53c9",
+     "code_commit": "78b187088624",
      "code_dirty": true,
      "alignment": "gather_X_by_z_ids",
      "aligned_ids_hash": "963505beb96e",
      "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact",
      "device": "cuda",
      "peak_gpu_gb": 5.629,
-     "peak_rss_gb": 4.311,
-     "wall_s": 1.77
+     "peak_rss_gb": 4.302,
+     "wall_s": 1.79
     },
     "guards": {
      "coords_finite": true,
@@ -356,7 +356,7 @@
   },
   "mn0_s1_ws0_s43": {
    "run_dir": "r1_abl_mn0_s1_ws0_s43_20260714_202930_65f818c6",
-   "wall_s": 6.8,
+   "wall_s": 7.0,
    "no_model_reference": false,
    "ffr": 0.5757,
    "recall@k": 0.09388,
@@ -412,15 +412,15 @@
      "run": "r1_abl_mn0_s1_ws0_s43_20260714_202930_65f818c6",
      "coords_sha": "d140b03e46a7ceae",
      "no_model_reference": false,
-     "code_commit": "8af4483f53c9",
+     "code_commit": "78b187088624",
      "code_dirty": true,
      "alignment": "gather_X_by_z_ids",
      "aligned_ids_hash": "963505beb96e",
      "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact",
      "device": "cuda",
      "peak_gpu_gb": 5.629,
-     "peak_rss_gb": 4.311,
-     "wall_s": 1.74
+     "peak_rss_gb": 4.305,
+     "wall_s": 1.78
     },
     "guards": {
      "coords_finite": true,
@@ -441,7 +441,7 @@
   },
   "mn0_s1_ws1_s43": {
    "run_dir": "r1_abl_mn0_s1_ws1_s43_20260714_205744_cd1072a1",
-   "wall_s": 6.8,
+   "wall_s": 6.9,
    "no_model_reference": false,
    "ffr": 0.6471,
    "recall@k": 0.18468,
@@ -497,15 +497,15 @@
      "run": "r1_abl_mn0_s1_ws1_s43_20260714_205744_cd1072a1",
      "coords_sha": "0d2924898e5781b3",
      "no_model_reference": false,
-     "code_commit": "8af4483f53c9",
+     "code_commit": "78b187088624",
      "code_dirty": true,
      "alignment": "gather_X_by_z_ids",
      "aligned_ids_hash": "963505beb96e",
      "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact",
      "device": "cuda",
      "peak_gpu_gb": 5.629,
-     "peak_rss_gb": 4.311,
-     "wall_s": 1.78
+     "peak_rss_gb": 4.305,
+     "wall_s": 1.77
     },
     "guards": {
      "coords_finite": true,
@@ -582,15 +582,15 @@
      "run": "r1_abl_mn1_s4_ws0_s43_20260714_212555_4387631b",
      "coords_sha": "ade13e35ecb33a7a",
      "no_model_reference": false,
-     "code_commit": "8af4483f53c9",
+     "code_commit": "78b187088624",
      "code_dirty": true,
      "alignment": "gather_X_by_z_ids",
      "aligned_ids_hash": "963505beb96e",
      "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact",
      "device": "cuda",
      "peak_gpu_gb": 5.629,
-     "peak_rss_gb": 4.311,
-     "wall_s": 1.76
+     "peak_rss_gb": 4.305,
+     "wall_s": 1.77
     },
     "guards": {
      "coords_finite": true,
@@ -667,15 +667,15 @@
      "run": "r1_abl_mn1_s4_ws1_s43_20260714_220359_b97f2fe5",
      "coords_sha": "cf984cf75d5e8cbc",
      "no_model_reference": false,
-     "code_commit": "8af4483f53c9",
+     "code_commit": "78b187088624",
      "code_dirty": true,
      "alignment": "gather_X_by_z_ids",
      "aligned_ids_hash": "963505beb96e",
      "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact",
      "device": "cuda",
      "peak_gpu_gb": 5.629,
-     "peak_rss_gb": 4.311,
-     "wall_s": 1.76
+     "peak_rss_gb": 4.305,
+     "wall_s": 1.78
     },
     "guards": {
      "coords_finite": true,
@@ -696,7 +696,7 @@
   },
   "mn0_s1_ws0_s44": {
    "run_dir": "r1_abl_mn0_s1_ws0_s44_20260714_224203_dbe7a1b9",
-   "wall_s": 6.8,
+   "wall_s": 6.9,
    "no_model_reference": false,
    "ffr": 0.5807,
    "recall@k": 0.09533,
@@ -752,15 +752,15 @@
      "run": "r1_abl_mn0_s1_ws0_s44_20260714_224203_dbe7a1b9",
      "coords_sha": "36bb8262b547c772",
      "no_model_reference": false,
-     "code_commit": "8af4483f53c9",
+     "code_commit": "78b187088624",
      "code_dirty": true,
      "alignment": "gather_X_by_z_ids",
      "aligned_ids_hash": "963505beb96e",
      "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact",
      "device": "cuda",
      "peak_gpu_gb": 5.629,
-     "peak_rss_gb": 4.311,
-     "wall_s": 1.76
+     "peak_rss_gb": 4.305,
+     "wall_s": 1.77
     },
     "guards": {
      "coords_finite": true,
@@ -781,7 +781,7 @@
   },
   "mn0_s1_ws1_s44": {
    "run_dir": "r1_abl_mn0_s1_ws1_s44_20260714_231021_c3729af2",
-   "wall_s": 6.8,
+   "wall_s": 6.9,
    "no_model_reference": false,
    "ffr": 0.6453,
    "recall@k": 0.18344,
@@ -837,15 +837,15 @@
      "run": "r1_abl_mn0_s1_ws1_s44_20260714_231021_c3729af2",
      "coords_sha": "757da827e1e28f1e",
      "no_model_reference": false,
-     "code_commit": "8af4483f53c9",
+     "code_commit": "78b187088624",
      "code_dirty": true,
      "alignment": "gather_X_by_z_ids",
      "aligned_ids_hash": "963505beb96e",
      "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact",
      "device": "cuda",
      "peak_gpu_gb": 5.629,
-     "peak_rss_gb": 4.311,
-     "wall_s": 1.75
+     "peak_rss_gb": 4.305,
+     "wall_s": 1.79
     },
     "guards": {
      "coords_finite": true,
@@ -922,14 +922,14 @@
      "run": "r1_abl_mn1_s4_ws0_s44_20260714_233836_090fc3f5",
      "coords_sha": "a8dd1b2caa8cdc39",
      "no_model_reference": false,
-     "code_commit": "8af4483f53c9",
+     "code_commit": "78b187088624",
      "code_dirty": true,
      "alignment": "gather_X_by_z_ids",
      "aligned_ids_hash": "963505beb96e",
      "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact",
      "device": "cuda",
      "peak_gpu_gb": 5.629,
-     "peak_rss_gb": 4.311,
+     "peak_rss_gb": 4.305,
      "wall_s": 1.77
     },
     "guards": {
@@ -1007,14 +1007,14 @@
      "run": "r1_abl_mn1_s4_ws1_s44_20260715_001645_3dcea9b7",
      "coords_sha": "d7bea497aba7c670",
      "no_model_reference": false,
-     "code_commit": "8af4483f53c9",
+     "code_commit": "78b187088624",
      "code_dirty": true,
      "alignment": "gather_X_by_z_ids",
      "aligned_ids_hash": "963505beb96e",
      "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact",
      "device": "cuda",
      "peak_gpu_gb": 5.629,
-     "peak_rss_gb": 4.311,
+     "peak_rss_gb": 4.305,
      "wall_s": 1.78
     },
     "guards": {
@@ -1035,6 +1035,6 @@
    }
   }
  },
- "started": "2026-07-15T20:05:35Z",
- "finished": "2026-07-15T20:06:58Z"
+ "started": "2026-07-15T20:08:15Z",
+ "finished": "2026-07-15T20:09:39Z"
 }
