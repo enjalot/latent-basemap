@@ -148,7 +148,11 @@ def phase_8m_program(out_path, summary):
     n = len(X)
     labels = np.asarray(np.load(LABELS8M, mmap_mode="r")[:n])
     cents = {256: np.load(C256), 1024: np.load(C1024)}
-    cfg_score = PanelV2Config(frac=0.001, n_anchors=10000, corpus_chunk=500_000, k_clust=(256, 1024))
+    # 2000 anchors (not 10k): the k_frac≈8000 exact-rerank gathers ~n_anchors×8009
+    # rows from the 8M memmap; 10k anchors is CPU-bound for many minutes/map. 2k is
+    # 5× fewer tiles, statistically ample for the scale/recipe comparison (the
+    # golden gate used 512), and keeps the overnight program within budget.
+    cfg_score = PanelV2Config(frac=0.001, n_anchors=2000, corpus_chunk=500_000, k_clust=(256, 1024))
     aidx = sample_anchors(n, cfg_score)
     fineweb_mask = (labels[aidx] == 0)
     results = {}
