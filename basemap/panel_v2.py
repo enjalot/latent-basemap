@@ -321,8 +321,14 @@ def _self_knn(F, anchor_idx, k, cfg: PanelV2Config, hi_dim=True, want_dist=False
             best_d, sel = torch.topk(best_d, cand, dim=1, largest=False)
             best_i = torch.gather(best_i, 1, sel)
             del Xc, d2
-        if hi_dim:
-            # EXACT rerank: gather candidate vectors, recompute fp32 distances.
+        if hi_dim and want_dist:
+            # EXACT rerank — ONLY when radii are needed (density). Gathering the
+            # candidate vectors is (achunk × cand × D); at k_frac≈8000 (8M) that
+            # is ~24 GB and OOMs. The ID-only k_frac pass (ffr/purity) does NOT
+            # need exact order — near-duplicate reordering cannot change a top-10
+            # set-intersection or a label count — so it uses the fast-expansion
+            # top-k directly (validated_approximate). Density uses small k
+            # (k_density=15) so its rerank gather is tiny.
             flat = best_i.reshape(-1).cpu().numpy()
             nb = torch.from_numpy(np.asarray(F[flat], dtype=np.float32)).to(dev).reshape(ma, cand, -1)
             exact = (nb - Q[:, None, :]).float().pow(2).sum(2)   # (ma, cand) squared L2
@@ -332,7 +338,7 @@ def _self_knn(F, anchor_idx, k, cfg: PanelV2Config, hi_dim=True, want_dist=False
             best_d = ed
             del nb, exact
         ids = best_i.cpu().numpy()
-        dist = best_d.clamp_min(0).sqrt().cpu().numpy() if want_dist or hi_dim else None
+        dist = best_d.clamp_min(0).sqrt().cpu().numpy() if want_dist else None
         for r in range(ma):
             keep = ids[r] != aids[r]
             row = ids[r][keep]
