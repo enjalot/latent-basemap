@@ -471,6 +471,9 @@ def cross_knn(Q, corpus, k, cfg: PanelV2Config, hi_dim=True, q_tile=4096, exact=
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     cc = min(len(corpus), max(1, cfg.corpus_chunk))
     cand = (k + cfg.overselect + 1) if (hi_dim and exact) else k
+    # cap q_tile by the DISTANCE-MATRIX size (q_tile × cc), not just the rerank
+    # gather — otherwise q_tile × corpus_chunk OOMs (the golden projection OOM).
+    q_tile = max(1, min(q_tile, int(cfg.block_elems // cc)))
     if hi_dim and exact:
         D = int(np.asarray(Q[:1]).shape[1])
         q_tile = max(1, min(q_tile, int(cfg.rerank_byte_cap // (cand * D * 4 * cfg.rerank_scratch))))

@@ -1,0 +1,51 @@
+{
+ "substrate": "mixed-8M (fineweb+rpj+pile)",
+ "recipe": "legacy nomn+weighted",
+ "budget": "500k updates v3",
+ "n_anchors": 2000,
+ "formula_version": "panel_v2.2-2026-07-15",
+ "seeds": {
+  "s42": {
+   "run_dir": "r1_8m_bridge_weighted_s42_20260715_163719_f4934f5b",
+   "score_wall_s": 94.7,
+   "pipeline": "device",
+   "positive_sampling": "weighted_with_replacement",
+   "sampler_class": "DeviceEdgeSampler",
+   "x_residency": "device_fp16",
+   "positive_lr_updates": 500000,
+   "budget_satisfied": true,
+   "schedule_version": "cosine-v3-positive-budget",
+   "updates_per_s": 296.8,
+   "formula_version": "panel_v2.2-2026-07-15",
+   "ffr": 0.5778,
+   "recall@k": 0.00395,
+   "purity": {
+    "k256": 0.9691,
+    "k1024": 0.772
+   },
+   "density": 0.6277,
+   "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact"
+  },
+  "s43": {
+   "run_dir": "r1_8m_bridge_weighted_s43_20260715_170618_63bbadf5",
+   "score_wall_s": 93.0,
+   "pipeline": "device",
+   "positive_sampling": "weighted_with_replacement",
+   "sampler_class": "DeviceEdgeSampler",
+   "x_residency": "device_fp16",
+   "positive_lr_updates": 500000,
+   "budget_satisfied": true,
+   "schedule_version": "cosine-v3-positive-budget",
+   "updates_per_s": 296.3,
+   "formula_version": "panel_v2.2-2026-07-15",
+   "ffr": 0.5768,
+   "recall@k": 0.00485,
+   "purity": {
+    "k256": 0.9649,
+    "k1024": 0.7937
+   },
+   "density": 0.6284,
+   "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact"
+  }
+ }
+}

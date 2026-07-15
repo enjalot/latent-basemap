@@ -295,6 +295,21 @@ def test_cross_knn_matches_brute_and_is_tiled():
         assert set(got[r].tolist()) == set(np.argsort(d)[:10].tolist()), r
 
 
+def test_p2_cross_knn_q_tile_bounded_by_distance_matrix():
+    # P2: q_tile must be capped by the distance-matrix size (q_tile × corpus_chunk),
+    # not only the rerank gather — else the query×corpus matrix OOMs (the golden
+    # projection failure). With a small block_elems, a large requested q_tile and a
+    # large corpus_chunk must still produce a bounded, correct result.
+    rng = np.random.RandomState(1)
+    corpus = rng.randn(4000, 12).astype('float32'); Q = rng.randn(80, 12).astype('float32')
+    cfg = pv.PanelV2Config(corpus_chunk=4000, block_elems=40_000)   # forces q_tile ≤ 10
+    got = pv.cross_knn(Q, corpus, 8, cfg, hi_dim=True, q_tile=100_000, exact=True)
+    Cd = corpus.astype('float64'); Qd = Q.astype('float64')
+    for r in range(len(Q)):
+        d = np.linalg.norm(Cd - Qd[r], axis=1)
+        assert set(got[r].tolist()) == set(np.argsort(d)[:8].tolist()), r
+
+
 def test_runner_and_cli_payloads_byte_equivalent(tmp_path):
     # Both entry points call score_panel, so metric payloads (minus runtime
     # telemetry) must be byte-identical. Simulate: direct arrays vs load-from-disk.

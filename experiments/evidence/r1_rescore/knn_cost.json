@@ -1,0 +1,37 @@
+{
+ "contract": "zero-build streamed brute hi-D search: the training X IS the reference index (no separate build/add/load); cost = query + coordinate regression + the memory to hold X.",
+ "k": 15,
+ "testbeds": {
+  "200k": {
+   "n_train": 200000,
+   "n_query": 20000,
+   "index_build_s": 0.0,
+   "index_note": "no index \u2014 streamed brute search over X",
+   "query_wall_s": 1.03,
+   "queries_per_s": 19477.1,
+   "end_to_end_regression_wall_s": 1.03,
+   "end_to_end_per_s": 19369.7,
+   "x_footprint_gb": 0.614,
+   "peak_gpu_gb": 7.195,
+   "held_hash": "0e81ac067567",
+   "run_dir": "r1_kernel_legacy_a1b1_s42_20260714_041129_d8943c8d",
+   "vs_parametric_transform": "parametric map = constant-time forward pass (~430k rows/s, 14 MB checkpoint); kNN-regressor query scales O(n_train \u00d7 D)."
+  },
+  "2m": {
+   "n_train": 2000000,
+   "n_query": 20000,
+   "index_build_s": 0.0,
+   "index_note": "no index \u2014 streamed brute search over X",
+   "query_wall_s": 5.13,
+   "queries_per_s": 3902.3,
+   "end_to_end_regression_wall_s": 5.14,
+   "end_to_end_per_s": 3893.1,
+   "x_footprint_gb": 6.144,
+   "peak_gpu_gb": 17.946,
+   "held_hash": "cd1208a56d17",
+   "run_dir": "r1_kernel_2m_legacy_a1b1_s42_20260714_083247_055217e4",
+   "vs_parametric_transform": "parametric map = constant-time forward pass (~430k rows/s, 14 MB checkpoint); kNN-regressor query scales O(n_train \u00d7 D)."
+  }
+ },
+ "peak_rss_gb": 14.463
+}

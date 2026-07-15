@@ -119,7 +119,7 @@ def main():
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
-    cfg = PanelV2Config(frac=args.frac, n_anchors=args.n_anchors)
+    cfg = PanelV2Config(frac=args.frac, n_anchors=args.n_anchors, corpus_chunk=500_000)
     X = load_embeddings(args.emb, dim=args.dim)
     Z, z_ids = load_coords(args.coords)
     Xa, _, _ = align_x_to_z(X, Z, None, z_ids)
