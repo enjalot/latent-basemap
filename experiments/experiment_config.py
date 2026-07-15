@@ -106,6 +106,8 @@ class TrainConfig:
     required_input_pipeline: Optional[str] = None  # P1: "device"|"hybrid"|"any" — fail closed on mismatch
     canary_max_steps: int = 0          # P3: >0 → stop after N steps + measure steady-state rate
     canary_warmup: int = 200           # P3: steps excluded from the rate window
+    canary_floor: float = 200.0        # S2: consecutive sub-floor rate windows abort the run
+    canary_warn_rate: float = 0.0      # S2: warn (not abort) below this rate; 0 disables
     use_amp: bool = True
     positive_target_mode: str = "probability"  # "probability" or "binary"
     # Edge-list scale path: reject actual graph neighbours in the negative

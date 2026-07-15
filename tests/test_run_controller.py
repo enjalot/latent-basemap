@@ -244,10 +244,55 @@ def test_co_tenant_policy_blocks_gpu_job_with_unknown_pid():
     print("PASS co-tenant policy blocks insufficient-VRAM job")
 
 
+def test_s2_long_run_without_canary_dep_rejected():
+    # A certifying run predicted > 10 min with NO canary_dep must be refused
+    # before launch (S2: canary is a mandatory dependency of a long run).
+    d = tempfile.mkdtemp(); os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
+    import importlib; importlib.reload(rc)
+    j = rc.Job(name='train8m', argv=['bash', '-c', f'touch {d}/o'], outputs=[f'{d}/o'],
+               done_marker=os.path.join(d, 'j.done'), predicted_wall_s=1800.0)
+    s = rc.run_jobs([j])
+    assert s['jobs'][0]['status'] == 'config_error:long_run_without_canary_dep', s
+    assert not os.path.exists(f'{d}/o')            # never launched
+    print("PASS long run without canary dep rejected")
+
+
+def test_s2_subfloor_canary_blocks_long_run():
+    # canary exits non-zero (sub-floor) → not in `done` → the long run that
+    # declares it as canary_dep is blocked by the deps machinery.
+    d = tempfile.mkdtemp(); os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
+    import importlib; importlib.reload(rc)
+    canary = rc.Job(name='canary', argv=['false'], outputs=[],
+                    done_marker=os.path.join(d, 'c.done'), certifying=False)
+    train = rc.Job(name='train8m', argv=['bash', '-c', f'touch {d}/o'], outputs=[f'{d}/o'],
+                   done_marker=os.path.join(d, 't.done'), predicted_wall_s=1800.0,
+                   deps=['canary'], canary_dep='canary')
+    s = rc.run_jobs([canary, train], allowed_pids=rc.known_service_pids())
+    assert s['jobs'][0]['status'].startswith('exit_')      # canary failed
+    assert not os.path.exists(f'{d}/o')                    # train never ran
+    print("PASS sub-floor canary blocks long run")
+
+
+def test_s2_passing_canary_admits_long_run():
+    d = tempfile.mkdtemp(); os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
+    import importlib; importlib.reload(rc)
+    canary = rc.Job(name='canary', argv=['bash', '-c', f'touch {d}/c.out'],
+                    outputs=[f'{d}/c.out'], done_marker=os.path.join(d, 'c.done'))
+    train = rc.Job(name='train8m', argv=['bash', '-c', f'touch {d}/o'], outputs=[f'{d}/o'],
+                   done_marker=os.path.join(d, 't.done'), predicted_wall_s=1800.0,
+                   deps=['canary'], canary_dep='canary')
+    s = rc.run_jobs([canary, train], allowed_pids=rc.known_service_pids())
+    assert [j['status'] for j in s['jobs']] == ['ok', 'ok'], s
+    assert os.path.exists(f'{d}/o')
+    print("PASS passing canary admits long run")
+
+
 if __name__ == '__main__':
     for fn in [test_cross_process_lease_exclusion, test_lease_survives_controller_death_via_inherited_fd,
                test_nonzero_job1_stops_job2, test_exit_zero_without_outputs_is_failure,
                test_stale_output_does_not_skip_without_done_record, test_final_manifest_has_status_and_telemetry,
-               test_co_tenant_policy_blocks_gpu_job_with_unknown_pid]:
+               test_co_tenant_policy_blocks_gpu_job_with_unknown_pid,
+               test_s2_long_run_without_canary_dep_rejected, test_s2_subfloor_canary_blocks_long_run,
+               test_s2_passing_canary_admits_long_run]:
         fn()
     print("ALL P0-D TESTS PASSED")

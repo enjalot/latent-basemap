@@ -532,7 +532,15 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
     if getattr(tc, "canary_max_steps", 0):
         pumap._max_train_steps = int(tc.canary_max_steps)
         pumap._bench_warmup = int(tc.canary_warmup)
-        logging.info("P3 CANARY: max_steps=%d warmup=%d", pumap._max_train_steps, pumap._bench_warmup)
+        # S2: instrument the canary — rate windows, sampled phase timing, env
+        # snapshot, sub-floor abort. Floor/warn come from the config (defaults
+        # 200/250 for the 8M h1024 path).
+        pumap._perf_profile = True
+        pumap._perf_floor = float(getattr(tc, "canary_floor", 200.0))
+        pumap._perf_warn_rate = float(getattr(tc, "canary_warn_rate", 0.0)) or None
+        logging.info("P3/S2 CANARY: max_steps=%d warmup=%d floor=%s warn=%s",
+                     pumap._max_train_steps, pumap._bench_warmup,
+                     pumap._perf_floor, pumap._perf_warn_rate)
 
     # S0: atomic admission artifact written before update 0.
     pumap._admission_artifact_path = os.path.join(run_dir, "admission.json")
@@ -584,6 +592,15 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
             "pipeline": {k[len("pipeline_"):]: v for k, v in train_stats.items()
                          if k.startswith("pipeline_")},
         }
+        # S2: fold in the instrumented profile (rate windows, phase timings,
+        # env snapshot, abort verdict, baseline key). The abort flag is the
+        # regression contract — a sub-floor run reports aborted=true here.
+        _profiler = getattr(pumap, "_canary_profiler", None)
+        if _profiler is not None:
+            canary["profile"] = _profiler.finalize(
+                bench_seconds=bench_s, setup_seconds=getattr(pumap, "_setup_seconds", None))
+            canary["aborted"] = bool(_profiler.abort)
+            canary["baseline_key"] = _profiler.baseline_key
         run_manifest["canary"] = canary
         results = {"config": cfg.to_dict(), "config_hash": cfg.config_hash(),
                    "run_manifest": run_manifest, "canary": canary}

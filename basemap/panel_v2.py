@@ -46,7 +46,11 @@ class PanelV2Config:
     k_hit: int = D_K_HIT
     n_anchors: int = 10000
     anchor_seed: int = 42
-    corpus_chunk: int = 2_000_000          # rows streamed per corpus chunk (hiD)
+    # S2.4: profiled default. The 2M-row tile made A3 scoring take ~292 s/map;
+    # the 500k tile made the otherwise-comparable bridge scorer ~94 s/map at the
+    # same peak accuracy. 500k is the production default; do not leave tile size
+    # to per-script guesswork. Raise only with a matching peak_byte_cap check.
+    corpus_chunk: int = 500_000            # rows streamed per corpus chunk (hiD)
     overselect: int = 8                    # extra candidates kept before exact rerank
     block_elems: int = 500_000_000         # per-block element cap (~2 GB fp32)
     rerank_byte_cap: int = 2_000_000_000   # P2: cap the exact-rerank gather tile (~2 GB)
@@ -534,9 +538,94 @@ def score_projection(Xa, Z, cfg: PanelV2Config, projection: dict, x_ids=None):
 
 # ── canonical entry point (P0-C) ─────────────────────────────────────────────────
 
+def _matrix_fingerprint(F, sample_rows=131072):
+    """Content fingerprint of a (possibly memmap) hi-D matrix: shape + dtype +
+    a strided row sample rounded to 4 dp. Cheap and stable across processes; the
+    same X always yields the same key, a different X does not (S2.5)."""
+    n = len(F); d = int(np.asarray(F[:1]).shape[1])
+    stride = max(1, n // max(1, sample_rows))
+    idx = np.arange(0, n, stride)[:sample_rows]
+    rows = np.asarray(F[idx] if hasattr(F, "__getitem__") else F, dtype=np.float32)
+    h = hashlib.sha1()
+    h.update(f"{n}x{d}:{np.asarray(F[:1]).dtype}".encode())
+    h.update(np.ascontiguousarray(np.round(rows, 4)).tobytes())
+    return h.hexdigest()[:16]
+
+
+def hiD_reference_key(Xa, aidx, cfg: PanelV2Config, centroids_by_k=None, kf=None):
+    """The content-addressed key that makes a hi-D reference REUSABLE only for an
+    identical (data, anchors, k-params, formula, centroids) tuple. Any drift ->
+    a different key -> the verify below fails closed rather than mis-scoring."""
+    parts = {
+        "data": _matrix_fingerprint(Xa), "anchors": _ids_hash(np.asarray(aidx)),
+        "k_hit": int(cfg.k_hit), "k_frac": int(kf) if kf else None,
+        "k_density": int(cfg.k_density), "frac": float(cfg.frac),
+        "overselect": int(cfg.overselect), "formula": cfg.formula_version,
+        "centroids": {str(kc): _ids_hash(np.round(np.asarray(C, np.float32), 4))
+                      for kc, C in (centroids_by_k or {}).items()}}
+    return hashlib.sha1(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:16], parts
+
+
+def build_hiD_reference(Xa, aidx, cfg: PanelV2Config, centroids_by_k=None):
+    """Compute every MAP-INDEPENDENT high-D quantity ONCE: exact top-k_hit truth,
+    approximate k_frac membership, exact density radii (all anchors), and centroid
+    labels. Scoring N maps of the same corpus then reuses this single reference and
+    only repeats the cheap low-D passes (S2.5 'done when')."""
+    kf = max(cfg.k_hit, int(np.ceil(cfg.frac * len(Xa))))
+    key, parts = hiD_reference_key(Xa, aidx, cfg, centroids_by_k, kf=kf)
+    hi_hit, _, guard_hit = _self_knn(Xa, aidx, cfg.k_hit, cfg, hi_dim=True, exact=True)
+    hi_frac, _, _ = _self_knn(Xa, aidx, kf, cfg, hi_dim=True, exact=False)
+    _, hd_r, guard_den = _self_knn(Xa, aidx, cfg.k_density, cfg, hi_dim=True, want_dist=True)
+    r_hd = hd_r.mean(1)                              # per-anchor hi-D radius (all anchors)
+    labels = _label_by_centroids(Xa, centroids_by_k) if centroids_by_k else {}
+    return {"key": key, "key_parts": parts, "kf": int(kf),
+            "hi_hit": hi_hit, "hi_frac": hi_frac, "r_hd": r_hd,
+            "labels": {int(k): v for k, v in labels.items()},
+            "guard_hit": guard_hit, "guard_den": guard_den,
+            "formula_version": cfg.formula_version}
+
+
+def save_hiD_reference(ref, path):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    np.savez(path, key=ref["key"], kf=ref["kf"], hi_hit=ref["hi_hit"],
+             hi_frac=ref["hi_frac"], r_hd=ref["r_hd"],
+             label_keys=np.array(sorted(ref["labels"]), dtype=np.int64),
+             meta=json.dumps({"key_parts": ref["key_parts"], "guard_hit": ref["guard_hit"],
+                              "guard_den": ref["guard_den"],
+                              "formula_version": ref["formula_version"]}),
+             **{f"labels_{k}": v for k, v in ref["labels"].items()})
+    return path
+
+
+def load_hiD_reference(path):
+    z = np.load(path if path.endswith(".npz") else path + ".npz", allow_pickle=False)
+    meta = json.loads(str(z["meta"]))
+    labels = {int(k): z[f"labels_{int(k)}"] for k in z["label_keys"].tolist()}
+    return {"key": str(z["key"]), "kf": int(z["kf"]), "hi_hit": z["hi_hit"],
+            "hi_frac": z["hi_frac"], "r_hd": z["r_hd"], "labels": labels,
+            "key_parts": meta["key_parts"], "guard_hit": meta["guard_hit"],
+            "guard_den": meta["guard_den"], "formula_version": meta["formula_version"]}
+
+
+def _resolve_reference(Xa, aidx, cfg, centroids_by_k, hiD_reference):
+    """Return a verified reference: compute inline if none given, else CHECK the
+    supplied one against a freshly recomputed content key and RAISE on any drift
+    (fail-closed, S2.5 'verified')."""
+    if hiD_reference is None:
+        return build_hiD_reference(Xa, aidx, cfg, centroids_by_k), False
+    kf = max(cfg.k_hit, int(np.ceil(cfg.frac * len(Xa))))
+    key, _ = hiD_reference_key(Xa, aidx, cfg, centroids_by_k, kf=kf)
+    if key != hiD_reference.get("key"):
+        raise ValueError(f"hiD_reference key mismatch: supplied {hiD_reference.get('key')} "
+                         f"!= recomputed {key} (data/anchors/params/centroids drifted).")
+    if int(hiD_reference.get("kf", -1)) != int(kf):
+        raise ValueError("hiD_reference k_frac mismatch (stale reference).")
+    return hiD_reference, True
+
+
 def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
                 centroids_by_k=None, anchor_masks=None, projection=None,
-                provenance):
+                hiD_reference=None, provenance):
     """The single evaluator both the runner and CLI call. Aligns X to Z exactly,
     runs ONE high-D and ONE low-D neighbour pass shared across ffr/recall/purity,
     an exact-radius pass for density, optional projection fidelity, and emits a
@@ -576,8 +665,11 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
     #             so no 24 GB gather). Order inside the set is irrelevant to a label
     #             count; boundary membership is approximate and labelled so.
     #   lo_kf   : exact low-D top-k_frac (single deterministic pass).
-    hi_hit, _, guard_hit = _self_knn(Xa, aidx, cfg.k_hit, cfg, hi_dim=True, exact=True)
-    hi_frac, _, _ = _self_knn(Xa, aidx, kf, cfg, hi_dim=True, exact=False)
+    # S2.5: hi_hit/hi_frac/labels/density-radii are MAP-INDEPENDENT — computed once
+    # in a content-verified reference (identical to the inline path by construction),
+    # so rescoring N maps of one corpus repeats only the low-D passes below.
+    ref, ref_reused = _resolve_reference(Xa, aidx, cfg, centroids_by_k, hiD_reference)
+    hi_hit, hi_frac, guard_hit = ref["hi_hit"], ref["hi_frac"], ref["guard_hit"]
     lo_kf, _, _ = _self_knn(Z, aidx, kf, cfg, hi_dim=False)
 
     res = {"schema": PANEL_SCHEMA, "formula_version": cfg.formula_version,
@@ -598,7 +690,7 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
         res["purity_numerators"] = {}     # R2: high-D vs map label agreement, not just the ratio
         res["purity_exactness"] = "hi_frac_membership: approximate (fast expansion, no rerank)"
         res["centroid_hashes"] = {}
-        lab = _label_by_centroids(Xa, centroids_by_k)   # {k: labels[N]}
+        lab = ref["labels"]                             # {k: labels[N]} (cached)
         for kc, labels in lab.items():
             alab = labels[aidx][sel_pur]
             hd = float((labels[hi_frac[sel_pur]] == alab[:, None]).mean())   # high-D agreement
@@ -613,10 +705,11 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
                 np.round(np.asarray(centroids_by_k[kc], np.float32), 4))
         res["n_purity_anchors"] = int(len(sel_pur))
 
-    # density: exact-radius pass (k_density), hiD vs loD
-    _, hd_r, guard_den = _self_knn(Xa, aidx[sel_den], cfg.k_density, cfg, hi_dim=True, want_dist=True)
+    # density: exact-radius pass (k_density), hiD vs loD. hi-D radii are cached
+    # for ALL anchors (per-anchor independent); index the density mask here.
+    guard_den = ref["guard_den"]
     _, ld_r, _ = _self_knn(Z, aidx[sel_den], cfg.k_density, cfg, hi_dim=False, want_dist=True)
-    r_hd = hd_r.mean(1); r_ld = ld_r.mean(1); eps = 1e-12
+    r_hd = np.asarray(ref["r_hd"])[sel_den]; r_ld = ld_r.mean(1); eps = 1e-12
     res["density"] = round(float(np.corrcoef(np.log(r_hd + eps), np.log(r_ld + eps))[0, 1]), 4)
     res["n_density_anchors"] = int(len(sel_den))
 
@@ -641,6 +734,9 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
                         if torch.cuda.is_available() else None),
         "peak_rss_gb": _peak_rss_gb(),
         "wall_s": round(time.time() - t0, 2),
+        # S2.5: which high-D reference produced the truth, and whether it was a
+        # shared cache reuse (one reference for N maps) or computed inline.
+        "hiD_reference_key": ref["key"], "hiD_reference_reused": bool(ref_reused),
     }
     res["guards"] = {**_data_guards(Xa, Z), "hit_guard": guard_hit, "density_guard": guard_den}
     return res

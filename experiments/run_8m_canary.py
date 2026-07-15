@@ -38,6 +38,9 @@ def build_canary_config(max_steps, warmup, budget_gb):
         "train.gpu_resident_data": "auto",
         "train.gpu_resident_vram_budget_gb": float(budget_gb),
         "train.canary_max_steps": int(max_steps), "train.canary_warmup": int(warmup),
+        # S2: hard floor 200 upd/s (abort on consecutive sub-floor windows);
+        # warn below 250 against the ~296 upd/s h1024 baseline.
+        "train.canary_floor": 200.0, "train.canary_warn_rate": 250.0,
     })
     cfg.name = "r1_8m_canary"
     cfg.eval.metrics = []          # no scoring
@@ -61,7 +64,11 @@ def main():
 
     job = Job(name="canary_8m",
               argv=[".venv/bin/python", "experiments/run_experiment.py", cfg_path],
-              outputs=[], done_marker="/data/latent-basemap/closure/canary.done.json",
+              # S1: the canary is a NON-certifying benchmark — it stops at
+              # canary_max_steps and intentionally saves no model/coords, so
+              # outputs=[] is legitimate here (certifying=False).
+              outputs=[], certifying=False,
+              done_marker="/data/latent-basemap/closure/canary.done.json",
               log="/data/latent-basemap/closure/canary.log",
               manifest="/data/latent-basemap/closure/canary.manifest.json",
               cwd=os.getcwd(), required_free_gb=28.0,
@@ -78,15 +85,32 @@ def main():
         c = json.load(open(os.path.join(rd[-1], "results.json"))).get("canary", {})
         pipe = c.get("pipeline", {})
         rate = c.get("steady_updates_per_s")
+        prof = c.get("profile") or {}
+        aborted = bool(c.get("aborted"))
         passed = (rec["status"] == "ok" and pipe.get("pipeline") == "device"
                   and pipe.get("positive_sampling") == "weighted_with_replacement"
-                  and rate is not None and rate >= args.floor)
+                  and rate is not None and rate >= args.floor and not aborted)
         verdict.update({"passed": bool(passed), "steady_updates_per_s": rate,
                         "pipeline": pipe.get("pipeline"),
                         "positive_sampling": pipe.get("positive_sampling"),
                         "x_residency": pipe.get("x_residency"),
                         "bench_seconds": c.get("bench_seconds"), "run_dir": os.path.basename(rd[-1]),
-                        "est_500k_minutes": round((500000 / rate) / 60, 1) if rate else None})
+                        "est_500k_minutes": round((500000 / rate) / 60, 1) if rate else None,
+                        # S2: instrumented profile — rate windows, phase diagnosis,
+                        # env snapshot, baseline key, abort verdict.
+                        "aborted": aborted,
+                        "baseline_key": c.get("baseline_key"),
+                        "rate_windows": prof.get("rate_windows"),
+                        "rate_median": prof.get("rate_median"), "rate_min": prof.get("rate_min"),
+                        "phase_ms_median": prof.get("phase_ms_median"),
+                        "dominant_phase": prof.get("dominant_phase"),
+                        "phase_fractions": prof.get("phase_fractions"),
+                        "setup_seconds": prof.get("setup_seconds"),
+                        "peak_vram_reserved_gb": prof.get("peak_vram_reserved_gb"),
+                        "rss_peak_gb": prof.get("rss_peak_gb"),
+                        "gpu_util_pct": prof.get("gpu_util_pct"), "power_w": prof.get("power_w"),
+                        "co_tenant_pids": prof.get("co_tenant_pids"),
+                        "lease_id": prof.get("lease_id")})
     else:
         verdict["passed"] = False; verdict["error"] = "no canary results (job likely raised on admission)"
     json.dump(verdict, open(args.out, "w"), indent=1)

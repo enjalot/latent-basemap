@@ -3,11 +3,88 @@
  "job_status": "ok",
  "floor": 200.0,
  "passed": true,
- "steady_updates_per_s": 298.5,
+ "steady_updates_per_s": 298.4,
  "pipeline": "device",
  "positive_sampling": "weighted_with_replacement",
  "x_residency": "device_fp16",
- "bench_seconds": 3.349707842920907,
- "run_dir": "r1_8m_canary_20260715_163523_8d6ccd57",
- "est_500k_minutes": 27.9
+ "bench_seconds": 3.351749497000128,
+ "run_dir": "r1_8m_canary_20260715_203317_80396be4",
+ "est_500k_minutes": 27.9,
+ "aborted": false,
+ "baseline_key": {
+  "n": 8000000,
+  "d": 768,
+  "n_edges": 605184300,
+  "hidden_dim": 1024,
+  "n_components": 2,
+  "n_layers": 3,
+  "batch_size": 8192,
+  "use_amp": true,
+  "kernel": "legacy_lp",
+  "pipeline": "device",
+  "sampler_class": "DeviceEdgeSampler",
+  "positive_sampling": "weighted_with_replacement",
+  "x_residency": "device_fp16",
+  "torch": "2.11.0+cu128",
+  "gpu_name": "NVIDIA GeForce RTX 5090",
+  "cuda": "12.8",
+  "compute_capability": "12.0",
+  "driver": "570.211.01"
+ },
+ "rate_windows": [
+  {
+   "idx": 0,
+   "updates": 166,
+   "wall_s": 0.557,
+   "rate": 298.0
+  },
+  {
+   "idx": 1,
+   "updates": 166,
+   "wall_s": 0.5549,
+   "rate": 299.2
+  },
+  {
+   "idx": 2,
+   "updates": 167,
+   "wall_s": 0.5595,
+   "rate": 298.5
+  },
+  {
+   "idx": 3,
+   "updates": 167,
+   "wall_s": 0.5593,
+   "rate": 298.6
+  },
+  {
+   "idx": 4,
+   "updates": 166,
+   "wall_s": 0.557,
+   "rate": 298.0
+  }
+ ],
+ "rate_median": 298.5,
+ "rate_min": 298.0,
+ "phase_ms_median": {
+  "sample": 0.152,
+  "forward": 1.022,
+  "backward": 1.839,
+  "optimizer": 0.25
+ },
+ "dominant_phase": "backward",
+ "phase_fractions": {
+  "sample": 0.047,
+  "forward": 0.313,
+  "backward": 0.564,
+  "optimizer": 0.077
+ },
+ "setup_seconds": 30.216,
+ "peak_vram_reserved_gb": 31.684,
+ "rss_peak_gb": 24.631,
+ "gpu_util_pct": 86.0,
+ "power_w": 428.53,
+ "co_tenant_pids": [
+  "3679171"
+ ],
+ "lease_id": "3"
 }

@@ -59,6 +59,8 @@ train:
   required_input_pipeline: device
   canary_max_steps: 1200
   canary_warmup: 200
+  canary_floor: 200.0
+  canary_warn_rate: 250.0
   use_amp: true
   positive_target_mode: binary
   reject_neighbors: false

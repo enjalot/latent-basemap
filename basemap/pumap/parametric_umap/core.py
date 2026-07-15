@@ -710,6 +710,9 @@ class ParametricUMAP:
         -------
         self
         """
+        # S2: setup timer — everything before the first bench step (graph load,
+        # CDF build/upload, device residency) is "setup_seconds" in the canary.
+        self._setup_t0 = time.perf_counter()
         if use_wandb:
             import wandb
             config = {
@@ -997,6 +1000,30 @@ class ParametricUMAP:
 
         global_step = 0
         self._train_t0 = time.perf_counter()
+        # S2: setup = graph load + CDF build/upload + device residency + model init.
+        self._setup_seconds = self._train_t0 - getattr(self, "_setup_t0", self._train_t0)
+        # S2: attach the canary profiler in profile mode (canary runs only). It
+        # partitions the post-warmup window into >=5 rate windows, times the hot
+        # phases with SAMPLED CUDA events, and aborts on consecutive sub-floor
+        # windows. Production runs (no _perf_profile) pay nothing.
+        from .perf import _NullPhase
+        _perf_null = _NullPhase()
+        prof = None
+        if getattr(self, "_perf_profile", False) and self._max_train_steps is not None:
+            from .perf import CanaryProfiler, build_baseline_key
+            bkey = build_baseline_key(
+                model=self, n=n_train_rows, d=int(getattr(X, "shape", [0, 0])[1] or 0),
+                n_edges=int(n_pos_edges), batch_size=self.batch_size, use_amp=use_amp,
+                kernel=getattr(self, "low_dim_kernel", "legacy_lp"),
+                pipeline_info=getattr(self, "_pipeline_info", {}), device=self.device)
+            prof = CanaryProfiler(
+                warmup=self._bench_warmup, max_steps=self._max_train_steps,
+                floor=float(getattr(self, "_perf_floor", 200.0)),
+                warn_rate=getattr(self, "_perf_warn_rate", None),
+                device=self.device, baseline_key=bkey)
+            self._canary_profiler = prof
+        def _ph(name):
+            return prof.phase(name, global_step) if prof is not None else _perf_null
         consecutive_nonfinite_losses = 0
         consecutive_nonfinite_gradients = 0   # P0-3: separate from the loss counter
         for epoch in range(self.n_epochs):
@@ -1030,6 +1057,8 @@ class ParametricUMAP:
                 optimizer.zero_grad(set_to_none=True)
                 src_values, dst_values, targets = batch
 
+                _fwd_ph = _ph("forward")   # S2: forward + kernel + BCE loss
+                _fwd_ph.__enter__()
                 with torch.autocast(device_type='cuda' if use_amp else 'cpu', enabled=use_amp):
                     # Forward pass
                     src_embeddings = self.model(src_values)
@@ -1132,6 +1161,8 @@ class ParametricUMAP:
                     loss = loss + self.anchor_hold_weight * hold_loss
                     hold_loss_val = hold_loss.item() if use_wandb else 0.0
 
+                _fwd_ph.__exit__(None, None, None)   # S2: close forward+loss phase
+
                 if not torch.isfinite(loss):
                     consecutive_nonfinite_losses += 1
                     self._train_stats["nonfinite_loss_skips"] += 1
@@ -1151,11 +1182,12 @@ class ParametricUMAP:
                 consecutive_nonfinite_losses = 0
                 self._train_stats["finite_loss_batches"] += 1
 
-                if scaler is not None:
-                    scaler.scale(loss).backward()
-                    scaler.unscale_(optimizer)
-                else:
-                    loss.backward()
+                with _ph("backward"):      # S2: backward pass
+                    if scaler is not None:
+                        scaler.scale(loss).backward()
+                        scaler.unscale_(optimizer)
+                    else:
+                        loss.backward()
 
                 # Gradient clipping is always applied; the norm read-backs it
                 # needs for logging are gated so we don't sync every step.
@@ -1232,13 +1264,14 @@ class ParametricUMAP:
                 st["optimizer_steps_attempted"] += 1
 
                 optimizer_was_run = True
-                if scaler is not None:
-                    scale_before = scaler.get_scale()
-                    scaler.step(optimizer)
-                    scaler.update()
-                    optimizer_was_run = scaler.get_scale() >= scale_before
-                else:
-                    optimizer.step()
+                with _ph("optimizer"):     # S2: optimizer step (+AMP scaler)
+                    if scaler is not None:
+                        scale_before = scaler.get_scale()
+                        scaler.step(optimizer)
+                        scaler.update()
+                        optimizer_was_run = scaler.get_scale() >= scale_before
+                    else:
+                        optimizer.step()
 
                 if optimizer_was_run:
                     st["optimizer_steps_succeeded"] += 1
@@ -1348,8 +1381,16 @@ class ParametricUMAP:
                         'global_step': global_step,
                     })
 
-                batch = _get_next()
+                with _ph("sample"):        # S2: sampler draw + gather + H2D
+                    batch = _get_next()
                 pbar.update(1)
+                # S2: advance canary rate windows; abort on repeated sub-floor.
+                if prof is not None and prof.on_update(
+                        global_step, self._train_stats["positive_lr_optimizer_steps"]):
+                    logging.error("S2 canary abort: %s", prof.abort_reason)
+                    self._train_stats["stop_reason"] = "canary_subfloor_abort"
+                    stop_training = True
+                    break
                 if verbose:
                     pbar.set_postfix({
                         'loss': f'{loss.item():.4f}',

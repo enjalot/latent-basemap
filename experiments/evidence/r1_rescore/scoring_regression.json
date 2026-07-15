@@ -1,0 +1,42 @@
+{
+ "gate": "scoring_2m_regression",
+ "passed": true,
+ "checks": {
+  "golden_2m_streamed_wall_s": {
+   "observed": 5.5,
+   "baseline": 5.5,
+   "hard_max": 15.0,
+   "passed": true,
+   "ratio_vs_baseline": 1.0
+  },
+  "golden_2m_reference_wall_s": {
+   "observed": 12.7,
+   "baseline": 12.7,
+   "hard_max": 35.0,
+   "passed": true,
+   "ratio_vs_baseline": 1.0
+  },
+  "golden_2m_peak_gpu_gb": {
+   "observed": 5.629,
+   "baseline": 5.629,
+   "hard_max": 9.0,
+   "passed": true,
+   "ratio_vs_baseline": 1.0
+  },
+  "knn_2m_e2e_wall_s": {
+   "observed": 5.14,
+   "baseline": 5.14,
+   "hard_max": 15.0,
+   "passed": true,
+   "ratio_vs_baseline": 1.0
+  },
+  "knn_2m_peak_gpu_gb": {
+   "observed": 17.946,
+   "baseline": 17.946,
+   "hard_max": 24.0,
+   "passed": true,
+   "ratio_vs_baseline": 1.0
+  }
+ },
+ "rule": "2M evaluator wall/peak must stay within the pinned envelope before any 8M/30M scoring; catches lost byte-caps / tile blowups."
+}

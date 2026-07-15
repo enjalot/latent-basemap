@@ -266,6 +266,13 @@ class Job:
     # A change to any of them (or the repo commit) invalidates a stale done marker.
     certifying: bool = True   # S1: a certifying job MUST declare outputs; outputs=[]
     # is only allowed for an explicitly non-certifying job (certifying=False).
+    predicted_wall_s: float = 0.0   # S2: predicted wall time; >CANARY_REQUIRED_WALL_S
+    # forces a passing canary dependency before the run is admitted.
+    canary_dep: Optional[str] = None   # S2: name of the perf-canary job this long
+    # run depends on. Must also appear in `deps` so a sub-floor canary blocks it.
+
+
+CANARY_REQUIRED_WALL_S = 600.0   # S2: >10 predicted minutes ⇒ canary is mandatory
 
 
 def run_jobs(jobs: list, controller_id: Optional[str] = None, allowed_pids=(),
@@ -290,6 +297,20 @@ def run_jobs(jobs: list, controller_id: Optional[str] = None, allowed_pids=(),
                 summary["jobs"].append(rec)
                 if not job.continue_on_failure:
                     summary["stop_reason"] = f"{job.name}: missing declared inputs {missing_inputs} (S1)"; break
+                continue
+            # S2: a certifying run predicted to exceed 10 minutes MUST depend on a
+            # passing performance canary in this same batch (critique #4: nothing
+            # made the canary a mandatory dependency). A sub-floor canary exits
+            # non-zero → not in `done` → the deps check below blocks this run.
+            if (job.certifying and job.predicted_wall_s > CANARY_REQUIRED_WALL_S
+                    and (not job.canary_dep or job.canary_dep not in (job.deps or []))):
+                rec["status"] = "config_error:long_run_without_canary_dep"
+                rec["predicted_wall_s"] = job.predicted_wall_s
+                summary["jobs"].append(rec)
+                if not job.continue_on_failure:
+                    summary["stop_reason"] = (f"{job.name}: predicted {job.predicted_wall_s:.0f}s "
+                                              f"> {CANARY_REQUIRED_WALL_S:.0f}s needs a canary_dep "
+                                              f"in deps (S2)"); break
                 continue
             spec_digest = _job_spec_digest(job)
             # idempotency: skip only if the done record matches THIS job's spec
