@@ -1,0 +1,87 @@
+{
+ "budget": 500000,
+ "seed": 43,
+ "base": "experiments/configs/jina_en_200k_k50_fuzzy.yaml",
+ "mn_on_scale": 4.0,
+ "runs": {
+  "mn0_s1_ws0": {
+   "name": "r1_abl_mn0_s1_ws0_s43",
+   "midnear": false,
+   "mn_weight_scale": 1.0,
+   "weighted": false,
+   "config_hash": "65f818c6",
+   "run_dir": "r1_abl_mn0_s1_ws0_s43_20260714_202930_65f818c6",
+   "reused": false,
+   "wall_s": 1693.7,
+   "ffr": 0.5758,
+   "recall@k": 0.09399,
+   "density": 0.2915,
+   "stop_reason": "lr_horizon",
+   "positive_lr_updates": 500000
+  },
+  "mn0_s1_ws1": {
+   "name": "r1_abl_mn0_s1_ws1_s43",
+   "midnear": false,
+   "mn_weight_scale": 1.0,
+   "weighted": true,
+   "config_hash": "cd1072a1",
+   "run_dir": "r1_abl_mn0_s1_ws1_s43_20260714_205744_cd1072a1",
+   "reused": false,
+   "wall_s": 1691.0,
+   "ffr": 0.6472,
+   "recall@k": 0.18478,
+   "density": 0.3094,
+   "stop_reason": "lr_horizon",
+   "positive_lr_updates": 500000
+  },
+  "mn1_s4_ws0": {
+   "name": "r1_abl_mn1_s4_ws0_s43",
+   "midnear": true,
+   "mn_weight_scale": 4.0,
+   "weighted": false,
+   "config_hash": "4387631b",
+   "run_dir": "r1_abl_mn1_s4_ws0_s43_20260714_212555_4387631b",
+   "reused": false,
+   "wall_s": 2284.6,
+   "ffr": 0.5716,
+   "recall@k": 0.09311,
+   "density": 0.245,
+   "stop_reason": "lr_horizon",
+   "positive_lr_updates": 500000
+  },
+  "mn1_s4_ws1": {
+   "name": "r1_abl_mn1_s4_ws1_s43",
+   "midnear": true,
+   "mn_weight_scale": 4.0,
+   "weighted": true,
+   "config_hash": "b97f2fe5",
+   "run_dir": "r1_abl_mn1_s4_ws1_s43_20260714_220359_b97f2fe5",
+   "reused": false,
+   "wall_s": 2283.0,
+   "ffr": 0.6402,
+   "recall@k": 0.18242,
+   "density": 0.3427,
+   "stop_reason": "lr_horizon",
+   "positive_lr_updates": 500000
+  }
+ },
+ "started": "2026-07-14T20:29:30Z",
+ "effects": {
+  "ffr": {
+   "weighted_main": 0.07,
+   "midnear_main": -0.0056,
+   "interaction": -0.0028
+  },
+  "density": {
+   "weighted_main": 0.0578,
+   "midnear_main": -0.0066,
+   "interaction": 0.0798
+  },
+  "recall@k": {
+   "weighted_main": 0.09,
+   "midnear_main": -0.0016,
+   "interaction": -0.0015
+  }
+ },
+ "finished": "2026-07-14T22:42:02Z"
+}
