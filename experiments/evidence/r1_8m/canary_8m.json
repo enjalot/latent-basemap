@@ -1,0 +1,13 @@
+{
+ "controller": "completed",
+ "job_status": "ok",
+ "floor": 200.0,
+ "passed": true,
+ "steady_updates_per_s": 298.5,
+ "pipeline": "device",
+ "positive_sampling": "weighted_with_replacement",
+ "x_residency": "device_fp16",
+ "bench_seconds": 3.349707842920907,
+ "run_dir": "r1_8m_canary_20260715_163523_8d6ccd57",
+ "est_500k_minutes": 27.9
+}

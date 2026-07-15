@@ -525,6 +525,15 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
     # ── Wandb setup ──
     wandb_run_name = cfg.logging.wandb_run_name or f"{cfg.name}_{cfg.config_hash()}"
 
+    # P3: admission canary — stop after canary_max_steps and time the steady-state
+    # window [canary_warmup, canary_max_steps] via the bench hook. Used to prove
+    # the device+weighted path is admitted and meets the throughput floor before a
+    # 500k-update run. Scoring is skipped (partial map).
+    if getattr(tc, "canary_max_steps", 0):
+        pumap._max_train_steps = int(tc.canary_max_steps)
+        pumap._bench_warmup = int(tc.canary_warmup)
+        logging.info("P3 CANARY: max_steps=%d warmup=%d", pumap._max_train_steps, pumap._bench_warmup)
+
     # ── Train ──
     t0 = time.time()
     pumap.fit(
@@ -558,6 +567,27 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
     legacy_samples_per_sec_diag = n_train * tc.n_epochs / train_time
     run_manifest["train_accounting"] = train_stats
     run_manifest["low_dim_kernel"] = getattr(pumap, "low_dim_kernel", "legacy_lp")
+
+    # P3: canary — steady-state rate over [warmup, max_steps], the ACTUAL pipeline,
+    # and pass/fail vs a pre-registered floor. Returns before scoring the partial map.
+    if getattr(tc, "canary_max_steps", 0):
+        bench_s = getattr(pumap, "_bench_seconds", None)
+        window = int(tc.canary_max_steps) - int(tc.canary_warmup)
+        rate = round(window / bench_s, 1) if (bench_s and window > 0) else None
+        canary = {
+            "canary": True, "n": n_train, "max_steps": int(tc.canary_max_steps),
+            "warmup": int(tc.canary_warmup), "bench_seconds": bench_s,
+            "steady_updates_per_s": rate, "stop_reason": train_stats.get("stop_reason"),
+            "pipeline": {k[len("pipeline_"):]: v for k, v in train_stats.items()
+                         if k.startswith("pipeline_")},
+        }
+        run_manifest["canary"] = canary
+        results = {"config": cfg.to_dict(), "config_hash": cfg.config_hash(),
+                   "run_manifest": run_manifest, "canary": canary}
+        with open(os.path.join(run_dir, "results.json"), "w") as f:
+            json.dump(results, f, indent=2)
+        logging.info("P3 CANARY result: %s", canary)
+        return results
 
     # ── Transform ──
     t0 = time.time()
