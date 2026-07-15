@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse, os, sys, json, glob, hashlib
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)   # so `import basemap...` works for the post-hoc graph check
 EVID = os.path.join(ROOT, "experiments", "evidence")
 RESULTS = os.path.join(ROOT, "experiments", "results")
 
