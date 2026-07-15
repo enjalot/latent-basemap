@@ -31,7 +31,7 @@ from __future__ import annotations
 import os, json, glob, time, hashlib, resource, subprocess, dataclasses
 import numpy as np
 
-FORMULA_VERSION = "panel_v2.1-2026-07-14"
+FORMULA_VERSION = "panel_v2.2-2026-07-15"   # exact top-k_hit truth + approx k_frac membership; byte-capped rerank
 PANEL_SCHEMA = "panel_v2"
 D_DEFAULT_FRAC = 0.001
 D_K_DENSITY = 15
@@ -49,6 +49,9 @@ class PanelV2Config:
     corpus_chunk: int = 2_000_000          # rows streamed per corpus chunk (hiD)
     overselect: int = 8                    # extra candidates kept before exact rerank
     block_elems: int = 500_000_000         # per-block element cap (~2 GB fp32)
+    rerank_byte_cap: int = 2_000_000_000   # P2: cap the exact-rerank gather tile (~2 GB)
+    rerank_scratch: float = 3.0            # scratch multiplier for the rerank alloc
+    peak_byte_cap: int = 26_000_000_000    # P2: refuse a scoring stage above this (~26 GB)
     formula_version: str = FORMULA_VERSION
 
 
@@ -272,28 +275,75 @@ def align_x_to_z(X, Z, x_ids, z_ids):
 
 # ── bounded-memory kNN with overselect + exact rerank (P0-C) ──────────────────────
 
-def _self_knn(F, anchor_idx, k, cfg: PanelV2Config, hi_dim=True, want_dist=False):
-    """Top-k self-excluded neighbours of ``anchor_idx`` within corpus F.
+def estimate_panel_peak_bytes(cfg: PanelV2Config, n_dims: int, k_frac: int) -> dict:
+    """Shape-only peak-byte estimate per scoring stage (P2). Computes the dominant
+    allocations from (corpus_chunk, block_elems, k_frac, k_hit, overselect, D)
+    WITHOUT touching the GPU — so a stage that would OOM is caught before any
+    coordinate is loaded. Returns bytes per stage + the dominant term."""
+    cc = min(cfg.corpus_chunk, cfg.block_elems)      # corpus rows resident per chunk
+    # exact top-k_hit rerank gather (byte-capped achunk × cand × D)
+    cand_hit = cfg.k_hit + cfg.overselect + 1
+    achunk = max(1, min(int(cfg.block_elems // max(1, cc)),
+                        int(cfg.rerank_byte_cap // (cand_hit * n_dims * 4 * cfg.rerank_scratch))))
+    rerank_hit = achunk * cand_hit * n_dims * 4 * cfg.rerank_scratch
+    corpus_tile = cc * n_dims * 4                    # a streamed hi-D corpus chunk
+    # approximate k_frac membership: distance matrix (achunk_frac × cc)
+    achunk_frac = max(1, int(cfg.block_elems // max(1, cc)))
+    dmat_frac = achunk_frac * cc * 4
+    stages = {
+        "hi_k_hit_rerank": int(rerank_hit),
+        "hi_k_frac_dmat": int(dmat_frac),
+        "corpus_chunk": int(corpus_tile),
+    }
+    dom = max(stages, key=stages.get)
+    return {"stages": stages, "dominant": dom, "dominant_bytes": stages[dom],
+            "cap": int(cfg.peak_byte_cap)}
 
-    hi_dim: fast normalised-matmul expansion selects ``k+overselect`` candidates
-    per corpus chunk; after streaming all chunks the candidate vectors are gathered
-    and distances recomputed EXACTLY (fp32 subtraction) to rerank and to report
-    radii. Returns (ids[m,k], dist[m,k] or None, guard) where guard carries the
-    minimum boundary gap (kept k-th exact dist vs first dropped) across anchors.
 
-    low_dim: single deterministic pass over the whole (tiny) coord corpus — no
-    chunk-boundary tie perturbation; distances are already exact."""
+def _peak_byte_preflight(cfg: PanelV2Config, n_dims: int, k_frac: int) -> None:
+    est = estimate_panel_peak_bytes(cfg, n_dims, k_frac)
+    if est["dominant_bytes"] > est["cap"]:
+        raise MemoryError(
+            f"panel peak-byte preflight: stage '{est['dominant']}' needs "
+            f"{est['dominant_bytes']/1e9:.1f} GB > cap {est['cap']/1e9:.1f} GB (P2). "
+            f"Lower n_anchors won't help (per-tile); raise corpus_chunk/rerank_byte_cap "
+            f"or peak_byte_cap deliberately. stages={ {k: round(v/1e9,2) for k,v in est['stages'].items()} }")
+
+
+def _self_knn(F, anchor_idx, k, cfg: PanelV2Config, hi_dim=True, want_dist=False, exact=True):
+    """Top-k self-excluded neighbours of ``anchor_idx`` within corpus F (panel v2.2).
+
+    hi_dim + exact: fast normalised-matmul expansion selects ``k+overselect``
+    candidates per corpus chunk, then the candidate vectors are gathered and
+    distances recomputed EXACTLY (fp32) to rerank / report radii. This is the
+    high-D top-k_hit TRUTH (FFR/recall) and the density-radius path. The rerank
+    gather (achunk × cand × D) is BYTE-CAPPED — `block_elems`/`corpus_chunk` does
+    NOT bound it, which is what OOM'd at k_frac≈8000 (v2.1).
+
+    hi_dim + not exact: fast-expansion top-k with NO rerank — the k_frac MEMBERSHIP
+    pass (purity). Order inside the set is irrelevant to a label count; boundary
+    membership is approximate and labelled so. want_dist REQUIRES exact.
+
+    low_dim: single deterministic exact pass over the (tiny) coord corpus."""
     import torch
+    if want_dist and not exact:
+        raise ValueError("radii (want_dist) require exact reranking (P2)")
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     N = len(F); m = len(anchor_idx)
     kk = k + 1                                            # +1 for self
     if hi_dim:
-        cand = k + max(cfg.overselect, 1) + 1
+        cand = (k + max(cfg.overselect, 1) + 1) if exact else kk
         cchunk = min(N, max(1, int(cfg.corpus_chunk)))
     else:
         cand = kk
         cchunk = N                                       # one deterministic pass
     achunk = max(1, min(m, int(cfg.block_elems // max(1, cchunk))))
+    if hi_dim and exact:
+        # BYTE-CAP the exact-rerank tile: achunk × cand × D × 4 × scratch. This is
+        # the allocation `corpus_chunk` never bounded (v2.1 OOM at 24 GB).
+        D = int(np.asarray(F[anchor_idx[:1]]).shape[1])
+        cap_rows = max(1, int(cfg.rerank_byte_cap // (cand * D * 4 * cfg.rerank_scratch)))
+        achunk = max(1, min(achunk, cap_rows))
     out_i = np.empty((m, k), dtype=np.int64)
     out_d = np.empty((m, k), dtype=np.float64) if want_dist else None
     min_gap = float("inf")
@@ -321,22 +371,18 @@ def _self_knn(F, anchor_idx, k, cfg: PanelV2Config, hi_dim=True, want_dist=False
             best_d, sel = torch.topk(best_d, cand, dim=1, largest=False)
             best_i = torch.gather(best_i, 1, sel)
             del Xc, d2
-        if hi_dim and want_dist:
-            # EXACT rerank — ONLY when radii are needed (density). Gathering the
-            # candidate vectors is (achunk × cand × D); at k_frac≈8000 (8M) that
-            # is ~24 GB and OOMs. The ID-only k_frac pass (ffr/purity) does NOT
-            # need exact order — near-duplicate reordering cannot change a top-10
-            # set-intersection or a label count — so it uses the fast-expansion
-            # top-k directly (validated_approximate). Density uses small k
-            # (k_density=15) so its rerank gather is tiny.
+        if hi_dim and exact:
+            # EXACT rerank (byte-capped achunk): gather candidate vectors, recompute
+            # fp32 distances. Used for the top-k_hit TRUTH (FFR) and density radii —
+            # both small k, so the gather is tiny. NOT used for k_frac membership.
             flat = best_i.reshape(-1).cpu().numpy()
             nb = torch.from_numpy(np.asarray(F[flat], dtype=np.float32)).to(dev).reshape(ma, cand, -1)
-            exact = (nb - Q[:, None, :]).float().pow(2).sum(2)   # (ma, cand) squared L2
-            exact = torch.where(best_i >= 0, exact, torch.full_like(exact, float("inf")))
-            ed, es = torch.sort(exact, dim=1)
+            ex = (nb - Q[:, None, :]).float().pow(2).sum(2)      # (ma, cand) squared L2
+            ex = torch.where(best_i >= 0, ex, torch.full_like(ex, float("inf")))
+            ed, es = torch.sort(ex, dim=1)
             best_i = torch.gather(best_i, 1, es)
             best_d = ed
-            del nb, exact
+            del nb, ex
         ids = best_i.cpu().numpy()
         dist = best_d.clamp_min(0).sqrt().cpu().numpy() if want_dist else None
         for r in range(ma):
@@ -414,31 +460,41 @@ def _peak_rss_gb():
 
 # ── projection fidelity (P0-C) ───────────────────────────────────────────────────
 
-def cross_knn(Q, corpus, k, cfg: PanelV2Config, hi_dim=True, q_tile=4096):
+def cross_knn(Q, corpus, k, cfg: PanelV2Config, hi_dim=True, q_tile=4096, exact=True):
     """Canonical tiled top-k of each query row over a corpus (cross, not self).
     Tiles BOTH the query rows (q_tile) and the corpus (cfg.corpus_chunk) so a full
-    (all-queries × corpus) matrix is never materialised — safe for 20k queries
-    against a 2M map. This is the ONE cross-neighbour implementation used by both
-    projection and the decision scorer (P0-4). hi_dim uses the normalised-matmul
-    expansion; low-D uses exact cdist."""
+    (all-queries × corpus) matrix is never materialised. The ONE cross-neighbour
+    implementation for projection + the decision scorer. hi_dim + exact: overselect
+    fast-expansion candidates, then EXACT fp32 rerank (byte-capped q_tile) — so
+    high-D projection top-k_hit is exact truth, not the v2.1 fast-only IDs (P2)."""
     import torch
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     cc = min(len(corpus), max(1, cfg.corpus_chunk))
+    cand = (k + cfg.overselect + 1) if (hi_dim and exact) else k
+    if hi_dim and exact:
+        D = int(np.asarray(Q[:1]).shape[1])
+        q_tile = max(1, min(q_tile, int(cfg.rerank_byte_cap // (cand * D * 4 * cfg.rerank_scratch))))
     out = np.empty((len(Q), k), dtype=np.int64)
     for q0 in range(0, len(Q), q_tile):
         Qt = torch.from_numpy(np.asarray(Q[q0:q0 + q_tile], dtype=np.float32)).to(dev)
         qn = (Qt * Qt).sum(1, keepdim=True)
-        best_d = torch.full((len(Qt), k), float("inf"), device=dev)
-        best_i = torch.full((len(Qt), k), -1, dtype=torch.long, device=dev)
+        best_d = torch.full((len(Qt), cand), float("inf"), device=dev)
+        best_i = torch.full((len(Qt), cand), -1, dtype=torch.long, device=dev)
         for j in range(0, len(corpus), cc):
             Xc = torch.from_numpy(np.asarray(corpus[j:j + cc], dtype=np.float32)).to(dev)
             d2 = (qn - 2.0 * (Qt @ Xc.T) + (Xc * Xc).sum(1)) if hi_dim else (torch.cdist(Qt, Xc) ** 2)
-            kloc = min(k, len(Xc))
+            kloc = min(cand, len(Xc))
             ld, li = torch.topk(d2, kloc, dim=1, largest=False)
             best_d = torch.cat([best_d, ld], 1); best_i = torch.cat([best_i, li + j], 1)
-            best_d, sel = torch.topk(best_d, k, dim=1, largest=False)
+            best_d, sel = torch.topk(best_d, cand, dim=1, largest=False)
             best_i = torch.gather(best_i, 1, sel); del Xc, d2
-        out[q0:q0 + len(Qt)] = best_i.cpu().numpy(); del Qt, best_d, best_i
+        if hi_dim and exact:            # exact fp32 rerank of the candidate pool
+            flat = best_i.reshape(-1).cpu().numpy()
+            nb = torch.from_numpy(np.asarray(corpus[flat], dtype=np.float32)).to(dev).reshape(len(Qt), cand, -1)
+            ex = (nb - Qt[:, None, :]).float().pow(2).sum(2)
+            ex = torch.where(best_i >= 0, ex, torch.full_like(ex, float("inf")))
+            best_i = torch.gather(best_i, 1, torch.sort(ex, dim=1).indices); del nb, ex
+        out[q0:q0 + len(Qt)] = best_i[:, :k].cpu().numpy(); del Qt, best_d, best_i
     return out
 
 
@@ -510,10 +566,16 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
     sel_den = _resolve_mask(masks.get("density"), m)
 
     kf = max(cfg.k_hit, int(np.ceil(cfg.frac * n)))
-    # ONE hi pass (k_frac) + ONE lo pass (k_frac) shared by ffr/recall/purity.
-    hi_kf, _, guard_hi = _self_knn(Xa, aidx, kf, cfg, hi_dim=True)
+    _peak_byte_preflight(cfg, n_dims=int(np.asarray(Xa[:1]).shape[1]), k_frac=kf)
+    # v2.2: SEPARATE passes —
+    #   hi_hit  : EXACT-reranked top-k_hit (FFR/recall high-D TRUTH; small k → cheap).
+    #   hi_frac : APPROXIMATE fast-expansion top-k_frac MEMBERSHIP (purity; no rerank,
+    #             so no 24 GB gather). Order inside the set is irrelevant to a label
+    #             count; boundary membership is approximate and labelled so.
+    #   lo_kf   : exact low-D top-k_frac (single deterministic pass).
+    hi_hit, _, guard_hit = _self_knn(Xa, aidx, cfg.k_hit, cfg, hi_dim=True, exact=True)
+    hi_frac, _, _ = _self_knn(Xa, aidx, kf, cfg, hi_dim=True, exact=False)
     lo_kf, _, _ = _self_knn(Z, aidx, kf, cfg, hi_dim=False)
-    hi_hit = hi_kf[:, :cfg.k_hit]
 
     res = {"schema": PANEL_SCHEMA, "formula_version": cfg.formula_version,
            "n": int(n), "n_dims_hi": int(np.asarray(Xa[:1]).shape[1]),
@@ -522,19 +584,20 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
            "anchor_seed": cfg.anchor_seed, "n_anchors": m,
            "anchor_hash": _ids_hash(aidx)}
 
-    # ffr + recall@k (separate masks, separate numbers — P0.4)
+    # ffr + recall@k use the EXACT high-D top-k_hit truth (separate masks — P0.4)
     res["ffr"] = round(ffr_from_neighbors(hi_hit[sel_ffr], lo_kf[sel_ffr], cfg.k_hit), 4)
     res["recall@k"] = round(recall_at_k_from_neighbors(hi_hit[sel_ffr], lo_kf[sel_ffr], cfg.k_hit), 5)
     res["n_ffr_anchors"] = int(len(sel_ffr))
 
-    # purity per centroid granularity, with centroid provenance
+    # purity per centroid granularity — uses the APPROXIMATE high-D k_frac membership
     if centroids_by_k:
         res["purity"] = {}
+        res["purity_exactness"] = "hi_frac_membership: approximate (fast expansion, no rerank)"
         res["centroid_hashes"] = {}
         lab = _label_by_centroids(Xa, centroids_by_k)   # {k: labels[N]}
         for kc, labels in lab.items():
             alab = labels[aidx][sel_pur]
-            hd = float((labels[hi_kf[sel_pur]] == alab[:, None]).mean())
+            hd = float((labels[hi_frac[sel_pur]] == alab[:, None]).mean())
             mp = float((labels[lo_kf[sel_pur]] == alab[:, None]).mean())
             res["purity"][f"k{kc}"] = round(mp / hd, 4) if hd else None
             res["centroid_hashes"][f"k{kc}"] = _ids_hash(
@@ -559,19 +622,18 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
         "code_commit": commit, "code_dirty": dirty,
         "alignment": align_note,
         "aligned_ids_hash": _ids_hash(aligned_ids) if aligned_ids is not None else None,
-        # P0-4: honest label. Overselect+rerank cannot recover a true neighbour
-        # the float32 expansion pushed out of the candidate pool, and the
-        # boundary guard only inspects the selected pool — so this is
-        # VALIDATED_APPROXIMATE (agrees with fp64 in the golden-gate aggregate),
-        # not a proof of exact top-k. Low-D is a single exact pass.
-        "exactness": "hi:validated_approximate(overselect+rerank); lo:single_pass_exact",
+        # P2: honest per-path label. hi top-k_hit (FFR/recall) is exact-reranked
+        # (validated ≥ tolerance vs fp64); hi k_frac membership (purity) is
+        # approximate fast-expansion; density radii are exact; low-D is exact.
+        "exactness": ("hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; "
+                      "density:exact; lo:single_pass_exact"),
         "device": "cuda" if torch.cuda.is_available() else "cpu",
         "peak_gpu_gb": (round(torch.cuda.max_memory_allocated() / (1024 ** 3), 3)
                         if torch.cuda.is_available() else None),
         "peak_rss_gb": _peak_rss_gb(),
         "wall_s": round(time.time() - t0, 2),
     }
-    res["guards"] = {**_data_guards(Xa, Z), **guard_hi, "density_guard": guard_den}
+    res["guards"] = {**_data_guards(Xa, Z), "hit_guard": guard_hit, "density_guard": guard_den}
     return res
 
 

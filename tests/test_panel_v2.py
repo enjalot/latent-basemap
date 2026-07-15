@@ -102,6 +102,46 @@ def test_hi_knn_candidate_recall_vs_fp64_measured():
     assert mean_recall >= 0.98, f"measured top-15 recall vs fp64 = {mean_recall}"
 
 
+def test_p2_ffr_id_path_exact_beats_fast_at_boundary():
+    # P2: the FFR high-D truth path (exact=True) must match fp64 top-k_hit even
+    # at a near-duplicate top-10 boundary where the fast expansion (exact=False)
+    # can drop/reorder a true neighbour. This tests the SAME path FFR uses.
+    rng = np.random.RandomState(3)
+    # a cluster of near-equidistant points around the anchor at the k=10 boundary
+    base = rng.randn(1, 48).astype('float32')
+    ring = base + rng.randn(30, 48).astype('float32') * 2e-3   # ~equal radii, > k_hit
+    far = rng.randn(300, 48).astype('float32') * 4 + 20
+    F = np.concatenate([base, ring, far]).astype('float32')
+    cfg = pv.PanelV2Config(overselect=8)
+    ex, _, _ = pv._self_knn(F, np.array([0]), 10, cfg, hi_dim=True, exact=True)
+    fa, _, _ = pv._self_knn(F, np.array([0]), 10, cfg, hi_dim=True, exact=False)
+    Fd = F.astype('float64'); d = np.linalg.norm(Fd - Fd[0], axis=1); d[0] = np.inf
+    truth = set(np.argsort(d)[:10].tolist())
+    # exact path recovers the fp64 top-10 exactly
+    assert set(ex[0].tolist()) == truth, ("exact", ex[0], truth)
+    # (the fast membership path is allowed to differ — that is why FFR must not use it)
+    assert ex[0].tolist() != fa[0].tolist() or set(fa[0].tolist()) == truth
+
+
+def test_p2_peak_byte_preflight_catches_8m_shape():
+    # P2: a shape-only estimate rejects the v2.1 8M configuration (k_frac~8000,
+    # corpus_chunk=500k) BEFORE touching the GPU — reducing anchors would not help.
+    import pytest
+    # exact-rerank at k_frac as k_hit would blow the cap; simulate by asking the
+    # estimator with a huge k_hit (stand-in for the 8000-candidate exact gather).
+    cfg = pv.PanelV2Config(corpus_chunk=500_000, rerank_byte_cap=24_000_000_000,
+                           peak_byte_cap=20_000_000_000)
+    cfg.k_hit = 8000; cfg.overselect = 8
+    est = pv.estimate_panel_peak_bytes(cfg, n_dims=768, k_frac=8000)
+    assert est["dominant_bytes"] > est["cap"], est
+    with pytest.raises(MemoryError, match="peak-byte preflight"):
+        pv._peak_byte_preflight(cfg, n_dims=768, k_frac=8000)
+    # the real default 8M panel (small k_hit=10) fits the cap
+    ok = pv.PanelV2Config(corpus_chunk=500_000)
+    e2 = pv.estimate_panel_peak_bytes(ok, n_dims=768, k_frac=8000)
+    assert e2["dominant_bytes"] <= e2["cap"], e2
+
+
 def test_hi_knn_matches_brute_fp64():
     rng = np.random.RandomState(1)
     F = rng.randn(400, 24).astype('float32')
@@ -160,7 +200,7 @@ def test_score_panel_matches_brute():
     res = pv.score_panel(X, Z, config=cfg, provenance={"t": "unit"})
     assert abs(res["ffr"] - _brute_panel(X, Z, cfg)) <= 0.02, res["ffr"]
     assert res["recall@k"] <= res["ffr"] + 1e-9
-    assert "validated_approximate" in res["provenance"]["exactness"]
+    assert "hi_k_hit:exact_rerank" in res["provenance"]["exactness"]
     assert res["guards"]["coords_finite"] is True
 
 
