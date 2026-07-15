@@ -534,6 +534,9 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         pumap._bench_warmup = int(tc.canary_warmup)
         logging.info("P3 CANARY: max_steps=%d warmup=%d", pumap._max_train_steps, pumap._bench_warmup)
 
+    # S0: atomic admission artifact written before update 0.
+    pumap._admission_artifact_path = os.path.join(run_dir, "admission.json")
+
     # ── Train ──
     t0 = time.time()
     pumap.fit(

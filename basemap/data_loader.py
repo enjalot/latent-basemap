@@ -7,24 +7,27 @@ class MemmapArrayConcatenator:
     def __init__(self, directories, input_dim, testing: bool = False):
         self.input_dim = input_dim
         
-        # Collect all .npy files from directories
+        # Collect all .npy files from directories. SORTED per directory so the
+        # concatenation order (hence row indices, and the graph/data pairing) is
+        # DETERMINISTIC — glob order is arbitrary (S0).
         self.memmap_files = []
         for directory in directories:
             if testing:
                 npy_files = glob.glob(os.path.join(directory, "data-00000-*.npy"))
             else:
                 npy_files = glob.glob(os.path.join(directory, "*.npy"))
-            self.memmap_files.extend(npy_files)
-            
+            self.memmap_files.extend(sorted(npy_files))
+
         if not self.memmap_files:
             raise ValueError("No .npy files found in the provided directories")
-            
+
         # Load standard .npy files through NumPy so dtype/header metadata is
         # respected. Most local embedding shards are float16 .npy arrays, not
         # raw float32 buffers.
         self.shapes = []
         self.memmaps = []
-        
+        self.loaded_shard_paths = []   # S0: ordered paths of ACCEPTED shards only
+
         for path in self.memmap_files:
             try:
                 memmap = np.load(path, mmap_mode="r")
@@ -39,6 +42,7 @@ class MemmapArrayConcatenator:
                     continue
                 self.shapes.append(memmap.shape)
                 self.memmaps.append(memmap)
+                self.loaded_shard_paths.append(path)   # S0: only accepted shards, in order
             except Exception as e:
                 raise IOError(f"Failed to load memmap file {path}: {str(e)}")
 

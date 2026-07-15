@@ -210,8 +210,23 @@ class DeviceEdgeSampler:
                 )
             w = torch.as_tensor(np.asarray(weights), dtype=torch.float64,
                                  device=device)
+            # S0: fail closed on degenerate weights rather than collapsing every
+            # draw onto one edge. Non-finite or negative weights are invalid; a
+            # non-positive total is unsamplable. Constant positive weights are
+            # explicitly uniform-equivalent (linear CDF) — allowed, logged.
+            if not bool(torch.isfinite(w).all()):
+                raise ValueError("weighted_edge_sampling: non-finite edge weights (S0).")
+            if bool((w < 0).any()):
+                raise ValueError("weighted_edge_sampling: negative edge weights (S0).")
+            total = float(w.sum())
+            if not (total > 0):
+                raise ValueError(f"weighted_edge_sampling: non-positive weight total {total} — "
+                                 f"unsamplable; refuse rather than collapse all draws (S0).")
+            wmin, wmax = float(w.min()), float(w.max())
+            if wmax - wmin <= 1e-12 * max(1.0, abs(wmax)):
+                logging.info("weighted_edge_sampling: constant weights → uniform-equivalent (S0).")
             cdf = torch.cumsum(w, dim=0)
-            cdf = cdf / cdf[-1].clamp_min(1e-12)
+            cdf = cdf / total
             self.sample_cdf = cdf  # float64, monotonic in (0, 1]
 
         # Persistent generator: state advances across batches AND epochs, so

@@ -254,6 +254,7 @@ class ParametricUMAP:
         )
         from .datasets.covariates_datasets import VariableDataset
 
+        self._edges_path_used = edges_path
         load_weights = (self.positive_target_mode == "probability"
                         or self.weighted_edge_sampling)
         sources, targets, weights, n_nodes = load_edge_arrays(
@@ -282,12 +283,17 @@ class ParametricUMAP:
                 logging.info("P0-E: validating X identity against graph manifest %s", man_path)
                 validate_against_manifest(X, _man,
                                           allow_prefix=getattr(self, "allow_prefix_edge_filter", False))
-                # P1: also verify the ACTUAL graph (+ shards) content hashes match
-                # the manifest — the 2k-row fingerprint alone never compared
-                # graph_sha / data_shard_sha (size+mtime-cached; v1 manifests skip).
-                _shards = [str(p) for p in getattr(self, "_data_shard_paths", []) or []]
-                trusted = validate_graph_content(edges_path, _man, shard_paths=_shards)
-                logging.info("P1: graph/shard content verified against manifest: %s", trusted)
+                # P1/S0: verify the ACTUAL graph AND ordered data-shard content
+                # hashes against the manifest. The shard paths come from the data
+                # loader itself (deterministic, accepted-only). require_manifest_sha
+                # makes a required production manifest without graph_sha fail, and a
+                # data_shard_sha manifest with no/mismatched shards fail.
+                _shards = [str(p) for p in getattr(X, "loaded_shard_paths", []) or []]
+                trusted = validate_graph_content(
+                    edges_path, _man, shard_paths=_shards,
+                    require_manifest_sha=getattr(self, "require_graph_manifest", True))
+                logging.info("S0: graph/shard content verified against manifest: %s", trusted)
+                self._pipeline_verified_hashes = trusted    # for the admission artifact
                 man_found = man_path
                 break
         # P0-2: manifests are MANDATORY by default — a graph without a matching
@@ -952,8 +958,25 @@ class ParametricUMAP:
             # P1: the ACTUAL input pipeline + positive-sampling semantics that ran
             # (device|hybrid|legacy, weighted|uniform), stamped before update 0.
             **{f"pipeline_{k}": v for k, v in getattr(self, "_pipeline_info", {}).items()},
+            "verified_hashes": getattr(self, "_pipeline_verified_hashes", {}),
         }
         logging.info("P1 input pipeline: %s", getattr(self, "_pipeline_info", {}))
+        # S0: atomic admission artifact — pipeline + verified graph/shard hashes,
+        # written BEFORE update 0 so a mid-training crash still leaves proof of what
+        # was admitted. Copied into the final run manifest via train_accounting.
+        _adm_path = getattr(self, "_admission_artifact_path", None)
+        if _adm_path:
+            _adm = {"admitted_before_update_0": True,
+                    "pipeline": getattr(self, "_pipeline_info", {}),
+                    "verified_hashes": getattr(self, "_pipeline_verified_hashes", {}),
+                    "schedule_version": schedule_version, "lr_horizon": lr_horizon,
+                    "edges_path": getattr(self, "_edges_path_used", None)}
+            _tmp = f"{_adm_path}.tmp.{os.getpid()}"
+            import json as _jsonw
+            with open(_tmp, "w") as _f:
+                _jsonw.dump(_adm, _f, indent=1); _f.flush(); os.fsync(_f.fileno())
+            os.replace(_tmp, _adm_path)   # atomic
+            logging.info("S0: wrote admission artifact %s", _adm_path)
         stop_training = False
 
         self.model.train()

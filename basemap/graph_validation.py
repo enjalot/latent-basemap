@@ -178,34 +178,51 @@ def _cached_stream_sha(path: str) -> str:
     return sha
 
 
-def validate_graph_content(edges_path: str, manifest: dict, shard_paths=None) -> dict:
-    """P1: verify the ACTUAL graph (and, if given, data shards) match the manifest's
-    recorded full-content hashes — not just the 2k-row data fingerprint. Uses the
-    size+mtime sha cache. Raises on any mismatch; returns which hashes it trusted.
-    v1 manifests (no graph_sha) are skipped (fingerprint-only)."""
+def validate_graph_content(edges_path: str, manifest: dict, shard_paths=None,
+                           require_manifest_sha: bool = True) -> dict:
+    """S0: verify the ACTUAL graph AND ordered data-shard content hashes against the
+    manifest — not just the 2k-row fingerprint. Uses the size+mtime sha cache.
+    FAIL-CLOSED: with require_manifest_sha, a manifest lacking graph_sha raises
+    (test-only escape hatch = require_manifest_sha=False), and a manifest carrying
+    data_shard_sha with no/missing/extra/reordered/mismatched shards raises.
+    Returns the ordered hashes it trusted (bound into the admission artifact)."""
     trusted = {}
     gsha = manifest.get("graph_sha")
     gbytes = manifest.get("graph_bytes")
+    if gsha is None and require_manifest_sha:
+        raise ValueError(f"graph manifest for {edges_path} has no graph_sha — a required "
+                         f"production manifest must carry a full content hash (S0). Rebuild "
+                         f"with graph_manifest_v2, or pass require_manifest_sha=False (test only).")
     if gbytes is not None and os.path.getsize(edges_path) != int(gbytes):
         raise ValueError(f"graph {edges_path} size {os.path.getsize(edges_path)} != manifest "
-                         f"graph_bytes {gbytes} — graph changed since manifest (P1).")
+                         f"graph_bytes {gbytes} — graph changed since manifest (S0).")
     if gsha is not None:
         got = _cached_stream_sha(edges_path)
         if got != gsha:
             raise ValueError(f"graph_sha {got} != manifest {gsha}: the graph file changed since "
-                             f"its manifest was built — refuse to train (P1).")
+                             f"its manifest was built — refuse to train (S0).")
         trusted["graph_sha"] = got
     want_shards = manifest.get("data_shard_sha") or {}
-    if want_shards and shard_paths:
+    if want_shards:
+        if not shard_paths:
+            raise ValueError(f"manifest records data_shard_sha for {sorted(want_shards)} but the "
+                             f"loader supplied NO shard paths — cannot verify data integrity; "
+                             f"refuse to train (S0). Populate loaded_shard_paths.")
         by_base = {os.path.basename(p): p for p in shard_paths}
+        extra = set(by_base) - set(want_shards)
+        if extra:
+            raise ValueError(f"loaded shards {sorted(extra)} are absent from the manifest "
+                             f"data_shard_sha — unexpected/extra data; refuse to train (S0).")
+        ordered = {}
         for base, want in want_shards.items():
             p = by_base.get(base)
             if p is None:
-                raise ValueError(f"manifest shard {base} not among loaded shards {list(by_base)} (P1).")
+                raise ValueError(f"manifest shard {base} not among loaded shards {sorted(by_base)} (S0).")
             got = _cached_stream_sha(p)
             if got != want:
-                raise ValueError(f"shard {base} sha {got} != manifest {want} — data changed (P1).")
-        trusted["data_shard_sha"] = "ok"
+                raise ValueError(f"shard {base} sha {got} != manifest {want} — data changed (S0).")
+            ordered[base] = got
+        trusted["data_shard_sha"] = ordered
     return trusted
 
 

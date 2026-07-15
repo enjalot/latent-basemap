@@ -79,13 +79,13 @@ def test_p0a_amp_skip_path_does_not_break_scaler():
 
 
 def _p1_edges_with_manifest(n=400, e=1200, seed=1, tmp='/tmp/_p1c.npz'):
-    from basemap.graph_validation import graph_manifest, write_manifest
+    from basemap.graph_validation import graph_manifest_v2, write_manifest
     X = np.random.RandomState(seed).randn(n, 8).astype(np.float32)
     s = np.repeat(np.arange(n), e // n).astype(np.int32)
     t = np.random.RandomState(seed + 1).randint(0, n, len(s)).astype(np.int32)
     w = np.random.RandomState(seed + 2).rand(len(s)).astype(np.float32)
     np.savez(tmp, sources=s, targets=t, weights=w, n_nodes=n, k=3)
-    write_manifest(tmp + '.manifest.json', graph_manifest(s, t, n, X=X, extra={'k': 3}))
+    write_manifest(tmp + '.manifest.json', graph_manifest_v2(s, t, n, X=X, graph_path=tmp, k=3))
     return X, tmp
 
 
@@ -125,7 +125,7 @@ def test_p1_required_pipeline_mismatch_raises():
 def test_p0_2_mandatory_manifest_gate():
     # P0-2: require_graph_manifest=True refuses a graph with no manifest; writing a
     # matching manifest lets it proceed.
-    from basemap.graph_validation import graph_manifest, write_manifest
+    from basemap.graph_validation import graph_manifest_v2, write_manifest
     import os as _os
     X = np.random.RandomState(1).randn(400, 8).astype(np.float32)
     s, t, w = _edges(400, 8000, 1)
@@ -139,7 +139,7 @@ def test_p0_2_mandatory_manifest_gate():
                               use_amp=False, require_graph_manifest=req)
     with pytest.raises(ValueError, match="no manifest|content-bound graph identity"):
         mk(True).fit(X, precomputed_edges_path=ep)
-    write_manifest(ep + '.manifest.json', graph_manifest(s, t, 400, X=X, extra={'k': 15}))
+    write_manifest(ep + '.manifest.json', graph_manifest_v2(s, t, 400, X=X, graph_path=ep, k=15))
     m = mk(True); m.fit(X, precomputed_edges_path=ep)     # manifest present → proceeds
     assert m.is_fitted
 
