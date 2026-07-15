@@ -1,0 +1,70 @@
+{
+ "gate": "panel_v2_golden_2m",
+ "schema": "panel_v2",
+ "formula_version": "panel_v2.2-2026-07-15",
+ "passed": true,
+ "config": {
+  "frac": 0.001,
+  "n_anchors": 512,
+  "k_hit": 10,
+  "k_frac": 2000,
+  "k_density": 15,
+  "overselect": 8,
+  "corpus_chunk": 2000000,
+  "anchor_seed": 42
+ },
+ "corpus": {
+  "emb": "/data/latent-basemap/jina-en-2m/train/data-00000.npy",
+  "coords": "/data/latent-basemap/jina-en-2m/ceiling_umaplearn_k50.parquet",
+  "n": 2000000,
+  "dim_hi": 768,
+  "dim_lo": 2
+ },
+ "streamed": {
+  "ffr": 0.6725,
+  "recall@k": 0.03379,
+  "density": 0.2162
+ },
+ "reference": {
+  "ffr": 0.6725,
+  "recall@k": 0.03379,
+  "density": 0.2162
+ },
+ "deltas": {
+  "ffr": 0.0,
+  "recall@k": 0.0,
+  "density": 0.0
+ },
+ "tolerances": {
+  "ffr": 0.01,
+  "recall@k": 0.01,
+  "density": 0.02
+ },
+ "per_metric_pass": {
+  "ffr": true,
+  "recall@k": true,
+  "density": true
+ },
+ "boundary_min_gap": null,
+ "peak_gpu_gb": 13.34,
+ "peak_rss_gb": 14.023,
+ "wall_streamed_s": 6.6,
+ "wall_reference_s": 6.6,
+ "code_commit": "06dd092bc847",
+ "code_dirty": false,
+ "guards": {
+  "coords_finite": true,
+  "coords_collapsed": false,
+  "emb_finite": true,
+  "emb_norm_mean": 1.0,
+  "emb_zero_rows": 0,
+  "hit_guard": {
+   "boundary_min_gap": null,
+   "overselect": 8
+  },
+  "density_guard": {
+   "boundary_min_gap": 0.0,
+   "overselect": 8
+  }
+ }
+}
