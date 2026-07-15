@@ -1,0 +1,117 @@
+{
+ "gate": "a3_recipe_rescore",
+ "formula_version": "panel_v2.1-2026-07-14",
+ "metric": "fixed_fraction_recall",
+ "n": 8000000,
+ "config": {
+  "frac": 0.001,
+  "n_anchors": 2000
+ },
+ "provenance": {
+  "scorer": "experiments/score_a3_rescore.py",
+  "scorer_sha": "49b83a215d09cedb",
+  "train": "/data/latent-basemap/jina-en-8M-nested/train",
+  "labels": "/data/latent-basemap/jina-en-8m/corpus_labels.npy",
+  "labels_sha": "dde1e2c26b8dda3c",
+  "centroid_sha": {
+   "256": "0122a95b65bb509a",
+   "1024": "3721a8fac3fa955b"
+  },
+  "anchor_hash": "05c7c888e2bd",
+  "n_fineweb_anchors": 634,
+  "code_commit": "b92c4a0e3bb8",
+  "code_dirty": false,
+  "generated_cmd": "python experiments/score_a3_rescore.py --n-anchors 2000 --out experiments/evidence/a3_rescore.json"
+ },
+ "per_run": {
+  "mn4_s42": {
+   "recipe": "mn4",
+   "seed": 42,
+   "ffr": 0.5067,
+   "recall@k": 0.00525,
+   "purity_k256": 0.8208,
+   "purity_k1024": 0.6589,
+   "density": 0.7697,
+   "k_frac": 8000,
+   "coords_sha": "021dcfbb497e323d",
+   "run_dir": "jina_en_8m_nested-mn4_20260709_132310_8f48fd08"
+  },
+  "mn4_s43": {
+   "recipe": "mn4",
+   "seed": 43,
+   "ffr": 0.4985,
+   "recall@k": 0.00585,
+   "purity_k256": 0.7779,
+   "purity_k1024": 0.6435,
+   "density": 0.7686,
+   "k_frac": 8000,
+   "coords_sha": "eab927ac3cfab516",
+   "run_dir": "jina_en_8m_track1_a3_mn4_s43_20260711_174359_ba7ec10d"
+  },
+  "mn4_s44": {
+   "recipe": "mn4",
+   "seed": 44,
+   "ffr": 0.503,
+   "recall@k": 0.00445,
+   "purity_k256": 0.7772,
+   "purity_k1024": 0.6308,
+   "density": 0.7597,
+   "k_frac": 8000,
+   "coords_sha": "c07cb164e5c521eb",
+   "run_dir": "jina_en_8m_track1_a3_mn4_s44_20260712_010137_078f5ef0"
+  },
+  "nomn_s42": {
+   "recipe": "nomn",
+   "seed": 42,
+   "ffr": 0.5773,
+   "recall@k": 0.00615,
+   "purity_k256": 1.011,
+   "purity_k1024": 0.7961,
+   "density": 0.6395,
+   "k_frac": 8000,
+   "coords_sha": "1c274e5ea3183189",
+   "run_dir": "jina_en_8m_nested-fuzzyW_pr05_nomn_20260709_043029_b63ca1a8"
+  },
+  "nomn_s43": {
+   "recipe": "nomn",
+   "seed": 43,
+   "ffr": 0.564,
+   "recall@k": 0.0056,
+   "purity_k256": 0.9927,
+   "purity_k1024": 0.7804,
+   "density": 0.6361,
+   "k_frac": 8000,
+   "coords_sha": "95a949eea3b1b06a",
+   "run_dir": "jina_en_8m_track1_a3_nomn_s43_20260711_144049_49e9d5a4"
+  },
+  "nomn_s44": {
+   "recipe": "nomn",
+   "seed": 44,
+   "ffr": 0.576,
+   "recall@k": 0.00575,
+   "purity_k256": 0.9787,
+   "purity_k1024": 0.7863,
+   "density": 0.6332,
+   "k_frac": 8000,
+   "coords_sha": "164e94873b417259",
+   "run_dir": "jina_en_8m_track1_a3_nomn_s44_20260711_215833_1b948e64"
+  }
+ },
+ "seed_means": {
+  "nomn": {
+   "ffr": 0.5724,
+   "purity_k256": 0.9941,
+   "purity_k1024": 0.7876,
+   "density": 0.6363,
+   "n_seeds": 3
+  },
+  "mn4": {
+   "ffr": 0.5027,
+   "purity_k256": 0.792,
+   "purity_k1024": 0.6444,
+   "density": 0.766,
+   "n_seeds": 3
+  }
+ },
+ "decision": "nomn"
+}

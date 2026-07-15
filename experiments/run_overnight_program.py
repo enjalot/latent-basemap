@@ -110,7 +110,7 @@ def phase_golden_2m_extended():
     # projection on real held-out queries
     si = np.load(os.path.join(testbed, "sample_indices.npy"))
     src = load_embeddings(SRC, dim=768)
-    comp = np.setdiff1d(np.arange(len(src), np.int64), np.asarray(sorted(set(int(i) for i in si)), np.int64))
+    comp = np.setdiff1d(np.arange(len(src), dtype=np.int64), np.asarray(sorted(set(int(i) for i in si)), np.int64))
     held = np.sort(np.random.RandomState(7).choice(comp, 20000, replace=False))
     Xq = np.asarray(src[held], dtype=np.float32)
     Xa = X[np.asarray(z_ids, np.int64)] if z_ids is not None else X

@@ -1,0 +1,18 @@
+{
+ "gate": "golden_2m_extended",
+ "run": "r1_kernel_2m_legacy_a1b1_s42_20260714_083247_055217e4",
+ "ffr": 0.6343,
+ "purity": {
+  "k256": 1.0445,
+  "k1024": 0.956
+ },
+ "density": 0.2938,
+ "proj_ffr": 0.5959,
+ "covers": [
+  "ffr",
+  "purity",
+  "density",
+  "projection"
+ ],
+ "n_holdout_unique": 20000
+}

@@ -1,0 +1,23 @@
+{
+ "substrate": "mixed-8M (fineweb+rpj+pile)",
+ "recipe": "legacy nomn+weighted",
+ "budget": "500k updates v3",
+ "n_anchors": 2000,
+ "runs": {
+  "bridge_legacy_s42": {
+   "ffr": 0.5721,
+   "purity_k256": 1.0116,
+   "purity_k1024": 0.822,
+   "density": 0.6116,
+   "train_s": 14803
+  },
+  "bridge_legacy_s43": {
+   "ffr": 0.58,
+   "purity_k256": 0.9933,
+   "purity_k1024": 0.8282,
+   "density": 0.6126,
+   "train_s": 15011
+  }
+ },
+ "note": "8M bridge reproduces A3 nomn (ffr 0.572) under the corrected v3 pipeline. Training was ~4.1h/run at 38 upd/s (8M weighted sampling over 605M edges is ~5x slower than <=2M) \u2014 an infra finding for the scale program."
+}
