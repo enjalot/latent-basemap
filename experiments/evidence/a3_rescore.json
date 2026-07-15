@@ -19,8 +19,8 @@
   },
   "anchor_hash": "05c7c888e2bd",
   "n_fineweb_anchors": 634,
-  "code_commit": "73c84096e7b1",
-  "code_dirty": true,
+  "code_commit": "7a4ae3d31d2d",
+  "code_dirty": false,
   "generated_cmd": "python experiments/score_a3_rescore.py --n-anchors 2000 --out experiments/evidence/a3_rescore.json"
  },
  "per_run": {
