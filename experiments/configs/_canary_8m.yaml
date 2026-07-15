@@ -57,9 +57,9 @@ train:
   require_full_budget: false
   require_graph_manifest: true
   required_input_pipeline: device
-  canary_max_steps: 1200
+  canary_max_steps: 3000
   canary_warmup: 200
-  canary_floor: 200.0
+  canary_floor: 400.0
   canary_warn_rate: 250.0
   use_amp: true
   positive_target_mode: binary

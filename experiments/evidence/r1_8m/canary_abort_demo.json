@@ -1,0 +1,78 @@
+{
+ "controller": "completed",
+ "job_status": "ok",
+ "floor": 400.0,
+ "passed": false,
+ "steady_updates_per_s": null,
+ "pipeline": "device",
+ "positive_sampling": "weighted_with_replacement",
+ "x_residency": "device_fp16",
+ "bench_seconds": null,
+ "run_dir": "r1_8m_canary_20260715_203903_d741be15",
+ "est_500k_minutes": null,
+ "aborted": true,
+ "baseline_key": {
+  "n": 8000000,
+  "d": 768,
+  "n_edges": 605184300,
+  "hidden_dim": 1024,
+  "n_components": 2,
+  "n_layers": 3,
+  "batch_size": 8192,
+  "use_amp": true,
+  "kernel": "legacy_lp",
+  "pipeline": "device",
+  "sampler_class": "DeviceEdgeSampler",
+  "positive_sampling": "weighted_with_replacement",
+  "x_residency": "device_fp16",
+  "torch": "2.11.0+cu128",
+  "gpu_name": "NVIDIA GeForce RTX 5090",
+  "cuda": "12.8",
+  "compute_capability": "12.0",
+  "driver": "570.211.01"
+ },
+ "rate_windows": [
+  {
+   "idx": 0,
+   "updates": 466,
+   "wall_s": 1.559,
+   "rate": 298.9
+  },
+  {
+   "idx": 1,
+   "updates": 466,
+   "wall_s": 1.5552,
+   "rate": 299.6
+  },
+  {
+   "idx": 2,
+   "updates": 467,
+   "wall_s": 1.5671,
+   "rate": 298.0
+  }
+ ],
+ "rate_median": 298.9,
+ "rate_min": 298.0,
+ "phase_ms_median": {
+  "sample": 0.152,
+  "forward": 1.019,
+  "backward": 1.839,
+  "optimizer": 0.25
+ },
+ "dominant_phase": "backward",
+ "phase_fractions": {
+  "sample": 0.047,
+  "forward": 0.313,
+  "backward": 0.564,
+  "optimizer": 0.077
+ },
+ "setup_seconds": 29.12,
+ "peak_vram_reserved_gb": 31.684,
+ "rss_peak_gb": 24.63,
+ "gpu_util_pct": 79.0,
+ "power_w": 411.52,
+ "co_tenant_pids": [
+  "3679171"
+ ],
+ "lease_id": "3"
+}

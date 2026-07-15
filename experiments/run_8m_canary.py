@@ -24,7 +24,7 @@ from basemap.run_controller import run_jobs, Job, known_service_pids
 BASE = "experiments/configs/jina_en_8m_nested.yaml"
 
 
-def build_canary_config(max_steps, warmup, budget_gb):
+def build_canary_config(max_steps, warmup, budget_gb, floor=200.0, warn_rate=250.0):
     cfg = load_config(BASE, {
         "model.low_dim_kernel": "legacy_lp", "model.a": 1.0, "model.b": 1.0,
         "model.hidden_dim": 1024, "model.n_components": 2,
@@ -38,9 +38,10 @@ def build_canary_config(max_steps, warmup, budget_gb):
         "train.gpu_resident_data": "auto",
         "train.gpu_resident_vram_budget_gb": float(budget_gb),
         "train.canary_max_steps": int(max_steps), "train.canary_warmup": int(warmup),
-        # S2: hard floor 200 upd/s (abort on consecutive sub-floor windows);
-        # warn below 250 against the ~296 upd/s h1024 baseline.
-        "train.canary_floor": 200.0, "train.canary_warn_rate": 250.0,
+        # S2: hard floor (abort on consecutive sub-floor windows); warn below
+        # warn_rate against the ~296 upd/s h1024 baseline. Floor comes from the
+        # CLI so a raised floor exercises the in-training abort, not just the verdict.
+        "train.canary_floor": float(floor), "train.canary_warn_rate": float(warn_rate),
     })
     cfg.name = "r1_8m_canary"
     cfg.eval.metrics = []          # no scoring
@@ -57,7 +58,7 @@ def main():
     ap.add_argument("--out", default="/data/latent-basemap/closure/canary_8m.json")
     args = ap.parse_args()
 
-    cfg = build_canary_config(args.max_steps, args.warmup, args.budget_gb)
+    cfg = build_canary_config(args.max_steps, args.warmup, args.budget_gb, floor=args.floor)
     cfg_path = "experiments/configs/_canary_8m.yaml"
     cfg.to_yaml(cfg_path)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
