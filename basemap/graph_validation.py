@@ -158,6 +158,57 @@ def stream_sha(path: str, chunk=1 << 20) -> str:
     return h.hexdigest()[:16]
 
 
+def _cached_stream_sha(path: str) -> str:
+    """stream_sha with a size+mtime cache next to the file, so multi-GB artifacts
+    are not rehashed on every training run (P1). The cache is keyed by stable file
+    identity (size, mtime_ns); a change to either forces a rehash."""
+    st = os.stat(path)
+    cache = path + ".shacache.json"
+    try:
+        c = json.load(open(cache))
+        if c.get("size") == st.st_size and c.get("mtime_ns") == st.st_mtime_ns:
+            return c["sha"]
+    except Exception:
+        pass
+    sha = stream_sha(path)
+    try:
+        json.dump({"size": st.st_size, "mtime_ns": st.st_mtime_ns, "sha": sha}, open(cache, "w"))
+    except Exception:
+        pass
+    return sha
+
+
+def validate_graph_content(edges_path: str, manifest: dict, shard_paths=None) -> dict:
+    """P1: verify the ACTUAL graph (and, if given, data shards) match the manifest's
+    recorded full-content hashes — not just the 2k-row data fingerprint. Uses the
+    size+mtime sha cache. Raises on any mismatch; returns which hashes it trusted.
+    v1 manifests (no graph_sha) are skipped (fingerprint-only)."""
+    trusted = {}
+    gsha = manifest.get("graph_sha")
+    gbytes = manifest.get("graph_bytes")
+    if gbytes is not None and os.path.getsize(edges_path) != int(gbytes):
+        raise ValueError(f"graph {edges_path} size {os.path.getsize(edges_path)} != manifest "
+                         f"graph_bytes {gbytes} — graph changed since manifest (P1).")
+    if gsha is not None:
+        got = _cached_stream_sha(edges_path)
+        if got != gsha:
+            raise ValueError(f"graph_sha {got} != manifest {gsha}: the graph file changed since "
+                             f"its manifest was built — refuse to train (P1).")
+        trusted["graph_sha"] = got
+    want_shards = manifest.get("data_shard_sha") or {}
+    if want_shards and shard_paths:
+        by_base = {os.path.basename(p): p for p in shard_paths}
+        for base, want in want_shards.items():
+            p = by_base.get(base)
+            if p is None:
+                raise ValueError(f"manifest shard {base} not among loaded shards {list(by_base)} (P1).")
+            got = _cached_stream_sha(p)
+            if got != want:
+                raise ValueError(f"shard {base} sha {got} != manifest {want} — data changed (P1).")
+        trusted["data_shard_sha"] = "ok"
+    return trusted
+
+
 def graph_manifest_v2(sources, targets, n_nodes, *, X=None, graph_path=None,
                       data_paths=None, sample_indices_path=None, k=None, metric="cosine",
                       directed=True, weight_semantics=None, builder_commit=None,

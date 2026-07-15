@@ -87,6 +87,26 @@ def test_manifest_length_mismatch_raises():
         validate_against_manifest(X[:400], man)            # shorter, no prefix allowance
 
 
+def test_p1_graph_content_validation(tmp_path):
+    # P1: mutating the graph file after the manifest is written fails admission
+    # even when X (the 2k fingerprint) is unchanged.
+    from basemap.graph_validation import graph_manifest_v2, validate_graph_content
+    import numpy as np, os
+    X = np.random.RandomState(0).randn(300, 8).astype('float32')
+    s = np.repeat(np.arange(300), 3).astype('int32'); t = np.random.RandomState(1).randint(0, 300, 900).astype('int32')
+    gp = str(tmp_path / "edges.npz"); np.savez(gp, sources=s, targets=t, n_nodes=300, k=3)
+    man = graph_manifest_v2(s, t, 300, X=X, graph_path=gp, k=3)
+    validate_graph_content(gp, man)                       # matches → ok
+    # mutate the graph file (different content, X untouched)
+    np.savez(gp, sources=s, targets=(t + 1) % 300, n_nodes=300, k=3)
+    try:
+        os.remove(gp + ".shacache.json")
+    except OSError:
+        pass
+    with pytest.raises(ValueError, match="graph_sha|size"):
+        validate_graph_content(gp, man)
+
+
 def test_prefix_refused_without_stored_fingerprint():
     # P0-2: allow_prefix must NOT be an unconditional pass — a prefix with no
     # stored fingerprint to verify against is refused.

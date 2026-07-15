@@ -78,6 +78,50 @@ def test_p0a_amp_skip_path_does_not_break_scaler():
     assert m._train_stats['stop_reason'] == 'lr_horizon'
 
 
+def _p1_edges_with_manifest(n=400, e=1200, seed=1, tmp='/tmp/_p1c.npz'):
+    from basemap.graph_validation import graph_manifest, write_manifest
+    X = np.random.RandomState(seed).randn(n, 8).astype(np.float32)
+    s = np.repeat(np.arange(n), e // n).astype(np.int32)
+    t = np.random.RandomState(seed + 1).randint(0, n, len(s)).astype(np.int32)
+    w = np.random.RandomState(seed + 2).rand(len(s)).astype(np.float32)
+    np.savez(tmp, sources=s, targets=t, weights=w, n_nodes=n, k=3)
+    write_manifest(tmp + '.manifest.json', graph_manifest(s, t, n, X=X, extra={'k': 3}))
+    return X, tmp
+
+
+def _p1_umap(**kw):
+    base = dict(a=1., b=1., correlation_weight=0.0, n_epochs=4, batch_size=64,
+                total_steps_estimate=40, lr_schedule='cosine', warmup_steps=0, device='cpu',
+                gpu_resident_data='auto', positive_target_mode='binary', use_amp=False,
+                require_full_budget=False)
+    base.update(kw)
+    return ParametricUMAP(**base)
+
+
+def test_p1_weighted_uniform_fallback_raises():
+    # P1: weighted request that reaches the uniform legacy iterator must RAISE
+    # before training (the 8M-bridge fallback that silently trained uniform).
+    X, ep = _p1_edges_with_manifest()
+    with pytest.raises(RuntimeError, match="weighted_edge_sampling=True|samples UNIFORMLY"):
+        _p1_umap(weighted_edge_sampling=True).fit(X, precomputed_edges_path=ep)
+
+
+def test_p1_pipeline_semantics_stamped():
+    X, ep = _p1_edges_with_manifest()
+    m = _p1_umap(weighted_edge_sampling=False); m.fit(X, precomputed_edges_path=ep)
+    s = m._train_stats
+    assert s['pipeline_pipeline'] == 'legacy'
+    assert s['pipeline_positive_sampling'] == 'uniform'
+    assert s['pipeline_sampler_class'] == 'EdgeListBalancedIterator'
+    assert s['pipeline_weighted_requested'] is False
+
+
+def test_p1_required_pipeline_mismatch_raises():
+    X, ep = _p1_edges_with_manifest()
+    with pytest.raises(RuntimeError, match="required_input_pipeline"):
+        _p1_umap(required_input_pipeline='device').fit(X, precomputed_edges_path=ep)
+
+
 def test_p0_2_mandatory_manifest_gate():
     # P0-2: require_graph_manifest=True refuses a graph with no manifest; writing a
     # matching manifest lets it proceed.

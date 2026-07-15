@@ -151,6 +151,47 @@ def test_p0_5_known_service_pids_matches_by_identity(monkeypatch):
     assert rc.known_service_pids(["zzz_no_such_service_marker"]) == []
 
 
+def test_p1_lease_ownership_not_any_holder():
+    # P1: a lease held by ANOTHER process must NOT satisfy require_active_lease();
+    # only an owned in-process lease (or an inherited BASEMAP_GPU_LEASE_FD) counts.
+    import subprocess, sys, time as _t, pytest
+    d = tempfile.mkdtemp(); lp = os.path.join(d, '.lease')
+    os.environ['BASEMAP_GPU_LEASE'] = lp
+    os.environ.pop('BASEMAP_GPU_LEASE_FD', None)
+    import importlib; importlib.reload(rc)
+    # child process holds the lease for a bit; we do NOT own or inherit it
+    child = subprocess.Popen([sys.executable, '-c', _hold_lease_script(lp, 3)])
+    _t.sleep(0.8)
+    try:
+        with pytest.raises(RuntimeError, match="owned/inherited"):
+            rc.require_active_lease()          # file IS locked, but not by us
+    finally:
+        child.wait()
+    # now WE own it → passes
+    L = rc.GpuLease(path=lp, timeout=0).acquire()
+    try:
+        rc.require_active_lease()
+    finally:
+        L.release()
+
+
+def test_p1_done_digest_binds_input_content():
+    # P1: a change to a declared input_path invalidates the done marker even with
+    # identical argv (the "changed scorer reuses A3 done marker" hazard).
+    d = tempfile.mkdtemp(); os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
+    import importlib; importlib.reload(rc)
+    inp = f'{d}/scorer.py'
+    with open(inp, 'w') as f: f.write("v1\n")
+    def mk():
+        return rc.Job(name='x', argv=['bash', '-c', f'cp {inp} {d}/out'],   # output reflects input
+                      outputs=[f'{d}/out'], done_marker=os.path.join(d, 'x.done'), input_paths=[inp])
+    assert rc.run_jobs([mk()])['jobs'][0]['status'] == 'ok'
+    assert rc.run_jobs([mk()])['jobs'][0]['status'] == 'skipped_done'   # unchanged → skip
+    with open(inp, 'w') as f: f.write("v2 CHANGED\n")                    # change the input
+    assert rc.run_jobs([mk()])['jobs'][0]['status'] == 'ok'             # re-runs, not skipped
+    assert open(f'{d}/out').read() == "v2 CHANGED\n"
+
+
 def test_p0_5_require_active_lease():
     d = tempfile.mkdtemp(); lp = os.path.join(d, '.lease')
     os.environ['BASEMAP_GPU_LEASE'] = lp

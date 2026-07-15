@@ -103,6 +103,7 @@ class TrainConfig:
     total_steps_estimate: int = 0
     require_full_budget: bool = True   # P0-3: fail closed if plan exhausts below horizon
     require_graph_manifest: bool = True  # P0-2: refuse a graph without a content-bound manifest
+    required_input_pipeline: Optional[str] = None  # P1: "device"|"hybrid"|"any" — fail closed on mismatch
     use_amp: bool = True
     positive_target_mode: str = "probability"  # "probability" or "binary"
     # Edge-list scale path: reject actual graph neighbours in the negative

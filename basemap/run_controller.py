@@ -70,36 +70,68 @@ def _output_sig(path: str) -> Optional[dict]:
         return None
 
 
+def _git_state():
+    try:
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        c = subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True, timeout=10).strip()[:12]
+        d = bool(subprocess.check_output(["git", "-C", root, "status", "--porcelain"], text=True, timeout=10).strip())
+        return f"{c}{'-dirty' if d else ''}"
+    except Exception:
+        return "nogit"
+
+
 def _job_spec_digest(job) -> str:
-    """Bind a done record to the job's identity: argv + cwd + declared outputs.
-    A changed argv/config/output set cannot reuse an old done record (P0-5)."""
-    payload = json.dumps({"argv": list(job.argv), "cwd": job.cwd or "",
-                          "outputs": sorted(job.outputs)}, sort_keys=True)
+    """Bind a done record to the job's FULL identity (P1): argv + cwd + declared
+    outputs + the repo commit/dirty state + the content hashes of every declared
+    input_path (config, scorer/trainer code, input artifacts). A changed scorer or
+    config at the same argv therefore invalidates a stale done marker."""
+    payload = json.dumps({
+        "argv": list(job.argv), "cwd": job.cwd or "", "outputs": sorted(job.outputs),
+        "code": _git_state(),
+        "inputs": {p: _output_sig(p) for p in sorted(getattr(job, "input_paths", []) or [])},
+    }, sort_keys=True)
     return hashlib.sha1(payload.encode()).hexdigest()[:16]
 
 
+_OWNED_LEASE_FDS = set()   # P1: fds of GpuLeases acquired in THIS process
+
+
 def require_active_lease(path: str = None) -> None:
-    """Refuse to run a GPU entry point unless the GPU lease is currently HELD (by
-    this process's in-process GpuLease, or by a controller parent via an inherited
-    fd) — P0-5. Detects "held" by trying a non-blocking exclusive flock on a fresh
-    fd: it fails iff some open-file-description already holds the lock. Bypass only
-    with BASEMAP_UNSAFE_NO_LEASE=1 for explicit unsafe diagnostics."""
+    """Refuse to run a GPU entry point unless THIS process OWNS or INHERITED the
+    GPU lease (P1 — the old any-lock-holder-passes check was ownership-blind, so a
+    stray direct process passed while a controller job held the lease). Proof is:
+      (a) an in-process GpuLease this process acquired (registered fd whose inode
+          matches the lease file), or
+      (b) an inherited lease fd the controller passed via BASEMAP_GPU_LEASE_FD
+          (open in this process, inode matches the lease file).
+    Bypass only with BASEMAP_UNSAFE_NO_LEASE=1 for explicit unsafe diagnostics."""
     if os.environ.get("BASEMAP_UNSAFE_NO_LEASE") == "1":
         return
     path = path or _lease_path()
-    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        # We acquired it → nobody held it → this process is NOT under a lease.
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        raise RuntimeError(
-            f"GPU lease {path} is not held — refuse to run a GPU entry point without a "
-            f"lease (P0-5). Launch via run_controller/GpuLease, or set "
-            f"BASEMAP_UNSAFE_NO_LEASE=1 for an explicit unsafe diagnostic run.")
-    except BlockingIOError:
-        return  # held by us or a controller parent → protected
-    finally:
-        os.close(fd)
+        lease_ino = os.stat(path).st_ino
+    except OSError:
+        lease_ino = None
+    # (a) in-process owner
+    for fd in list(_OWNED_LEASE_FDS):
+        try:
+            if lease_ino is not None and os.fstat(fd).st_ino == lease_ino:
+                return
+        except OSError:
+            _OWNED_LEASE_FDS.discard(fd)
+    # (b) inherited fd from a controller parent
+    envfd = os.environ.get("BASEMAP_GPU_LEASE_FD")
+    if envfd is not None and lease_ino is not None:
+        try:
+            if os.fstat(int(envfd)).st_ino == lease_ino:
+                return
+        except (OSError, ValueError):
+            pass
+    raise RuntimeError(
+        f"no owned/inherited GPU lease for {path} — refuse to run a GPU entry point "
+        f"(P1). Launch via run_controller (which passes BASEMAP_GPU_LEASE_FD) or hold "
+        f"an in-process GpuLease; a lease held by another process does NOT count. Set "
+        f"BASEMAP_UNSAFE_NO_LEASE=1 for an explicit unsafe diagnostic run.")
 
 
 def gpu_snapshot() -> dict:
@@ -150,6 +182,7 @@ class GpuLease:
                 os.ftruncate(self._fd, 0)
                 os.write(self._fd, f"{self.controller_id} pid={os.getpid()} at={_utcnow()}\n".encode())
                 os.fsync(self._fd)
+                _OWNED_LEASE_FDS.add(self._fd)   # P1: this process owns this lease
                 return self
             except BlockingIOError:
                 if deadline is not None and time.time() >= deadline:
@@ -163,6 +196,7 @@ class GpuLease:
 
     def release(self):
         if self._fd is not None:
+            _OWNED_LEASE_FDS.discard(self._fd)
             try:
                 fcntl.flock(self._fd, fcntl.LOCK_UN)
             finally:
@@ -227,6 +261,9 @@ class Job:
     manifest: Optional[str] = None
     required_free_gb: float = 0.0
     continue_on_failure: bool = False
+    input_paths: list = dataclasses.field(default_factory=list)   # P1: files whose
+    # content binds the job identity (config, scorer/trainer code, input artifacts).
+    # A change to any of them (or the repo commit) invalidates a stale done marker.
 
 
 def run_jobs(jobs: list, controller_id: Optional[str] = None, allowed_pids=(),
@@ -284,8 +321,14 @@ def run_jobs(jobs: list, controller_id: Optional[str] = None, allowed_pids=(),
             # child in its own process group. pass_fds keeps the inherited lease
             # fd open (lock survives controller death); close_fds stays default
             # True so no other fds leak (the old close_fds=False warned every run).
+            # P1: pass the inherited lease fd number so the child's
+            # require_active_lease() can PROVE ownership (inode match), not merely
+            # observe the global lock is held.
+            child_env = dict(os.environ)
+            if lease.fileno() is not None:
+                child_env["BASEMAP_GPU_LEASE_FD"] = str(lease.fileno())
             p = subprocess.Popen(job.argv, cwd=job.cwd, stdout=logf, stderr=subprocess.STDOUT,
-                                 start_new_session=True,
+                                 start_new_session=True, env=child_env,
                                  pass_fds=(lease.fileno(),) if lease.fileno() is not None else ())
             rec["child_pid"] = p.pid; rec["pgid"] = os.getpgid(p.pid)
             rc = p.wait()

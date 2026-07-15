@@ -49,6 +49,7 @@ class ParametricUMAP:
         total_steps_estimate=0,
         require_full_budget=True,
         require_graph_manifest=False,   # class default lenient; run_experiment/config default True (P0-2)
+        required_input_pipeline=None,   # P1: "device"|"hybrid"|"any"|None — fail closed on mismatch
         use_amp=True,
         positive_target_mode="probability",
         reject_neighbors=False,
@@ -106,6 +107,8 @@ class ParametricUMAP:
         self.total_steps_estimate = total_steps_estimate
         self.require_full_budget = require_full_budget
         self.require_graph_manifest = require_graph_manifest
+        self.required_input_pipeline = required_input_pipeline
+        self._pipeline_info = {}         # P1: actual selected pipeline/semantics
         self.use_amp = use_amp
         self.positive_target_mode = positive_target_mode
         self.reject_neighbors = reject_neighbors
@@ -265,7 +268,8 @@ class ParametricUMAP:
         # prefix-filter of a larger graph onto a balanced/sampled matrix (which
         # silently connects unrelated cross-corpus rows) unless explicitly opted
         # into for a verified literal prefix.
-        from ...graph_validation import validate_graph_data_pair, validate_against_manifest
+        from ...graph_validation import (validate_graph_data_pair, validate_against_manifest,
+                                          validate_graph_content)
         # P0-E: if the graph ships a node/data manifest, verify the loaded X's
         # identity (fingerprint) against it BEFORE building samplers. Length
         # equality is not identity — this catches a reordered or wrong-corpus X.
@@ -274,9 +278,16 @@ class ParametricUMAP:
         for man_path in (edges_path + ".manifest.json",
                          edges_path.rsplit(".", 1)[0] + ".manifest.json"):
             if os.path.exists(man_path):
+                _man = _json.load(open(man_path))
                 logging.info("P0-E: validating X identity against graph manifest %s", man_path)
-                validate_against_manifest(X, _json.load(open(man_path)),
+                validate_against_manifest(X, _man,
                                           allow_prefix=getattr(self, "allow_prefix_edge_filter", False))
+                # P1: also verify the ACTUAL graph (+ shards) content hashes match
+                # the manifest — the 2k-row fingerprint alone never compared
+                # graph_sha / data_shard_sha (size+mtime-cached; v1 manifests skip).
+                _shards = [str(p) for p in getattr(self, "_data_shard_paths", []) or []]
+                trusted = validate_graph_content(edges_path, _man, shard_paths=_shards)
+                logging.info("P1: graph/shard content verified against manifest: %s", trusted)
                 man_found = man_path
                 break
         # P0-2: manifests are MANDATORY by default — a graph without a matching
@@ -309,6 +320,33 @@ class ParametricUMAP:
             logging.info("Building positive-edge rejection set (reject_neighbors=True)...")
             edge_set = build_edge_key_set(np.asarray(sources), np.asarray(targets), n_train)
 
+        # P1: record the ACTUAL input pipeline + positive-sampling semantics that
+        # were selected, and fail closed if a weighted request would be silently
+        # downgraded or the required pipeline is not met. Requested config is not
+        # execution evidence — this is stamped into the manifest before any update.
+        def _stamp_pipeline(pipeline, sampler_class, weighted_ok, x_residency):
+            pos = ("weighted_with_replacement" if (self.weighted_edge_sampling and weighted_ok)
+                   else "uniform")
+            self._pipeline_info = {
+                "pipeline": pipeline, "sampler_class": sampler_class,
+                "positive_sampling": pos, "x_residency": x_residency,
+                "weighted_requested": bool(self.weighted_edge_sampling),
+                "weighted_effective": bool(self.weighted_edge_sampling and weighted_ok),
+                "path_reason": reason}
+            # weighted request must NEVER silently reach a uniform sampler.
+            if self.weighted_edge_sampling and not weighted_ok:
+                raise RuntimeError(
+                    f"weighted_edge_sampling=True but the selected input pipeline "
+                    f"'{pipeline}' ({sampler_class}) samples UNIFORMLY ({reason}). This "
+                    f"would silently change the recipe (the P0.9 hole). Admit the device/"
+                    f"hybrid weighted sampler (more free VRAM / larger resident budget) or "
+                    f"set weighted_edge_sampling=False explicitly. (P1)")
+            req = self.required_input_pipeline
+            if req and str(req).lower() not in ("any", "none") and pipeline != str(req).lower():
+                raise RuntimeError(
+                    f"required_input_pipeline='{req}' but the selected pipeline is "
+                    f"'{pipeline}' ({reason}). Refuse to train off the declared path (P1).")
+
         # GPU-resident fast path: upload X once (fp16 on CUDA) and do all
         # gathers + negative sampling on-device. See _decide_gpu_resident.
         n_features = int(X.shape[1])
@@ -316,6 +354,7 @@ class ParametricUMAP:
             n_train, n_features, n_pos_edges, edge_set, low_memory)
         if use_fast:
             logging.info("Edge-list mode: GPU-resident fast path (%s).", reason)
+            _stamp_pipeline("device", "DeviceEdgeSampler", weighted_ok=True, x_residency="device_fp16")
             ddataset = DeviceArrayDataset(X, self.device)
             self._X_dev = ddataset
             self._fast_device_path = True
@@ -346,6 +385,8 @@ class ParametricUMAP:
             if x_bytes <= x_budget:
                 logging.info("Edge-list mode: HYBRID (X resident %.1f GB + host-streamed "
                              "edges/CDF; %s).", x_bytes / 1e9, reason)
+                _stamp_pipeline("hybrid", "HostStreamEdgeSampler", weighted_ok=True,
+                                x_residency="device_fp16")
                 ddataset = DeviceArrayDataset(X, self.device)
                 self._X_dev = ddataset
                 self._fast_device_path = True
@@ -360,6 +401,12 @@ class ParametricUMAP:
                 return ddataset, loader, n_pos_edges
 
         logging.info("Edge-list mode: legacy sampler path (%s).", reason)
+        # P1: EdgeListBalancedIterator ignores weighted_edge_sampling → uniform.
+        # _stamp_pipeline RAISES here if weighted was requested (the fallback that
+        # silently trained the 8M "bridge" uniform), or if the required pipeline
+        # was device/hybrid.
+        _stamp_pipeline("legacy", "EdgeListBalancedIterator", weighted_ok=False,
+                        x_residency="host_memmap")
         loader = EdgeListBalancedIterator(
             sources, targets, weights, n_nodes=n_train,
             pos_ratio=self.pos_ratio, batch_size=self.batch_size,
@@ -902,7 +949,11 @@ class ParametricUMAP:
             # P0-3: budget accounting — H successful positive-LR updates.
             "lr_used_first": None, "lr_used_last": None, "next_lr": None,
             "budget_satisfied": None, "use_amp": bool(use_amp),
+            # P1: the ACTUAL input pipeline + positive-sampling semantics that ran
+            # (device|hybrid|legacy, weighted|uniform), stamped before update 0.
+            **{f"pipeline_{k}": v for k, v in getattr(self, "_pipeline_info", {}).items()},
         }
+        logging.info("P1 input pipeline: %s", getattr(self, "_pipeline_info", {}))
         stop_training = False
 
         self.model.train()

@@ -499,6 +499,7 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         total_steps_estimate=tc.total_steps_estimate,
         require_full_budget=getattr(tc, "require_full_budget", True),
         require_graph_manifest=getattr(tc, "require_graph_manifest", True),
+        required_input_pipeline=getattr(tc, "required_input_pipeline", None),
         use_amp=tc.use_amp,
         positive_target_mode=tc.positive_target_mode,
         reject_neighbors=tc.reject_neighbors,
