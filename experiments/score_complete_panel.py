@@ -165,8 +165,12 @@ def main():
     try:
         _commit = subprocess.check_output(["git", "-C", os.path.dirname(os.path.abspath(__file__)),
                                            "rev-parse", "HEAD"], text=True).strip()[:12]
-        _dirty = bool(subprocess.check_output(["git", "-C", os.path.dirname(os.path.abspath(__file__)),
-                                               "status", "--porcelain"], text=True).strip())
+        # scorer_dirty = TRACKED source modifications only. An untracked output
+        # (e.g. a sibling rescore's just-written evidence file) is not a scorer-code
+        # change and must not dirty a later scorer in the same batch (--untracked-files=no).
+        _dirty = bool(subprocess.check_output(
+            ["git", "-C", os.path.dirname(os.path.abspath(__file__)),
+             "status", "--porcelain", "--untracked-files=no"], text=True).strip())
     except Exception:
         _commit = _dirty = None
     summary = {"testbed": args.testbed, "n": int(len(X)), "n_holdout": int(len(held)),
