@@ -720,9 +720,18 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         anchor_targets = getattr(pumap, "anchor_targets_", None)
         if anchor_targets is not None:
             anchor_path = os.path.join(run_dir, "anchor_targets.parquet")
-            _write_anchor_targets_parquet(anchor_path, anchor_targets, train_indices)
-            logging.info("Saved anchor targets: %s (%d rows)", anchor_path,
-                         len(anchor_targets))
+            # O2: the SPARSE path exposes targets ONLY for active landmark rows
+            # (len n_active), whose row ids are pumap.anchor_ids_ — not train_indices
+            # (len n_train). The dense path targets align to train_indices. Pick the
+            # ls_index that matches the target length.
+            sparse_ids = getattr(pumap, "anchor_ids_", None)
+            if sparse_ids is not None and len(sparse_ids) == len(anchor_targets):
+                anchor_ls = np.asarray(sparse_ids, dtype=np.int64)
+            else:
+                anchor_ls = train_indices
+            _write_anchor_targets_parquet(anchor_path, anchor_targets, anchor_ls)
+            logging.info("Saved anchor targets: %s (%d rows, %s)", anchor_path,
+                         len(anchor_targets), "sparse landmarks" if sparse_ids is not None else "dense")
 
     if cfg.logging.save_model and not model_saved:
         pumap.save(os.path.join(run_dir, "model.pt"))
