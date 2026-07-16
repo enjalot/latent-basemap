@@ -1,0 +1,18 @@
+{
+ "assets": [
+  {
+   "name": "jina-en-4M-nested",
+   "graph": "/data/latent-basemap/jina-en-4M-nested/edges_k50_fuzzy.npz",
+   "n_nodes": 4000000,
+   "n_edges": 301126446,
+   "endpoint_cosine": {
+    "edge_cosine": 0.5948,
+    "random_cosine": 0.1138,
+    "margin": 0.481
+   },
+   "manifest": "/data/latent-basemap/jina-en-4M-nested/edges_k50_fuzzy.npz.manifest.json",
+   "graph_sha": "96171467942c42de",
+   "data_fingerprint": "9275223a035dde21"
+  }
+ ]
+}
