@@ -134,6 +134,22 @@ class TrainConfig:
     # Requires anchored_init in {pca, file} to define the target source.
     anchor_hold_weight: float = 0.0
     anchor_hold_fraction: float = 0.05   # fraction of each batch drawn as anchors
+    # O2 sparse landmark hold (self-growth pilot): an EXPLICIT alternative to
+    # anchored_init/anchored_init_path. Path to an .npz (arrays `anchor_ids`
+    # int64 (n_landmarks,) + `anchor_targets` float32 (n_landmarks, n_components))
+    # or .parquet (`anchor_ids`/`ls_index` id column + `x, y[, z]` columns)
+    # defining a SPARSE set of landmark row ids held to fixed teacher 2D
+    # coordinates — e.g. the ~2M old points from a 2M->4M growth step — while
+    # every other row trains freely. Unlike anchored_init="file", targets are
+    # allocated ONLY for the landmark rows, and the hold term (anchor_hold_weight
+    # / anchor_hold_fraction, same semantics as above) samples ONLY from that
+    # landmark pool. Mutually exclusive with anchored_init; requires
+    # anchor_hold_weight>0 (there is no sparse pretrain phase).
+    anchor_ids_path: str = ""
+    # Fraction of the loaded landmark set reserved as held-out: recorded (id
+    # hash + count) for later old-point drift measurement, but never drawn
+    # into the hold loss. 0 = every landmark participates in the hold term.
+    anchor_holdout_fraction: float = 0.0
     # Mid-near pair loss (plan §6 Phase 1, PaCMAP-style global term). When
     # enabled, add an annealed mid-near attractive term to the edge-list BCE.
     midnear_enabled: bool = False

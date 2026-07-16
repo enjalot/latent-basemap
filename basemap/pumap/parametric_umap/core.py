@@ -14,6 +14,7 @@ import pickle
 import logging
 import os
 import time
+import hashlib
 from pathlib import Path
 
 logging.basicConfig(
@@ -59,6 +60,8 @@ class ParametricUMAP:
         anchored_init_path="",
         anchor_hold_weight=0.0,
         anchor_hold_fraction=0.05,
+        anchor_ids_path="",
+        anchor_holdout_fraction=0.0,
         midnear_enabled=False,
         mn_pairs_per_batch=0,
         mn_weight_scale=1.0,
@@ -118,6 +121,16 @@ class ParametricUMAP:
         self.anchored_init_path = anchored_init_path
         self.anchor_hold_weight = anchor_hold_weight
         self.anchor_hold_fraction = anchor_hold_fraction
+        # O2: sparse landmark hold — an alternative to anchored_init/anchored_init_path.
+        # Path to an .npz/.parquet with explicit landmark row ids + fixed teacher
+        # (x, y[, z]) targets (e.g. the ~2M old points from a 2M->4M growth step).
+        # Unlike anchored_init="file" (which allocates a target for every one of
+        # n_train rows), this allocates targets ONLY for the landmark rows, and the
+        # hold term samples ONLY from that landmark pool.
+        self.anchor_ids_path = anchor_ids_path
+        # Fraction of the loaded landmark set reserved as held-out: recorded (for
+        # later old-point drift measurement) but NEVER drawn into the hold loss.
+        self.anchor_holdout_fraction = anchor_holdout_fraction
         self.midnear_enabled = midnear_enabled
         self.mn_pairs_per_batch = mn_pairs_per_batch
         self.mn_weight_scale = mn_weight_scale
@@ -142,6 +155,14 @@ class ParametricUMAP:
         self.anchor_targets_ = None
         self.anchor_scale_ = None        # RMS-radius scale factor (manifest)
         self._anchor_targets_dev = None  # resident targets for the hold term
+        # O2 sparse landmark hold pool (populated by fit() when anchor_ids_path
+        # is set). anchor_ids_ / anchor_holdout_ids_ are the active (sampled) and
+        # reserved-but-never-sampled landmark row ids, respectively.
+        self.anchor_ids_ = None
+        self.anchor_holdout_ids_ = None
+        self._anchor_ids_pool_dev = None
+        self._anchor_ids_pool = None
+        self._hold_pool_size = 0
 
     def _init_model(self, input_dim):
         """Initialize the configured parametric model."""
@@ -559,6 +580,173 @@ class ParametricUMAP:
             "%.4f (target RMS %.1f).", path, n_train, rms, scale, target_rms_radius)
         return targets
 
+    @staticmethod
+    def _coerce_landmark_ids(ids_raw, path):
+        """O2 fail-closed (fable finding): landmark ids are ROW indices — a blanket
+        ``astype(int64)`` silently FLOORS float ids (e.g. a pandas float64 round-trip
+        of [1.7, 2.2] → rows [1, 2]), holding rows to the WRONG teacher coordinate
+        with no error. Reject any non-integer-valued ids before casting."""
+        ids_raw = np.asarray(ids_raw)
+        if ids_raw.dtype.kind not in "iu":
+            if not np.all(np.isfinite(ids_raw)) or not np.all(ids_raw == np.floor(ids_raw)):
+                raise ValueError(
+                    f"{path}: anchor_ids must be integer-valued row indices; got dtype "
+                    f"{ids_raw.dtype} with non-integer values — refuse to silently floor "
+                    f"landmark ids onto the wrong rows (O2).")
+        return ids_raw.astype(np.int64)
+
+    # ── O2: sparse landmark ("anchor_ids") hold — growth-step teacher targets ──
+    def _load_sparse_anchor_landmarks(self, n_train, random_state=0):
+        """Load the O2 sparse landmark hold set (``anchor_ids_path``).
+
+        Unlike ``anchored_init="file"`` (which allocates a target for every one
+        of ``n_train`` rows), this is an explicit sparse API: it defines targets
+        for ONLY a subset of rows — e.g. the ~2M old points from a 2M->4M growth
+        step — that should be held fixed at their teacher 2D coordinates while
+        every other row trains freely. Non-landmark rows never receive a target
+        and are never touched by this loader.
+
+        Schema (either format):
+          ``.npz``     — int64 array ``anchor_ids`` (n_landmarks,) and float32
+                         array ``anchor_targets`` (n_landmarks, n_components).
+          ``.parquet`` — an integer id column named ``anchor_ids`` or
+                         ``ls_index``, plus coordinate columns ``x, y[, z, ...]``
+                         (as many as ``n_components``).
+
+        FAILS CLOSED (repo idiom — see ``basemap/graph_validation.py``) on: an
+        empty landmark set, a length mismatch between ids and targets, a wrong
+        target column count, non-unique ids, out-of-range ids (outside
+        ``[0, n_train)``), or non-finite targets (NaN/Inf) — every one of these
+        is caught here, BEFORE any training step, not discovered mid-run.
+
+        ``anchor_holdout_fraction`` (if > 0) deterministically reserves a subset
+        of the loaded landmarks as held-out: recorded in the returned stats for
+        later old-point-drift measurement, but NEVER drawn into the hold loss.
+        The split is seeded from ``random_state`` alone (not from any other RNG
+        draw in ``fit``), so it is reproducible independent of batch order.
+
+        Returns ``(active_ids, active_targets, holdout_ids, stats)`` — the pool
+        actually sampled by the hold term, the reserved-but-unsampled ids, and a
+        dict of counts/hashes to merge into ``self._train_stats`` so a run
+        manifest can prove exactly what was held.
+        """
+        path = os.path.expanduser(str(self.anchor_ids_path or ""))
+        if not path:
+            raise ValueError(
+                "anchor_ids_path is empty — cannot load sparse landmark targets.")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"sparse anchor landmark file not found: {path}")
+
+        if path.endswith(".npz"):
+            z = np.load(path)
+            if "anchor_ids" not in z.files or "anchor_targets" not in z.files:
+                raise ValueError(
+                    f"{path}: npz must contain 'anchor_ids' and 'anchor_targets' "
+                    f"arrays; got {list(z.files)}")
+            ids = self._coerce_landmark_ids(np.asarray(z["anchor_ids"]), path)
+            targets = np.asarray(z["anchor_targets"]).astype(np.float32)
+        elif path.endswith(".parquet"):
+            import pyarrow.parquet as pq
+            df = pq.read_table(path).to_pandas()
+            if "anchor_ids" in df.columns:
+                id_col = "anchor_ids"
+            elif "ls_index" in df.columns:
+                id_col = "ls_index"
+            else:
+                raise ValueError(
+                    f"{path}: parquet must have an 'anchor_ids' or 'ls_index' "
+                    f"integer id column; got {list(df.columns)}")
+            coord_cols = ["x", "y", "z"][: self.n_components]
+            missing_cols = [c for c in coord_cols if c not in df.columns]
+            if missing_cols:
+                raise ValueError(
+                    f"{path}: parquet missing coordinate column(s) {missing_cols} "
+                    f"for n_components={self.n_components}; got {list(df.columns)}")
+            ids = self._coerce_landmark_ids(df[id_col].to_numpy(), path)
+            targets = df[coord_cols].to_numpy().astype(np.float32)
+        else:
+            raise ValueError(
+                f"anchor_ids_path must be a .npz or .parquet file, got: {path}")
+
+        # ── FAIL CLOSED — every check runs before any optimizer step ──────────
+        if ids.shape[0] == 0:
+            raise ValueError(
+                f"{path}: empty landmark set (0 anchor_ids) — refuse to run a "
+                f"sparse-hold training with no landmarks to hold.")
+        if targets.shape[0] != ids.shape[0]:
+            raise ValueError(
+                f"{path}: anchor_ids length {ids.shape[0]} != anchor_targets "
+                f"length {targets.shape[0]} — cannot align landmark ids to "
+                f"targets.")
+        if targets.ndim != 2 or targets.shape[1] != self.n_components:
+            got = targets.shape[1] if targets.ndim == 2 else targets.ndim
+            raise ValueError(
+                f"{path}: anchor_targets has {got} column(s), expected "
+                f"n_components={self.n_components}.")
+        uniq_ids = np.unique(ids)
+        if uniq_ids.shape[0] != ids.shape[0]:
+            n_dup = int(ids.shape[0] - uniq_ids.shape[0])
+            raise ValueError(
+                f"{path}: anchor_ids has {n_dup} duplicate id(s) — landmark ids "
+                f"must be unique (each row held at most once).")
+        if ids.min() < 0 or ids.max() >= n_train:
+            raise ValueError(
+                f"{path}: anchor_ids out of range [0, {n_train}) — "
+                f"min={int(ids.min())}, max={int(ids.max())}.")
+        if not np.isfinite(targets).all():
+            n_bad = int((~np.isfinite(targets)).any(axis=1).sum())
+            raise ValueError(
+                f"{path}: anchor_targets has {n_bad} non-finite row(s) "
+                f"(NaN/Inf) — refuse to hold a row to a non-finite target.")
+
+        # ── deterministic holdout split (recorded, never sampled) ─────────────
+        holdout_frac = float(self.anchor_holdout_fraction or 0.0)
+        if not (0.0 <= holdout_frac < 1.0):
+            raise ValueError(
+                f"anchor_holdout_fraction must be in [0, 1), got {holdout_frac}.")
+        # Canonicalize by sorted id order so the split is independent of the
+        # file's row order (deterministic given random_state alone).
+        order = np.argsort(ids, kind="stable")
+        ids_sorted = ids[order]
+        targets_sorted = targets[order]
+        n_total = int(ids_sorted.shape[0])
+        n_holdout = int(np.floor(n_total * holdout_frac))
+        holdout_mask = np.zeros(n_total, dtype=bool)
+        if n_holdout > 0:
+            split_rng = np.random.RandomState(int(random_state) + 7211)
+            holdout_pos = split_rng.choice(n_total, size=n_holdout, replace=False)
+            holdout_mask[holdout_pos] = True
+        active_ids = np.ascontiguousarray(ids_sorted[~holdout_mask])
+        active_targets = np.ascontiguousarray(targets_sorted[~holdout_mask])
+        holdout_ids = np.ascontiguousarray(ids_sorted[holdout_mask])
+        if active_ids.shape[0] == 0:
+            raise ValueError(
+                f"{path}: anchor_holdout_fraction={holdout_frac} reserves all "
+                f"{n_total} landmarks as held-out, leaving none to sample for "
+                f"the hold loss.")
+
+        id_hash = hashlib.sha1(
+            np.ascontiguousarray(ids_sorted, dtype=np.int64).tobytes()).hexdigest()[:16]
+        target_hash = hashlib.sha1(
+            np.ascontiguousarray(targets_sorted, dtype=np.float32).tobytes()).hexdigest()[:16]
+        stats = {
+            "anchor_landmark_path": path,
+            "anchor_landmark_id_hash": id_hash,
+            "anchor_landmark_target_hash": target_hash,
+            "anchor_landmark_count": n_total,
+            "anchor_landmark_active_count": int(active_ids.shape[0]),
+            "anchor_landmark_holdout_count": int(holdout_ids.shape[0]),
+            "anchor_holdout_fraction": holdout_frac,
+            "non_anchor_row_count": int(n_train - n_total),
+            "n_train_rows": int(n_train),
+        }
+        logging.info(
+            "O2 sparse anchor landmarks from %s: %d total (%d active, %d "
+            "held-out), id_hash=%s target_hash=%s, non-anchor rows=%d.",
+            path, n_total, active_ids.shape[0], holdout_ids.shape[0],
+            id_hash, target_hash, n_train - n_total)
+        return active_ids, active_targets, holdout_ids, stats
+
     def _anchored_pretrain(self, dataset, targets, n_train, random_state):
         """Pretrain the encoder to regress deterministic 2D anchor targets (MSE).
 
@@ -751,6 +939,8 @@ class ParametricUMAP:
                 "anchored_init_path": self.anchored_init_path,
                 "anchor_hold_weight": self.anchor_hold_weight,
                 "anchor_hold_fraction": self.anchor_hold_fraction,
+                "anchor_ids_path": self.anchor_ids_path,
+                "anchor_holdout_fraction": self.anchor_holdout_fraction,
                 "midnear_enabled": self.midnear_enabled,
                 "mn_pairs_per_batch": self.mn_pairs_per_batch,
                 "mn_weight_scale": self.mn_weight_scale,
@@ -865,14 +1055,65 @@ class ParametricUMAP:
         self.anchor_targets_ = None
         self.anchor_scale_ = None
         self._anchor_targets_dev = None
+        self._hold_sampled_row_ids = []   # O2 debug instrumentation, see _debug_track_hold_samples
+        # O2 sparse-landmark hold pool. Dense (anchored_init pca/file) hold
+        # samples uniformly over [0, n_train) directly — the pool IS the row-id
+        # space, so no extra id array is needed. Sparse (anchor_ids_path) hold
+        # samples over ONLY the loaded landmark id pool: _anchor_ids_pool_dev /
+        # _anchor_ids_pool map a pool index -> the actual training row id, so
+        # non-landmark rows can never be drawn into the loss.
+        self._hold_pool_size = 0
+        self._anchor_ids_pool_dev = None
+        self._anchor_ids_pool = None
+        self.anchor_ids_ = None
+        self.anchor_holdout_ids_ = None
+        self._sparse_anchor_stats = None
         want_hold = bool(self.anchor_hold_weight and self.anchor_hold_weight > 0)
-        has_init = bool(self.anchored_init and self.anchored_init != "none")
-        if want_hold and not has_init:
+        # fable finding: also treat a stray `anchored_init_path` as a dense-source
+        # signal, so anchor_ids_path + anchored_init_path (even with anchored_init
+        # left "none") fails loudly instead of silently ignoring the dense file.
+        has_init = bool((self.anchored_init and self.anchored_init != "none")
+                        or self.anchored_init_path)
+        has_sparse = bool(self.anchor_ids_path)
+        if has_init and has_sparse:
             raise ValueError(
-                "anchor_hold_weight>0 requires anchored_init in {pca,file} to "
-                "define the target source (use anchored_init_epochs=0 for a "
-                "hold-only run with no pretrain).")
-        if has_init:
+                "anchored_init/anchored_init_path and anchor_ids_path are alternative "
+                "anchor-target sources — set only one (anchored_init[_path] for PCA / "
+                "dense reference-atlas distillation, anchor_ids_path for the O2 "
+                "sparse-landmark growth hold).")
+        if want_hold and not has_init and not has_sparse:
+            raise ValueError(
+                "anchor_hold_weight>0 requires anchored_init in {pca,file} or "
+                "anchor_ids_path to define the target source (use "
+                "anchored_init_epochs=0 for a dense hold-only run with no "
+                "pretrain).")
+        if has_sparse and not want_hold:
+            raise ValueError(
+                "anchor_ids_path is set but anchor_hold_weight<=0 — the sparse "
+                "landmark file has no effect without a hold loss (there is no "
+                "sparse pretrain phase); set anchor_hold_weight>0 or clear "
+                "anchor_ids_path.")
+        if has_sparse:
+            active_ids, active_targets, holdout_ids, stats = \
+                self._load_sparse_anchor_landmarks(n_train_rows, random_state=random_state)
+            self.anchor_ids_ = active_ids
+            self.anchor_holdout_ids_ = holdout_ids
+            self.anchor_targets_ = active_targets
+            self._sparse_anchor_stats = stats
+            logging.info(
+                "O2 sparse anchor-hold distillation enabled (w=%.3g, frac=%.3g): "
+                "%d landmark rows (%d active, %d held-out) sampled from a fixed "
+                "pool; non-landmark rows never receive a target.",
+                self.anchor_hold_weight, self.anchor_hold_fraction,
+                stats["anchor_landmark_count"], stats["anchor_landmark_active_count"],
+                stats["anchor_landmark_holdout_count"])
+            self._anchor_targets_dev = torch.from_numpy(
+                np.asarray(active_targets, dtype=np.float32)).to(self.device)
+            self._anchor_ids_pool_dev = torch.from_numpy(
+                np.asarray(active_ids, dtype=np.int64)).to(self.device)
+            self._anchor_ids_pool = np.asarray(active_ids, dtype=np.int64)
+            self._hold_pool_size = int(active_ids.shape[0])
+        elif has_init:
             targets = self._compute_anchor_targets(
                 X, n_train_rows, random_state=random_state)
             self.anchor_targets_ = targets
@@ -889,6 +1130,7 @@ class ParametricUMAP:
                     self.anchor_hold_weight, self.anchor_hold_fraction)
                 self._anchor_targets_dev = torch.from_numpy(
                     np.asarray(targets, dtype=np.float32)).to(self.device)
+                self._hold_pool_size = int(n_train_rows)
 
         # ── Mid-near pair loss setup (plan §6 Phase 1, PaCMAP-style) ──
         mn_rng = np.random.RandomState(random_state + 104729)
@@ -972,6 +1214,11 @@ class ParametricUMAP:
             **{f"pipeline_{k}": v for k, v in getattr(self, "_pipeline_info", {}).items()},
             "verified_hashes": getattr(self, "_pipeline_verified_hashes", {}),
         }
+        # O2: fold the sparse-landmark accounting (id/target hashes, active +
+        # holdout + non-anchor counts) into the run's train_stats so a manifest
+        # proves exactly what was held, without waiting for the run to finish.
+        if self._sparse_anchor_stats:
+            self._train_stats.update(self._sparse_anchor_stats)
         logging.info("P1 input pipeline: %s", getattr(self, "_pipeline_info", {}))
         # S0: atomic admission artifact — pipeline + verified graph/shard hashes,
         # written BEFORE update 0 so a mid-training crash still leaves proof of what
@@ -1144,25 +1391,40 @@ class ParametricUMAP:
                         loss = loss + w_mn * mn_loss
                         mn_loss_val = mn_loss.item() if use_wandb else 0.0
 
-                # ── Anchor-hold term (reference-atlas distillation, §4.3) ──
+                # ── Anchor-hold term (reference-atlas distillation, §4.3 / O2
+                # sparse-landmark growth hold) ──
                 # Draw anchor_hold_fraction of the batch as random anchors and
                 # pull their projections toward the frozen teacher targets. Tiny
                 # n x 2 target tensor is resident on the training device; gathers
                 # reuse the fast-path feature matrix when active, else the lazy
                 # dataset (memmap-safe). Composes with midnear + the fast path.
+                # The sampled index space is the HOLD POOL (`_hold_pool_size`):
+                # for dense anchored_init it is [0, n_train) directly; for O2
+                # sparse anchor_ids_path it is ONLY the landmark id pool
+                # (`_anchor_ids_pool[_dev]` maps pool index -> training row id),
+                # so a non-landmark row can never be drawn into this term.
                 hold_loss_val = 0.0
                 if self._anchor_targets_dev is not None:
                     h_m = max(1, int(self.batch_size * self.anchor_hold_fraction))
+                    pool_n = self._hold_pool_size
                     if self._fast_device_path:
-                        h_idx = torch.randint(0, n_train_rows, (h_m,),
-                                              generator=hold_gen, device=self.device)
-                        h_feats = self._X_dev.index_select(h_idx)
+                        pool_idx = torch.randint(0, pool_n, (h_m,),
+                                                 generator=hold_gen, device=self.device)
+                        row_idx = (self._anchor_ids_pool_dev.index_select(0, pool_idx)
+                                   if self._anchor_ids_pool_dev is not None else pool_idx)
+                        h_feats = self._X_dev.index_select(row_idx)
+                        if getattr(self, "_debug_track_hold_samples", False):
+                            self._hold_sampled_row_ids.extend(row_idx.tolist())
                     else:
-                        h_np = hold_rng.randint(0, n_train_rows, size=h_m)
-                        h_feats = self._gather_feature_rows(dataset, h_np)
-                        h_idx = torch.as_tensor(h_np, dtype=torch.long,
-                                                device=self.device)
-                    h_tgt = self._anchor_targets_dev.index_select(0, h_idx)
+                        pool_idx_np = hold_rng.randint(0, pool_n, size=h_m)
+                        row_np = (self._anchor_ids_pool[pool_idx_np]
+                                  if self._anchor_ids_pool is not None else pool_idx_np)
+                        h_feats = self._gather_feature_rows(dataset, row_np)
+                        pool_idx = torch.as_tensor(pool_idx_np, dtype=torch.long,
+                                                   device=self.device)
+                        if getattr(self, "_debug_track_hold_samples", False):
+                            self._hold_sampled_row_ids.extend(np.asarray(row_np).tolist())
+                    h_tgt = self._anchor_targets_dev.index_select(0, pool_idx)
                     with torch.autocast(device_type='cuda' if use_amp else 'cpu',
                                         enabled=use_amp):
                         z_h = self.model(h_feats)

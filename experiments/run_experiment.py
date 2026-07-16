@@ -517,6 +517,8 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         anchored_init_path=tc.anchored_init_path,
         anchor_hold_weight=tc.anchor_hold_weight,
         anchor_hold_fraction=tc.anchor_hold_fraction,
+        anchor_ids_path=tc.anchor_ids_path,                 # O2 sparse landmarks
+        anchor_holdout_fraction=tc.anchor_holdout_fraction,
         midnear_enabled=tc.midnear_enabled,
         mn_pairs_per_batch=tc.mn_pairs_per_batch,
         mn_weight_scale=tc.mn_weight_scale,
