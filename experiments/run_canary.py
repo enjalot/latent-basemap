@@ -88,10 +88,16 @@ def main():
         shutil.rmtree(args.run_dir)      # fresh deterministic dir for this canary
 
     # Run the raw experiment runner as a child. Its exit code is NOT trusted for
-    # success (we re-judge below); we only surface a hard crash.
+    # success (we re-judge below); we only surface a hard crash. The inherited GPU
+    # lease fd (BASEMAP_GPU_LEASE_FD from the controller) must be kept open across
+    # the exec so the child's require_active_lease() passes.
     env = dict(os.environ, BASEMAP_RUN_DIR=args.run_dir)
+    pass_fds = ()
+    lease_fd = os.environ.get("BASEMAP_GPU_LEASE_FD")
+    if lease_fd and lease_fd.isdigit():
+        pass_fds = (int(lease_fd),)
     proc = subprocess.run([sys.executable, "experiments/run_experiment.py", scratch_cfg],
-                          env=env)
+                          env=env, close_fds=True, pass_fds=pass_fds)
     child_rc = proc.returncode
 
     rj = os.path.join(args.run_dir, "results.json")
