@@ -1,0 +1,68 @@
+{
+ "gate": "o2_sparse_hold_frontier",
+ "control": "/data/latent-basemap/closure/o2/control_s42",
+ "anchor_id_hash": "556adf2798df",
+ "control_kpi_mean": {
+  "ffr": 0.5627333333333334,
+  "purity_k1024": 0.9169333333333333,
+  "density": 0.20859999999999998
+ },
+ "n_landmark_sample": 20000,
+ "k": 15,
+ "results": {
+  "w2": {
+   "landmark_overlap_jaccard": 0.0169,
+   "old_point_drift_norm": 0.007,
+   "kpi": {
+    "ffr": 0.3244,
+    "purity_k1024": 0.5772,
+    "density": 0.0768
+   },
+   "kpi_ratio_vs_control": {
+    "ffr": 0.5765,
+    "purity_k1024": 0.6295,
+    "density": 0.3682
+   },
+   "overlap_ge_0.5": false,
+   "kpi_ge_90pct": false,
+   "passed": false
+  },
+  "w10": {
+   "landmark_overlap_jaccard": 0.0167,
+   "old_point_drift_norm": 0.0071,
+   "kpi": {
+    "ffr": 0.3122,
+    "purity_k1024": 0.5621,
+    "density": 0.0606
+   },
+   "kpi_ratio_vs_control": {
+    "ffr": 0.5548,
+    "purity_k1024": 0.613,
+    "density": 0.2905
+   },
+   "overlap_ge_0.5": false,
+   "kpi_ge_90pct": false,
+   "passed": false
+  },
+  "w50": {
+   "landmark_overlap_jaccard": 0.016,
+   "old_point_drift_norm": 0.0074,
+   "kpi": {
+    "ffr": 0.2996,
+    "purity_k1024": 0.5473,
+    "density": 0.0605
+   },
+   "kpi_ratio_vs_control": {
+    "ffr": 0.5324,
+    "purity_k1024": 0.5969,
+    "density": 0.29
+   },
+   "overlap_ge_0.5": false,
+   "kpi_ge_90pct": false,
+   "passed": false
+  }
+ },
+ "selected_weight": null,
+ "rule": "select w iff landmark low-D kNN overlap >= 0.5 AND every panel KPI >= 90% of the unanchored control. drift is diagnostic.",
+ "surrogate_note": "landmarks = deterministic random 4M subset held to the seed-42 control's coords (no real 2M->4M provenance). FLAGGED for review."
+}
