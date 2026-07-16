@@ -1,0 +1,168 @@
+{
+  "schema": "evidence_status.v1",
+  "program": "basemap-100m",
+  "policy": "Decision discovery is accepted-only unless the caller explicitly opts into another status. Diagnostic-only artifacts never gate decisions by default.",
+  "events": [
+    {
+      "event_id": "20260716T000001Z-g1-accepted",
+      "evidence_id": "g1.stdcurve-decision",
+      "recorded_utc": "2026-07-16T00:00:01Z",
+      "status": "accepted",
+      "reason": "Owner correction accepts the G1 8M standard-curve decision and finalizes legacy_lp.",
+      "reviewer_source": {
+        "uri": "gsv:~/code/latent-labs/logs/topics/basemap.md#2026-07-16-owner-correction",
+        "sha256": "7b2ebd6c47d660d8bea6705c391dfb18fb09ba436bd7201a5ff56d3d6d470f83"
+      },
+      "source_signatures": [
+        {
+          "path": "r1_g1/stdcurve_decision.json",
+          "sha256": "6380e6c1ec2e529597d0fd2c887625b7d35fbf49a6d103eb31df5c069555800e"
+        }
+      ],
+      "replaces": [],
+      "superseded_by": []
+    },
+    {
+      "event_id": "20260716T000002Z-2m-backfill-accepted",
+      "evidence_id": "kernel.2m-three-seed-backfill",
+      "recorded_utc": "2026-07-16T00:00:02Z",
+      "status": "accepted",
+      "reason": "Owner correction accepts the seed-44 backfill and the resulting three-seed 2M direction as corroboration.",
+      "reviewer_source": {
+        "uri": "gsv:~/code/latent-labs/logs/topics/basemap.md#2026-07-16-owner-correction",
+        "sha256": "7b2ebd6c47d660d8bea6705c391dfb18fb09ba436bd7201a5ff56d3d6d470f83"
+      },
+      "source_signatures": [
+        {
+          "path": "r1_kernel/complete_2m_3seed_v22.json",
+          "sha256": "ec07701c4236f6e8dcccd0559b62494a25c38f6be10f13651abefda689aa8ec9"
+        }
+      ],
+      "replaces": [],
+      "superseded_by": []
+    },
+    {
+      "event_id": "20260716T000003Z-o1-transductive-provisional",
+      "evidence_id": "o1.prompted-transductive",
+      "recorded_utc": "2026-07-16T00:00:03Z",
+      "status": "provisional",
+      "reason": "The local prompted embeddings and older control used different embedding implementations, so the scalar comparison is not a clean prompt-only effect.",
+      "reviewer_source": {
+        "uri": "gsv:~/code/latent-labs/logs/topics/basemap.md#2026-07-16-owner-correction",
+        "sha256": "7b2ebd6c47d660d8bea6705c391dfb18fb09ba436bd7201a5ff56d3d6d470f83"
+      },
+      "source_signatures": [
+        {
+          "path": "r1_o1/o1_prompted_vs_unprompted.json",
+          "sha256": "e917ea875183e98c392c256ddb2df705c3ee8ae8ea4fd1e9c3ee603105bd8f68"
+        },
+        {
+          "path": "r1_o1/complete_200k_prompted_v22.json",
+          "sha256": "c0c200b6dee155f1b9b6415ab0296d9f2ec9dc4323b75798bc9bc34c55722cbb"
+        }
+      ],
+      "replaces": [],
+      "superseded_by": ["round-0003"]
+    },
+    {
+      "event_id": "20260716T000004Z-o1-topology-provisional",
+      "evidence_id": "o1.high-d-topology",
+      "recorded_utc": "2026-07-16T00:00:04Z",
+      "status": "provisional",
+      "reason": "The prompt materially moves high-D topology, but the field labeled Jaccard is retention and the embedding implementation is not shared across arms.",
+      "reviewer_source": {
+        "uri": "gsv:~/code/latent-labs/logs/topics/basemap.md#2026-07-16-owner-correction",
+        "sha256": "7b2ebd6c47d660d8bea6705c391dfb18fb09ba436bd7201a5ff56d3d6d470f83"
+      },
+      "source_signatures": [
+        {
+          "path": "r1_o1/o1_prompted_vs_unprompted.json",
+          "sha256": "e917ea875183e98c392c256ddb2df705c3ee8ae8ea4fd1e9c3ee603105bd8f68"
+        }
+      ],
+      "replaces": [],
+      "superseded_by": ["round-0003"]
+    },
+    {
+      "event_id": "20260716T000005Z-o1-projection-invalid",
+      "evidence_id": "o1.prompted-projection",
+      "recorded_utc": "2026-07-16T00:00:05Z",
+      "status": "invalidated",
+      "reason": "The scorer ignored the produced prompted held-out queries and used unprompted raw-source queries, so the projection delta is cross-convention and withdrawn.",
+      "reviewer_source": {
+        "uri": "gsv:~/code/latent-labs/logs/topics/basemap.md#2026-07-16-owner-correction",
+        "sha256": "7b2ebd6c47d660d8bea6705c391dfb18fb09ba436bd7201a5ff56d3d6d470f83"
+      },
+      "source_signatures": [
+        {
+          "path": "r1_o1/o1_prompted_vs_unprompted.json",
+          "sha256": "e917ea875183e98c392c256ddb2df705c3ee8ae8ea4fd1e9c3ee603105bd8f68"
+        }
+      ],
+      "replaces": [],
+      "superseded_by": ["round-0003"]
+    },
+    {
+      "event_id": "20260716T000006Z-o2-selector-invalid",
+      "evidence_id": "o2.frontier-selector",
+      "recorded_utc": "2026-07-16T00:00:06Z",
+      "status": "invalidated",
+      "reason": "The selector mixed cohorts/self-neighbours and compared 166,667-update treatments with 500,000-update controls; it cannot select or reject a growth treatment.",
+      "reviewer_source": {
+        "uri": "gsv:~/code/latent-labs/logs/topics/basemap.md#2026-07-16-owner-correction",
+        "sha256": "7b2ebd6c47d660d8bea6705c391dfb18fb09ba436bd7201a5ff56d3d6d470f83"
+      },
+      "source_signatures": [
+        {
+          "path": "r1_o2/o2_frontier_selection.json",
+          "sha256": "9e0232c9c042bb439edc0290b4f69275cf36a344b605edb46767cd547dbfdd16"
+        }
+      ],
+      "replaces": [],
+      "superseded_by": ["round-0004"]
+    },
+    {
+      "event_id": "20260716T000007Z-o2-verdict-invalid",
+      "evidence_id": "o2.scientific-verdict",
+      "recorded_utc": "2026-07-16T00:00:07Z",
+      "status": "invalidated",
+      "reason": "The experiment used a random subset of a trained 4M map rather than literal nested 2M-to-4M growth, used the wrong landmark dose, and had an uncalibrated hold scale; the negative verdict is withdrawn.",
+      "reviewer_source": {
+        "uri": "gsv:~/code/latent-labs/logs/topics/basemap.md#2026-07-16-owner-correction",
+        "sha256": "7b2ebd6c47d660d8bea6705c391dfb18fb09ba436bd7201a5ff56d3d6d470f83"
+      },
+      "source_signatures": [
+        {
+          "path": "r1_o2/o2_frontier_selection.json",
+          "sha256": "9e0232c9c042bb439edc0290b4f69275cf36a344b605edb46767cd547dbfdd16"
+        }
+      ],
+      "replaces": [],
+      "superseded_by": ["round-0004"]
+    },
+    {
+      "event_id": "20260716T000008Z-o2-maps-diagnostic",
+      "evidence_id": "o2.engineering-maps",
+      "recorded_utc": "2026-07-16T00:00:08Z",
+      "status": "provisional",
+      "diagnostic_only": true,
+      "reason": "The completed maps remain useful engineering diagnostics for the sparse-anchor API but are not matched growth evidence.",
+      "reviewer_source": {
+        "uri": "gsv:~/code/latent-labs/logs/topics/basemap.md#2026-07-16-owner-correction",
+        "sha256": "7b2ebd6c47d660d8bea6705c391dfb18fb09ba436bd7201a5ff56d3d6d470f83"
+      },
+      "source_signatures": [
+        {
+          "path": "r1_o2/complete_4m_controls_v22.json",
+          "sha256": "d7cbd56547f312a31152565d351bb290932a099b617a902d2fa68252523a0e99"
+        },
+        {
+          "path": "r1_o2/complete_4m_frontier_v22.json",
+          "sha256": "8fbdf8f26423c88ccbd56fea6181798b892945a924348e772349c3fd1949c081"
+        }
+      ],
+      "replaces": [],
+      "superseded_by": ["round-0004"]
+    }
+  ]
+}

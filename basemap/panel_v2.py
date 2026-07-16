@@ -31,6 +31,9 @@ from __future__ import annotations
 import os, json, glob, time, hashlib, resource, subprocess, dataclasses
 import numpy as np
 
+from .artifact_identity import (canonical_json, ordered_array_sha256, path_signature,
+                                sha256_bytes)
+
 FORMULA_VERSION = "panel_v2.2-2026-07-15"   # exact top-k_hit truth + approx k_frac membership; byte-capped rerank
 PANEL_SCHEMA = "panel_v2"
 D_DEFAULT_FRAC = 0.001
@@ -123,9 +126,10 @@ class _LazyConcat:
     """Read-only lazy concatenation of memmapped shards (raw-headerless float32 or
     .npy) that supports ``len``, ``[i:j]``, and fancy ``[idx_array]`` and returns
     float32 arrays — used so the 150M substrate never lands in RAM at once (P0-C)."""
-    def __init__(self, mms, dim):
+    def __init__(self, mms, dim, shard_paths=None):
         self.mms = mms
         self.dim = dim
+        self.shard_paths = [os.path.realpath(p) for p in (shard_paths or [])]
         self.lens = np.array([len(m) for m in mms], dtype=np.int64)
         self.offsets = np.concatenate([[0], np.cumsum(self.lens)])
         self.N = int(self.offsets[-1])
@@ -136,6 +140,10 @@ class _LazyConcat:
     @property
     def shape(self):
         return (self.N, self.dim)
+
+    @property
+    def dtype(self):
+        return self.mms[0].dtype
 
     def _slice(self, s, e):
         parts = []
@@ -197,7 +205,7 @@ def load_embeddings(path, dim: int | None = None):
     d = mms[0].shape[1]
     if any(m.shape[1] != d for m in mms):
         raise ValueError("shards have inconsistent dim")
-    return _LazyConcat(mms, d)
+    return _LazyConcat(mms, d, shard_paths=shards)
 
 
 # ── id handling (P0-C: exact, never sort-inferred) ───────────────────────────────
@@ -538,41 +546,76 @@ def score_projection(Xa, Z, cfg: PanelV2Config, projection: dict, x_ids=None):
 
 # ── canonical entry point (P0-C) ─────────────────────────────────────────────────
 
-def _matrix_fingerprint(F, sample_rows=131072):
-    """Content fingerprint of a (possibly memmap) hi-D matrix: shape + dtype +
-    a strided row sample rounded to 4 dp. Cheap and stable across processes; the
-    same X always yields the same key, a different X does not (S2.5)."""
-    n = len(F); d = int(np.asarray(F[:1]).shape[1])
-    stride = max(1, n // max(1, sample_rows))
-    idx = np.arange(0, n, stride)[:sample_rows]
-    rows = np.asarray(F[idx] if hasattr(F, "__getitem__") else F, dtype=np.float32)
-    h = hashlib.sha1()
-    h.update(f"{n}x{d}:{np.asarray(F[:1]).dtype}".encode())
-    h.update(np.ascontiguousarray(np.round(rows, 4)).tobytes())
-    return h.hexdigest()[:16]
+def _matrix_identity(F):
+    """Full ordered data identity: every shard byte or every in-memory row."""
+    shard_paths = list(getattr(F, "shard_paths", []) or [])
+    if not shard_paths and isinstance(F, np.memmap) and getattr(F, "filename", None):
+        shard_paths = [os.path.realpath(os.fspath(F.filename))]
+    shape = [int(v) for v in F.shape]
+    dtype = np.dtype(F.dtype if hasattr(F, "dtype") else np.asarray(F[:1]).dtype).str
+    if shard_paths:
+        shards = []
+        for position, path in enumerate(shard_paths):
+            sig = path_signature(path)
+            shards.append({"position": position, "name": os.path.basename(path),
+                           "bytes": sig["bytes"], "sha256": sig["sha256"]})
+        return {"kind": "ordered_shards", "shape": shape, "dtype": dtype, "shards": shards}
+    return {"kind": "ordered_array", "shape": shape, "dtype": dtype,
+            "sha256": ordered_array_sha256(F)}
 
 
-def hiD_reference_key(Xa, aidx, cfg: PanelV2Config, centroids_by_k=None, kf=None):
+def _centroid_identities(centroids_by_k):
+    identities = {}
+    for kc, centroids in sorted((centroids_by_k or {}).items()):
+        identities[str(kc)] = {
+            "shape": [int(v) for v in np.asarray(centroids).shape],
+            "dtype": np.asarray(centroids).dtype.str,
+            "sha256": ordered_array_sha256(np.asarray(centroids)),
+        }
+    return identities
+
+
+def hiD_reference_key(Xa, aidx, cfg: PanelV2Config, centroids_by_k=None, kf=None,
+                      *, query_ids=None, convention=None, data_identity=None,
+                      centroid_identities=None):
     """The content-addressed key that makes a hi-D reference REUSABLE only for an
     identical (data, anchors, k-params, formula, centroids) tuple. Any drift ->
     a different key -> the verify below fails closed rather than mis-scoring."""
+    anchors = np.ascontiguousarray(np.asarray(aidx, dtype=np.int64))
+    queries = (None if query_ids is None else
+               np.ascontiguousarray(np.asarray(query_ids, dtype=np.int64)))
     parts = {
-        "data": _matrix_fingerprint(Xa), "anchors": _ids_hash(np.asarray(aidx)),
-        "k_hit": int(cfg.k_hit), "k_frac": int(kf) if kf else None,
-        "k_density": int(cfg.k_density), "frac": float(cfg.frac),
-        "overselect": int(cfg.overselect), "formula": cfg.formula_version,
-        "centroids": {str(kc): _ids_hash(np.round(np.asarray(C, np.float32), 4))
-                      for kc, C in (centroids_by_k or {}).items()}}
-    return hashlib.sha1(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:16], parts
+        "schema": "hiD_reference_identity.v2",
+        "data": data_identity or _matrix_identity(Xa),
+        "anchors": {"count": len(anchors), "sha256": sha256_bytes(anchors.tobytes())},
+        "queries": (None if queries is None else
+                    {"count": len(queries), "sha256": sha256_bytes(queries.tobytes())}),
+        "config": dataclasses.asdict(cfg),
+        "k_frac_effective": int(kf) if kf is not None else None,
+        "formula": cfg.formula_version,
+        "convention": convention or {
+            "row_order": "ordered corpus rows",
+            "distance": "squared L2; exact fp32 rerank for k_hit/density",
+            "self_exclusion": True,
+            "anchor_namespace": "zero-based corpus row IDs",
+        },
+        "centroids": centroid_identities or _centroid_identities(centroids_by_k),
+    }
+    return sha256_bytes(canonical_json(parts)), parts
 
 
-def build_hiD_reference(Xa, aidx, cfg: PanelV2Config, centroids_by_k=None):
+def build_hiD_reference(Xa, aidx, cfg: PanelV2Config, centroids_by_k=None,
+                        *, query_ids=None, convention=None, data_identity=None,
+                        centroid_identities=None):
     """Compute every MAP-INDEPENDENT high-D quantity ONCE: exact top-k_hit truth,
     approximate k_frac membership, exact density radii (all anchors), and centroid
     labels. Scoring N maps of the same corpus then reuses this single reference and
     only repeats the cheap low-D passes (S2.5 'done when')."""
     kf = max(cfg.k_hit, int(np.ceil(cfg.frac * len(Xa))))
-    key, parts = hiD_reference_key(Xa, aidx, cfg, centroids_by_k, kf=kf)
+    key, parts = hiD_reference_key(
+        Xa, aidx, cfg, centroids_by_k, kf=kf, query_ids=query_ids,
+        convention=convention, data_identity=data_identity,
+        centroid_identities=centroid_identities)
     hi_hit, _, guard_hit = _self_knn(Xa, aidx, cfg.k_hit, cfg, hi_dim=True, exact=True)
     hi_frac, _, _ = _self_knn(Xa, aidx, kf, cfg, hi_dim=True, exact=False)
     _, hd_r, guard_den = _self_knn(Xa, aidx, cfg.k_density, cfg, hi_dim=True, want_dist=True)
@@ -607,14 +650,17 @@ def load_hiD_reference(path):
             "guard_den": meta["guard_den"], "formula_version": meta["formula_version"]}
 
 
-def _resolve_reference(Xa, aidx, cfg, centroids_by_k, hiD_reference):
+def _resolve_reference(Xa, aidx, cfg, centroids_by_k, hiD_reference,
+                       reference_identity=None):
     """Return a verified reference: compute inline if none given, else CHECK the
     supplied one against a freshly recomputed content key and RAISE on any drift
     (fail-closed, S2.5 'verified')."""
     if hiD_reference is None:
-        return build_hiD_reference(Xa, aidx, cfg, centroids_by_k), False
+        return build_hiD_reference(Xa, aidx, cfg, centroids_by_k,
+                                   **(reference_identity or {})), False
     kf = max(cfg.k_hit, int(np.ceil(cfg.frac * len(Xa))))
-    key, _ = hiD_reference_key(Xa, aidx, cfg, centroids_by_k, kf=kf)
+    key, _ = hiD_reference_key(Xa, aidx, cfg, centroids_by_k, kf=kf,
+                               **(reference_identity or {}))
     if key != hiD_reference.get("key"):
         raise ValueError(f"hiD_reference key mismatch: supplied {hiD_reference.get('key')} "
                          f"!= recomputed {key} (data/anchors/params/centroids drifted).")
@@ -625,7 +671,7 @@ def _resolve_reference(Xa, aidx, cfg, centroids_by_k, hiD_reference):
 
 def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
                 centroids_by_k=None, anchor_masks=None, projection=None,
-                hiD_reference=None, provenance):
+                hiD_reference=None, reference_identity=None, provenance):
     """The single evaluator both the runner and CLI call. Aligns X to Z exactly,
     runs ONE high-D and ONE low-D neighbour pass shared across ffr/recall/purity,
     an exact-radius pass for density, optional projection fidelity, and emits a
@@ -668,7 +714,8 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
     # S2.5: hi_hit/hi_frac/labels/density-radii are MAP-INDEPENDENT — computed once
     # in a content-verified reference (identical to the inline path by construction),
     # so rescoring N maps of one corpus repeats only the low-D passes below.
-    ref, ref_reused = _resolve_reference(Xa, aidx, cfg, centroids_by_k, hiD_reference)
+    ref, ref_reused = _resolve_reference(Xa, aidx, cfg, centroids_by_k, hiD_reference,
+                                         reference_identity=reference_identity)
     hi_hit, hi_frac, guard_hit = ref["hi_hit"], ref["hi_frac"], ref["guard_hit"]
     lo_kf, _, _ = _self_knn(Z, aidx, kf, cfg, hi_dim=False)
 
