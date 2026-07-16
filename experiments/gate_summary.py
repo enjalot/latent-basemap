@@ -53,12 +53,53 @@ def check_2x2():
     if not d:
         return False, "missing complete.json", {}
     want_cells = {"mn0_s1_ws0", "mn0_s1_ws1", "mn1_s4_ws0", "mn1_s4_ws1"}
-    got = {k.rsplit("_s", 1)[0] for k in d.get("runs", {})}
-    seeds = {int(k.rsplit("_s", 1)[1]) for k in d.get("runs", {}) if k.rsplit("_s", 1)[1].isdigit()}
-    ok = (len(d.get("runs", {})) == 12 and want_cells.issubset(got)
-          and seeds == {42, 43, 44}
+    runs = d.get("runs", {})
+    got = {k.rsplit("_s", 1)[0] for k in runs}
+    seeds = {int(k.rsplit("_s", 1)[1]) for k in runs if k.rsplit("_s", 1)[1].isdigit()}
+    # C1: prove the EXACT cell×seed cross-product (12 = 4 cells × 3 seeds), not
+    # just the count + membership (critique #9).
+    want_cross = {f"{c}_s{s}" for c in want_cells for s in (42, 43, 44)}
+    cross_ok = set(runs) == want_cross
+    v22 = "panel_v2.2" in str(d.get("formula_version"))
+    ok = (len(runs) == 12 and want_cells == got and seeds == {42, 43, 44} and cross_ok and v22
           and int(d.get("n_holdout_unique", 0)) == int(d.get("n_holdout", -1)))
-    return ok, f"cells={sorted(got)} seeds={sorted(seeds)} n={len(d.get('runs',{}))}", {}
+    return ok, (f"cells={sorted(got)} seeds={sorted(seeds)} n={len(runs)} "
+                f"exact_cross={cross_ok} v2.2={v22}"), {}
+
+
+def check_kernel_v22():
+    """C1: the missing v2.2 kernel rescore (G0). Reopens complete_200k_v22 +
+    complete_2m_v22 + kernel_decision_v22 and requires: formula v2.2, ONE shared
+    reference reused on EVERY map, clean scorer, the fresh evaluator wall/peak gate
+    passed, and legacy winning BOTH primary axes vs both umap arms at both scales."""
+    dec = _load(os.path.join(EVID, "r1_kernel", "kernel_decision_v22.json"))
+    p200 = _load(os.path.join(EVID, "r1_kernel", "complete_200k_v22.json"))
+    p2m = _load(os.path.join(EVID, "r1_kernel", "complete_2m_v22.json"))
+    if not (dec and p200 and p2m):
+        return False, "missing kernel v2.2 rescore evidence (complete_200k/2m/decision)", {}
+    problems = []
+    for name, panel, n_expected in [("200k", p200, 9), ("2m", p2m, 6)]:
+        runs = panel.get("runs", {})
+        if len(runs) != n_expected:
+            problems.append(f"{name}:n={len(runs)}!={n_expected}")
+        if "panel_v2.2" not in str(panel.get("formula_version")):
+            problems.append(f"{name}:not_v2.2")
+        if panel.get("scorer_dirty") is not False:
+            problems.append(f"{name}:scorer_dirty")
+        keys = {r.get("hiD_reference_key") for r in runs.values()}
+        if len(keys) != 1 or None in keys or not all(r.get("hiD_reference_reused") for r in runs.values()):
+            problems.append(f"{name}:reference_not_reused({keys})")
+    # decision: legacy wins both axes vs both umap arms at both scales
+    if not dec.get("evaluator_gate_passed"):
+        problems.append("evaluator_gate_failed")
+    for scale, w in (dec.get("primary_axis_winners") or {}).items():
+        for q, axes in w.items():
+            for ax, winner in axes.items():
+                if winner != "legacy":
+                    problems.append(f"{scale}:{q}:{ax}={winner}")
+    ok = not problems
+    return ok, f"200k_ref={p200.get('hiD_reference_key')} 2m_ref={p2m.get('hiD_reference_key')} "\
+               f"evaluator_gate={dec.get('evaluator_gate_passed')} problems={problems}", {}
 
 
 def check_a3():
@@ -92,14 +133,17 @@ def check_golden():
     if not d:
         return False, "missing golden_2m_extended_v22.json", {}
     # RECOMPUTE the pass from values/tolerances — do not trust d['passed'].
+    # C1: a MISSING streamed/reference/tolerance triplet is a FAILURE, not a
+    # silently-skipped metric (critique #9).
     need = {"ffr", "recall@k", "density", "purity_k1024", "proj_ffr"}
     have = set(d.get("metrics_validated", []))
     streamed, ref, tol = d.get("streamed", {}), d.get("reference", {}), d.get("tolerances", {})
-    recomputed = all(abs(streamed[m] - ref[m]) <= tol[m] for m in have
-                     if m in streamed and m in ref and m in tol)
-    ok = (need.issubset(have) and recomputed and d.get("code_dirty") is False
-          and "panel_v2.2" in str(d.get("formula_version")))
-    return ok, f"metrics={sorted(have)} recomputed_pass={recomputed} dirty={d.get('code_dirty')}", {}
+    triplet_complete = all(m in streamed and m in ref and m in tol for m in need)
+    recomputed = triplet_complete and all(abs(streamed[m] - ref[m]) <= tol[m] for m in need)
+    ok = (need.issubset(have) and triplet_complete and recomputed
+          and d.get("code_dirty") is False and "panel_v2.2" in str(d.get("formula_version")))
+    return ok, (f"metrics={sorted(have)} triplet_complete={triplet_complete} "
+                f"recomputed_pass={recomputed} dirty={d.get('code_dirty')}"), {}
 
 
 def check_bridge():
@@ -159,7 +203,22 @@ def check_bridge():
 
 CHECKS = [("1_corrected_2x2", check_2x2), ("2_a3_regen", check_a3),
           ("3a_knn_cost", check_knn_cost), ("3b_golden_2m_extended", check_golden),
-          ("4_weighted_8m_bridge", check_bridge)]
+          ("4_weighted_8m_bridge", check_bridge), ("5_kernel_v22_rescore", check_kernel_v22)]
+
+# C1: per-source content hashes stamped into the certificate so the closure is
+# traceable to exact bytes, not just to a pass/fail boolean.
+SOURCE_FILES = {
+    "ablation_2x2": os.path.join(EVID, "r1_ablation_mn4", "complete.json"),
+    "a3_rescore": os.path.join(EVID, "a3_rescore.json"),
+    "knn_cost": os.path.join(EVID, "r1_rescore", "knn_cost.json"),
+    "golden_2m_extended": os.path.join(EVID, "r1_rescore", "golden_2m_extended_v22.json"),
+    "canary_pass": os.path.join(EVID, "r1_8m", "canary_8m.json"),
+    "canary_abort_demo": os.path.join(EVID, "r1_8m", "canary_abort_demo.json"),
+    "bridge_scores": os.path.join(EVID, "r1_8m", "bridge_weighted.json"),
+    "kernel_200k_v22": os.path.join(EVID, "r1_kernel", "complete_200k_v22.json"),
+    "kernel_2m_v22": os.path.join(EVID, "r1_kernel", "complete_2m_v22.json"),
+    "kernel_decision_v22": os.path.join(EVID, "r1_kernel", "kernel_decision_v22.json"),
+}
 
 
 def main():
@@ -175,13 +234,32 @@ def main():
         items[name] = {"passed": bool(ok), "detail": detail, **extra}
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}: {detail}")
     closed = all(v["passed"] for v in items.values())
+    # C1: stamp per-source content hashes so the certificate is traceable to exact
+    # bytes. A missing pinned source is itself a red flag surfaced here.
+    source_hashes = {k: _sha(p) for k, p in SOURCE_FILES.items()}
+    missing = [k for k, h in source_hashes.items() if h is None]
     out = {"gate": "r0_1_closure", "closed": bool(closed), "items": items,
-           "rule": "reopens raw pinned sources; recomputes golden deltas + decisions; binds actual "
-                   "pipeline/sampler/schedule/budget/updates to persisted run results, not summaries."}
+           "source_hashes": source_hashes, "missing_sources": missing,
+           "code_commit": _git_head(),
+           "rule": "reopens raw pinned sources; recomputes golden deltas + decisions + the exact "
+                   "cell×seed cross-product; requires the v2.2 kernel rescore with a reused shared "
+                   "reference; binds actual pipeline/sampler/schedule/budget/updates to persisted "
+                   "run results, not summaries; stamps per-source content hashes."}
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     json.dump(out, open(args.out, "w"), indent=1)
     print(f"\nR0.1 closed = {closed}  ->  {args.out}")
+    if missing:
+        print(f"  (missing pinned sources: {missing})")
     sys.exit(0 if closed else 3)
+
+
+def _git_head():
+    import subprocess
+    try:
+        return subprocess.check_output(["git", "-C", ROOT, "rev-parse", "HEAD"],
+                                       text=True).strip()[:12]
+    except Exception:
+        return None
 
 
 if __name__ == "__main__":
