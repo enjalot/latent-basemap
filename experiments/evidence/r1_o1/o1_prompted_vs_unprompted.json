@@ -1,0 +1,117 @@
+{
+ "gate": "o1_prompted_vs_unprompted",
+ "formula_version": "panel_v2.2-2026-07-15",
+ "prompted_reference_key": "7e4271f943f23b8a",
+ "unprompted_reference_key": "a904ee42a36d4013",
+ "prompted_scorer_dirty": false,
+ "high_d_prompt_shift": {
+  "neighbor_overlap": {
+   "k": 50,
+   "n_anchors": 2000,
+   "mean_overlap": 0.7617800235748291,
+   "std_overlap": 0.10987825691699982,
+   "min_overlap": 0.0,
+   "max_overlap": 0.9599999785423279
+  },
+  "centroid_agreement": {
+   "k256": {
+    "ari": 0.5753265324597573,
+    "n_clusters": 256
+   },
+   "k1024": {
+    "ari": 0.5280220589918175,
+    "n_clusters": 1024
+   },
+   "n_sample": 20000
+  },
+  "seed": 7,
+  "created_utc": "2026-07-16T06:09:57+00:00"
+ },
+ "metric_deltas": {
+  "ffr": {
+   "prompted_mean": 0.631,
+   "unprompted_mean": 0.64683,
+   "delta_mean": -0.01583,
+   "delta_sd": 0.00108,
+   "n_seeds": 3,
+   "per_seed": {
+    "42": {
+     "prompted": 0.6321,
+     "unprompted": 0.6467
+    },
+    "43": {
+     "prompted": 0.6308,
+     "unprompted": 0.6471
+    },
+    "44": {
+     "prompted": 0.6301,
+     "unprompted": 0.6467
+    }
+   }
+  },
+  "purity_k1024": {
+   "prompted_mean": 1.1419,
+   "unprompted_mean": 1.118,
+   "delta_mean": 0.0239,
+   "delta_sd": 0.00526,
+   "n_seeds": 3,
+   "per_seed": {
+    "42": {
+     "prompted": 1.1465,
+     "unprompted": 1.1172
+    },
+    "43": {
+     "prompted": 1.1423,
+     "unprompted": 1.1187
+    },
+    "44": {
+     "prompted": 1.1369,
+     "unprompted": 1.1181
+    }
+   }
+  },
+  "density": {
+   "prompted_mean": 0.39603,
+   "unprompted_mean": 0.36737,
+   "delta_mean": 0.02867,
+   "delta_sd": 0.05372,
+   "n_seeds": 3,
+   "per_seed": {
+    "42": {
+     "prompted": 0.3958,
+     "unprompted": 0.3058
+    },
+    "43": {
+     "prompted": 0.3971,
+     "unprompted": 0.3911
+    },
+    "44": {
+     "prompted": 0.3952,
+     "unprompted": 0.4052
+    }
+   }
+  },
+  "proj_ffr": {
+   "prompted_mean": 0.46523,
+   "unprompted_mean": 0.47337,
+   "delta_mean": -0.00813,
+   "delta_sd": 0.00396,
+   "n_seeds": 3,
+   "per_seed": {
+    "42": {
+     "prompted": 0.4684,
+     "unprompted": 0.4745
+    },
+    "43": {
+     "prompted": 0.4647,
+     "unprompted": 0.4703
+    },
+    "44": {
+     "prompted": 0.4626,
+     "unprompted": 0.4753
+    }
+   }
+  }
+ },
+ "note": "delta = prompted - unprompted (legacy_lp arm, paired by seed). The prompt moves BOTH the high-D space (see high_d_prompt_shift) and the learned map; read map deltas alongside the high-D shift, not as pure map effects."
+}

@@ -1,0 +1,289 @@
+{
+ "testbed": "/data/latent-basemap/jina-en-200k-prompted",
+ "n": 200000,
+ "n_holdout": 20000,
+ "n_holdout_unique": 20000,
+ "held_disjoint_from_train": true,
+ "held_hash": "0e81ac067567",
+ "source": "/data/embeddings/fineweb-edu-sample-10BT-chunked-500-jina-v5-nano/train",
+ "sample_indices_hash": "f85a1b82368c",
+ "frac": 0.001,
+ "n_anchors": 10000,
+ "seed": 123,
+ "scorer_commit": "a332050417e7",
+ "scorer_dirty": false,
+ "formula_version": "panel_v2.2-2026-07-15",
+ "hiD_reference_path": "/data/latent-basemap/closure/o1/ref_prompted.npz",
+ "hiD_reference_key": "7e4271f943f23b8a",
+ "runs": {
+  "prompted_s42": {
+   "run_dir": "train_prompted_s42",
+   "wall_s": 5.9,
+   "no_model_reference": false,
+   "ffr": 0.6321,
+   "recall@k": 0.16714,
+   "purity_k256": 1.1026,
+   "purity_k1024": 1.1465,
+   "density": 0.3958,
+   "proj_ffr": 0.4684,
+   "proj_recall@k": 0.049,
+   "proj_knn_regressor_ffr": 0.2831,
+   "proj_random_floor_ffr": 0.0012,
+   "proj_beats_knn": true,
+   "proj_margin_over_knn": 0.1853,
+   "hiD_reference_key": "7e4271f943f23b8a",
+   "hiD_reference_reused": true,
+   "panel_full": {
+    "schema": "panel_v2",
+    "formula_version": "panel_v2.2-2026-07-15",
+    "n": 200000,
+    "n_dims_hi": 768,
+    "n_dims_lo": 2,
+    "frac": 0.001,
+    "k_hit": 10,
+    "k_frac": 200,
+    "k_density": 15,
+    "anchor_seed": 42,
+    "n_anchors": 10000,
+    "anchor_hash": "94ade67d4451",
+    "ffr": 0.6321,
+    "recall@k": 0.16714,
+    "n_ffr_anchors": 10000,
+    "purity": {
+     "k256": 1.1026,
+     "k1024": 1.1465
+    },
+    "purity_numerators": {
+     "k256": {
+      "hi_D_agreement": 0.4614,
+      "map_agreement": 0.5088
+     },
+     "k1024": {
+      "hi_D_agreement": 0.3258,
+      "map_agreement": 0.3736
+     }
+    },
+    "purity_exactness": "hi_frac_membership: approximate (fast expansion, no rerank)",
+    "centroid_hashes": {
+     "k256": "b4ec100052a4",
+     "k1024": "afa31b66d13f"
+    },
+    "n_purity_anchors": 10000,
+    "density": 0.3958,
+    "n_density_anchors": 10000,
+    "provenance": {
+     "scorer": "complete_panel",
+     "run": "train_prompted_s42",
+     "coords_sha": "1a04c430b22804cf",
+     "no_model_reference": false,
+     "code_commit": "a332050417e7",
+     "code_dirty": false,
+     "alignment": "gather_X_by_z_ids",
+     "aligned_ids_hash": "963505beb96e",
+     "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact",
+     "device": "cuda",
+     "peak_gpu_gb": 5.615,
+     "peak_rss_gb": 4.595,
+     "wall_s": 0.9,
+     "hiD_reference_key": "7e4271f943f23b8a",
+     "hiD_reference_reused": true
+    },
+    "guards": {
+     "coords_finite": true,
+     "coords_collapsed": false,
+     "emb_finite": true,
+     "emb_norm_mean": 1.0,
+     "emb_zero_rows": 0,
+     "hit_guard": {
+      "boundary_min_gap": null,
+      "overselect": 8
+     },
+     "density_guard": {
+      "boundary_min_gap": 0.0,
+      "overselect": 8
+     }
+    }
+   }
+  },
+  "prompted_s43": {
+   "run_dir": "train_prompted_s43",
+   "wall_s": 5.8,
+   "no_model_reference": false,
+   "ffr": 0.6308,
+   "recall@k": 0.15903,
+   "purity_k256": 1.1017,
+   "purity_k1024": 1.1423,
+   "density": 0.3971,
+   "proj_ffr": 0.4647,
+   "proj_recall@k": 0.04865,
+   "proj_knn_regressor_ffr": 0.2814,
+   "proj_random_floor_ffr": 0.0012,
+   "proj_beats_knn": true,
+   "proj_margin_over_knn": 0.1833,
+   "hiD_reference_key": "7e4271f943f23b8a",
+   "hiD_reference_reused": true,
+   "panel_full": {
+    "schema": "panel_v2",
+    "formula_version": "panel_v2.2-2026-07-15",
+    "n": 200000,
+    "n_dims_hi": 768,
+    "n_dims_lo": 2,
+    "frac": 0.001,
+    "k_hit": 10,
+    "k_frac": 200,
+    "k_density": 15,
+    "anchor_seed": 42,
+    "n_anchors": 10000,
+    "anchor_hash": "94ade67d4451",
+    "ffr": 0.6308,
+    "recall@k": 0.15903,
+    "n_ffr_anchors": 10000,
+    "purity": {
+     "k256": 1.1017,
+     "k1024": 1.1423
+    },
+    "purity_numerators": {
+     "k256": {
+      "hi_D_agreement": 0.4614,
+      "map_agreement": 0.5083
+     },
+     "k1024": {
+      "hi_D_agreement": 0.3258,
+      "map_agreement": 0.3722
+     }
+    },
+    "purity_exactness": "hi_frac_membership: approximate (fast expansion, no rerank)",
+    "centroid_hashes": {
+     "k256": "b4ec100052a4",
+     "k1024": "afa31b66d13f"
+    },
+    "n_purity_anchors": 10000,
+    "density": 0.3971,
+    "n_density_anchors": 10000,
+    "provenance": {
+     "scorer": "complete_panel",
+     "run": "train_prompted_s43",
+     "coords_sha": "d82445de734f9747",
+     "no_model_reference": false,
+     "code_commit": "a332050417e7",
+     "code_dirty": true,
+     "alignment": "gather_X_by_z_ids",
+     "aligned_ids_hash": "963505beb96e",
+     "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact",
+     "device": "cuda",
+     "peak_gpu_gb": 5.629,
+     "peak_rss_gb": 5.249,
+     "wall_s": 0.87,
+     "hiD_reference_key": "7e4271f943f23b8a",
+     "hiD_reference_reused": true
+    },
+    "guards": {
+     "coords_finite": true,
+     "coords_collapsed": false,
+     "emb_finite": true,
+     "emb_norm_mean": 1.0,
+     "emb_zero_rows": 0,
+     "hit_guard": {
+      "boundary_min_gap": null,
+      "overselect": 8
+     },
+     "density_guard": {
+      "boundary_min_gap": 0.0,
+      "overselect": 8
+     }
+    }
+   }
+  },
+  "prompted_s44": {
+   "run_dir": "train_prompted_s44",
+   "wall_s": 5.8,
+   "no_model_reference": false,
+   "ffr": 0.6301,
+   "recall@k": 0.15608,
+   "purity_k256": 1.1073,
+   "purity_k1024": 1.1369,
+   "density": 0.3952,
+   "proj_ffr": 0.4626,
+   "proj_recall@k": 0.04863,
+   "proj_knn_regressor_ffr": 0.2791,
+   "proj_random_floor_ffr": 0.0012,
+   "proj_beats_knn": true,
+   "proj_margin_over_knn": 0.1835,
+   "hiD_reference_key": "7e4271f943f23b8a",
+   "hiD_reference_reused": true,
+   "panel_full": {
+    "schema": "panel_v2",
+    "formula_version": "panel_v2.2-2026-07-15",
+    "n": 200000,
+    "n_dims_hi": 768,
+    "n_dims_lo": 2,
+    "frac": 0.001,
+    "k_hit": 10,
+    "k_frac": 200,
+    "k_density": 15,
+    "anchor_seed": 42,
+    "n_anchors": 10000,
+    "anchor_hash": "94ade67d4451",
+    "ffr": 0.6301,
+    "recall@k": 0.15608,
+    "n_ffr_anchors": 10000,
+    "purity": {
+     "k256": 1.1073,
+     "k1024": 1.1369
+    },
+    "purity_numerators": {
+     "k256": {
+      "hi_D_agreement": 0.4614,
+      "map_agreement": 0.511
+     },
+     "k1024": {
+      "hi_D_agreement": 0.3258,
+      "map_agreement": 0.3704
+     }
+    },
+    "purity_exactness": "hi_frac_membership: approximate (fast expansion, no rerank)",
+    "centroid_hashes": {
+     "k256": "b4ec100052a4",
+     "k1024": "afa31b66d13f"
+    },
+    "n_purity_anchors": 10000,
+    "density": 0.3952,
+    "n_density_anchors": 10000,
+    "provenance": {
+     "scorer": "complete_panel",
+     "run": "train_prompted_s44",
+     "coords_sha": "b2e9f5e97b833708",
+     "no_model_reference": false,
+     "code_commit": "a332050417e7",
+     "code_dirty": true,
+     "alignment": "gather_X_by_z_ids",
+     "aligned_ids_hash": "963505beb96e",
+     "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact",
+     "device": "cuda",
+     "peak_gpu_gb": 5.629,
+     "peak_rss_gb": 5.26,
+     "wall_s": 0.86,
+     "hiD_reference_key": "7e4271f943f23b8a",
+     "hiD_reference_reused": true
+    },
+    "guards": {
+     "coords_finite": true,
+     "coords_collapsed": false,
+     "emb_finite": true,
+     "emb_norm_mean": 1.0,
+     "emb_zero_rows": 0,
+     "hit_guard": {
+      "boundary_min_gap": null,
+      "overselect": 8
+     },
+     "density_guard": {
+      "boundary_min_gap": 0.0,
+      "overselect": 8
+     }
+    }
+   }
+  }
+ },
+ "started": "2026-07-16T07:34:51Z",
+ "finished": "2026-07-16T07:35:09Z"
+}
