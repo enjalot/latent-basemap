@@ -120,7 +120,17 @@ def main():
     runs = dict(kv.split("=", 1) for kv in args.runs)
 
     X = load_embeddings(os.path.join(args.testbed, "train"), dim=args.dim)
-    si = np.load(os.path.join(args.testbed, "sample_indices.npy"))
+    # sample_indices maps testbed rows back to the source corpus; required for the
+    # held-out projection (model path), optional for a --no-model transductive score
+    # (e.g. the 4M-nested corpus has none).
+    _si_path = os.path.join(args.testbed, "sample_indices.npy")
+    if os.path.exists(_si_path):
+        si = np.load(_si_path)
+    elif args.no_model:
+        si = None
+    else:
+        raise FileNotFoundError(f"{_si_path} required for held-out projection (drop --no-model "
+                                f"or provide sample_indices.npy)")
     centroids = frozen_centroids(X, (256, 1024), args.testbed)
 
     # L0.4: build (or load + key-verify) the ONE shared hi-D reference for this
@@ -176,7 +186,8 @@ def main():
     summary = {"testbed": args.testbed, "n": int(len(X)), "n_holdout": int(len(held)),
                "n_holdout_unique": int(len(np.unique(held))),
                "held_disjoint_from_train": True, "held_hash": _ids_hash(held),
-               "source": args.source, "sample_indices_hash": _ids_hash(np.asarray(si, np.int64)),
+               "source": args.source,
+               "sample_indices_hash": (_ids_hash(np.asarray(si, np.int64)) if si is not None else None),
                "frac": cfg.frac, "n_anchors": cfg.n_anchors, "seed": args.seed,
                "scorer_commit": _commit, "scorer_dirty": _dirty,
                "formula_version": cfg.formula_version,
