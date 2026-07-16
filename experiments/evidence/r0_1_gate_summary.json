@@ -4,7 +4,7 @@
  "items": {
   "1_corrected_2x2": {
    "passed": true,
-   "detail": "cells=['mn0_s1_ws0', 'mn0_s1_ws1', 'mn1_s4_ws0', 'mn1_s4_ws1'] seeds=[42, 43, 44] n=12"
+   "detail": "cells=['mn0_s1_ws0', 'mn0_s1_ws1', 'mn1_s4_ws0', 'mn1_s4_ws1'] seeds=[42, 43, 44] n=12 exact_cross=True v2.2=True"
   },
   "2_a3_regen": {
    "passed": true,
@@ -16,12 +16,30 @@
   },
   "3b_golden_2m_extended": {
    "passed": true,
-   "detail": "metrics=['density', 'ffr', 'proj_ffr', 'purity_k1024', 'recall@k'] recomputed_pass=True dirty=False"
+   "detail": "metrics=['density', 'ffr', 'proj_ffr', 'purity_k1024', 'recall@k'] triplet_complete=True recomputed_pass=True dirty=False"
   },
   "4_weighted_8m_bridge": {
    "passed": true,
    "detail": "canary_pass=True seeds={'s42': {'pipeline': 'device', 'sampling': 'weighted_with_replacement', 'updates': 500000, 'budget_satisfied': True, 'schedule': 'cosine-v3-positive-budget', 'graph_verified_posthoc': True, 'config_byte_identical': True}, 's43': {'pipeline': 'device', 'sampling': 'weighted_with_replacement', 'updates': 500000, 'budget_satisfied': True, 'schedule': 'cosine-v3-positive-budget', 'graph_verified_posthoc': True, 'config_byte_identical': True}}"
+  },
+  "5_kernel_v22_rescore": {
+   "passed": true,
+   "detail": "200k_ref=a904ee42a36d4013 2m_ref=b1c9b2040be819fa evaluator_gate=True problems=[]"
   }
  },
- "rule": "reopens raw pinned sources; recomputes golden deltas + decisions; binds actual pipeline/sampler/schedule/budget/updates to persisted run results, not summaries."
+ "source_hashes": {
+  "ablation_2x2": "b66d0b5032dbc9f2",
+  "a3_rescore": "e60f82a2af8a4380",
+  "knn_cost": "5dc96c14e74cea77",
+  "golden_2m_extended": "6360568474b94e8a",
+  "canary_pass": "20b211f779c6bb0b",
+  "canary_abort_demo": "5a3e9c2e9072610a",
+  "bridge_scores": "cfe6a410e9b349f2",
+  "kernel_200k_v22": "bcc885e731894e66",
+  "kernel_2m_v22": "bc20128e9bce30cb",
+  "kernel_decision_v22": "140c7b5577dda6f1"
+ },
+ "missing_sources": [],
+ "code_commit": "9f2c422d4271",
+ "rule": "reopens raw pinned sources; recomputes golden deltas + decisions + the exact cell\u00d7seed cross-product; requires the v2.2 kernel rescore with a reused shared reference; binds actual pipeline/sampler/schedule/budget/updates to persisted run results, not summaries; stamps per-source content hashes."
 }

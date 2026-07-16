@@ -1,0 +1,166 @@
+{
+ "gate": "kernel_decision_v22",
+ "formula_version": "panel_v2.2-2026-07-15",
+ "corpora": {
+  "200k": {
+   "formula_version": "panel_v2.2-2026-07-15",
+   "reference_key": "a904ee42a36d4013",
+   "hiD_reference_reused": true,
+   "scorer_dirty": false,
+   "n_maps": 9,
+   "arm_means": {
+    "ffr": {
+     "legacy_a1b1": 0.64683,
+     "umap_a1b1": 0.49193,
+     "umap_stdcurve": 0.5535
+    },
+    "purity_k1024": {
+     "legacy_a1b1": 1.118,
+     "umap_a1b1": 0.6494,
+     "umap_stdcurve": 0.77887
+    },
+    "density": {
+     "legacy_a1b1": 0.36737,
+     "umap_a1b1": 0.44637,
+     "umap_stdcurve": 0.43927
+    }
+   },
+   "paired_deltas": {
+    "umap_a1b1_minus_legacy": {
+     "ffr": {
+      "mean": -0.1549,
+      "sd": 0.0027,
+      "n": 3
+     },
+     "purity_k1024": {
+      "mean": -0.4686,
+      "sd": 0.00427,
+      "n": 3
+     },
+     "density": {
+      "mean": 0.079,
+      "sd": 0.06506,
+      "n": 3
+     }
+    },
+    "stdcurve_minus_legacy": {
+     "ffr": {
+      "mean": -0.09333,
+      "sd": 0.00081,
+      "n": 3
+     },
+     "purity_k1024": {
+      "mean": -0.33913,
+      "sd": 0.00309,
+      "n": 3
+     },
+     "density": {
+      "mean": 0.0719,
+      "sd": 0.06185,
+      "n": 3
+     }
+    }
+   },
+   "evaluator_wall_peak": {
+    "max_wall_s": 6.3,
+    "max_peak_gpu_gb": 5.629,
+    "wall_ok": true,
+    "peak_ok": true,
+    "wall_max_allowed": 60.0,
+    "peak_max_allowed": 26.0
+   }
+  },
+  "2m": {
+   "formula_version": "panel_v2.2-2026-07-15",
+   "reference_key": "b1c9b2040be819fa",
+   "hiD_reference_reused": true,
+   "scorer_dirty": false,
+   "n_maps": 6,
+   "arm_means": {
+    "ffr": {
+     "legacy_a1b1": 0.6295,
+     "umap_a1b1": 0.5719,
+     "umap_stdcurve": 0.627
+    },
+    "purity_k1024": {
+     "legacy_a1b1": 0.93995,
+     "umap_a1b1": 0.6217,
+     "umap_stdcurve": 0.747
+    },
+    "density": {
+     "legacy_a1b1": 0.4503,
+     "umap_a1b1": 0.73655,
+     "umap_stdcurve": 0.67995
+    }
+   },
+   "paired_deltas": {
+    "umap_a1b1_minus_legacy": {
+     "ffr": {
+      "mean": -0.0576,
+      "sd": 0.00537,
+      "n": 2
+     },
+     "purity_k1024": {
+      "mean": -0.31825,
+      "sd": 0.0227,
+      "n": 2
+     },
+     "density": {
+      "mean": 0.28625,
+      "sd": 0.0046,
+      "n": 2
+     }
+    },
+    "stdcurve_minus_legacy": {
+     "ffr": {
+      "mean": -0.0025,
+      "sd": 0.00057,
+      "n": 2
+     },
+     "purity_k1024": {
+      "mean": -0.19295,
+      "sd": 0.00728,
+      "n": 2
+     },
+     "density": {
+      "mean": 0.22965,
+      "sd": 0.0053,
+      "n": 2
+     }
+    }
+   },
+   "evaluator_wall_peak": {
+    "max_wall_s": 56.2,
+    "max_peak_gpu_gb": 5.644,
+    "wall_ok": true,
+    "peak_ok": true,
+    "wall_max_allowed": 240.0,
+    "peak_max_allowed": 26.0
+   }
+  }
+ },
+ "primary_axis_winners": {
+  "200k": {
+   "legacy_vs_umap_a1b1": {
+    "ffr": "legacy",
+    "purity_k1024": "legacy"
+   },
+   "legacy_vs_stdcurve": {
+    "ffr": "legacy",
+    "purity_k1024": "legacy"
+   }
+  },
+  "2m": {
+   "legacy_vs_umap_a1b1": {
+    "ffr": "legacy",
+    "purity_k1024": "legacy"
+   },
+   "legacy_vs_stdcurve": {
+    "ffr": "legacy",
+    "purity_k1024": "legacy"
+   }
+  }
+ },
+ "evaluator_gate_passed": true,
+ "note": "two separate questions kept apart: formula isolation (a=b=1) and fitted standard curve; primary axes ffr+purity, density secondary."
+}
