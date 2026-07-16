@@ -1,0 +1,7 @@
+=== L0 GPU EXIT TEST ===
+canary status: exit_2
+verdict passed: False reasons: ['aborted (sub-floor windows)', 'missing steady rate']
+sentinel_train in summary: False | status: None
+sentinel file exists (train ran?): False
+
+L0 EXIT TEST PASS
