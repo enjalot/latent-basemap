@@ -50,10 +50,11 @@ def build_g1_dag(*, train_cfg, work_dir, reference, legacy_run_dir, testbed_2m,
     jobs = []
 
     # 1) fresh current-commit 2M evaluator canary → wall/peak verdict, BEFORE 8M scoring.
+    # --no-model → the run value is a coords.parquet PATH (not a run dir).
     eval_canary = Job(
         name="eval_canary_2m", certifying=True, outputs=[eval_canary_out],
         argv=[PY, "experiments/score_complete_panel.py",
-              "--runs", f"legacy2m={kernel_run_2m}",
+              "--runs", f"legacy2m={os.path.join(kernel_run_2m, 'coords.parquet')}",
               "--testbed", testbed_2m,
               "--no-model", "--reference", d("ref_2m.npz"), "--out", eval_canary_out],
         done_marker=d("eval_canary_2m.done.json"), log=d("eval_canary_2m.log"),
