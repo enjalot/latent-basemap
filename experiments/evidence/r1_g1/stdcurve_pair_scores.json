@@ -1,0 +1,56 @@
+{
+ "substrate": "mixed-8M (fineweb+rpj+pile)",
+ "recipe": "legacy nomn+weighted",
+ "budget": "500k updates v3",
+ "n_anchors": 2000,
+ "formula_version": "panel_v2.2-2026-07-15",
+ "hiD_reference_key": "c3774f9f006a6a4d",
+ "seeds": {
+  "stdcurve": {
+   "run_dir": "train_stdcurve_s42",
+   "score_wall_s": 3.3,
+   "pipeline": "device",
+   "positive_sampling": "weighted_with_replacement",
+   "sampler_class": "DeviceEdgeSampler",
+   "x_residency": "device_fp16",
+   "positive_lr_updates": 500000,
+   "budget_satisfied": true,
+   "schedule_version": "cosine-v3-positive-budget",
+   "updates_per_s": 291.0,
+   "formula_version": "panel_v2.2-2026-07-15",
+   "hiD_reference_key": "c3774f9f006a6a4d",
+   "hiD_reference_reused": true,
+   "ffr": 0.5356,
+   "recall@k": 0.0037,
+   "purity": {
+    "k256": 0.6902,
+    "k1024": 0.5566
+   },
+   "density": 0.805,
+   "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact"
+  },
+  "legacy": {
+   "run_dir": "r1_8m_bridge_weighted_s42_20260715_163719_f4934f5b",
+   "score_wall_s": 3.2,
+   "pipeline": "device",
+   "positive_sampling": "weighted_with_replacement",
+   "sampler_class": "DeviceEdgeSampler",
+   "x_residency": "device_fp16",
+   "positive_lr_updates": 500000,
+   "budget_satisfied": true,
+   "schedule_version": "cosine-v3-positive-budget",
+   "updates_per_s": 296.8,
+   "formula_version": "panel_v2.2-2026-07-15",
+   "hiD_reference_key": "c3774f9f006a6a4d",
+   "hiD_reference_reused": true,
+   "ffr": 0.5778,
+   "recall@k": 0.00395,
+   "purity": {
+    "k256": 0.9691,
+    "k1024": 0.772
+   },
+   "density": 0.6277,
+   "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact"
+  }
+ }
+}

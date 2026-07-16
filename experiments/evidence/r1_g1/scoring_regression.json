@@ -1,0 +1,21 @@
+{
+ "gate": "scoring_2m_regression",
+ "passed": true,
+ "checks": {
+  "golden_2m_streamed_wall_s": {
+   "observed": 6.3,
+   "baseline": 55.8,
+   "hard_max": 180.0,
+   "passed": true,
+   "ratio_vs_baseline": 0.11
+  },
+  "golden_2m_peak_gpu_gb": {
+   "observed": 5.628,
+   "baseline": 5.65,
+   "hard_max": 12.0,
+   "passed": true,
+   "ratio_vs_baseline": 1.0
+  }
+ },
+ "rule": "2M evaluator wall/peak must stay within the pinned envelope before any 8M/30M scoring; catches lost byte-caps / tile blowups."
+}

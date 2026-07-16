@@ -1,0 +1,111 @@
+{
+ "testbed": "/data/latent-basemap/jina-en-2m",
+ "n": 2000000,
+ "n_holdout": 0,
+ "n_holdout_unique": 0,
+ "held_disjoint_from_train": true,
+ "held_hash": "da39a3ee5e6b",
+ "source": null,
+ "sample_indices_hash": "02b21f8f8064",
+ "frac": 0.001,
+ "n_anchors": 10000,
+ "seed": 123,
+ "scorer_commit": "b26528f31032",
+ "scorer_dirty": false,
+ "formula_version": "panel_v2.2-2026-07-15",
+ "hiD_reference_path": "/data/latent-basemap/closure/g1/ref_2m.npz",
+ "hiD_reference_key": "b1c9b2040be819fa",
+ "runs": {
+  "legacy2m": {
+   "run_dir": "coords.parquet",
+   "wall_s": 6.3,
+   "no_model_reference": true,
+   "ffr": 0.6307,
+   "recall@k": 0.01463,
+   "purity_k256": 1.041,
+   "purity_k1024": 0.9466,
+   "density": 0.453,
+   "proj_ffr": null,
+   "proj_recall@k": null,
+   "proj_knn_regressor_ffr": null,
+   "proj_random_floor_ffr": null,
+   "proj_beats_knn": null,
+   "proj_margin_over_knn": null,
+   "hiD_reference_key": "b1c9b2040be819fa",
+   "hiD_reference_reused": true,
+   "panel_full": {
+    "schema": "panel_v2",
+    "formula_version": "panel_v2.2-2026-07-15",
+    "n": 2000000,
+    "n_dims_hi": 768,
+    "n_dims_lo": 2,
+    "frac": 0.001,
+    "k_hit": 10,
+    "k_frac": 2000,
+    "k_density": 15,
+    "anchor_seed": 42,
+    "n_anchors": 10000,
+    "anchor_hash": "a42f40e8cd59",
+    "ffr": 0.6307,
+    "recall@k": 0.01463,
+    "n_ffr_anchors": 10000,
+    "purity": {
+     "k256": 1.041,
+     "k1024": 0.9466
+    },
+    "purity_numerators": {
+     "k256": {
+      "hi_D_agreement": 0.467,
+      "map_agreement": 0.4862
+     },
+     "k1024": {
+      "hi_D_agreement": 0.3262,
+      "map_agreement": 0.3088
+     }
+    },
+    "purity_exactness": "hi_frac_membership: approximate (fast expansion, no rerank)",
+    "centroid_hashes": {
+     "k256": "bd48a7f7ce21",
+     "k1024": "b58b4fb70eac"
+    },
+    "n_purity_anchors": 10000,
+    "density": 0.453,
+    "n_density_anchors": 10000,
+    "provenance": {
+     "scorer": "complete_panel",
+     "run": "coords.parquet",
+     "coords_sha": "4aafbe068465df59",
+     "no_model_reference": true,
+     "code_commit": "b26528f31032",
+     "code_dirty": false,
+     "alignment": "gather_X_by_z_ids",
+     "aligned_ids_hash": "f80c9724bc43",
+     "exactness": "hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; density:exact; lo:single_pass_exact",
+     "device": "cuda",
+     "peak_gpu_gb": 5.628,
+     "peak_rss_gb": 14.151,
+     "wall_s": 5.18,
+     "hiD_reference_key": "b1c9b2040be819fa",
+     "hiD_reference_reused": true
+    },
+    "guards": {
+     "coords_finite": true,
+     "coords_collapsed": false,
+     "emb_finite": true,
+     "emb_norm_mean": 1.0,
+     "emb_zero_rows": 0,
+     "hit_guard": {
+      "boundary_min_gap": null,
+      "overselect": 8
+     },
+     "density_guard": {
+      "boundary_min_gap": 0.0,
+      "overselect": 8
+     }
+    }
+   }
+  }
+ },
+ "started": "2026-07-16T03:01:49Z",
+ "finished": "2026-07-16T03:01:55Z"
+}

@@ -1,0 +1,36 @@
+{
+ "gate": "stdcurve_vs_legacy_decision",
+ "scores_path": "/data/latent-basemap/closure/g1/stdcurve_pair_scores.json",
+ "hiD_reference_key": "c3774f9f006a6a4d",
+ "legacy_reference": {
+  "ffr_mean": 0.5773,
+  "purity_k1024_mean": 0.78285,
+  "ffr_band": 0.005,
+  "purity_band": 0.03068,
+  "ffr_floor": 0.5723,
+  "purity_floor": 0.75217
+ },
+ "stdcurve": {
+  "ffr": 0.5356,
+  "purity_k1024": 0.5566,
+  "density": 0.805,
+  "hiD_reference_reused": true
+ },
+ "legacy_paired": {
+  "ffr": 0.5778,
+  "purity_k1024": 0.772,
+  "density": 0.6277,
+  "hiD_reference_reused": true
+ },
+ "primary_axes": {
+  "ffr_below_floor": true,
+  "purity_below_floor": true,
+  "ffr_in_band": false,
+  "purity_in_band": false,
+  "ffr_reversed": false,
+  "purity_reversed": false
+ },
+ "density_secondary": 0.805,
+ "decision": "finalize_legacy_lp",
+ "needs_seed43": false
+}

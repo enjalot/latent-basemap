@@ -1,0 +1,149 @@
+{
+ "controller_id": "ctl-f8eb31cf",
+ "controller_pid": 1694848,
+ "started": "2026-07-16T03:01:32+00:00",
+ "jobs": [
+  {
+   "name": "eval_canary_2m",
+   "gpu_pre": {
+    "at": "2026-07-16T03:01:32+00:00",
+    "gpu": "31373, 748, 0, 15.29",
+    "compute_apps": [
+     "3679171, 738"
+    ],
+    "compute_pids": [
+     3679171
+    ],
+    "free_mb": 31373.0,
+    "n_co_tenants": 1
+   },
+   "child_pid": 1694859,
+   "pgid": 1694859,
+   "status": "ok",
+   "seconds": 23.5,
+   "outputs_present": true
+  },
+  {
+   "name": "scoring_regression",
+   "gpu_pre": {
+    "at": "2026-07-16T03:01:56+00:00",
+    "gpu": "31373, 748, 17, 208.96",
+    "compute_apps": [
+     "3679171, 738"
+    ],
+    "compute_pids": [
+     3679171
+    ],
+    "free_mb": 31373.0,
+    "n_co_tenants": 1
+   },
+   "child_pid": 1695328,
+   "pgid": 1695328,
+   "status": "ok",
+   "seconds": 0.0,
+   "outputs_present": true
+  },
+  {
+   "name": "perf_canary",
+   "gpu_pre": {
+    "at": "2026-07-16T03:01:56+00:00",
+    "gpu": "31373, 748, 17, 208.96",
+    "compute_apps": [
+     "3679171, 738"
+    ],
+    "compute_pids": [
+     3679171
+    ],
+    "free_mb": 31373.0,
+    "n_co_tenants": 1
+   },
+   "child_pid": 1695339,
+   "pgid": 1695339,
+   "status": "ok",
+   "seconds": 34.7,
+   "outputs_present": true
+  },
+  {
+   "name": "build_reference",
+   "gpu_pre": {
+    "at": "2026-07-16T03:02:31+00:00",
+    "gpu": "31373, 748, 64, 223.54",
+    "compute_apps": [
+     "3679171, 738"
+    ],
+    "compute_pids": [
+     3679171
+    ],
+    "free_mb": 31373.0,
+    "n_co_tenants": 1
+   },
+   "child_pid": 1695955,
+   "pgid": 1695955,
+   "status": "ok",
+   "seconds": 92.0,
+   "outputs_present": true
+  },
+  {
+   "name": "train_stdcurve_s42",
+   "gpu_pre": {
+    "at": "2026-07-16T03:04:03+00:00",
+    "gpu": "31373, 748, 0, 77.40",
+    "compute_apps": [
+     "3679171, 738"
+    ],
+    "compute_pids": [
+     3679171
+    ],
+    "free_mb": 31373.0,
+    "n_co_tenants": 1
+   },
+   "child_pid": 1697606,
+   "pgid": 1697606,
+   "status": "ok",
+   "seconds": 1771.8,
+   "outputs_present": true
+  },
+  {
+   "name": "score_pair",
+   "gpu_pre": {
+    "at": "2026-07-16T03:33:35+00:00",
+    "gpu": "31373, 748, 100, 77.20",
+    "compute_apps": [
+     "3679171, 738"
+    ],
+    "compute_pids": [
+     3679171
+    ],
+    "free_mb": 31373.0,
+    "n_co_tenants": 1
+   },
+   "child_pid": 1728143,
+   "pgid": 1728143,
+   "status": "ok",
+   "seconds": 15.9,
+   "outputs_present": true
+  },
+  {
+   "name": "decision",
+   "gpu_pre": {
+    "at": "2026-07-16T03:33:51+00:00",
+    "gpu": "31373, 748, 0, 263.76",
+    "compute_apps": [
+     "3679171, 738"
+    ],
+    "compute_pids": [
+     3679171
+    ],
+    "free_mb": 31373.0,
+    "n_co_tenants": 1
+   },
+   "child_pid": 1728456,
+   "pgid": 1728456,
+   "status": "ok",
+   "seconds": 0.0,
+   "outputs_present": true
+  }
+ ],
+ "stop_reason": "completed",
+ "finished": "2026-07-16T03:33:51+00:00"
+}
