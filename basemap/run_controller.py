@@ -19,8 +19,10 @@ Route ALL GPU entry points (training, scoring, graph/index validation, benches,
 chains) through here; direct launches are unsafe.
 """
 from __future__ import annotations
-import os, sys, json, time, uuid, fcntl, signal, subprocess, datetime, dataclasses, hashlib
+import os, sys, json, time, uuid, fcntl, subprocess, datetime, dataclasses, hashlib
 from typing import Optional
+
+from .artifact_identity import git_checkout_state, path_signature
 
 _DEFAULT_LEASE = "/data/latent-basemap/.gpu_lease"
 
@@ -47,25 +49,10 @@ def _atomic_write_json(path: str, obj: dict) -> None:
     os.replace(tmp, path)   # atomic
 
 
-def _file_sha(path: str, cap=1 << 20) -> Optional[str]:
-    try:
-        h = hashlib.sha1()
-        with open(path, "rb") as f:
-            h.update(f.read(cap))
-        return h.hexdigest()[:16]
-    except Exception:
-        return None
-
-
 def _output_sig(path: str) -> Optional[dict]:
-    """Content signature of an output (size + full-stream sha), or None if absent."""
+    """Readable full SHA-256 signature of an output, or None if absent."""
     try:
-        st = os.stat(path)
-        h = hashlib.sha1()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                h.update(chunk)
-        return {"size": st.st_size, "sha": h.hexdigest()[:16]}
+        return path_signature(path)
     except FileNotFoundError:
         return None
 
@@ -73,11 +60,10 @@ def _output_sig(path: str) -> Optional[dict]:
 def _git_state():
     try:
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        c = subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True, timeout=10).strip()[:12]
-        d = bool(subprocess.check_output(["git", "-C", root, "status", "--porcelain"], text=True, timeout=10).strip())
-        return f"{c}{'-dirty' if d else ''}"
+        return git_checkout_state(root)
     except Exception:
-        return "nogit"
+        return {"head": None, "clean": None, "detached": None,
+                "dirty_tree_digest": None, "error": "nogit"}
 
 
 def _job_spec_digest(job) -> str:
@@ -289,13 +275,29 @@ CANARY_REQUIRED_WALL_S = 600.0   # S2: >10 predicted minutes ⇒ canary is manda
 
 
 def run_jobs(jobs: list, controller_id: Optional[str] = None, allowed_pids=(),
-             summary_path: Optional[str] = None) -> dict:
+             summary_path: Optional[str] = None, admission=None) -> dict:
     cid = controller_id or f"ctl-{uuid.uuid4().hex[:8]}"
-    summary = {"controller_id": cid, "controller_pid": os.getpid(), "started": _utcnow(), "jobs": []}
+    launch_checkout = _git_state()
+    summary = {"controller_id": cid, "controller_pid": os.getpid(), "started": _utcnow(),
+               "launch_checkout": launch_checkout, "jobs": []}
+    if admission is not None:
+        summary["queue_manifest_path"] = admission.manifest_path
+        summary["queue_manifest_sha256"] = admission.manifest_sha256
+        summary["queue_release_sha"] = admission.manifest["release_sha"]
+        summary["initial_input_signatures"] = admission.initial_inputs
     done = set()
     with GpuLease(controller_id=cid, timeout=0) as lease:
         for job in jobs:
             rec = {"name": job.name}
+            if admission is not None:
+                try:
+                    rec["gate_receipt"] = admission.boundary(job.name)
+                except Exception as e:
+                    rec["status"] = "boundary_rejected"
+                    rec["error"] = str(e)
+                    summary["jobs"].append(rec)
+                    summary["stop_reason"] = f"{job.name}: queue boundary rejected: {e}"
+                    break
             # S1: a certifying job MUST declare outputs (exit-0 alone can't certify);
             # and every declared input MUST exist (fail on missing input).
             if job.certifying and not job.outputs:
@@ -378,10 +380,15 @@ def run_jobs(jobs: list, controller_id: Optional[str] = None, allowed_pids=(),
                     summary["stop_reason"] = str(e); break
                 continue
             rec["gpu_pre"] = snap_pre
+            input_sigs = {p: _output_sig(p) for p in sorted(job.input_paths or [])}
             if job.manifest:
                 _atomic_write_json(job.manifest, {"controller_id": cid, "job": job.name,
                                                   "argv": job.argv, "gpu_pre": snap_pre,
-                                                  "status": "running", "started": _utcnow()})
+                                                  "status": "running", "started": _utcnow(),
+                                                  "launch_checkout": launch_checkout,
+                                                  "queue_manifest_sha256": (admission.manifest_sha256
+                                                                            if admission else None),
+                                                  "input_signatures": input_sigs})
             # snapshot pre-existing output signatures — an exit-0 no-op that
             # leaves a stale output unchanged must NOT be certified (P0-5).
             pre_sigs = {o: _output_sig(o) for o in job.outputs}
@@ -394,6 +401,9 @@ def run_jobs(jobs: list, controller_id: Optional[str] = None, allowed_pids=(),
             # require_active_lease() can PROVE ownership (inode match), not merely
             # observe the global lock is held.
             child_env = dict(os.environ)
+            if admission is not None:
+                child_env.update({str(k): str(v) for k, v in
+                                  admission.manifest["cache_environment"].items()})
             if lease.fileno() is not None:
                 child_env["BASEMAP_GPU_LEASE_FD"] = str(lease.fileno())
             p = subprocess.Popen(job.argv, cwd=job.cwd, stdout=logf, stderr=subprocess.STDOUT,
@@ -419,6 +429,9 @@ def run_jobs(jobs: list, controller_id: Optional[str] = None, allowed_pids=(),
             final = {"controller_id": cid, "job": job.name, "argv": job.argv,
                      "status": rec["status"], "exit_code": rc, "seconds": rec["seconds"],
                      "spec_digest": spec_digest, "output_sigs": post_sigs,
+                     "input_signatures": input_sigs,
+                     "launch_checkout": launch_checkout,
+                     "queue_manifest_sha256": (admission.manifest_sha256 if admission else None),
                      "gpu_pre": snap_pre, "gpu_post": snap_post, "finished": _utcnow()}
             if job.manifest:
                 _atomic_write_json(job.manifest, final)
@@ -428,6 +441,10 @@ def run_jobs(jobs: list, controller_id: Optional[str] = None, allowed_pids=(),
                 _atomic_write_json(job.done_marker, {"status": "ok", "job": job.name,
                                                      "finished": _utcnow(), "exit_code": 0,
                                                      "spec_digest": spec_digest,
+                                                     "input_signatures": input_sigs,
+                                                     "launch_checkout": launch_checkout,
+                                                     "queue_manifest_sha256": (admission.manifest_sha256
+                                                                               if admission else None),
                                                      "output_sigs": post_sigs})
                 done.add(job.name)
             summary["jobs"].append(rec)
@@ -441,8 +458,34 @@ def run_jobs(jobs: list, controller_id: Optional[str] = None, allowed_pids=(),
 
 
 if __name__ == "__main__":
-    spec = json.load(open(sys.argv[1]))
-    jobs = [Job(**j) for j in spec.get("jobs", spec)]
+    spec_path = os.path.realpath(sys.argv[1])
+    spec = json.load(open(spec_path))
+    raw_jobs = spec.get("jobs", spec) if isinstance(spec, dict) else spec
+    job_fields = {field.name for field in dataclasses.fields(Job)}
+    repo_root = (os.path.realpath(spec.get("repo_root")) if isinstance(spec, dict)
+                 and spec.get("repo_root") else
+                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    jobs = []
+    for raw in raw_jobs:
+        normalized = dict(raw)
+        normalized["name"] = normalized.pop("id", normalized.get("name"))
+        inputs = normalized.pop("inputs", normalized.get("input_paths", []))
+        normalized["input_paths"] = [
+            path if os.path.isabs(path) else os.path.join(repo_root, path)
+            for path in inputs
+        ]
+        normalized = {key: value for key, value in normalized.items() if key in job_fields}
+        jobs.append(Job(**normalized))
+    admission = None
+    queue_manifest = None
+    if isinstance(spec, dict):
+        queue_manifest = spec.get("queue_manifest")
+        if queue_manifest is None and spec.get("schema_version") == 1:
+            queue_manifest = spec_path
+    if queue_manifest:
+        from .queue_admission import QueueAdmission
+        admission = QueueAdmission(queue_manifest, repo_root)
     out = run_jobs(jobs, allowed_pids=spec.get("allowed_pids", ()) if isinstance(spec, dict) else (),
-                   summary_path=sys.argv[2] if len(sys.argv) > 2 else None)
+                   summary_path=sys.argv[2] if len(sys.argv) > 2 else None,
+                   admission=admission)
     print(json.dumps(out, indent=1))

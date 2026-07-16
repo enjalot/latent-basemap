@@ -74,6 +74,33 @@ def test_reference_fails_closed_on_drifted_centroids():
                        hiD_reference=ref, provenance={"t": "cdrift"})
 
 
+def test_reference_key_changes_on_unsampled_row_and_row_order():
+    """Round 0001: no striding/rounding hole remains in the corpus identity."""
+    X, _, _, cents = _fixture(n=200_000)
+    cfg = pv.PanelV2Config(n_anchors=100)
+    anchors = pv.sample_anchors(len(X), cfg)
+    key, _ = pv.hiD_reference_key(X, anchors, cfg, cents, kf=200)
+    changed = X.copy()
+    changed[123_457, 3] += np.float32(1e-7)
+    changed_key, _ = pv.hiD_reference_key(changed, anchors, cfg, cents, kf=200)
+    assert changed_key != key
+    reordered = X.copy()
+    reordered[[123_457, 123_458]] = reordered[[123_458, 123_457]]
+    reordered_key, _ = pv.hiD_reference_key(reordered, anchors, cfg, cents, kf=200)
+    assert reordered_key != key
+
+
+def test_reference_key_changes_on_sub_1e4_centroid_mutation():
+    X, _, _, cents = _fixture()
+    cfg = pv.PanelV2Config(n_anchors=100)
+    anchors = pv.sample_anchors(len(X), cfg)
+    key, _ = pv.hiD_reference_key(X, anchors, cfg, cents, kf=100)
+    changed = {16: cents[16].copy()}
+    changed[16][0, 0] += np.float32(1e-6)
+    changed_key, _ = pv.hiD_reference_key(X, anchors, cfg, changed, kf=100)
+    assert changed_key != key
+
+
 def test_reference_save_load_roundtrip(tmp_path):
     X, Z1, _, cents = _fixture()
     cfg = pv.PanelV2Config(frac=0.02, n_anchors=100, corpus_chunk=256)

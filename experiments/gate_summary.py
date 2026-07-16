@@ -10,12 +10,26 @@ budget/updates bound to the persisted run results (not a summary copy).
 Usage:  python experiments/gate_summary.py --out experiments/evidence/r0_1_gate_summary.json
 """
 from __future__ import annotations
-import argparse, os, sys, json, glob, hashlib
+import argparse, os, sys, json, hashlib, re
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)   # so `import basemap...` works for the post-hoc graph check
 EVID = os.path.join(ROOT, "experiments", "evidence")
-RESULTS = os.path.join(ROOT, "experiments", "results")
+RAW_ROOT = "/data/latent-basemap/closure"
+BRIDGE_RUNS = {
+    42: "historical/r1_8m_bridge_weighted_s42_20260715_163719_f4934f5b",
+    43: "historical/r1_8m_bridge_weighted_s43_20260715_170618_63bbadf5",
+}
+PINNED_RAW_FILES = {
+    "g1_decision_raw": "g1/stdcurve_decision.json",
+    "backfill_2m_controller": "bf_2m/bf_ctl.json",
+    "o1_controller": "o1/o1_ctl.json",
+    "o2_frontier_controller": "o2/o2_frontier_ctl.json",
+    "bridge_s42_results": BRIDGE_RUNS[42] + "/results.json",
+    "bridge_s42_config": BRIDGE_RUNS[42] + "/config.yaml",
+    "bridge_s43_results": BRIDGE_RUNS[43] + "/results.json",
+    "bridge_s43_config": BRIDGE_RUNS[43] + "/config.yaml",
+}
 
 
 def _sha(path, chunk=1 << 20):
@@ -34,11 +48,6 @@ def _load(path):
         return json.load(open(path))
     except Exception:
         return None
-
-
-def _latest(pat):
-    d = sorted(glob.glob(os.path.join(RESULTS, pat)))
-    return d[-1] if d else None
 
 
 def _acct(run_dir):
@@ -157,8 +166,8 @@ def check_bridge():
                  and (canary.get("steady_updates_per_s") or 0) >= (canary.get("floor") or 200))
     details, seed_ok = {}, True
     for seed in (42, 43):
-        rd = _latest(f"r1_8m_bridge_weighted_s{seed}_*")
-        if not rd:
+        rd = os.path.join(RAW_ROOT, BRIDGE_RUNS[seed])
+        if not os.path.isdir(rd):
             seed_ok = False; details[f"s{seed}"] = "no run dir"; continue
         acct, r = _acct(rd)
         cfg_persisted = os.path.join(rd, "config.yaml")
@@ -222,9 +231,18 @@ SOURCE_FILES = {
 
 
 def main():
+    global RAW_ROOT
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=os.path.join(EVID, "r0_1_gate_summary.json"))
+    ap.add_argument("--raw-root", default=RAW_ROOT)
+    ap.add_argument("--release-sha", required=True,
+                    help="full clean queue release SHA that this new certificate binds")
     args = ap.parse_args()
+    if not re.fullmatch(r"[0-9a-f]{40}", args.release_sha):
+        raise SystemExit("--release-sha must be a full lowercase 40-character SHA")
+    RAW_ROOT = os.path.realpath(args.raw_root)
+    if not RAW_ROOT.startswith("/data/"):
+        raise SystemExit("--raw-root must resolve under /data")
     items = {}
     for name, fn in CHECKS:
         try:
@@ -236,11 +254,16 @@ def main():
     closed = all(v["passed"] for v in items.values())
     # C1: stamp per-source content hashes so the certificate is traceable to exact
     # bytes. A missing pinned source is itself a red flag surfaced here.
-    source_hashes = {k: _sha(p) for k, p in SOURCE_FILES.items()}
+    pinned_raw_paths = {key: os.path.join(RAW_ROOT, relative)
+                        for key, relative in PINNED_RAW_FILES.items()}
+    all_sources = {**SOURCE_FILES, **pinned_raw_paths}
+    source_hashes = {k: _sha(p) for k, p in all_sources.items()}
     missing = [k for k, h in source_hashes.items() if h is None]
+    closed = closed and not missing
     out = {"gate": "r0_1_closure", "closed": bool(closed), "items": items,
            "source_hashes": source_hashes, "missing_sources": missing,
-           "code_commit": _git_head(),
+           "source_paths": all_sources, "raw_root": RAW_ROOT,
+           "code_commit": _git_head(), "release_sha": args.release_sha,
            "rule": "reopens raw pinned sources; recomputes golden deltas + decisions + the exact "
                    "cell×seed cross-product; requires the v2.2 kernel rescore with a reused shared "
                    "reference; binds actual pipeline/sampler/schedule/budget/updates to persisted "
@@ -257,7 +280,7 @@ def _git_head():
     import subprocess
     try:
         return subprocess.check_output(["git", "-C", ROOT, "rev-parse", "HEAD"],
-                                       text=True).strip()[:12]
+                                       text=True).strip()
     except Exception:
         return None
 

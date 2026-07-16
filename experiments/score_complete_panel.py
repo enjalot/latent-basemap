@@ -85,6 +85,21 @@ def knn_regress_coords(Xq, X, Z, cfg, k=15):
     return Z[nb].mean(axis=1)
 
 
+def load_sample_indices(testbed, *, no_model):
+    """Load the source-row map only when projection semantics require it.
+
+    Coord-only/no-model maps are transductive and may legitimately describe an
+    ordered corpus that has no source sampling artifact.
+    """
+    path = os.path.join(testbed, "sample_indices.npy")
+    if os.path.exists(path):
+        return np.load(path)
+    if no_model:
+        return None
+    raise FileNotFoundError(f"{path} required for held-out projection (drop --no-model "
+                            f"or provide sample_indices.npy)")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", nargs="+", required=True,
@@ -123,14 +138,7 @@ def main():
     # sample_indices maps testbed rows back to the source corpus; required for the
     # held-out projection (model path), optional for a --no-model transductive score
     # (e.g. the 4M-nested corpus has none).
-    _si_path = os.path.join(args.testbed, "sample_indices.npy")
-    if os.path.exists(_si_path):
-        si = np.load(_si_path)
-    elif args.no_model:
-        si = None
-    else:
-        raise FileNotFoundError(f"{_si_path} required for held-out projection (drop --no-model "
-                                f"or provide sample_indices.npy)")
+    si = load_sample_indices(args.testbed, no_model=args.no_model)
     centroids = frozen_centroids(X, (256, 1024), args.testbed)
 
     # L0.4: build (or load + key-verify) the ONE shared hi-D reference for this

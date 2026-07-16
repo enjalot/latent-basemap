@@ -67,6 +67,22 @@ def test_sparse_targets_allocated_only_for_landmarks(tmp_path):
     assert m._train_stats['non_anchor_row_count'] == 160
 
 
+def test_sparse_artifacts_save_reload_roundtrip(tmp_path):
+    """Round 0001 all-node fixture: sparse target + trained model persistence."""
+    X, ep = _edges_with_manifest(tmp_path, n=200)
+    ap, ids, targets = _landmark_npz(tmp_path, n_train=200, n_landmarks=40)
+    m = _umap(ap, gpu_resident_data=True)
+    m.fit(X, precomputed_edges_path=ep)
+    model_path = str(tmp_path / "model.pt")
+    m.save(model_path)
+    restored = ParametricUMAP.load(model_path, device="cpu")
+    np.testing.assert_allclose(restored.transform(X[:25]), m.transform(X[:25]),
+                               rtol=0, atol=1e-6)
+    artifact = np.load(ap, allow_pickle=False)
+    np.testing.assert_array_equal(artifact["anchor_ids"], ids)
+    np.testing.assert_array_equal(artifact["anchor_targets"], targets)
+
+
 # ── (b) hold term samples ONLY landmark ids ──────────────────────────────
 
 @pytest.mark.parametrize("resident", [True, False])
