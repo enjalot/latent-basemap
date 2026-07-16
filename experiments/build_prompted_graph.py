@@ -108,8 +108,13 @@ def build_fuzzy_graph(X, k=50, seed=42, device="cuda", chunk=4096):
     the construction the existing edges_k50_fuzzy.npz manifests attest to."""
     import umap.umap_ as uu
     n = X.shape[0]
-    ids = np.arange(n, dtype=np.int64)
-    nbr_idx, nbr_dist = topk_neighbors(X, X, k, device=device, chunk=chunk, exclude_self_ids=ids)
+    # fable blocker fix: the unprompted testbed graph was built with UMAP-standard
+    # SELF-INCLUSIVE knn_indices (self ranks first under cosine on normalized
+    # vectors → self + k-1 real neighbours; fuzzy_simplicial_set zeroes the self
+    # edge). Passing self-EXCLUDED top-k gave a different recipe (out-degree floor
+    # k vs k-1, rho/sigma calibrated on a different distance list, edge-weight
+    # deltas up to ~0.7). Use self-inclusive top-k to match the artifact exactly.
+    nbr_idx, nbr_dist = topk_neighbors(X, X, k, device=device, chunk=chunk, exclude_self_ids=None)
     graph, sigmas, rhos = uu.fuzzy_simplicial_set(
         X, n_neighbors=k, random_state=np.random.RandomState(seed), metric="cosine",
         knn_indices=nbr_idx, knn_dists=nbr_dist,

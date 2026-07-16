@@ -322,7 +322,8 @@ def embed_texts(model, texts, batch_size: int = 512, show_progress: bool = False
 
 def measure_faithfulness(model, *, sample_indices, ref_X, text_dir, text_shards,
                           offsets, n_probe: int = 8, seed: int = 0,
-                          min_mean_cosine: float = 0.98) -> dict:
+                          min_mean_cosine: float = 0.98,
+                          min_row_cosine: float = 0.95) -> dict:
     """Embed ``n_probe`` of the 200k rows WITHOUT the prompt through the local
     pipeline and compare to the stored (Modal/vLLM) reference embeddings for
     those exact rows. Returns a dict with per-row/mean/min cosine and a
@@ -344,8 +345,10 @@ def measure_faithfulness(model, *, sample_indices, ref_X, text_dir, text_shards,
         "per_row_cosine": [float(c) for c in cos],
         "probe_positions": [int(p) for p in positions],
         "probe_global_ids": [int(g) for g in got_ids],
-        "threshold": min_mean_cosine,
-        "passed": bool(cos.mean() >= min_mean_cosine),
+        "threshold": min_mean_cosine, "min_row_threshold": min_row_cosine,
+        # fable finding: gate the MIN row cosine too — one catastrophically wrong
+        # row (e.g. a single misaligned shard) can hide behind a passing mean.
+        "passed": bool(cos.mean() >= min_mean_cosine and cos.min() >= min_row_cosine),
     }
     return out
 
@@ -365,7 +368,7 @@ def main():
     ap.add_argument("--batch-size", type=int, default=512)
     ap.add_argument("--dtype", default="float32", choices=["float32", "float16", "bfloat16"])
     ap.add_argument("--device", default=None, help="default: cuda if available else cpu")
-    ap.add_argument("--n-faithfulness-probe", type=int, default=8)
+    ap.add_argument("--n-faithfulness-probe", type=int, default=40)  # fable: ≥33 for 11-shard coverage
     ap.add_argument("--canary-rows", type=int, default=2000)
     ap.add_argument("--limit", type=int, default=None,
                      help="debug: only embed the first N rows (smoke tests)")
