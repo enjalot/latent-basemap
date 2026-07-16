@@ -81,14 +81,23 @@ def _git_state():
 
 
 def _job_spec_digest(job) -> str:
-    """Bind a done record to the job's FULL identity (P1): argv + cwd + declared
-    outputs + the repo commit/dirty state + the content hashes of every declared
-    input_path (config, scorer/trainer code, input artifacts). A changed scorer or
-    config at the same argv therefore invalidates a stale done marker."""
+    """Bind a done record to the job's FULL identity (P1/L0.3): argv + cwd +
+    declared outputs + the repo commit/dirty state + the content hashes of every
+    declared input_path (config, scorer/trainer code, input artifacts) + the
+    dependency edges, canary identity, predicted wall, and resource/verdict policy.
+    A changed scorer, config, dependency edge, or resource policy at the same argv
+    therefore invalidates a stale done marker."""
     payload = json.dumps({
         "argv": list(job.argv), "cwd": job.cwd or "", "outputs": sorted(job.outputs),
         "code": _git_state(),
         "inputs": {p: _output_sig(p) for p in sorted(getattr(job, "input_paths", []) or [])},
+        # L0.3: bind the execution contract, not just argv/inputs.
+        "deps": sorted(getattr(job, "deps", []) or []),
+        "canary_dep": getattr(job, "canary_dep", None),
+        "predicted_wall_s": getattr(job, "predicted_wall_s", 0.0),
+        "required_free_gb": getattr(job, "required_free_gb", 0.0),
+        "require_passing_verdict": getattr(job, "require_passing_verdict", None),
+        "certifying": getattr(job, "certifying", True),
     }, sort_keys=True)
     return hashlib.sha1(payload.encode()).hexdigest()[:16]
 
@@ -270,6 +279,10 @@ class Job:
     # forces a passing canary dependency before the run is admitted.
     canary_dep: Optional[str] = None   # S2: name of the perf-canary job this long
     # run depends on. Must also appear in `deps` so a sub-floor canary blocks it.
+    require_passing_verdict: Optional[str] = None   # L0.3: path to a verdict JSON
+    # that must parse to {"passed": true} before this job launches. Binds the
+    # canary→train edge by CONTENT — a `touch`-only job named `perf_canary` cannot
+    # release training because it never writes a passing verdict.
 
 
 CANARY_REQUIRED_WALL_S = 600.0   # S2: >10 predicted minutes ⇒ canary is mandatory
@@ -335,6 +348,24 @@ def run_jobs(jobs: list, controller_id: Optional[str] = None, allowed_pids=(),
                 if not job.continue_on_failure:
                     summary["stop_reason"] = f"unsatisfied deps for {job.name}"; break
                 continue
+            # L0.3: content-based canary gate — the referenced verdict JSON must
+            # exist and parse to passed=true. A job named `perf_canary` that only
+            # `touch`es a file writes no such verdict, so it cannot release a train.
+            rpv = getattr(job, "require_passing_verdict", None)
+            if rpv:
+                v = None
+                try:
+                    v = json.load(open(rpv))
+                except Exception as e:
+                    v = {"_load_error": repr(e)}
+                if not (isinstance(v, dict) and v.get("passed") is True):
+                    rec["status"] = "blocked:verdict_not_passing"
+                    rec["verdict_path"] = rpv
+                    summary["jobs"].append(rec)
+                    if not job.continue_on_failure:
+                        summary["stop_reason"] = (f"{job.name}: required verdict {rpv} is not "
+                                                  f"passed=true (L0.3)"); break
+                    continue
             # co-tenant policy — enforced only for jobs that declare a GPU need
             # (required_free_gb>0); required_free_gb==0 marks a CPU job.
             try:

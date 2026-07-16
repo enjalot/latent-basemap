@@ -481,9 +481,24 @@ class HostStreamEdgeSampler:
         self._dst_h = np.ascontiguousarray(np.asarray(targets), dtype=np.int32)
         self._cdf_h = None
         if weighted_edge_sampling:
+            if weights is None:
+                raise ValueError("weighted_edge_sampling=True requires edge weights (S0).")
             w = np.asarray(weights, dtype=np.float64)
+            # L0.5: HostStream degenerate-weight guards, matching DeviceEdgeSampler.
+            # A non-finite/negative weight or a non-positive total must FAIL CLOSED,
+            # not silently collapse every draw. Constant weights are uniform-equivalent.
+            if not np.all(np.isfinite(w)):
+                raise ValueError("weighted_edge_sampling: non-finite edge weights (S0).")
+            if np.any(w < 0):
+                raise ValueError("weighted_edge_sampling: negative edge weights (S0).")
+            total = float(w.sum())
+            if not (total > 0):
+                raise ValueError(f"weighted_edge_sampling: non-positive weight total {total} — "
+                                 f"all-zero/degenerate weights; refuse to sample (S0).")
+            if float(w.max()) == float(w.min()):
+                logging.info("weighted_edge_sampling: constant weights → uniform-equivalent (S0).")
             cdf = np.cumsum(w)
-            self._cdf_h = cdf / max(cdf[-1], 1e-12)   # f64 host, monotonic (0,1]
+            self._cdf_h = cdf / total                 # f64 host, monotonic (0,1]
         # binary targets use a constant ones vector; probability mode gathers weights
         self._w_h = (np.asarray(weights, dtype=np.float32)
                      if positive_target_mode == "probability" else None)

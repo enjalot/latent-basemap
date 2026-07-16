@@ -159,20 +159,28 @@ def stream_sha(path: str, chunk=1 << 20) -> str:
 
 
 def _cached_stream_sha(path: str) -> str:
-    """stream_sha with a size+mtime cache next to the file, so multi-GB artifacts
-    are not rehashed on every training run (P1). The cache is keyed by stable file
-    identity (size, mtime_ns); a change to either forces a rehash."""
+    """stream_sha with a cache next to the file, so multi-GB artifacts are not
+    rehashed on every training run (P1). L0.5: the cache identity now includes
+    device+inode+ctime_ns in addition to size+mtime_ns, so a same-size/same-mtime
+    replacement (atomic rename over the path, or a restored backup) no longer
+    reuses a stale sha. The sidecar is written ATOMICALLY (tmp+os.replace) so a
+    concurrent reader never sees a half-written cache."""
     st = os.stat(path)
+    ident = {"size": st.st_size, "mtime_ns": st.st_mtime_ns,
+             "ctime_ns": st.st_ctime_ns, "dev": st.st_dev, "inode": st.st_ino}
     cache = path + ".shacache.json"
     try:
         c = json.load(open(cache))
-        if c.get("size") == st.st_size and c.get("mtime_ns") == st.st_mtime_ns:
+        if all(c.get(k) == v for k, v in ident.items()):
             return c["sha"]
     except Exception:
         pass
     sha = stream_sha(path)
     try:
-        json.dump({"size": st.st_size, "mtime_ns": st.st_mtime_ns, "sha": sha}, open(cache, "w"))
+        tmp = f"{cache}.tmp.{os.getpid()}"
+        with open(tmp, "w") as f:
+            json.dump({**ident, "sha": sha}, f); f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, cache)   # atomic
     except Exception:
         pass
     return sha
@@ -208,21 +216,39 @@ def validate_graph_content(edges_path: str, manifest: dict, shard_paths=None,
             raise ValueError(f"manifest records data_shard_sha for {sorted(want_shards)} but the "
                              f"loader supplied NO shard paths — cannot verify data integrity; "
                              f"refuse to train (S0). Populate loaded_shard_paths.")
-        by_base = {os.path.basename(p): p for p in shard_paths}
-        extra = set(by_base) - set(want_shards)
-        if extra:
-            raise ValueError(f"loaded shards {sorted(extra)} are absent from the manifest "
-                             f"data_shard_sha — unexpected/extra data; refuse to train (S0).")
+        # L0.5: compare shards as an ORDERED list, not a basename-keyed set — a
+        # reordered load ([a,b] loaded as [b,a]) and duplicate basenames both used
+        # to pass through the old dict mapping (REORDER_ACCEPTED). Reject dup
+        # basenames outright, then require the manifest's ordered `data_shards`
+        # list to match the loaded order position-by-position.
+        loaded_bases = [os.path.basename(p) for p in shard_paths]
+        if len(set(loaded_bases)) != len(loaded_bases):
+            dups = sorted({b for b in loaded_bases if loaded_bases.count(b) > 1})
+            raise ValueError(f"duplicate shard basenames {dups} in loaded paths — ambiguous "
+                             f"identity; refuse to train (S0).")
+        want_order = manifest.get("data_shards")
+        if want_order is None:
+            if len(want_shards) > 1:
+                raise ValueError(f"multi-shard manifest for {edges_path} lacks an ordered "
+                                 f"`data_shards` list — cannot verify load order; refuse to "
+                                 f"train (S0). Rebuild with graph_manifest_v2.")
+            want_order = list(want_shards.keys())      # single shard: order is trivial
+        if loaded_bases != list(want_order):
+            raise ValueError(f"loaded shard order {loaded_bases} != manifest order "
+                             f"{list(want_order)} — reordered/missing/extra data; refuse to "
+                             f"train (S0).")
         ordered = {}
-        for base, want in want_shards.items():
-            p = by_base.get(base)
-            if p is None:
-                raise ValueError(f"manifest shard {base} not among loaded shards {sorted(by_base)} (S0).")
+        for base, p in zip(want_order, shard_paths):
+            want = want_shards.get(base)
+            if want is None:
+                raise ValueError(f"manifest data_shards lists {base} but data_shard_sha has no "
+                                 f"hash for it — malformed manifest (S0).")
             got = _cached_stream_sha(p)
             if got != want:
                 raise ValueError(f"shard {base} sha {got} != manifest {want} — data changed (S0).")
             ordered[base] = got
         trusted["data_shard_sha"] = ordered
+        trusted["data_shard_order"] = list(want_order)
     return trusted
 
 

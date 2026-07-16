@@ -176,6 +176,10 @@ class LoggingConfig:
     wandb_group: Optional[str] = None     # Group related runs (e.g. a sweep)
     # File-based logging
     results_dir: str = "experiments/results"
+    # L0.2: explicit deterministic run dir. When set, run_dir() returns it
+    # verbatim (no timestamp), so a controller can DECLARE and freshly verify the
+    # exact config/admission/results/manifest/coords/model paths a launch writes.
+    run_dir_override: str = ""
     save_model: bool = True
     save_embeddings: bool = False         # Save transformed embeddings
     # Run persistence: always write coords.parquet (x, y, ls_index) + model.pt
@@ -227,7 +231,12 @@ class ExperimentConfig:
         return hashlib.sha256(s.encode()).hexdigest()[:8]
 
     def run_dir(self) -> str:
-        """Directory for this run's results."""
+        """Directory for this run's results. L0.2: an explicit
+        `logging.run_dir_override` (or the BASEMAP_RUN_DIR env) wins verbatim so
+        the run dir is deterministic and declarable; otherwise timestamped."""
+        override = self.logging.run_dir_override or os.environ.get("BASEMAP_RUN_DIR", "")
+        if override:
+            return override
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return os.path.join(self.logging.results_dir, f"{self.name}_{timestamp}_{self.config_hash()}")
 

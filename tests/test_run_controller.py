@@ -287,12 +287,77 @@ def test_s2_passing_canary_admits_long_run():
     print("PASS passing canary admits long run")
 
 
+def test_l03_touch_canary_does_not_release_train():
+    # A job merely NAMED perf_canary that only touches a file writes no passing
+    # verdict — so a verdict-gated train must NOT launch (content, not name).
+    d = tempfile.mkdtemp(); os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
+    import importlib; importlib.reload(rc)
+    verdict = os.path.join(d, 'verdict.json')     # never written by a touch job
+    canary = rc.Job(name='perf_canary', argv=['bash', '-c', f'touch {d}/c.out'],
+                    outputs=[f'{d}/c.out'], done_marker=os.path.join(d, 'c.done'))
+    train = rc.Job(name='train8m', argv=['bash', '-c', f'touch {d}/o'], outputs=[f'{d}/o'],
+                   done_marker=os.path.join(d, 't.done'), predicted_wall_s=1800.0,
+                   deps=['perf_canary'], canary_dep='perf_canary',
+                   require_passing_verdict=verdict)
+    s = rc.run_jobs([canary, train], allowed_pids=rc.known_service_pids())
+    assert s['jobs'][0]['status'] == 'ok'                 # touch job "succeeds"
+    assert s['jobs'][1]['status'] == 'blocked:verdict_not_passing', s
+    assert not os.path.exists(f'{d}/o')                   # train never ran
+
+
+def test_l03_failing_verdict_blocks_train():
+    d = tempfile.mkdtemp(); os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
+    import importlib; importlib.reload(rc)
+    verdict = os.path.join(d, 'verdict.json')
+    canary = rc.Job(name='perf_canary',
+                    argv=['bash', '-c', f'echo \'{{"passed": false, "reasons": ["below floor"]}}\' > {verdict}'],
+                    outputs=[verdict], done_marker=os.path.join(d, 'c.done'))
+    train = rc.Job(name='train8m', argv=['bash', '-c', f'touch {d}/o'], outputs=[f'{d}/o'],
+                   done_marker=os.path.join(d, 't.done'), predicted_wall_s=1800.0,
+                   deps=['perf_canary'], canary_dep='perf_canary',
+                   require_passing_verdict=verdict)
+    s = rc.run_jobs([canary, train], allowed_pids=rc.known_service_pids())
+    assert s['jobs'][1]['status'] == 'blocked:verdict_not_passing'
+    assert not os.path.exists(f'{d}/o')
+
+
+def test_l03_passing_verdict_admits_train():
+    d = tempfile.mkdtemp(); os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
+    import importlib; importlib.reload(rc)
+    verdict = os.path.join(d, 'verdict.json')
+    canary = rc.Job(name='perf_canary',
+                    argv=['bash', '-c', f'echo \'{{"passed": true}}\' > {verdict}'],
+                    outputs=[verdict], done_marker=os.path.join(d, 'c.done'))
+    train = rc.Job(name='train8m', argv=['bash', '-c', f'touch {d}/o'], outputs=[f'{d}/o'],
+                   done_marker=os.path.join(d, 't.done'), predicted_wall_s=1800.0,
+                   deps=['perf_canary'], canary_dep='perf_canary',
+                   require_passing_verdict=verdict)
+    s = rc.run_jobs([canary, train], allowed_pids=rc.known_service_pids())
+    assert [j['status'] for j in s['jobs']] == ['ok', 'ok'], s
+    assert os.path.exists(f'{d}/o')
+
+
+def test_l03_dependency_edge_binds_digest():
+    # changing a job's deps must invalidate a prior done record (L0.3 digest).
+    d = tempfile.mkdtemp(); os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
+    import importlib; importlib.reload(rc)
+    a = rc.Job(name='a', argv=['bash', '-c', f'touch {d}/a.out'], outputs=[f'{d}/a.out'],
+               done_marker=os.path.join(d, 'a.done'))
+    j1 = rc.Job(name='b', argv=['bash', '-c', f'touch {d}/b.out'], outputs=[f'{d}/b.out'],
+                done_marker=os.path.join(d, 'b.done'))
+    assert rc._job_spec_digest(j1) != rc._job_spec_digest(
+        rc.Job(name='b', argv=['bash', '-c', f'touch {d}/b.out'], outputs=[f'{d}/b.out'],
+               done_marker=os.path.join(d, 'b.done'), deps=['a']))
+
+
 if __name__ == '__main__':
     for fn in [test_cross_process_lease_exclusion, test_lease_survives_controller_death_via_inherited_fd,
                test_nonzero_job1_stops_job2, test_exit_zero_without_outputs_is_failure,
                test_stale_output_does_not_skip_without_done_record, test_final_manifest_has_status_and_telemetry,
                test_co_tenant_policy_blocks_gpu_job_with_unknown_pid,
                test_s2_long_run_without_canary_dep_rejected, test_s2_subfloor_canary_blocks_long_run,
-               test_s2_passing_canary_admits_long_run]:
+               test_s2_passing_canary_admits_long_run, test_l03_touch_canary_does_not_release_train,
+               test_l03_failing_verdict_blocks_train, test_l03_passing_verdict_admits_train,
+               test_l03_dependency_edge_binds_digest]:
         fn()
     print("ALL P0-D TESTS PASSED")

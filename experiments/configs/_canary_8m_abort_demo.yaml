@@ -1,4 +1,4 @@
-name: r1_8m_canary_pass
+name: r1_8m_canary_abort_demo
 description: 'Phase 1 baseline: jina-v5-nano 768d fineweb-edu English, 200k-row testbed
   (seed-42 sample, /data/latent-basemap/jina-en-200k), exact GPU k=50 cosine edge
   list, binary targets, on-the-fly negatives. Carries the proven mxbai recipe onto
@@ -57,9 +57,9 @@ train:
   require_full_budget: false
   require_graph_manifest: true
   required_input_pipeline: device
-  canary_max_steps: 1200
+  canary_max_steps: 3000
   canary_warmup: 200
-  canary_floor: 200.0
+  canary_floor: 400.0
   canary_warn_rate: 250.0
   use_amp: true
   positive_target_mode: binary

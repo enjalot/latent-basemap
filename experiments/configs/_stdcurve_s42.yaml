@@ -1,4 +1,4 @@
-name: r1_8m_canary_pass
+name: r1_8m_umap_stdcurve_s42
 description: 'Phase 1 baseline: jina-v5-nano 768d fineweb-edu English, 200k-row testbed
   (seed-42 sample, /data/latent-basemap/jina-en-200k), exact GPU k=50 cosine edge
   list, binary targets, on-the-fly negatives. Carries the proven mxbai recipe onto
@@ -34,9 +34,9 @@ model:
   use_batchnorm: false
   use_dropout: false
   dropout_prob: 0.5
-  a: 1.0
-  b: 1.0
-  low_dim_kernel: legacy_lp
+  a: 1.57694346
+  b: 0.895060879
+  low_dim_kernel: umap
 train:
   n_epochs: 60
   batch_size: 8192
@@ -54,13 +54,13 @@ train:
   lr_schedule: cosine
   warmup_steps: 200
   total_steps_estimate: 500000
-  require_full_budget: false
+  require_full_budget: true
   require_graph_manifest: true
   required_input_pipeline: device
-  canary_max_steps: 1200
+  canary_max_steps: 0
   canary_warmup: 200
   canary_floor: 200.0
-  canary_warn_rate: 250.0
+  canary_warn_rate: 0.0
   use_amp: true
   positive_target_mode: binary
   reject_neighbors: false
@@ -95,6 +95,6 @@ logging:
   wandb_group: null
   results_dir: experiments/results
   run_dir_override: ''
-  save_model: false
+  save_model: true
   save_embeddings: false
   persist_run: true

@@ -59,7 +59,11 @@ def main():
     args = ap.parse_args()
 
     cfg = build_canary_config(args.max_steps, args.warmup, args.budget_gb, floor=args.floor)
-    cfg_path = "experiments/configs/_canary_8m.yaml"
+    # L0.1: a CLI invocation must NEVER overwrite a tracked YAML. Write the derived
+    # config to a scratch path under /data (immutable tracked references live at
+    # experiments/configs/_canary_8m{,_abort_demo}.yaml and are not rewritten here).
+    os.makedirs("/data/latent-basemap/closure", exist_ok=True)
+    cfg_path = "/data/latent-basemap/closure/_canary_8m_derived.yaml"
     cfg.to_yaml(cfg_path)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
 

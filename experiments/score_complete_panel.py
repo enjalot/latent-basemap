@@ -26,7 +26,8 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from basemap.panel_v2 import (score_panel, PanelV2Config, load_embeddings, load_coords,
                               ffr_from_neighbors, recall_at_k_from_neighbors, _ids_hash,
-                              cross_knn)
+                              cross_knn, sample_anchors, build_hiD_reference,
+                              save_hiD_reference, load_hiD_reference, hiD_reference_key)
 
 
 def _sha_file(path):
@@ -98,6 +99,10 @@ def main():
     ap.add_argument("--frac", type=float, default=0.001)
     ap.add_argument("--n-anchors", type=int, default=10000)
     ap.add_argument("--seed", type=int, default=123)
+    ap.add_argument("--reference", default=None,
+                    help="L0.4: shared hi-D reference .npz. Built+saved if absent, "
+                         "else loaded+key-verified; every map is scored through it "
+                         "and must stamp hiD_reference_reused=true.")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -117,6 +122,25 @@ def main():
     X = load_embeddings(os.path.join(args.testbed, "train"), dim=args.dim)
     si = np.load(os.path.join(args.testbed, "sample_indices.npy"))
     centroids = frozen_centroids(X, (256, 1024), args.testbed)
+
+    # L0.4: build (or load + key-verify) the ONE shared hi-D reference for this
+    # corpus. All maps below are scored through it; each must stamp the same key
+    # and hiD_reference_reused=true. build/verify uses the full ordered-shard /
+    # centroid / anchor / formula content identity via hiD_reference_key.
+    ref = None
+    if args.reference:
+        aidx0 = sample_anchors(len(X), cfg)
+        want_key, _ = hiD_reference_key(X, aidx0, cfg, centroids,
+                                        kf=max(cfg.k_hit, int(np.ceil(cfg.frac * len(X)))))
+        if os.path.exists(args.reference) or os.path.exists(args.reference + ".npz"):
+            ref = load_hiD_reference(args.reference)
+            if ref["key"] != want_key:
+                raise ValueError(f"shared reference key {ref['key']} != recomputed {want_key} "
+                                 f"— stale/mismatched reference; refuse to score (L0.4).")
+        else:
+            ref = build_hiD_reference(X, aidx0, cfg, centroids)
+            save_hiD_reference(ref, args.reference)
+        print(f"[panel] shared reference key={ref['key']} reused_across_maps=True", flush=True)
 
     # held-out queries: source rows NOT in the testbed sample (real OOS proof),
     # sampled WITHOUT replacement so the effective query count equals n_holdout
@@ -151,7 +175,9 @@ def main():
                "source": args.source, "sample_indices_hash": _ids_hash(np.asarray(si, np.int64)),
                "frac": cfg.frac, "n_anchors": cfg.n_anchors, "seed": args.seed,
                "scorer_commit": _commit, "scorer_dirty": _dirty,
-               "formula_version": cfg.formula_version, "runs": {},
+               "formula_version": cfg.formula_version,
+               "hiD_reference_path": args.reference,
+               "hiD_reference_key": (ref["key"] if ref is not None else None), "runs": {},
                "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
     for label, rd in runs.items():
@@ -161,9 +187,13 @@ def main():
         # pass z_ids through — the exact-alignment contract must hold for the
         # decision scorer too (P0-4), not just the transductive panel.
         panel = score_panel(X, Z, config=cfg, z_ids=z_ids, centroids_by_k=centroids,
+                            hiD_reference=ref,
                             provenance={"scorer": "complete_panel", "run": os.path.basename(rd),
                                         "coords_sha": _sha_file(coords_path),
                                         "no_model_reference": bool(args.no_model)})
+        if ref is not None and not panel["provenance"].get("hiD_reference_reused"):
+            raise ValueError(f"map {label} did not reuse the shared reference "
+                             f"(key drift?) — refuse to certify (L0.4).")
         if args.no_model:
             # coord-only reference (cuML/umap-learn): transductive metrics only —
             # no model to project held-out queries, so proj/kNN-regressor are N/A.
@@ -189,6 +219,9 @@ def main():
             "proj_knn_regressor_ffr": knn_ffr, "proj_random_floor_ffr": floor_ffr,
             "proj_beats_knn": (None if args.no_model else bool(proj_ffr > knn_ffr)),
             "proj_margin_over_knn": (None if args.no_model else round(proj_ffr - knn_ffr, 4)),
+            # L0.4: shared-reference provenance per map.
+            "hiD_reference_key": panel["provenance"].get("hiD_reference_key"),
+            "hiD_reference_reused": panel["provenance"].get("hiD_reference_reused"),
             # P0-4: retain the full panel audit trail, not just scalar leaves.
             "panel_full": panel}
         json.dump(summary, open(args.out, "w"), indent=1)

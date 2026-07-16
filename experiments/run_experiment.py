@@ -390,6 +390,14 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         from basemap.run_controller import require_active_lease
         require_active_lease()
     run_dir = cfg.run_dir()
+    # L0.2: with an explicit (deterministic) run dir, refuse to silently reuse a
+    # nonempty target — a stale coords/model/results would masquerade as this
+    # run's output. Set BASEMAP_RUN_DIR_OVERWRITE=1 to intentionally reuse.
+    explicit = bool(cfg.logging.run_dir_override or os.environ.get("BASEMAP_RUN_DIR"))
+    if explicit and os.path.isdir(run_dir) and os.listdir(run_dir) \
+            and os.environ.get("BASEMAP_RUN_DIR_OVERWRITE") != "1":
+        raise RuntimeError(f"explicit run_dir {run_dir} is non-empty; refuse to silently "
+                           f"reuse it (L0.2). Remove it or set BASEMAP_RUN_DIR_OVERWRITE=1.")
     os.makedirs(run_dir, exist_ok=True)
 
     # Save config for reproducibility
@@ -517,10 +525,9 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         gpu_resident_vram_budget_gb=tc.gpu_resident_vram_budget_gb,
     )
 
-    # Count parameters
-    pumap._init_model(X_train.shape[1])
-    n_params = sum(p.numel() for p in pumap.model.parameters())
-    logging.info(f"Model parameters: {n_params:,}")
+    # L0.5: do NOT eagerly allocate the model here — edge-list admission
+    # (graph/pipeline/weight fail-closed checks) must precede model allocation.
+    # fit() initializes the model after admission and logs the parameter count.
 
     # ── Wandb setup ──
     wandb_run_name = cfg.logging.wandb_run_name or f"{cfg.name}_{cfg.config_hash()}"
@@ -564,6 +571,9 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
         wandb_run_name=wandb_run_name,
     )
     train_time = time.time() - t0
+    # L0.5: the model is allocated inside fit() AFTER admission; count params now.
+    n_params = sum(p.numel() for p in pumap.model.parameters())
+    logging.info(f"Model parameters: {n_params:,}")
     if graph_cache is not None:
         run_manifest["graph_cache"] = graph_cache.to_dict()
     # Record the anchored-init RMS-radius scale factor (plan §4.3): needed to
@@ -601,12 +611,32 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
                 bench_seconds=bench_s, setup_seconds=getattr(pumap, "_setup_seconds", None))
             canary["aborted"] = bool(_profiler.abort)
             canary["baseline_key"] = _profiler.baseline_key
+        # L0.1: the raw runner must be HONEST — a canary that aborted, missed its
+        # rate, dipped below floor, or ran the wrong pipeline/sampler FAILS. The
+        # verdict is persisted and the process exits nonzero; nothing downstream
+        # may infer success from a bare exit 0.
+        req_pipe = getattr(tc, "required_input_pipeline", None)
+        floor = float(getattr(tc, "canary_floor", 200.0))
+        pipe = canary["pipeline"]
+        canary_passed = (
+            not canary.get("aborted", False)
+            and rate is not None and rate >= floor
+            and (req_pipe in (None, "any") or pipe.get("pipeline") == req_pipe)
+            and (not tc.weighted_edge_sampling
+                 or pipe.get("positive_sampling") == "weighted_with_replacement"))
+        canary["passed"] = bool(canary_passed)
+        canary["floor"] = floor
         run_manifest["canary"] = canary
         results = {"config": cfg.to_dict(), "config_hash": cfg.config_hash(),
                    "run_manifest": run_manifest, "canary": canary}
         with open(os.path.join(run_dir, "results.json"), "w") as f:
             json.dump(results, f, indent=2)
-        logging.info("P3 CANARY result: %s", canary)
+        logging.info("P3/S2 CANARY result (passed=%s): %s", canary_passed, canary)
+        if not canary_passed:
+            logging.error("CANARY FAILED — aborted=%s rate=%s floor=%s pipeline=%s/%s",
+                          canary.get("aborted"), rate, floor, pipe.get("pipeline"),
+                          pipe.get("positive_sampling"))
+            sys.exit(2)
         return results
 
     # ── Transform ──

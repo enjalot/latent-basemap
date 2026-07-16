@@ -75,6 +75,13 @@ def extract_panel(results):
 
 
 def main():
+    # L0.3: RETIRED same-process multi-GPU-phase loop. Runs many trainings in one
+    # process under a single lease, defeating per-phase fresh-process isolation and
+    # the controller's fail-stop DAG. Use experiments/dag_template.py (canary→train→
+    # reference→score→gate). Override only for explicit diagnostics.
+    if os.environ.get("BASEMAP_UNSAFE_SAME_PROCESS") != "1":
+        raise SystemExit("run_r1_kernel is RETIRED (L0.3): use the controller subprocess DAG "
+                         "(dag_template.py). Override with BASEMAP_UNSAFE_SAME_PROCESS=1.")
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="experiments/configs/jina_en_200k_k50_fuzzy.yaml")
     ap.add_argument("--budget", type=int, default=500000, help="active-update budget (LR horizon)")

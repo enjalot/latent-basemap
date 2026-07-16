@@ -64,6 +64,11 @@ def _find_reusable(cfg):
 
 
 def main():
+    # L0.3: RETIRED same-process multi-GPU-phase loop (see run_r1_kernel). Use the
+    # controller subprocess DAG. Override only for explicit diagnostics.
+    if os.environ.get("BASEMAP_UNSAFE_SAME_PROCESS") != "1":
+        raise SystemExit("run_r1_ablation is RETIRED (L0.3): use the controller subprocess DAG "
+                         "(dag_template.py). Override with BASEMAP_UNSAFE_SAME_PROCESS=1.")
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="experiments/configs/jina_en_200k_k50_fuzzy.yaml")
     ap.add_argument("--budget", type=int, default=500000)

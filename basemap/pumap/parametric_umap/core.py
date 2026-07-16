@@ -254,6 +254,13 @@ class ParametricUMAP:
         )
         from .datasets.covariates_datasets import VariableDataset
 
+        # L0.5: admission (graph/shard hashes, pipeline selection, weighted→uniform
+        # fail, weight degeneracy) MUST precede model allocation, so a fail-closed
+        # rejection never happens after GPU params are committed. Enforced + tested.
+        if not getattr(self, "_allow_model_before_admission", False) and self.model is not None:
+            raise RuntimeError("edge-list admission must run BEFORE model allocation "
+                               "(self.model already initialized) — pipeline/graph/weight "
+                               "fail-closed checks would run after GPU commit (L0.5).")
         self._edges_path_used = edges_path
         load_weights = (self.positive_target_mode == "probability"
                         or self.weighted_edge_sampling)
@@ -763,11 +770,13 @@ class ParametricUMAP:
             n_features = int(X.shape[1])
             n_train = int(X.shape[0])
             logging.info(f"Input shape (lazy, edge-list mode): ({n_train}, {n_features})")
-            if self.model is None:
-                self._init_model(n_features)
+            # L0.5: ADMIT (graph/pipeline/weights) BEFORE allocating the model.
             ed = None
             dataset, loader, n_pos_edges = self._prepare_edge_list_training(
                 X, precomputed_edges_path, n_train, low_memory, random_state)
+            if self.model is None:
+                self._init_model(n_features)
+            logging.info("Model parameters: %d", sum(p.numel() for p in self.model.parameters()))
             neg_desc = "on-the-fly"
         else:
             logging.info("Casting input array to float32...")
