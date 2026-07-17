@@ -10,6 +10,10 @@ Usage:
   modal run train_combined_modal.py
   modal run train_combined_modal.py --n-epochs 100
 """
+from basemap.round0005_retirement import refuse_retired_launcher
+
+refuse_retired_launcher("train_combined_modal.py")
+
 import time
 import pickle
 import logging

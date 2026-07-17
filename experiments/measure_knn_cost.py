@@ -21,6 +21,8 @@ SRC = "/data/embeddings/fineweb-edu-sample-10BT-chunked-500-jina-v5-nano/train"
 
 
 def main():
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("experiments/measure_knn_cost.py")
     import torch
     ap = argparse.ArgumentParser()
     ap.add_argument("--n-holdout", type=int, default=20000)

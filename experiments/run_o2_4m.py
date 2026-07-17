@@ -9,6 +9,7 @@ from __future__ import annotations
 import os, sys, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from basemap.run_controller import Job, run_jobs, known_service_pids
+from basemap.round0005_retirement import refuse_retired_launcher
 
 PY = ".venv/bin/python"
 W = "/data/latent-basemap/closure/o2"
@@ -17,6 +18,7 @@ EVID = "experiments/evidence/r1_o2"
 
 
 def main():
+    refuse_retired_launcher("experiments/run_o2_4m.py")
     os.makedirs(W, exist_ok=True); os.makedirs(EVID, exist_ok=True)
     d = lambda p: os.path.join(W, p)
     verdict = d("perf_canary_verdict.json")

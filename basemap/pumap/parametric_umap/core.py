@@ -304,6 +304,18 @@ class ParametricUMAP:
         # equality is not identity — this catches a reordered or wrong-corpus X.
         import json as _json
         man_found = None
+        # Round 0014 consumes the already accepted Round-0013 30M capability.
+        # That capability is a complete content-bound graph/data closure but it
+        # intentionally did not create a sibling ``.manifest.json`` beside the
+        # historical graph.  Admit only the exact sealed adapter and graph here;
+        # every other caller retains the generic sibling-manifest requirement.
+        round0014_pack = getattr(X, "round0014_pack_seal", None)
+        if round0014_pack is not None:
+            from ...round0014_program import validate_device_uniform_pack
+
+            trusted = validate_device_uniform_pack(X, edges_path)
+            self._pipeline_verified_hashes = trusted
+            man_found = "accepted-round0013-capability"
         for man_path in (edges_path + ".manifest.json",
                          edges_path.rsplit(".", 1)[0] + ".manifest.json"):
             if os.path.exists(man_path):
@@ -358,7 +370,8 @@ class ParametricUMAP:
         # were selected, and fail closed if a weighted request would be silently
         # downgraded or the required pipeline is not met. Requested config is not
         # execution evidence — this is stamped into the manifest before any update.
-        def _stamp_pipeline(pipeline, sampler_class, weighted_ok, x_residency):
+        def _stamp_pipeline(pipeline, sampler_class, weighted_ok, x_residency,
+                            uniform_with_replacement=False):
             pos = ("weighted_with_replacement" if (self.weighted_edge_sampling and weighted_ok)
                    else "uniform")
             self._pipeline_info = {
@@ -366,6 +379,7 @@ class ParametricUMAP:
                 "positive_sampling": pos, "x_residency": x_residency,
                 "weighted_requested": bool(self.weighted_edge_sampling),
                 "weighted_effective": bool(self.weighted_edge_sampling and weighted_ok),
+                "uniform_with_replacement": bool(uniform_with_replacement),
                 "path_reason": reason}
             # weighted request must NEVER silently reach a uniform sampler.
             if self.weighted_edge_sampling and not weighted_ok:
@@ -388,7 +402,15 @@ class ParametricUMAP:
             n_train, n_features, n_pos_edges, edge_set, low_memory)
         if use_fast:
             logging.info("Edge-list mode: GPU-resident fast path (%s).", reason)
-            _stamp_pipeline("device", "DeviceEdgeSampler", weighted_ok=True, x_residency="device_fp16")
+            exact_uniform = (
+                getattr(X, "round0014_pack_seal", None) is not None
+                and self.positive_target_mode == "binary"
+                and self.weighted_edge_sampling is False
+            )
+            _stamp_pipeline(
+                "device_uniform" if exact_uniform else "device",
+                "DeviceEdgeSampler", weighted_ok=True, x_residency="device_fp16",
+                uniform_with_replacement=exact_uniform)
             ddataset = DeviceArrayDataset(X, self.device)
             self._X_dev = ddataset
             self._fast_device_path = True
@@ -398,6 +420,7 @@ class ParametricUMAP:
                 shuffle=True, random_state=random_state,
                 positive_target_mode=self.positive_target_mode,
                 weighted_edge_sampling=self.weighted_edge_sampling,
+                uniform_with_replacement=exact_uniform,
                 device=self.device,
             )
             return ddataset, loader, n_pos_edges
@@ -1276,6 +1299,7 @@ class ParametricUMAP:
                 warmup=self._bench_warmup, max_steps=self._max_train_steps,
                 floor=float(getattr(self, "_perf_floor", 200.0)),
                 warn_rate=getattr(self, "_perf_warn_rate", None),
+                subfloor_patience=int(getattr(self, "_perf_subfloor_patience", 3)),
                 device=self.device, baseline_key=bkey)
             self._canary_profiler = prof
         def _ph(name):
@@ -1437,6 +1461,9 @@ class ParametricUMAP:
                 if not torch.isfinite(loss):
                     consecutive_nonfinite_losses += 1
                     self._train_stats["nonfinite_loss_skips"] += 1
+                    if getattr(self, "_abort_on_first_nonfinite", False):
+                        raise RuntimeError(
+                            "Round 0014 aborts on the first non-finite loss")
                     logging.warning(
                         "Non-finite loss detected at step %d, skipping batch (%d consecutive)",
                         global_step,
@@ -1497,6 +1524,9 @@ class ParametricUMAP:
                         self._train_stats["nonfinite_gradient_skips"] += 1
                         kind = "model_grad"
                     consecutive_nonfinite_gradients += 1
+                    if getattr(self, "_abort_on_first_nonfinite", False):
+                        raise RuntimeError(
+                            "Round 0014 aborts on the first non-finite gradient")
                     # rate-limited (per-batch spam suppressed; aggregate kept)
                     if consecutive_nonfinite_gradients <= 3 or consecutive_nonfinite_gradients % 500 == 0:
                         logging.warning("Non-finite gradient at step %d (%s); skipping (%d consecutive, "
@@ -1562,6 +1592,9 @@ class ParametricUMAP:
                     # scaler.step skipped (scale decreased) → an AMP overflow at
                     # THIS step; the schedule was NOT advanced, so H is preserved.
                     st["amp_overflow_skips"] += 1
+                    if getattr(self, "_abort_on_first_nonfinite", False):
+                        raise RuntimeError(
+                            "Round 0014 aborts on the first AMP overflow")
                 st["final_lr"] = lr_used
 
                 current_lr = optimizer.param_groups[0]['lr']  # LR for the NEXT update
@@ -1596,7 +1629,11 @@ class ParametricUMAP:
                 bench_cap = (self._max_train_steps is not None and global_step >= self._max_train_steps)
                 if horizon_done or bench_cap:
                     stop_training = True
-                    st["stop_reason"] = "bench_cap" if bench_cap else "lr_horizon"
+                    # When the exact benchmark cap and the successful-update LR
+                    # horizon coincide, this is a completed scientific budget,
+                    # not a partial benchmark.  Existing short canaries still
+                    # stop as ``bench_cap`` because their horizon is larger.
+                    st["stop_reason"] = "lr_horizon" if horizon_done else "bench_cap"
                     if bench_cap and self._bench_t0:
                         if 'cuda' in str(self.device):
                             torch.cuda.synchronize(self.device)

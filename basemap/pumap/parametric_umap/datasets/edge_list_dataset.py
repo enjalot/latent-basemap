@@ -140,10 +140,13 @@ class DeviceEdgeSampler:
 
     Semantics vs the legacy path (documented distribution-level equivalence):
 
-    * Positive edges: same directed edges, streamed in a per-epoch random
-      permutation (``torch.randperm``). In-batch shuffling is dropped because the
-      BCE + correlation losses are permutation-invariant over the batch, so it
-      never affected the gradient.
+    * Positive edges: same directed-edge universe, normally streamed in a
+      per-epoch random permutation (``torch.randperm``).  Large graphs may draw
+      bounded batches with replacement instead.  The explicit
+      ``uniform_with_replacement`` mode makes that bounded uniform distribution
+      independent of the process threshold (the authenticated Round-0014 path).
+      In-batch shuffling is dropped because the BCE + correlation losses are
+      permutation-invariant over the batch, so it never affected the gradient.
     * Negatives: ``neg_src`` uniform over ``[0, n_nodes)``; ``neg_dst`` drawn as
       ``(neg_src + offset) mod n_nodes`` with ``offset`` uniform over
       ``[1, n_nodes)``. This is *exactly* the conditional distribution of
@@ -159,6 +162,7 @@ class DeviceEdgeSampler:
                  pos_ratio=0.2, batch_size=4096, shuffle=True,
                  random_state=0, positive_target_mode="binary",
                  weighted_edge_sampling=False,
+                 uniform_with_replacement=False,
                  device="cpu"):
         self.dataset = dataset          # DeviceArrayDataset
         self.device = device
@@ -201,6 +205,11 @@ class DeviceEdgeSampler:
         # inverse-CDF sampling (searchsorted over the normalised cumulative
         # weights) so it is O(n_pos log n_pos)/epoch and has no category cap.
         self.weighted_edge_sampling = bool(weighted_edge_sampling)
+        self.uniform_with_replacement = bool(uniform_with_replacement)
+        if self.weighted_edge_sampling and self.uniform_with_replacement:
+            raise ValueError(
+                "uniform_with_replacement cannot be combined with "
+                "weighted_edge_sampling")
         self.sample_cdf = None
         if self.weighted_edge_sampling:
             if weights is None:
@@ -243,7 +252,7 @@ class DeviceEdgeSampler:
         # fast path. Above the threshold, draw each batch's indices on the fly
         # (with replacement) — O(batch) memory, statistically equivalent for SGD.
         import os
-        self._per_batch = self.n_pos > int(
+        self._per_batch = self.uniform_with_replacement or self.n_pos > int(
             os.environ.get("PER_BATCH_EDGE_THRESHOLD", 400_000_000))
 
     def __len__(self):

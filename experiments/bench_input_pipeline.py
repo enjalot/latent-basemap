@@ -77,6 +77,8 @@ def time_fit(X, edges_path, device, gpu_resident, midnear, batch_size,
 
 
 def main():
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("experiments/bench_input_pipeline.py")
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--device", default="cpu",
                     help="cpu (default, GPU-safe) or cuda")

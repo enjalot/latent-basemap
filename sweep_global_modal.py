@@ -5,6 +5,10 @@ Each experiment tests a different approach to improving distance correlation.
 Usage:
   modal run sweep_global_modal.py
 """
+from basemap.round0005_retirement import refuse_retired_launcher
+
+refuse_retired_launcher("sweep_global_modal.py")
+
 import time
 import logging
 import numpy as np

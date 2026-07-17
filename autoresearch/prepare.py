@@ -185,6 +185,8 @@ def print_results(results):
 # ─── Main ───────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("autoresearch/prepare.py")
     print("Checking data availability...")
 
     missing = []

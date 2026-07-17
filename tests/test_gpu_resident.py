@@ -73,6 +73,33 @@ def test_device_sampler_batch_shapes_and_labels():
     assert len(s) == int(np.ceil(len(src) / num_pos))
 
 
+def test_device_sampler_explicit_uniform_replacement_is_threshold_independent(monkeypatch):
+    import torch
+    from basemap.pumap.parametric_umap.datasets.edge_list_dataset import (
+        DeviceArrayDataset, DeviceEdgeSampler,
+    )
+    monkeypatch.setenv("PER_BATCH_EDGE_THRESHOLD", "999999999")
+    X = np.arange(80, dtype=np.float32).reshape(10, 8)
+    dd = DeviceArrayDataset(X, "cpu")
+    src = np.arange(10, dtype=np.int32)
+    dst = np.roll(src, -1)
+    sampler = DeviceEdgeSampler(
+        dd, src, dst, None, n_nodes=10, pos_ratio=0.25,
+        batch_size=8, random_state=42, positive_target_mode="binary",
+        uniform_with_replacement=True, device="cpu")
+    src_feats, dst_feats, labels = next(iter(sampler))
+    assert sampler._per_batch is True
+    assert sampler.perm is None
+    assert src_feats.shape == dst_feats.shape == (8, 8)
+    assert torch.equal(labels, torch.tensor([1.0, 1.0, 0.0, 0.0,
+                                             0.0, 0.0, 0.0, 0.0]))
+    with pytest.raises(ValueError, match="cannot be combined"):
+        DeviceEdgeSampler(
+            dd, src, dst, np.ones(10, dtype=np.float32), n_nodes=10,
+            weighted_edge_sampling=True, uniform_with_replacement=True,
+            device="cpu")
+
+
 def test_decide_gpu_resident_modes():
     from basemap.pumap.parametric_umap import ParametricUMAP
     # auto on CPU -> legacy

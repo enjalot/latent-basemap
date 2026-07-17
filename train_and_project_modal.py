@@ -5,6 +5,10 @@ Then we download and project locally.
 Usage:
   modal run train_and_project_modal.py
 """
+from basemap.round0005_retirement import refuse_retired_launcher
+
+refuse_retired_launcher("train_and_project_modal.py")
+
 import time
 import logging
 import numpy as np

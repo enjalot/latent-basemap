@@ -64,6 +64,8 @@ def _find_reusable(cfg):
 
 
 def main():
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("experiments/run_r1_ablation.py")
     # L0.3: RETIRED same-process multi-GPU-phase loop (see run_r1_kernel). Use the
     # controller subprocess DAG. Override only for explicit diagnostics.
     if os.environ.get("BASEMAP_UNSAFE_SAME_PROCESS") != "1":

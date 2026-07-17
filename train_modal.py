@@ -2,6 +2,10 @@
 modal run train_modal.py --batch-size 512 --n-epochs 1 --learning-rate 0.0001
 """
 
+from basemap.round0005_retirement import refuse_retired_launcher
+
+refuse_retired_launcher("train_modal.py")
+
 from modal import App, Image, Secret, Volume, build, enter, exit, gpu, method
 from basemap.pumap.parametric_umap import ParametricUMAP  # Use the unwrapped class
 # from parametric_umap import ParametricUMAP

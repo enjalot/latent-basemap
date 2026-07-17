@@ -297,6 +297,8 @@ def compute_metrics(X, Z, labels, label_prefix):
 
 
 def main():
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("validate_umap.py")
     parser = argparse.ArgumentParser(description="Parametric UMAP validation experiments")
     parser.add_argument("--n-samples", type=int, default=1000, help="Number of samples")
     parser.add_argument("--dataset", type=str, default="swiss_roll",

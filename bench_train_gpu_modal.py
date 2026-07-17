@@ -5,6 +5,10 @@ Tests pure training speed (no k-NN) with synthetic on-the-fly edges.
 Usage:
   modal run bench_train_gpu_modal.py
 """
+from basemap.round0005_retirement import refuse_retired_launcher
+
+refuse_retired_launcher("bench_train_gpu_modal.py")
+
 import time
 import logging
 import numpy as np

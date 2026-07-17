@@ -163,6 +163,11 @@ def _gpu_knn_ids(X, anchor_idx: np.ndarray, k: int, device="cuda", achunk: int =
     (radii for density_preservation) — computed from the *same* topk matrix, so
     recall and density share one GPU pass instead of two full-corpus kNNs.
     """
+    if str(device).lower().startswith("cuda"):
+        # The legacy CLI is retired, but imported library calls must also be
+        # incapable of selecting CUDA outside the genuine Round 0005 child.
+        from .run_controller import require_active_round0005_child_admission
+        require_active_round0005_child_admission()
     import torch
     Xt = torch.from_numpy(np.ascontiguousarray(np.asarray(X))).to(device, torch.float32)
     # ||row||^2 in blocks — (Xt*Xt) would materialize a full second copy of Xt.
@@ -1163,8 +1168,16 @@ def check_unit_norm(X, sample=10000, tol=0.01, seed=0):
 
 
 def cmd_score(args):
-    Z, row_id = load_coords(args.coords)
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("basemap/eval.py")
+
+
+def _cmd_score_fixture_only(args):
+    """Private CPU-only compatibility body; never registered as a CLI command."""
+    if os.environ.get("CUDA_VISIBLE_DEVICES") != "":
+        raise RuntimeError("eval fixture scorer requires CUDA_VISIBLE_DEVICES='' exactly")
     X = load_embeddings(args.embeddings, dim=args.dim)
+    Z, row_id = load_coords(args.coords)
 
     # Align embeddings to coords rows.
     if row_id is not None:
@@ -1249,8 +1262,20 @@ def build_parser():
 
 
 def main(argv=None):
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("basemap/eval.py")
     args = build_parser().parse_args(argv)
     args.func(args)
+
+
+def _main_fixture_only(argv=None):
+    """Exercise the legacy CPU implementation without exposing an executable lane."""
+    if os.environ.get("CUDA_VISIBLE_DEVICES") != "":
+        raise RuntimeError("eval fixture main requires CUDA_VISIBLE_DEVICES='' exactly")
+    args = build_parser().parse_args(argv)
+    if args.func is not cmd_score:
+        raise RuntimeError("eval fixture parser selected a non-fixture command")
+    return _cmd_score_fixture_only(args)
 
 
 if __name__ == "__main__":

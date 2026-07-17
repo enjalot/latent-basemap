@@ -11,6 +11,10 @@ Previous error with faiss-gpu (1.7.2):
     Also hangs on IndexFlatL2 GPU transfer.
 """
 
+from basemap.round0005_retirement import refuse_retired_launcher
+
+refuse_retired_launcher("debug_faiss_modal.py")
+
 import modal
 
 app = modal.App("debug-faiss")

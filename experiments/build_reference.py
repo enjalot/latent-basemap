@@ -17,9 +17,11 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from basemap.panel_v2 import (PanelV2Config, load_embeddings, sample_anchors,
                               build_hiD_reference, save_hiD_reference, FORMULA_VERSION)
+from basemap.round0005_retirement import refuse_retired_launcher
 
 
 def main():
+    refuse_retired_launcher("experiments/build_reference.py")
     ap = argparse.ArgumentParser()
     ap.add_argument("--train", default="/data/latent-basemap/jina-en-8M-nested/train")
     ap.add_argument("--dim", type=int, default=768)

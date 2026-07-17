@@ -7,6 +7,10 @@ Usage:
   modal run build_150m_index_modal.py --n-per-dataset 10000000  # 10M per dataset = 30M total
   modal run build_150m_index_modal.py --query-only  # skip build, just query existing index
 """
+from basemap.round0005_retirement import refuse_retired_launcher
+
+refuse_retired_launcher("build_150m_index_modal.py")
+
 import time
 import logging
 import os

@@ -757,6 +757,8 @@ def run_matryoshka(n_rows):
 
 
 def main():
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("experiments/space_passport.py")
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("mode", nargs="?", default="all",
                     choices=["passports", "matryoshka", "all"])

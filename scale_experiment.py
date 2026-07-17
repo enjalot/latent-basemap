@@ -204,6 +204,8 @@ def run_scale_tier(n_samples, n_features, args):
 
 
 def main():
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("scale_experiment.py")
     parser = argparse.ArgumentParser(description="Parametric UMAP scaling experiments")
     parser.add_argument("--tiers", type=str, default="small", choices=["small", "medium", "large"])
     parser.add_argument("--sizes", type=int, nargs="+", default=None, help="Custom sizes")

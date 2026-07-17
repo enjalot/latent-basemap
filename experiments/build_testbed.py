@@ -80,6 +80,8 @@ def build_edges(X, ks, device="cuda", chunk=4096):
 
 
 def main():
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("experiments/build_testbed.py")
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True)
     ap.add_argument("--out", required=True)

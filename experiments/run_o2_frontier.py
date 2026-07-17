@@ -10,6 +10,7 @@ from __future__ import annotations
 import os, sys, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from basemap.run_controller import Job, run_jobs, known_service_pids
+from basemap.round0005_retirement import refuse_retired_launcher
 
 PY = ".venv/bin/python"
 W = "/data/latent-basemap/closure/o2"
@@ -19,6 +20,7 @@ WEIGHTS = [2, 10, 50]
 
 
 def main():
+    refuse_retired_launcher("experiments/run_o2_frontier.py")
     d = lambda p: os.path.join(W, p)
     control42 = d("control_s42")
     if not os.path.exists(os.path.join(control42, "coords.parquet")):

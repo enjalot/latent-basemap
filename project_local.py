@@ -209,6 +209,8 @@ def project_dataset(dataset_name, device="cpu", model_dir=None):
 
 
 if __name__ == "__main__":
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("project_local.py")
     parser = argparse.ArgumentParser()
     parser.add_argument("--download", action="store_true", help="Download models from Modal")
     parser.add_argument("--dataset", type=str, help="Dataset to project")

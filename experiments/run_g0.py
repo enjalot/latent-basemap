@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse, os, sys, glob, json
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from basemap.run_controller import Job, run_jobs, known_service_pids
+from basemap.round0005_retirement import refuse_retired_launcher
 
 PY = ".venv/bin/python"
 RES = "experiments/results"
@@ -37,6 +38,7 @@ def runs_for(corpus, seeds):
 
 
 def score_job(corpus, testbed, seeds, out_path, ref_path):
+    refuse_retired_launcher("experiments/run_g0.py")
     return Job(
         name=f"rescore_{corpus}", certifying=True, outputs=[out_path],
         argv=[PY, "experiments/score_complete_panel.py", "--runs", *runs_for(corpus, seeds),
@@ -48,6 +50,7 @@ def score_job(corpus, testbed, seeds, out_path, ref_path):
 
 
 def main():
+    refuse_retired_launcher("experiments/run_g0.py")
     os.makedirs(CLO, exist_ok=True); os.makedirs(EVID, exist_ok=True)
     out200 = f"{EVID}/complete_200k_v22.json"
     out2m = f"{EVID}/complete_2m_v22.json"

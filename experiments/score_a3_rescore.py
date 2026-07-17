@@ -19,6 +19,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from basemap.panel_v2 import (score_panel, PanelV2Config, load_embeddings,
                               sample_anchors, _ids_hash)
+from basemap.round0005_retirement import refuse_retired_launcher
 
 R = os.path.join(os.path.dirname(__file__), "results")
 # PINNED run dirs — one per (recipe, seed). No globbing (P0-F).
@@ -57,6 +58,7 @@ def _git():
 
 
 def main():
+    refuse_retired_launcher("experiments/score_a3_rescore.py")
     import pandas as pd
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="experiments/evidence/a3_rescore.json")

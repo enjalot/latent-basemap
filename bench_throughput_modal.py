@@ -5,6 +5,10 @@ Tests: baseline, pinned memory, async prefetch, GPU-resident data.
 Usage:
   modal run bench_throughput_modal.py
 """
+from basemap.round0005_retirement import refuse_retired_launcher
+
+refuse_retired_launcher("bench_throughput_modal.py")
+
 import time
 import logging
 import numpy as np

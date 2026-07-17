@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from experiments.experiment_config import load_config
 from experiments.run_experiment import run_single_experiment
 from basemap.run_controller import GpuLease, known_service_pids, check_co_tenants
+from basemap.round0005_retirement import refuse_retired_launcher
 from basemap.panel_v2 import (score_panel, PanelV2Config, load_embeddings, load_coords,
                               cross_knn, ffr_from_neighbors, sample_anchors)
 
@@ -143,6 +144,7 @@ def _build_8m_cfg(name, kernel, a, b, hidden_dim, ncomp, seed):
 
 
 def phase_8m_program(out_path, summary):
+    refuse_retired_launcher("experiments/run_overnight_program.py")
     import glob
     X = load_embeddings(TRAIN8M, dim=768)
     n = len(X)
@@ -190,14 +192,7 @@ def phase_8m_program(out_path, summary):
 
 
 def main():
-    # S1: RETIRED — same-process multi-GPU-phase launcher (caused the overnight
-    # VRAM-pollution → legacy-fallback + scoring OOM). Use the controller subprocess
-    # DAG template (one GPU phase per process): canary -> train seed(s) -> shared
-    # reference -> score -> gate. Set BASEMAP_UNSAFE_SAME_PROCESS=1 only for diagnostics.
-    import os as _os
-    if _os.environ.get("BASEMAP_UNSAFE_SAME_PROCESS") != "1":
-        raise SystemExit("run_overnight_program is RETIRED (S1): use the controller subprocess "
-                         "DAG (canary->train->ref->score->gate). Override with BASEMAP_UNSAFE_SAME_PROCESS=1.")
+    refuse_retired_launcher("experiments/run_overnight_program.py")
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="/data/latent-basemap/overnight/summary.json")
     ap.add_argument("--required-free-gb", type=float, default=14.0)

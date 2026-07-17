@@ -75,6 +75,8 @@ def extract_panel(results):
 
 
 def main():
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("experiments/run_r1_kernel.py")
     # L0.3: RETIRED same-process multi-GPU-phase loop. Runs many trainings in one
     # process under a single lease, defeating per-phase fresh-process isolation and
     # the controller's fail-stop DAG. Use experiments/dag_template.py (canary→train→

@@ -9,6 +9,7 @@ from __future__ import annotations
 import os, sys, glob
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from basemap.run_controller import Job, run_jobs, known_service_pids
+from basemap.round0005_retirement import refuse_retired_launcher
 
 PY = ".venv/bin/python"
 W = "/data/latent-basemap/closure/bf_2m"
@@ -25,6 +26,7 @@ def _one(pat):
 
 
 def main():
+    refuse_retired_launcher("experiments/run_backfill_2m_s44.py")
     os.makedirs(W, exist_ok=True)
     verdict = f"{W}/perf_canary_verdict.json"
     legacy_cfg = "experiments/configs/_bf_2m_legacy_a1b1_s44.yaml"

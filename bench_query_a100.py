@@ -1,4 +1,8 @@
 """Quick query speed comparison: A10G vs A100 on existing 1M IVF_PQ index."""
+from basemap.round0005_retirement import refuse_retired_launcher
+
+refuse_retired_launcher("bench_query_a100.py")
+
 import time, logging, numpy as np
 from modal import App, Image, Volume
 

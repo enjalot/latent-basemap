@@ -27,6 +27,7 @@ import argparse, os, sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from basemap.run_controller import (Job, run_jobs, known_service_pids,
                                      CANARY_REQUIRED_WALL_S)
+from basemap.round0005_retirement import refuse_retired_launcher
 
 PY = ".venv/bin/python"
 
@@ -38,6 +39,7 @@ def build_g1_dag(*, train_cfg, work_dir, reference, legacy_run_dir, testbed_2m,
     `legacy_run_dir` is the accepted seed-42 legacy bridge run dir (scored as the
     paired control); `kernel_run_2m` is a persisted 2M map for the fresh evaluator
     canary."""
+    refuse_retired_launcher("experiments/dag_template.py")
     os.makedirs(work_dir, exist_ok=True)
     train_run_dir = os.path.join(work_dir, "train_stdcurve_s42")
     canary_run_dir = os.path.join(work_dir, "perf_canary_run")
@@ -169,6 +171,7 @@ def validate_dag(jobs, *, require_paths=False):
 
 
 def main():
+    refuse_retired_launcher("experiments/dag_template.py")
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--train-config", default="experiments/configs/_stdcurve_s42.yaml")
