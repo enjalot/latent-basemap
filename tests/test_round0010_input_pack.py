@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from basemap.minilm_input_pack import (
     RawSourceMap,
     _validate_endpoint_array,
     _verify_constant_weights,
+    build_transform_execution_spec,
     canonical_sha256,
     file_identity,
     seal_record,
@@ -64,7 +66,20 @@ def _small_source(tmp_path: Path) -> tuple[RawSourceMap, np.ndarray, list[RawMap
 
 def test_module_is_torch_free_and_cuda_hidden() -> None:
     assert os.environ.get("CUDA_VISIBLE_DEVICES") == ""
-    assert "torch" not in sys.modules
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import basemap.minilm_input_pack; "
+            "print('torch_imported=' + str('torch' in sys.modules).lower())",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    assert result.stdout.strip() == "torch_imported=false"
 
 
 def test_sealed_records_are_canonical_and_mutation_fails() -> None:
@@ -107,6 +122,14 @@ def test_stream_transform_interrupt_resume_is_byte_identical_to_clean(
         "rows_per_chunk": 4,
         "read_block_rows": 2,
     }
+    release_root = Path(__file__).resolve().parents[1]
+    kwargs["transform_execution_spec"] = build_transform_execution_spec(
+        transform,
+        release_root=release_root,
+        release_commit="a" * 40,
+        transform_config=kwargs["transform_config"],
+    )
+    kwargs["release_root"] = release_root
     with pytest.raises(PlannedInterruption):
         stream_transform_to_npy_chunks(
             source,

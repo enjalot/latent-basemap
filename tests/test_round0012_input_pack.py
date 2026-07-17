@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from basemap.minilm_input_pack import (
     PlannedInterruption,
     RawMapMember,
     RawSourceMap,
+    build_transform_execution_spec,
     canonical_sha256,
     file_identity,
     read_json,
@@ -59,11 +61,17 @@ def _source(tmp_path: Path) -> tuple[RawSourceMap, list[RawMapMember]]:
     return RawSourceMap(members, total_rows=cursor, dimension=4), members
 
 
+_TRANSFORM_CALLS = 0
+
+
 def _transform(block: np.ndarray) -> np.ndarray:
+    global _TRANSFORM_CALLS
+    _TRANSFORM_CALLS += 1
     return np.column_stack((block[:, 0] + block[:, 1], block[:, 2] - block[:, 3]))
 
 
-_KWARGS = {
+_RELEASE_ROOT = Path(__file__).resolve().parents[1]
+_KWARGS_BASE = {
     "transform_id": "round0012-test-linear-v1",
     "transform_implementation_sha256": hashlib.sha256(
         b"round0012-test-linear-numpy-v1"
@@ -74,6 +82,18 @@ _KWARGS = {
     "rows_per_chunk": 4,
     "read_block_rows": 2,
 }
+
+
+def _kwargs() -> dict[str, object]:
+    result = dict(_KWARGS_BASE)
+    result["transform_execution_spec"] = build_transform_execution_spec(
+        _transform,
+        release_root=_RELEASE_ROOT,
+        release_commit="b" * 40,
+        transform_config=result["transform_config"],
+    )
+    result["release_root"] = _RELEASE_ROOT
+    return result
 
 
 def _hash_tree(root: Path) -> dict[str, tuple[str, int]]:
@@ -87,7 +107,20 @@ def _hash_tree(root: Path) -> dict[str, tuple[str, int]]:
 
 def test_module_is_cuda_hidden_and_torch_free() -> None:
     assert os.environ.get("CUDA_VISIBLE_DEVICES") == ""
-    assert "torch" not in sys.modules
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import basemap.minilm_input_pack_round0012; "
+            "print('torch_imported=' + str('torch' in sys.modules).lower())",
+        ],
+        cwd=_RELEASE_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    assert result.stdout.strip() == "torch_imported=false"
 
 
 def test_canonical_plan_and_every_chunk_bind_complete_source_transform_and_layout(
@@ -96,7 +129,7 @@ def test_canonical_plan_and_every_chunk_bind_complete_source_transform_and_layou
     source, members = _source(tmp_path / "source")
     output = tmp_path / "output"
     capability = stream_transform_to_npy_chunks(
-        source, output, _transform, **_KWARGS
+        source, output, _transform, **_kwargs()
     )
     plan_receipt = read_json(output / "stream-plan.json")
     verify_sealed_record(plan_receipt)
@@ -116,11 +149,16 @@ def test_canonical_plan_and_every_chunk_bind_complete_source_transform_and_layou
         }
         for member in members
     ]
-    assert plan["transform"] == {
-        "transform_id": _KWARGS["transform_id"],
-        "implementation_sha256": _KWARGS["transform_implementation_sha256"],
-        "config": _KWARGS["transform_config"],
-    }
+    assert plan["transform"]["transform_id"] == _KWARGS_BASE["transform_id"]
+    assert plan["transform"]["caller_declared_implementation_sha256"] == \
+        _KWARGS_BASE["transform_implementation_sha256"]
+    observed_execution = plan["transform"]["observed_execution"]
+    assert observed_execution["release_commit"] == "b" * 40
+    assert observed_execution["canonical_config"] == \
+        _KWARGS_BASE["transform_config"]
+    assert plan["transform"]["observed_execution_sha256"] == canonical_sha256(
+        observed_execution
+    )
     assert plan["output"] == {"shape": [8, 2], "dtype": "<f4", "c_contiguous": True}
     assert plan["chunk_geometry"] == {
         "rows_per_chunk": 4,
@@ -145,11 +183,13 @@ def test_canonical_plan_and_every_chunk_bind_complete_source_transform_and_layou
 def test_correctly_rehashed_changed_source_rejects_before_reuse_or_production(
     tmp_path: Path,
 ) -> None:
+    global _TRANSFORM_CALLS
     source, members = _source(tmp_path / "source")
     output = tmp_path / "interrupted"
+    kwargs = _kwargs()
     with pytest.raises(PlannedInterruption):
         stream_transform_to_npy_chunks(
-            source, output, _transform, interrupt_after_chunks=1, **_KWARGS
+            source, output, _transform, interrupt_after_chunks=1, **kwargs
         )
     before = _hash_tree(output)
     changed = np.arange(100, 116, dtype=np.float32).reshape(4, 4)
@@ -161,18 +201,12 @@ def test_correctly_rehashed_changed_source_rejects_before_reuse_or_production(
     changed_source = RawSourceMap(
         [replacement, members[1]], total_rows=8, dimension=4
     )
-    calls = 0
-
-    def counted(block: np.ndarray) -> np.ndarray:
-        nonlocal calls
-        calls += 1
-        return _transform(block)
-
+    _TRANSFORM_CALLS = 0
     with pytest.raises(PackError, match="stream plan mismatch"):
         stream_transform_to_npy_chunks(
-            changed_source, output, counted, **_KWARGS
+            changed_source, output, _transform, **kwargs
         )
-    assert calls == 0
+    assert _TRANSFORM_CALLS == 0
     assert _hash_tree(output) == before
     assert not (output / "chunk-00001").exists()
 
@@ -184,10 +218,11 @@ def test_correctly_rehashed_changed_source_rejects_before_reuse_or_production(
 def test_any_complete_plan_mutation_rejects_before_existing_chunk_reuse(
     tmp_path: Path, mutation: str
 ) -> None:
+    global _TRANSFORM_CALLS
     source, _ = _source(tmp_path / "source")
     output = tmp_path / "output"
-    stream_transform_to_npy_chunks(source, output, _transform, **_KWARGS)
-    kwargs = dict(_KWARGS)
+    kwargs = _kwargs()
+    stream_transform_to_npy_chunks(source, output, _transform, **kwargs)
     if mutation == "implementation":
         kwargs["transform_implementation_sha256"] = "f" * 64
     elif mutation == "config":
@@ -196,25 +231,20 @@ def test_any_complete_plan_mutation_rejects_before_existing_chunk_reuse(
         kwargs["output_dim"] = 3
     else:
         kwargs["rows_per_chunk"] = 2
-    calls = 0
-
-    def counted(block: np.ndarray) -> np.ndarray:
-        nonlocal calls
-        calls += 1
-        return _transform(block)
-
-    with pytest.raises(PackError, match="stream plan mismatch"):
-        stream_transform_to_npy_chunks(source, output, counted, **kwargs)
-    assert calls == 0
+    _TRANSFORM_CALLS = 0
+    with pytest.raises(PackError):
+        stream_transform_to_npy_chunks(source, output, _transform, **kwargs)
+    assert _TRANSFORM_CALLS == 0
 
 
 def test_destination_entries_outside_plan_fail_closed(tmp_path: Path) -> None:
     source, _ = _source(tmp_path / "source")
     output = tmp_path / "output"
-    stream_transform_to_npy_chunks(source, output, _transform, **_KWARGS)
+    kwargs = _kwargs()
+    stream_transform_to_npy_chunks(source, output, _transform, **kwargs)
     (output / "unregistered-output.bin").write_bytes(b"user-owned")
     with pytest.raises(PackError, match="outside the canonical plan"):
-        stream_transform_to_npy_chunks(source, output, _transform, **_KWARGS)
+        stream_transform_to_npy_chunks(source, output, _transform, **kwargs)
     assert (output / "unregistered-output.bin").read_bytes() == b"user-owned"
 
 

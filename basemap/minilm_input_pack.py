@@ -15,7 +15,9 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import hashlib
+import inspect
 import json
+import marshal
 import math
 import os
 import re
@@ -24,6 +26,7 @@ import stat
 import struct
 import tempfile
 import time
+import types
 import zipfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timezone
@@ -39,10 +42,13 @@ INVENTORY_SCHEMA = "round0010-source-inventory-v1"
 MATERIALIZATION_SCHEMA = "round0010-fp16-materialization-v1"
 ENDPOINT_SCHEMA = "round0010-endpoints-v1"
 FIXTURE_SCHEMA = "round0010-loader-fixtures-v1"
-STREAM_PLAN_SCHEMA = "round0012-stream-plan-v1"
-STREAM_PLAN_RECEIPT_SCHEMA = "round0012-stream-plan-receipt-v1"
-STREAM_CHUNK_SCHEMA = "round0012-stream-output-chunk-v2"
-STREAM_CAPABILITY_SCHEMA = "round0012-stream-output-v2"
+TRANSFORM_EXECUTION_SPEC_SCHEMA = "round0013-transform-execution-spec-v1"
+TRANSFORM_EXECUTION_IDENTITY_SCHEMA = "round0013-transform-execution-identity-v1"
+TRANSFORM_EXECUTION_SPEC_SEAL = "transform_execution_spec_sha256"
+STREAM_PLAN_SCHEMA = "round0013-stream-plan-v1"
+STREAM_PLAN_RECEIPT_SCHEMA = "round0013-stream-plan-receipt-v1"
+STREAM_CHUNK_SCHEMA = "round0013-stream-output-chunk-v1"
+STREAM_CAPABILITY_SCHEMA = "round0013-stream-output-v1"
 DIMENSION = 384
 ROWS_PER_CORPUS = 10_000_000
 TOTAL_ROWS = 30_000_000
@@ -1838,12 +1844,199 @@ def _stream_source_members(source: RawSourceMap) -> list[dict[str, Any]]:
     return ordered
 
 
+def _canonical_stream_transform_config(
+    transform_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(transform_config, Mapping):
+        raise PackError("stream transform_config must be a mapping")
+    try:
+        canonical_config = json.loads(canonical_json_bytes(dict(transform_config)))
+    except (TypeError, ValueError) as error:
+        raise PackError(f"stream transform_config is not canonical JSON: {error}") from error
+    if not isinstance(canonical_config, dict):
+        raise PackError("canonical stream transform_config must be an object")
+    return canonical_config
+
+
+def _normalized_transform_code(
+    code: types.CodeType, *, relative_artifact_path: str
+) -> types.CodeType:
+    """Remove checkout-local filenames while preserving executable code bytes."""
+
+    constants = tuple(
+        _normalized_transform_code(
+            value, relative_artifact_path=relative_artifact_path
+        )
+        if isinstance(value, types.CodeType)
+        else value
+        for value in code.co_consts
+    )
+    return code.replace(
+        co_filename=relative_artifact_path,
+        co_consts=constants,
+    )
+
+
+def _observed_transform_spec_body(
+    transform: Callable[[np.ndarray], np.ndarray],
+    *,
+    release_root: os.PathLike[str] | str,
+    release_commit: str,
+    transform_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Mechanically observe one plain Python transform and its defining bytes."""
+
+    if not re.fullmatch(r"[0-9a-f]{40}", release_commit):
+        raise PackError("transform release commit must be a full lowercase Git SHA")
+    if not inspect.isfunction(transform):
+        raise PackError(
+            "transform callable is unauthenticatable: expected a plain Python function"
+        )
+    if transform.__closure__:
+        raise PackError(
+            "transform callable is unauthenticatable: closures are not an immutable "
+            "defining artifact"
+        )
+    if transform.__defaults__ or transform.__kwdefaults__:
+        raise PackError(
+            "transform callable is unauthenticatable: runtime defaults are not allowed"
+        )
+    module = transform.__module__
+    qualified_name = transform.__qualname__
+    if not isinstance(module, str) or not module or not isinstance(qualified_name, str) \
+            or not qualified_name:
+        raise PackError("transform callable has no stable qualified identity")
+
+    root_argument = Path(release_root)
+    if (
+        not root_argument.is_absolute()
+        or root_argument.is_symlink()
+        or root_argument.resolve() != root_argument
+        or not root_argument.is_dir()
+    ):
+        raise PackError("transform release root must be a canonical absolute directory")
+    source_name = inspect.getsourcefile(transform)
+    if source_name is None:
+        raise PackError(
+            "transform callable is unauthenticatable: no defining source artifact"
+        )
+    source_argument = Path(source_name)
+    if source_argument.is_symlink():
+        raise PackError("transform defining artifact must not be a symlink")
+    source_path = source_argument.resolve()
+    try:
+        relative_path = source_path.relative_to(root_argument).as_posix()
+    except ValueError as error:
+        raise PackError(
+            "transform defining artifact is outside the exact release root"
+        ) from error
+    if not relative_path or relative_path.startswith("../"):
+        raise PackError("transform defining artifact path is not release-relative")
+    if not source_path.is_file() or source_path.is_symlink():
+        raise PackError("transform defining artifact is not a regular source file")
+
+    artifact_sha256, artifact_size, _ = sha256_file(source_path)
+    normalized_code = _normalized_transform_code(
+        transform.__code__, relative_artifact_path=relative_path
+    )
+    code_sha256 = hashlib.sha256(marshal.dumps(normalized_code)).hexdigest()
+    canonical_config = _canonical_stream_transform_config(transform_config)
+    return {
+        "schema": TRANSFORM_EXECUTION_SPEC_SCHEMA,
+        "release_commit": release_commit,
+        "callable": {
+            "kind": "plain-python-function",
+            "module": module,
+            "qualified_name": qualified_name,
+        },
+        "defining_artifact": {
+            "relative_path": relative_path,
+            "sha256_full_file": artifact_sha256,
+            "size_bytes": artifact_size,
+        },
+        "code": {
+            "identity_format": "python-marshal-normalized-filename-v1",
+            "sha256": code_sha256,
+        },
+        "canonical_config": canonical_config,
+        "canonical_config_sha256": canonical_sha256(canonical_config),
+    }
+
+
+def build_transform_execution_spec(
+    transform: Callable[[np.ndarray], np.ndarray],
+    *,
+    release_root: os.PathLike[str] | str,
+    release_commit: str,
+    transform_config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Create the sealed specification that must be persisted before execution."""
+
+    body = _observed_transform_spec_body(
+        transform,
+        release_root=release_root,
+        release_commit=release_commit,
+        transform_config=transform_config,
+    )
+    return {**body, TRANSFORM_EXECUTION_SPEC_SEAL: canonical_sha256(body)}
+
+
+def authenticate_transform_execution(
+    transform: Callable[[np.ndarray], np.ndarray],
+    *,
+    transform_execution_spec: Mapping[str, Any],
+    release_root: os.PathLike[str] | str,
+    transform_config: Mapping[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Authenticate the actual callable before any destination path is resolved."""
+
+    if not isinstance(transform_execution_spec, Mapping):
+        raise PackError("transform execution spec must be a mapping")
+    try:
+        supplied = json.loads(canonical_json_bytes(dict(transform_execution_spec)))
+    except (TypeError, ValueError) as error:
+        raise PackError(f"transform execution spec is not canonical JSON: {error}") from error
+    supplied_seal = supplied.pop(TRANSFORM_EXECUTION_SPEC_SEAL, None)
+    if not isinstance(supplied_seal, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", supplied_seal
+    ):
+        raise PackError("transform execution spec seal is malformed")
+    if canonical_sha256(supplied) != supplied_seal:
+        raise PackError("transform execution spec seal mismatch")
+    release_commit = supplied.get("release_commit")
+    if not isinstance(release_commit, str):
+        raise PackError("transform execution spec release commit is missing")
+    observed_spec = _observed_transform_spec_body(
+        transform,
+        release_root=release_root,
+        release_commit=release_commit,
+        transform_config=transform_config,
+    )
+    if observed_spec != supplied:
+        raise PackError(
+            "transform execution authentication failed: observed qualified callable, "
+            "defining artifact/code bytes, release commit, or canonical config differs"
+        )
+    identity = {
+        "schema": TRANSFORM_EXECUTION_IDENTITY_SCHEMA,
+        "release_commit": release_commit,
+        "callable": observed_spec["callable"],
+        "defining_artifact": observed_spec["defining_artifact"],
+        "code": observed_spec["code"],
+        "canonical_config": observed_spec["canonical_config"],
+        "canonical_config_sha256": observed_spec["canonical_config_sha256"],
+        "transform_execution_spec_sha256": supplied_seal,
+    }
+    return identity, canonical_sha256(identity)
+
+
 def _stream_plan(
     source: RawSourceMap,
     *,
     transform_id: str,
     transform_implementation_sha256: str,
-    transform_config: Mapping[str, Any],
+    transform_execution_identity: Mapping[str, Any],
+    transform_execution_sha256: str,
     output_dim: int,
     output_dtype: np.dtype[Any],
     rows_per_chunk: int,
@@ -1853,14 +2046,10 @@ def _stream_plan(
         raise PackError("stream transform_id must be a non-empty string")
     if not re.fullmatch(r"[0-9a-f]{64}", transform_implementation_sha256):
         raise PackError("stream transform implementation SHA-256 is malformed")
-    if not isinstance(transform_config, Mapping):
-        raise PackError("stream transform_config must be a mapping")
-    try:
-        canonical_config = json.loads(canonical_json_bytes(dict(transform_config)))
-    except (TypeError, ValueError) as error:
-        raise PackError(f"stream transform_config is not canonical JSON: {error}") from error
-    if not isinstance(canonical_config, dict):
-        raise PackError("canonical stream transform_config must be an object")
+    if not re.fullmatch(r"[0-9a-f]{64}", transform_execution_sha256):
+        raise PackError("observed transform execution SHA-256 is malformed")
+    if canonical_sha256(transform_execution_identity) != transform_execution_sha256:
+        raise PackError("observed transform execution identity hash mismatch")
 
     ordered_sources = _stream_source_members(source)
     complete_source_identity_sha256 = canonical_sha256(ordered_sources)
@@ -1874,8 +2063,11 @@ def _stream_plan(
         "source_dtype": RAW_DTYPE.str,
         "transform": {
             "transform_id": transform_id,
-            "implementation_sha256": transform_implementation_sha256,
-            "config": canonical_config,
+            "caller_declared_implementation_sha256": (
+                transform_implementation_sha256
+            ),
+            "observed_execution": dict(transform_execution_identity),
+            "observed_execution_sha256": transform_execution_sha256,
         },
         "output": {
             "shape": [source.total_rows, output_dim],
@@ -1977,6 +2169,7 @@ def _stream_chunk_receipt(
     output_dim: int,
     output_dtype: np.dtype[Any],
     transform_id: str,
+    transform_execution_sha256: str,
     stream_plan_sha256: str,
     stream_plan_receipt_sha256: str,
     complete_source_identity_sha256: str,
@@ -1991,6 +2184,8 @@ def _stream_chunk_receipt(
         or receipt.get("global_row_start") != start
         or receipt.get("global_row_stop") != stop
         or receipt.get("transform_id") != transform_id
+        or receipt.get("transform_execution_sha256")
+        != transform_execution_sha256
         or receipt.get("stream_plan_sha256") != stream_plan_sha256
         or receipt.get("stream_plan_receipt_sha256")
         != stream_plan_receipt_sha256
@@ -2022,6 +2217,8 @@ def stream_transform_to_npy_chunks(
     transform_id: str,
     transform_implementation_sha256: str,
     transform_config: Mapping[str, Any],
+    transform_execution_spec: Mapping[str, Any],
+    release_root: os.PathLike[str] | str,
     output_dim: int,
     output_dtype: np.dtype[Any] | str = np.dtype("<f4"),
     rows_per_chunk: int = 8,
@@ -2040,11 +2237,20 @@ def stream_transform_to_npy_chunks(
     dtype = np.dtype(output_dtype)
     if dtype.hasobject or dtype.kind != "f":
         raise PackError("stream output dtype must be a fixed-width floating dtype")
+    transform_execution_identity, transform_execution_sha256 = (
+        authenticate_transform_execution(
+            transform,
+            transform_execution_spec=transform_execution_spec,
+            release_root=release_root,
+            transform_config=transform_config,
+        )
+    )
     plan, plan_receipt = _stream_plan(
         source,
         transform_id=transform_id,
         transform_implementation_sha256=transform_implementation_sha256,
-        transform_config=transform_config,
+        transform_execution_identity=transform_execution_identity,
+        transform_execution_sha256=transform_execution_sha256,
         output_dim=output_dim,
         output_dtype=dtype,
         rows_per_chunk=rows_per_chunk,
@@ -2078,6 +2284,7 @@ def stream_transform_to_npy_chunks(
                 output_dim=output_dim,
                 output_dtype=dtype,
                 transform_id=transform_id,
+                transform_execution_sha256=transform_execution_sha256,
                 stream_plan_sha256=plan_sha256,
                 stream_plan_receipt_sha256=plan_receipt_sha256,
                 complete_source_identity_sha256=complete_source_identity_sha256,
@@ -2127,6 +2334,9 @@ def stream_transform_to_npy_chunks(
                         "global_row_start": start,
                         "global_row_stop": stop,
                         "transform_id": transform_id,
+                        "transform_execution_sha256": (
+                            transform_execution_sha256
+                        ),
                         "stream_plan_sha256": plan_sha256,
                         "stream_plan_receipt_sha256": plan_receipt_sha256,
                         "complete_source_identity_sha256": (
@@ -2154,6 +2364,7 @@ def stream_transform_to_npy_chunks(
                 output_dim=output_dim,
                 output_dtype=dtype,
                 transform_id=transform_id,
+                transform_execution_sha256=transform_execution_sha256,
                 stream_plan_sha256=plan_sha256,
                 stream_plan_receipt_sha256=plan_receipt_sha256,
                 complete_source_identity_sha256=complete_source_identity_sha256,

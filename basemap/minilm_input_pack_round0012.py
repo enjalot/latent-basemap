@@ -442,17 +442,29 @@ def run_round0012_fixtures(root: os.PathLike[str] | str = ROUND_ROOT) -> dict[st
 def record_graph_provenance(
     root: os.PathLike[str] | str = ROUND_ROOT,
     upstream_root: os.PathLike[str] | str = UPSTREAM_ROOT,
+    *,
+    _expected_root: os.PathLike[str] | str = ROUND_ROOT,
+    _round_id: str = ROUND_ID,
+    _schema: str = GRAPH_PROVENANCE_SCHEMA,
+    _log_label: str = "round0012",
+    _implementation_release_commit: str | None = None,
+    _diagnostic_dependency: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Search only registered Round-0010 JSON evidence for graph construction."""
 
     require_cuda_hidden()
-    root_path = _round_root(root)
+    root_path = Path(root).resolve()
+    if root_path != Path(_expected_root).resolve():
+        raise PackError(
+            f"graph-provenance output root must be {Path(_expected_root).resolve()}, "
+            f"got {root_path}"
+        )
     upstream = _upstream_root(upstream_root)
     destination = root_path / "receipts" / "graph-provenance.json"
     if destination.exists():
         receipt = read_json(destination)
         verify_sealed_record(receipt)
-        if receipt.get("schema") != GRAPH_PROVENANCE_SCHEMA:
+        if receipt.get("schema") != _schema:
             raise PackError("existing graph-provenance receipt has the wrong schema")
         return receipt
 
@@ -500,8 +512,8 @@ def record_graph_provenance(
         registered = None
         diagnostic_only = True
     body = {
-        "schema": GRAPH_PROVENANCE_SCHEMA,
-        "round_id": ROUND_ID,
+        "schema": _schema,
+        "round_id": _round_id,
         "created_utc": utc_now(),
         "search_scope": "only JSON evidence registered under the Round-0010 root",
         "inspected_registered_evidence": inspected,
@@ -514,9 +526,13 @@ def record_graph_provenance(
         "registered_alignment": endpoints["row_alignment"],
         "registered_alignment_sha256": canonical_sha256(endpoints["row_alignment"]),
     }
+    if _implementation_release_commit is not None:
+        body["implementation_release_commit"] = _implementation_release_commit
+    if _diagnostic_dependency is not None:
+        body["diagnostic_dependency"] = copy.deepcopy(dict(_diagnostic_dependency))
     receipt = seal_record(body)
     atomic_write_json(destination, receipt, replace=False)
-    print(f"round0012 graph provenance: sealed {destination}", flush=True)
+    print(f"{_log_label} graph provenance: sealed {destination}", flush=True)
     return receipt
 
 
@@ -656,11 +672,16 @@ def _update_progress(
     return progress
 
 
-def _require_heavy_authority(progress_path: Path, *, command_authorized: bool) -> None:
+def _require_heavy_authority(
+    progress_path: Path,
+    *,
+    command_authorized: bool,
+    round_label: str = "Round 0012",
+) -> None:
     progress = read_json(progress_path)
     if not command_authorized or progress.get("heavy_io_authorized") is not True:
         raise PackError(
-            "full Round 0012 reopen requires both the explicit CLI flag and the "
+            f"full {round_label} reopen requires both the explicit CLI flag and the "
             "manager-authored heavy_io_authorized progress transition"
         )
 
@@ -673,23 +694,40 @@ def full_read_only_reopen(
     log_path: os.PathLike[str] | str = ROUND_ROOT / "logs" / "full-read-only-reopen.log",
     block_rows: int = DEFAULT_BLOCK_ROWS,
     heavy_io_authorized: bool = False,
+    _expected_root: os.PathLike[str] | str = ROUND_ROOT,
+    _round_id: str = ROUND_ID,
+    _full_reopen_schema: str = FULL_REOPEN_SCHEMA,
+    _graph_provenance_schema: str = GRAPH_PROVENANCE_SCHEMA,
+    _log_label: str = "round0012",
+    _round_label: str = "Round 0012",
+    _implementation_release_commit: str | None = None,
+    _diagnostic_dependency: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Complete one every-byte/every-row qualification without modifying upstream."""
 
     require_cuda_hidden()
-    root_path = _round_root(root)
+    root_path = Path(root).resolve()
+    if root_path != Path(_expected_root).resolve():
+        raise PackError(
+            f"full-reopen output root must be {Path(_expected_root).resolve()}, "
+            f"got {root_path}"
+        )
     upstream = _upstream_root(upstream_root)
     progress = Path(progress_path).resolve()
     if progress != root_path / "management" / "progress.json":
-        raise PackError("full reopen progress path must be the Round 0012 durable cursor")
-    _require_heavy_authority(progress, command_authorized=heavy_io_authorized)
+        raise PackError(f"full reopen progress path must be the {_round_label} durable cursor")
+    _require_heavy_authority(
+        progress,
+        command_authorized=heavy_io_authorized,
+        round_label=_round_label,
+    )
     if not isinstance(block_rows, int) or isinstance(block_rows, bool) or block_rows <= 0:
         raise PackError("full reopen block_rows must be a positive integer")
     destination = root_path / "receipts" / "full-read-only-reopen.json"
     if destination.exists():
         receipt = read_json(destination)
         verify_sealed_record(receipt)
-        if receipt.get("schema") != FULL_REOPEN_SCHEMA:
+        if receipt.get("schema") != _full_reopen_schema:
             raise PackError("existing full reopen receipt has the wrong schema")
         return receipt
 
@@ -707,10 +745,10 @@ def full_read_only_reopen(
     materialization = closure["materialization"]
     endpoints = closure["endpoints"]
     provenance = _load_required_receipt(
-        root_path / "receipts" / "graph-provenance.json", GRAPH_PROVENANCE_SCHEMA
+        root_path / "receipts" / "graph-provenance.json", _graph_provenance_schema
     )
 
-    print("round0012 reopen: hashing all 36 registered raw source files", flush=True)
+    print(f"{_log_label} reopen: hashing all 36 registered raw source files", flush=True)
     raw_verified: list[dict[str, Any]] = []
     for index, record in enumerate(inventory["sources"]):
         path = Path(record["path"])
@@ -753,7 +791,10 @@ def full_read_only_reopen(
     materialized_verified: list[dict[str, Any]] = []
     conversion_rows = 0
     conversion_blocks = 0
-    print("round0012 reopen: comparing every one of 30M fp32 rows to persisted fp16", flush=True)
+    print(
+        f"{_log_label} reopen: comparing every one of 30M fp32 rows to persisted fp16",
+        flush=True,
+    )
     for index, item in enumerate(materialization["ordered_shards"]):
         path = Path(item["path"])
         before = file_identity(path)
@@ -853,7 +894,10 @@ def full_read_only_reopen(
         current_log=log_text,
         live_child_pid=os.getpid(),
     )
-    print("round0012 reopen: verifying graph, endpoints, weights, and diagnostic alignment", flush=True)
+    print(
+        f"{_log_label} reopen: verifying graph, endpoints, weights, and diagnostic alignment",
+        flush=True,
+    )
     graph_path = Path(inventory["graph"]["path"])
     graph = inspect_graph_npz(
         graph_path, expected_sha256=inventory["graph"]["sha256_full_file"]
@@ -934,8 +978,8 @@ def full_read_only_reopen(
         },
     ])
     body = {
-        "schema": FULL_REOPEN_SCHEMA,
-        "round_id": ROUND_ID,
+        "schema": _full_reopen_schema,
+        "round_id": _round_id,
         "created_utc": started_utc,
         "completed_utc": utc_now(),
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
@@ -972,6 +1016,10 @@ def full_read_only_reopen(
         "complete_reopen": True,
         "phase_wall_seconds": time.monotonic() - started,
     }
+    if _implementation_release_commit is not None:
+        body["implementation_release_commit"] = _implementation_release_commit
+    if _diagnostic_dependency is not None:
+        body["diagnostic_dependency"] = copy.deepcopy(dict(_diagnostic_dependency))
     if body["cuda_visible_devices"] != "" or body["torch_imported"]:
         raise PackError("full reopen process was not CUDA-hidden and Torch-free")
     receipt = seal_record(body)
@@ -985,7 +1033,10 @@ def full_read_only_reopen(
         completed_item="complete every-row 30M source-to-fp16 read-only reopen sealed",
         full_reopen_conversion_rows=conversion_rows,
     )
-    print(f"round0012 reopen: sealed {destination} {receipt['receipt_sha256']}", flush=True)
+    print(
+        f"{_log_label} reopen: sealed {destination} {receipt['receipt_sha256']}",
+        flush=True,
+    )
     return receipt
 
 
