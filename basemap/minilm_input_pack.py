@@ -39,6 +39,10 @@ INVENTORY_SCHEMA = "round0010-source-inventory-v1"
 MATERIALIZATION_SCHEMA = "round0010-fp16-materialization-v1"
 ENDPOINT_SCHEMA = "round0010-endpoints-v1"
 FIXTURE_SCHEMA = "round0010-loader-fixtures-v1"
+STREAM_PLAN_SCHEMA = "round0012-stream-plan-v1"
+STREAM_PLAN_RECEIPT_SCHEMA = "round0012-stream-plan-receipt-v1"
+STREAM_CHUNK_SCHEMA = "round0012-stream-output-chunk-v2"
+STREAM_CAPABILITY_SCHEMA = "round0012-stream-output-v2"
 DIMENSION = 384
 ROWS_PER_CORPUS = 10_000_000
 TOTAL_ROWS = 30_000_000
@@ -1782,6 +1786,188 @@ def verify_raw_map_members(
                 raise PackError(f"raw source hash mismatch: {member.path}")
 
 
+def _stream_source_members(source: RawSourceMap) -> list[dict[str, Any]]:
+    """Return the complete ordered source identity bound by a stream plan.
+
+    This check is intentionally performed before an existing output directory is
+    inspected.  A stale source object therefore cannot cause an already committed
+    chunk to be counted as reusable before the source drift is rejected.
+    """
+
+    ordered: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for member in source.members:
+        path = member.path.resolve()
+        if member.path != path or member.path.is_symlink():
+            raise PackError(
+                f"stream source path must be canonical, absolute, and non-symlinked: "
+                f"{member.path}"
+            )
+        path_text = str(path)
+        if path_text in seen_paths:
+            raise PackError(f"duplicate stream source path {path}")
+        seen_paths.add(path_text)
+        if not re.fullmatch(r"[0-9a-f]{64}", member.sha256):
+            raise PackError(f"malformed stream source SHA-256 for {path}")
+        observed_identity = file_identity(path)
+        if not _same_identity(member.identity, observed_identity):
+            raise PackError(f"stream source identity is stale: {path}")
+        expected_size = member.full_rows * source.dimension * RAW_DTYPE.itemsize
+        if observed_identity["size_bytes"] != expected_size:
+            raise PackError(f"stream source byte geometry changed: {path}")
+        selected_rows = member.global_stop - member.global_start
+        if (
+            member.local_start < 0
+            or member.full_rows <= 0
+            or member.local_start + selected_rows > member.full_rows
+        ):
+            raise PackError(f"stream source selected-row geometry is invalid: {path}")
+        ordered.append(
+            {
+                "path": path_text,
+                "corpus": member.corpus,
+                "global_row_start": member.global_start,
+                "global_row_stop": member.global_stop,
+                "selected_local_row_start": member.local_start,
+                "selected_local_row_stop": member.local_start + selected_rows,
+                "full_rows": member.full_rows,
+                "sha256_full_file": member.sha256,
+                "identity": dict(member.identity),
+            }
+        )
+    return ordered
+
+
+def _stream_plan(
+    source: RawSourceMap,
+    *,
+    transform_id: str,
+    transform_implementation_sha256: str,
+    transform_config: Mapping[str, Any],
+    output_dim: int,
+    output_dtype: np.dtype[Any],
+    rows_per_chunk: int,
+    read_block_rows: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not isinstance(transform_id, str) or not transform_id.strip():
+        raise PackError("stream transform_id must be a non-empty string")
+    if not re.fullmatch(r"[0-9a-f]{64}", transform_implementation_sha256):
+        raise PackError("stream transform implementation SHA-256 is malformed")
+    if not isinstance(transform_config, Mapping):
+        raise PackError("stream transform_config must be a mapping")
+    try:
+        canonical_config = json.loads(canonical_json_bytes(dict(transform_config)))
+    except (TypeError, ValueError) as error:
+        raise PackError(f"stream transform_config is not canonical JSON: {error}") from error
+    if not isinstance(canonical_config, dict):
+        raise PackError("canonical stream transform_config must be an object")
+
+    ordered_sources = _stream_source_members(source)
+    complete_source_identity_sha256 = canonical_sha256(ordered_sources)
+    chunk_count = math.ceil(source.total_rows / rows_per_chunk)
+    plan = {
+        "schema": STREAM_PLAN_SCHEMA,
+        "ordered_source_members": ordered_sources,
+        "complete_source_identity_sha256": complete_source_identity_sha256,
+        "source_total_rows": source.total_rows,
+        "source_dimension": source.dimension,
+        "source_dtype": RAW_DTYPE.str,
+        "transform": {
+            "transform_id": transform_id,
+            "implementation_sha256": transform_implementation_sha256,
+            "config": canonical_config,
+        },
+        "output": {
+            "shape": [source.total_rows, output_dim],
+            "dtype": output_dtype.str,
+            "c_contiguous": True,
+        },
+        "chunk_geometry": {
+            "rows_per_chunk": rows_per_chunk,
+            "read_block_rows": read_block_rows,
+            "chunk_count": chunk_count,
+        },
+        "destination_layout": {
+            "plan_filename": "stream-plan.json",
+            "chunk_directory_template": "chunk-{chunk_index:05d}",
+            "artifact_filename": "coordinates.npy",
+            "receipt_filename": "receipt.json",
+        },
+    }
+    plan_sha256 = canonical_sha256(plan)
+    receipt = seal_record(
+        {
+            "schema": STREAM_PLAN_RECEIPT_SCHEMA,
+            "stream_plan_sha256": plan_sha256,
+            "plan": plan,
+        }
+    )
+    return plan, receipt
+
+
+def _install_or_verify_stream_plan(
+    destination: Path, plan: Mapping[str, Any], receipt: Mapping[str, Any]
+) -> None:
+    if destination.exists():
+        if destination.is_symlink() or not destination.is_dir():
+            raise PackError(f"stream destination is not a regular directory: {destination}")
+    else:
+        destination.mkdir(parents=True, exist_ok=False)
+        _fsync_directory(destination.parent)
+
+    plan_path = destination / "stream-plan.json"
+    if plan_path.exists():
+        file_identity(plan_path)
+        observed = read_json(plan_path)
+        verify_sealed_record(observed)
+        if observed.get("schema") != STREAM_PLAN_RECEIPT_SCHEMA:
+            raise PackError(f"unexpected stream plan receipt schema: {plan_path}")
+        observed_plan = observed.get("plan")
+        if not isinstance(observed_plan, dict):
+            raise PackError(f"stream plan payload is malformed: {plan_path}")
+        if observed.get("stream_plan_sha256") != canonical_sha256(observed_plan):
+            raise PackError(f"stream plan payload hash mismatch: {plan_path}")
+        if observed != receipt or observed_plan != plan:
+            raise PackError(
+                "stream plan mismatch; refusing all chunk reuse and production"
+            )
+        return
+
+    if any(destination.iterdir()):
+        raise PackError(
+            f"refusing unplanned pre-existing stream destination {destination}"
+        )
+    atomic_write_json(plan_path, receipt, replace=False)
+
+
+def _stable_stream_artifact(
+    observed: Mapping[str, Any], *, relative_path: str
+) -> dict[str, Any]:
+    return {
+        "relative_path": relative_path,
+        "shape": list(observed["shape"]),
+        "dtype": observed["dtype"],
+        "c_contiguous": observed["c_contiguous"],
+        "finite": observed["finite"],
+        "value_min": observed["value_min"],
+        "value_max": observed["value_max"],
+        "sha256": observed["sha256"],
+        "size_bytes": observed["size_bytes"],
+    }
+
+
+def _validate_stream_destination_entries(destination: Path, *, chunk_count: int) -> None:
+    expected = {"stream-plan.json"} | {
+        f"chunk-{index:05d}" for index in range(chunk_count)
+    }
+    unexpected = sorted(entry.name for entry in destination.iterdir()
+                        if entry.name not in expected)
+    if unexpected:
+        raise PackError(
+            f"stream destination contains entries outside the canonical plan: {unexpected}"
+        )
+
+
 def _stream_chunk_receipt(
     chunk_dir: Path,
     *,
@@ -1791,14 +1977,27 @@ def _stream_chunk_receipt(
     output_dim: int,
     output_dtype: np.dtype[Any],
     transform_id: str,
+    stream_plan_sha256: str,
+    stream_plan_receipt_sha256: str,
+    complete_source_identity_sha256: str,
+    source_segments: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     receipt = _load_chunk_receipt(chunk_dir)
+    source_segments_list = [dict(segment) for segment in source_segments]
+    source_segments_sha256 = canonical_sha256(source_segments_list)
     if (
-        receipt.get("schema") != "round0010-stream-output-chunk-v1"
+        receipt.get("schema") != STREAM_CHUNK_SCHEMA
         or receipt.get("chunk_index") != index
         or receipt.get("global_row_start") != start
         or receipt.get("global_row_stop") != stop
         or receipt.get("transform_id") != transform_id
+        or receipt.get("stream_plan_sha256") != stream_plan_sha256
+        or receipt.get("stream_plan_receipt_sha256")
+        != stream_plan_receipt_sha256
+        or receipt.get("complete_source_identity_sha256")
+        != complete_source_identity_sha256
+        or receipt.get("source_segments") != source_segments_list
+        or receipt.get("source_segments_sha256") != source_segments_sha256
     ):
         raise PackError(f"stream output receipt mismatch: {chunk_dir}")
     observed = _scan_npy(
@@ -1807,8 +2006,11 @@ def _stream_chunk_receipt(
         expected_dtype=output_dtype,
         require_finite=True,
     )
-    if observed["sha256"] != receipt["artifact"]["sha256"]:
-        raise PackError(f"stream output hash mismatch: {chunk_dir}")
+    stable_artifact = _stable_stream_artifact(
+        observed, relative_path=f"chunk-{index:05d}/coordinates.npy"
+    )
+    if receipt.get("artifact") != stable_artifact:
+        raise PackError(f"stream output artifact mismatch: {chunk_dir}")
     return receipt
 
 
@@ -1818,6 +2020,8 @@ def stream_transform_to_npy_chunks(
     transform: Callable[[np.ndarray], np.ndarray],
     *,
     transform_id: str,
+    transform_implementation_sha256: str,
+    transform_config: Mapping[str, Any],
     output_dim: int,
     output_dtype: np.dtype[Any] | str = np.dtype("<f4"),
     rows_per_chunk: int = 8,
@@ -1831,19 +2035,41 @@ def stream_transform_to_npy_chunks(
     concatenate, DataFrame, Torch, or CUDA object is constructed.
     """
 
-    destination = Path(output_root)
-    destination.mkdir(parents=True, exist_ok=True)
     if rows_per_chunk <= 0 or read_block_rows <= 0 or output_dim <= 0:
         raise PackError("invalid stream transform geometry")
     dtype = np.dtype(output_dtype)
+    if dtype.hasobject or dtype.kind != "f":
+        raise PackError("stream output dtype must be a fixed-width floating dtype")
+    plan, plan_receipt = _stream_plan(
+        source,
+        transform_id=transform_id,
+        transform_implementation_sha256=transform_implementation_sha256,
+        transform_config=transform_config,
+        output_dim=output_dim,
+        output_dtype=dtype,
+        rows_per_chunk=rows_per_chunk,
+        read_block_rows=read_block_rows,
+    )
+    destination = Path(output_root)
+    _install_or_verify_stream_plan(destination, plan, plan_receipt)
+    _clean_owned_partial_directories(destination)
+    plan_sha256 = str(plan_receipt["stream_plan_sha256"])
+    plan_receipt_sha256 = str(plan_receipt["receipt_sha256"])
+    complete_source_identity_sha256 = str(
+        plan["complete_source_identity_sha256"]
+    )
     receipts: list[dict[str, Any]] = []
     created = 0
     chunk_count = math.ceil(source.total_rows / rows_per_chunk)
+    _validate_stream_destination_entries(destination, chunk_count=chunk_count)
     for index in range(chunk_count):
         start = index * rows_per_chunk
         stop = min(start + rows_per_chunk, source.total_rows)
         final_dir = destination / f"chunk-{index:05d}"
+        source_segments = source.source_segments(start, stop)
         if final_dir.exists():
+            if final_dir.is_symlink() or not final_dir.is_dir():
+                raise PackError(f"invalid stream chunk path: {final_dir}")
             receipt = _stream_chunk_receipt(
                 final_dir,
                 index=index,
@@ -1852,6 +2078,10 @@ def stream_transform_to_npy_chunks(
                 output_dim=output_dim,
                 output_dtype=dtype,
                 transform_id=transform_id,
+                stream_plan_sha256=plan_sha256,
+                stream_plan_receipt_sha256=plan_receipt_sha256,
+                complete_source_identity_sha256=complete_source_identity_sha256,
+                source_segments=source_segments,
             )
         else:
             temporary = Path(
@@ -1887,18 +2117,25 @@ def stream_transform_to_npy_chunks(
                     expected_dtype=dtype,
                     require_finite=True,
                 )
-                artifact["path"] = str((final_dir / "coordinates.npy").resolve())
+                stable_artifact = _stable_stream_artifact(
+                    artifact, relative_path=f"chunk-{index:05d}/coordinates.npy"
+                )
                 receipt = seal_record(
                     {
-                        "schema": "round0010-stream-output-chunk-v1",
-                        "created_utc": utc_now(),
+                        "schema": STREAM_CHUNK_SCHEMA,
                         "chunk_index": index,
                         "global_row_start": start,
                         "global_row_stop": stop,
                         "transform_id": transform_id,
-                        "source_segments": source.source_segments(start, stop),
+                        "stream_plan_sha256": plan_sha256,
+                        "stream_plan_receipt_sha256": plan_receipt_sha256,
+                        "complete_source_identity_sha256": (
+                            complete_source_identity_sha256
+                        ),
+                        "source_segments": source_segments,
+                        "source_segments_sha256": canonical_sha256(source_segments),
                         "direct_persistence": "numpy-open-memmap",
-                        "artifact": artifact,
+                        "artifact": stable_artifact,
                     }
                 )
                 atomic_write_json(temporary / "receipt.json", receipt, replace=False)
@@ -1917,6 +2154,10 @@ def stream_transform_to_npy_chunks(
                 output_dim=output_dim,
                 output_dtype=dtype,
                 transform_id=transform_id,
+                stream_plan_sha256=plan_sha256,
+                stream_plan_receipt_sha256=plan_receipt_sha256,
+                complete_source_identity_sha256=complete_source_identity_sha256,
+                source_segments=source_segments,
             )
             created += 1
         receipts.append(receipt)
@@ -1925,28 +2166,18 @@ def stream_transform_to_npy_chunks(
                 f"planned stream interruption after {created} committed chunks"
             )
     capability_payload = {
-        "schema": "round0010-stream-output-v1",
-        "source_total_rows": source.total_rows,
-        "source_dimension": source.dimension,
-        "source_members": [
-            {
-                "path_basename": member.path.name,
-                "global_start": member.global_start,
-                "global_stop": member.global_stop,
-                "local_start": member.local_start,
-                "sha256": member.sha256,
-            }
-            for member in source.members
-        ],
-        "transform_id": transform_id,
-        "output_dimension": output_dim,
-        "output_dtype": dtype.str,
-        "rows_per_chunk": rows_per_chunk,
+        "schema": STREAM_CAPABILITY_SCHEMA,
+        "stream_plan_sha256": plan_sha256,
+        "stream_plan_receipt_sha256": plan_receipt_sha256,
+        "complete_source_identity_sha256": complete_source_identity_sha256,
+        "plan": plan,
         "ordered_chunks": [
             {
                 "chunk_index": receipt["chunk_index"],
                 "global_row_start": receipt["global_row_start"],
                 "global_row_stop": receipt["global_row_stop"],
+                "receipt_sha256": receipt["receipt_sha256"],
+                "source_segments_sha256": receipt["source_segments_sha256"],
                 "sha256": receipt["artifact"]["sha256"],
                 "size_bytes": receipt["artifact"]["size_bytes"],
             }
@@ -1958,6 +2189,8 @@ def stream_transform_to_npy_chunks(
         "capability_sha256": canonical_sha256(capability_payload),
         "created_chunks_this_invocation": created,
         "resumed_chunks_this_invocation": len(receipts) - created,
+        "stream_plan_sha256": plan_sha256,
+        "stream_plan_receipt_sha256": plan_receipt_sha256,
         "ordered_receipt_sha256": [receipt["receipt_sha256"] for receipt in receipts],
     }
 
@@ -2047,6 +2280,13 @@ def run_fixture_suite(root: os.PathLike[str] | str) -> dict[str, Any]:
         raise PackError("indexed multi-shard fixture returned incorrect rows")
 
     transform_id = "fixture-linear-v1: [x0+x1, x2-x3, row-sum]"
+    transform_implementation_sha256 = hashlib.sha256(
+        b"round0010-fixture-linear-numpy-column-stack-v1"
+    ).hexdigest()
+    transform_config = {
+        "expressions": ["x0+x1", "x2-x3", "row-sum"],
+        "input_dtype": RAW_DTYPE.str,
+    }
 
     def transform(block: np.ndarray) -> np.ndarray:
         return np.column_stack(
@@ -2060,6 +2300,8 @@ def run_fixture_suite(root: os.PathLike[str] | str) -> dict[str, Any]:
             fixture_root / "stream-resume",
             transform,
             transform_id=transform_id,
+            transform_implementation_sha256=transform_implementation_sha256,
+            transform_config=transform_config,
             output_dim=3,
             rows_per_chunk=5,
             read_block_rows=2,
@@ -2074,6 +2316,8 @@ def run_fixture_suite(root: os.PathLike[str] | str) -> dict[str, Any]:
         fixture_root / "stream-resume",
         transform,
         transform_id=transform_id,
+        transform_implementation_sha256=transform_implementation_sha256,
+        transform_config=transform_config,
         output_dim=3,
         rows_per_chunk=5,
         read_block_rows=2,
@@ -2083,6 +2327,8 @@ def run_fixture_suite(root: os.PathLike[str] | str) -> dict[str, Any]:
         fixture_root / "stream-clean",
         transform,
         transform_id=transform_id,
+        transform_implementation_sha256=transform_implementation_sha256,
+        transform_config=transform_config,
         output_dim=3,
         rows_per_chunk=5,
         read_block_rows=2,

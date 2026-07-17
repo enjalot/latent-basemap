@@ -99,6 +99,10 @@ def test_stream_transform_interrupt_resume_is_byte_identical_to_clean(
 
     kwargs = {
         "transform_id": "test-linear-v1",
+        "transform_implementation_sha256": hashlib.sha256(
+            b"test-linear-numpy-column-stack-v1"
+        ).hexdigest(),
+        "transform_config": {"expressions": ["x0+x1", "x2-x3"]},
         "output_dim": 2,
         "rows_per_chunk": 4,
         "read_block_rows": 2,
