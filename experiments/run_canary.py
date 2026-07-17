@@ -62,7 +62,35 @@ def derive_canary_config(train_cfg_path, run_dir, max_steps, warmup, floor, warn
     return canary, tf
 
 
+def _reject_tracked_scratch_argv(argv):
+    """Preserve the legacy no-tracked-write guard before hard retirement.
+
+    This intentionally inspects only the one dangerous destination flag.  It
+    does not construct the general parser, load a config, or create any path.
+    """
+    candidates = []
+    for index, token in enumerate(argv):
+        if token == "--scratch-config" and index + 1 < len(argv):
+            candidates.append(argv[index + 1])
+        elif token.startswith("--scratch-config="):
+            candidates.append(token.split("=", 1)[1])
+    tracked = os.path.realpath("experiments/configs")
+    for candidate in candidates:
+        proposed = os.path.abspath(candidate)
+        try:
+            inside_tracked = os.path.commonpath([tracked, proposed]) == tracked
+        except ValueError:
+            inside_tracked = False
+        if inside_tracked:
+            raise SystemExit(
+                "refuse to write a derived canary config into experiments/configs "
+                "(tracked); use a scratch path (L0.1).")
+
+
 def main():
+    _reject_tracked_scratch_argv(sys.argv[1:])
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("experiments/run_canary.py")
     ap = argparse.ArgumentParser()
     ap.add_argument("--train-config", required=True)
     ap.add_argument("--run-dir", required=True, help="deterministic child run dir")
@@ -72,17 +100,27 @@ def main():
     ap.add_argument("--warn", type=float, default=250.0)
     ap.add_argument("--max-steps", type=int, default=1200)
     ap.add_argument("--warmup", type=int, default=200)
+    ap.add_argument("--performance-gate",
+                    help="exact signed Round 0005 certificate required at >=8M")
+    ap.add_argument("--release-sha",
+                    help="exact clean release bound by an >=8M certificate")
     args = ap.parse_args()
 
     cfg, family = derive_canary_config(args.train_config, args.run_dir,
                                        args.max_steps, args.warmup, args.floor, args.warn)
     scratch_cfg = args.scratch_config or os.path.join(
         os.path.dirname(args.out) or ".", f"{cfg.name}_derived.yaml")
-    os.makedirs(os.path.dirname(scratch_cfg) or ".", exist_ok=True)
-    # never overwrite a tracked config: refuse if the target is under experiments/configs
+    # Reject tracked destinations before scale admission so an invalid output
+    # request is refused consistently, including for >=8M configurations.
     if os.path.abspath(scratch_cfg).startswith(os.path.abspath("experiments/configs")):
         raise SystemExit("refuse to write a derived canary config into experiments/configs "
                          "(tracked); use a scratch path (L0.1).")
+    # Reopen and validate any scale input before creating scratch state or a
+    # child process. The child repeats the same check before its first CUDA call.
+    from experiments.run_experiment import _round0005_scale_preflight
+    scale_admission = _round0005_scale_preflight(
+        cfg, performance_gate=args.performance_gate, release_sha=args.release_sha)
+    os.makedirs(os.path.dirname(scratch_cfg) or ".", exist_ok=True)
     cfg.to_yaml(scratch_cfg)
     if os.path.isdir(args.run_dir) and os.listdir(args.run_dir):
         shutil.rmtree(args.run_dir)      # fresh deterministic dir for this canary
@@ -96,14 +134,18 @@ def main():
     lease_fd = os.environ.get("BASEMAP_GPU_LEASE_FD")
     if lease_fd and lease_fd.isdigit():
         pass_fds = (int(lease_fd),)
-    proc = subprocess.run([sys.executable, "experiments/run_experiment.py", scratch_cfg],
+    child_argv = [sys.executable, "experiments/run_experiment.py", scratch_cfg]
+    if scale_admission is not None:
+        child_argv.extend(["--performance-gate", args.performance_gate,
+                           "--release-sha", args.release_sha])
+    proc = subprocess.run(child_argv,
                           env=env, close_fds=True, pass_fds=pass_fds)
     child_rc = proc.returncode
 
     rj = os.path.join(args.run_dir, "results.json")
     verdict = {"gate": "perf_canary", "train_config": os.path.abspath(args.train_config),
                "run_dir": args.run_dir, "floor": args.floor, "child_rc": child_rc,
-               "config_family": family}
+               "config_family": family, "scale_admission": scale_admission}
     reasons = []
     c = (json.load(open(rj)).get("canary") if os.path.exists(rj) else None)
     if not c:

@@ -12,6 +12,10 @@ Usage:
   # Build and also benchmark k-NN query speed
   modal run build_faiss_index_modal.py --n-samples 1000000 --benchmark
 """
+from basemap.round0005_retirement import refuse_retired_launcher
+
+refuse_retired_launcher("build_faiss_index_modal.py")
+
 import time
 import logging
 import json

@@ -13,13 +13,19 @@ Runs in a FRESH controller child (no VRAM pollution). Aborts if the pipeline is
 not device+weighted or the steady rate is below the floor.
 
 Usage:
-  python experiments/run_8m_canary.py --floor 200 --max-steps 1200
+  python experiments/run_8m_canary.py --performance-gate <round0005-gate.json> \
+      --release-sha <40-hex-release> \
+      --floor 200 --max-steps 1200
 """
 from __future__ import annotations
 import argparse, os, sys, json, glob, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from experiments.experiment_config import load_config
 from basemap.run_controller import run_jobs, Job, known_service_pids
+from basemap.round0005_retirement import refuse_retired_launcher
+from experiments.round0005_performance_gate import (derive_scale_rows,
+                                                     require_current_release_sha,
+                                                     require_scale_performance_gate)
 
 BASE = "experiments/configs/jina_en_8m_nested.yaml"
 
@@ -50,15 +56,31 @@ def build_canary_config(max_steps, warmup, budget_gb, floor=200.0, warn_rate=250
 
 
 def main():
+    refuse_retired_launcher("experiments/run_8m_canary.py")
     ap = argparse.ArgumentParser()
     ap.add_argument("--floor", type=float, default=200.0, help="steady upd/s abort floor")
     ap.add_argument("--max-steps", type=int, default=1200)
     ap.add_argument("--warmup", type=int, default=200)
     ap.add_argument("--budget-gb", type=float, default=26.0)
+    ap.add_argument("--performance-gate", required=True,
+                    help="accepted Round 0005 content-bound scale certificate")
+    ap.add_argument("--release-sha", required=True,
+                    help="exact queue release bound by the scale certificate")
     ap.add_argument("--out", default="/data/latent-basemap/closure/canary_8m.json")
     args = ap.parse_args()
+    require_current_release_sha(args.release_sha)
 
     cfg = build_canary_config(args.max_steps, args.warmup, args.budget_gb, floor=args.floor)
+    if len(cfg.data.memmap_dirs) != 1:
+        raise ValueError("8M canary needs one ordered embedding input for row derivation")
+    row_derivation = derive_scale_rows(
+        cfg.data.memmap_dirs[0], dimensions=int(cfg.data.input_dim))
+    scientific_rows = int(row_derivation["scientific_rows"])
+    if scientific_rows != 8_000_000:
+        raise ValueError(f"8M canary input derived {scientific_rows:,} rows, expected 8,000,000")
+    require_scale_performance_gate(
+        args.performance_gate, scientific_rows=scientific_rows,
+        row_derivation=row_derivation, release_sha=args.release_sha)
     # L0.1: a CLI invocation must NEVER overwrite a tracked YAML. Write the derived
     # config to a scratch path under /data (immutable tracked references live at
     # experiments/configs/_canary_8m{,_abort_demo}.yaml and are not rewritten here).
@@ -78,13 +100,19 @@ def main():
               manifest="/data/latent-basemap/closure/canary.manifest.json",
               cwd=os.getcwd(), required_free_gb=28.0,
               input_paths=[cfg_path, "experiments/run_experiment.py",
-                           "basemap/pumap/parametric_umap/core.py"])
+                           "basemap/pumap/parametric_umap/core.py",
+                           cfg.data.memmap_dirs[0], args.performance_gate],
+              scientific_rows=scientific_rows,
+              performance_gate_path=args.performance_gate)
     print(f"[canary] launching (floor {args.floor} upd/s, {args.max_steps} steps, "
           f"budget {args.budget_gb} GB, required device+weighted)…", flush=True)
     summary = run_jobs([job], allowed_pids=known_service_pids(),
                        summary_path="/data/latent-basemap/closure/canary_ctl.json")
     rec = summary["jobs"][0]
-    verdict = {"controller": summary.get("stop_reason"), "job_status": rec["status"], "floor": args.floor}
+    verdict = {"controller": summary.get("stop_reason"), "job_status": rec["status"],
+               "floor": args.floor, "scale_row_derivation": row_derivation,
+               "release_sha": args.release_sha,
+               "performance_gate": args.performance_gate}
     rd = sorted(glob.glob("experiments/results/r1_8m_canary_*"))
     if rd and os.path.exists(os.path.join(rd[-1], "results.json")):
         c = json.load(open(os.path.join(rd[-1], "results.json"))).get("canary", {})

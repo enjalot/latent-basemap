@@ -71,6 +71,8 @@ CORRELATION_WEIGHT = 150.0   # weight for distance correlation loss
 # MODIFY THIS: Change optimizer, scheduler, loss computation, etc.
 
 def train():
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("autoresearch/train.py")
     # Auto-detect device
     if torch.cuda.is_available():
         device = 'cuda'

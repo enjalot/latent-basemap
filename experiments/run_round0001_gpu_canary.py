@@ -17,6 +17,8 @@ from basemap.run_controller import require_active_lease
 
 
 def main(argv=None) -> int:
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("experiments/run_round0001_gpu_canary.py")
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
     parser.add_argument("--rows", type=int, default=4096)

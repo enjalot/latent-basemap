@@ -12,6 +12,10 @@ Key insights from prior rounds:
 Usage:
   modal run sweep_v3_modal.py
 """
+from basemap.round0005_retirement import refuse_retired_launcher
+
+refuse_retired_launcher("sweep_v3_modal.py")
+
 import time
 import logging
 import numpy as np

@@ -269,7 +269,7 @@ def test_floors_run(tmp_path):
 # ─── CLI / IO round-trip ─────────────────────────────────────────────────────
 
 
-def test_cli_score_roundtrip(tmp_path):
+def test_private_cpu_fixture_score_roundtrip(tmp_path):
     import pandas as pd
 
     X, y = blobs_hi(n=400, d=16, centers=6, seed=20)
@@ -282,7 +282,7 @@ def test_cli_score_roundtrip(tmp_path):
 
     out = tmp_path / "metrics.json"
     per = tmp_path / "diag.parquet"
-    ev.main([
+    ev._main_fixture_only([
         "score", "--coords", str(coords_path), "--embeddings", str(emb_path),
         "--out", str(out), "--per-point", str(per),
         "--n-anchors", "150", "--tc-subsample", "200",

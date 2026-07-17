@@ -106,6 +106,8 @@ def _fp64_cross_topk(Q, corpus, k, dev, tile=200_000):
 
 
 def main():
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("experiments/golden_validate.py")
     ap = argparse.ArgumentParser()
     ap.add_argument("--emb", required=True)
     ap.add_argument("--coords", required=True)

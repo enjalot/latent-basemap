@@ -1,49 +1,46 @@
-"""L0.3 / S2 — the canonical G1 DAG must encode the fail-stop + verdict contract."""
+"""The historical G1 DAG is superseded by exact Round 0005 admission."""
 import pytest
+
+from basemap.round0005_retirement import (RetiredLauncherError,
+                                          retirement_message)
 import experiments.dag_template as dag
 
 
-def _g1(tmp_path):
+def _build(work_dir):
     return dag.build_g1_dag(
-        train_cfg="experiments/configs/_stdcurve_s42.yaml", work_dir=str(tmp_path),
-        reference=str(tmp_path / "ref.npz"), legacy_run_dir=str(tmp_path / "legacy"),
-        testbed_2m=str(tmp_path / "tb2m"), kernel_run_2m=str(tmp_path / "k2m"),
-        decision_out=str(tmp_path / "dec.json"), gate_out=str(tmp_path / "gate.json"))
+        train_cfg="experiments/configs/_stdcurve_s42.yaml", work_dir=str(work_dir),
+        reference=str(work_dir / "ref.npz"),
+        legacy_run_dir=str(work_dir / "legacy"),
+        testbed_2m=str(work_dir / "tb2m"),
+        kernel_run_2m=str(work_dir / "k2m"),
+        decision_out=str(work_dir / "dec.json"),
+        gate_out=str(work_dir / "gate.json"))
 
 
-def test_g1_dag_is_valid(tmp_path):
-    jobs = _g1(tmp_path)
-    assert dag.validate_dag(jobs) is True
-    by = {j.name: j for j in jobs}
-    # the long train is verdict-gated + canary-dep'd, fail-stop, deterministic outputs
-    t = by["train_stdcurve_s42"]
-    assert t.canary_dep == "perf_canary" and "perf_canary" in t.deps
-    assert t.require_passing_verdict and t.require_passing_verdict.endswith("perf_canary_verdict.json")
-    assert t.predicted_wall_s > dag.CANARY_REQUIRED_WALL_S
-    assert len(t.outputs) == 3 and all("*" not in o for o in t.outputs)
-    assert all(j.continue_on_failure is False for j in jobs)
-    # the fresh 2M evaluator canary precedes the perf canary + train
-    assert by["scoring_regression"].deps == ["eval_canary_2m"]
-    assert "scoring_regression" in by["perf_canary"].deps
+def test_g1_dag_builder_retires_before_output_or_job_construction(tmp_path):
+    work_dir = tmp_path / "must-not-exist"
+    with pytest.raises(RetiredLauncherError, match="RETIRED for Round 0005"):
+        _build(work_dir)
+    assert not work_dir.exists()
 
 
-def test_g1_dag_rejects_missing_verdict_gate(tmp_path):
-    jobs = _g1(tmp_path)
-    t = next(j for j in jobs if j.name == "train_stdcurve_s42")
-    t.require_passing_verdict = None
-    with pytest.raises(ValueError, match="require_passing_verdict"):
-        dag.validate_dag(jobs)
+def test_g1_dag_main_retires_before_controller_child(monkeypatch):
+    calls = []
+    monkeypatch.setattr(dag, "run_jobs", lambda *args, **kwargs: calls.append("child"))
+    with pytest.raises(RetiredLauncherError, match="exact signed manifest"):
+        dag.main()
+    assert calls == []
 
 
-def test_g1_dag_rejects_placeholder_path(tmp_path):
-    jobs = _g1(tmp_path)
-    next(j for j in jobs if j.name == "score_pair").outputs = ["experiments/results/*/coords.parquet"]
-    with pytest.raises(ValueError, match="unresolved path token"):
-        dag.validate_dag(jobs)
+def test_g1_dag_retirement_names_scale_certificate_and_row_derivation():
+    message = retirement_message("experiments/dag_template.py")
+    assert "round0005_performance_certificate.v3" in message
+    assert "reopened-input row derivation" in message
 
 
-def test_g1_dag_rejects_continue_on_failure(tmp_path):
-    jobs = _g1(tmp_path)
-    jobs[0].continue_on_failure = True
-    with pytest.raises(ValueError, match="continue_on_failure"):
-        dag.validate_dag(jobs)
+def test_g1_dag_has_no_environment_override_bypass(tmp_path, monkeypatch):
+    monkeypatch.setenv("BASEMAP_UNSAFE_SAME_PROCESS", "1")
+    work_dir = tmp_path / "still-must-not-exist"
+    with pytest.raises(RetiredLauncherError):
+        _build(work_dir)
+    assert not work_dir.exists()

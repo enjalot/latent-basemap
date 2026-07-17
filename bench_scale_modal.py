@@ -7,6 +7,10 @@ Usage:
   modal run bench_scale_modal.py --n-samples 1000000 --n-epochs 1
   modal run bench_scale_modal.py --n-samples 100000 --n-neighbors 100
 """
+from basemap.round0005_retirement import refuse_retired_launcher
+
+refuse_retired_launcher("bench_scale_modal.py")
+
 import time
 import logging
 import numpy as np

@@ -110,6 +110,8 @@ def profile_fast(X, sources, targets, weights, device, batch, pr, steps, use_amp
 
 
 def main():
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("experiments/profile_pipeline.py")
     ap = argparse.ArgumentParser()
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--n-rows", type=int, default=100000)

@@ -21,6 +21,8 @@ UMAP_RESULTS_FILE = "data/precomputed_umap_results_ls-fineweb-edu-100k.pkl"
 NEGATIVE_EDGES_FILE = "data/precomputed_negatives_lance_ls-fineweb-edu-100k.pkl"
 
 def train(dataset, batch_size, n_epochs, learning_rate):
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("train_local.py")
     print(f"Training on datasets: {dataset}, dimensions: {D_IN}")
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -71,6 +73,8 @@ def train(dataset, batch_size, n_epochs, learning_rate):
     print("Done")
 
 def main():
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("train_local.py")
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--n-epochs", type=int, default=10)

@@ -261,7 +261,8 @@ def _load_lancedb(dc):
 
 # ─── Metrics ─────────────────────────────────────────────────────────────────
 
-def compute_metrics(X_high, X_low, cfg: ExperimentConfig, labels=None) -> dict:
+def compute_metrics(X_high, X_low, cfg: ExperimentConfig, labels=None,
+                    scale_admission=None) -> dict:
     """Compute requested evaluation metrics."""
     ec = cfg.eval
     n = X_high.shape[0]
@@ -306,7 +307,7 @@ def compute_metrics(X_high, X_low, cfg: ExperimentConfig, labels=None) -> dict:
                              n_anchors=getattr(ec, "panel_n_anchors", 10000),
                              anchor_seed=getattr(ec, "panel_anchor_seed", 42))
         results["panel_v2"] = score_panel(
-            X_high, X_low, config=pcfg,
+            X_high, X_low, config=pcfg, scale_admission=scale_admission,
             provenance={"caller": "run_experiment", "eval_mode": getattr(ec, "mode", None)})
 
     return results
@@ -381,8 +382,70 @@ def run_umap_baseline(X_train, X_test, cfg: ExperimentConfig) -> dict:
 
 # ─── Core Runner ─────────────────────────────────────────────────────────────
 
-def run_single_experiment(cfg: ExperimentConfig) -> dict:
+def _configured_scientific_rows(cfg: ExperimentConfig) -> int | None:
+    """Derive the configured row count without touching CUDA or run outputs."""
+    dc = cfg.data
+    limit = getattr(dc, "n_samples", None)
+    if dc.source == "memmap":
+        from basemap.data_loader import MemmapArrayConcatenator
+        available = len(MemmapArrayConcatenator(dc.memmap_dirs, dc.input_dim))
+        return min(int(limit), available) if limit else int(available)
+    if dc.source == "synthetic":
+        return int(limit or 1000)
+    if dc.source == "h5":
+        import h5py
+        with h5py.File(os.path.expanduser(dc.h5_path), "r") as handle:
+            available = int(handle[dc.h5_dataset].shape[0])
+        return min(int(limit), available) if limit else available
+    return int(limit) if limit else None
+
+
+def _round0005_scale_preflight(cfg: ExperimentConfig, *,
+                               performance_gate: str | None,
+                               release_sha: str | None) -> dict | None:
+    """Require exact reopened-input evidence before any >=8M CUDA operation."""
+    rows = _configured_scientific_rows(cfg)
+    if rows is None or rows < 8_000_000:
+        return None
+    dc = cfg.data
+    paths = list(getattr(dc, "memmap_dirs", ()) or ())
+    if dc.source != "memmap" or len(paths) != 1:
+        raise RuntimeError(
+            f"{rows:,}-row generic experiment has no single exact embedding input; "
+            "use an admitted purpose-built scale queue node")
+    from basemap.artifact_identity import expected_input_signature
+    from experiments.round0005_performance_gate import (
+        derive_scale_rows, require_current_release_sha,
+        require_scale_performance_gate,
+    )
+    derivation = derive_scale_rows(paths[0], dimensions=int(dc.input_dim))
+    if derivation["scientific_rows"] != rows:
+        raise RuntimeError(
+            f"configured scale subset cannot be content-bound exactly: "
+            f"configured={rows:,} reopened={derivation['scientific_rows']:,}")
+    if not performance_gate or not release_sha:
+        raise RuntimeError(
+            f"{rows:,}-row generic experiment requires --performance-gate and "
+            "--release-sha before child/CUDA work")
+    require_current_release_sha(release_sha)
+    certificate = require_scale_performance_gate(
+        performance_gate, scientific_rows=rows, row_derivation=derivation,
+        release_sha=release_sha)
+    return {
+        "schema": "round0005_generic_scale_admission.v1",
+        "scientific_rows": rows, "row_derivation": derivation,
+        "release_sha": release_sha,
+        "performance_certificate": expected_input_signature(performance_gate),
+        "certificate_identity_sha256": certificate["identity_sha256"],
+    }
+
+
+def run_single_experiment(cfg: ExperimentConfig, *,
+                          performance_gate: str | None = None,
+                          release_sha: str | None = None) -> dict:
     """Run one experiment end-to-end. Returns results dict."""
+    scale_admission = _round0005_scale_preflight(
+        cfg, performance_gate=performance_gate, release_sha=release_sha)
     # P0-5: a CUDA training run must hold the GPU lease (launched via the
     # controller or an in-process GpuLease). Refuses a direct unleased CUDA
     # launch unless BASEMAP_UNSAFE_NO_LEASE=1. CPU runs are exempt.
@@ -466,6 +529,7 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
     logging.info(f"Device: {device}")
     eval_mode = "transductive_full_graph" if using_precomputed else "holdout_rows"
     run_manifest = collect_run_manifest(cfg, device, eval_mode)
+    run_manifest["scale_admission"] = scale_admission
     graph_cache = build_graph_cache_spec(cfg, X_train, eval_mode)
     if graph_cache is not None:
         write_manifest_if_missing(graph_cache)
@@ -648,11 +712,21 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
     transform_time = time.time() - t0
 
     # ── Evaluate ──
-    metrics_train = compute_metrics(X_train, Z_train, cfg, labels_train)
+    panel_scale_admission = (None if scale_admission is None else {
+        "performance_gate": performance_gate,
+        "release_sha": release_sha,
+        "row_derivation": scale_admission["row_derivation"],
+        "scale_policy": None,
+    })
+    metrics_train = compute_metrics(
+        X_train, Z_train, cfg, labels_train,
+        scale_admission=(panel_scale_admission if len(X_train) >= 8_000_000 else None))
     metrics_test = {}
     if X_test is not None:
         logging.info("Computing metrics on test set...")
-        metrics_test = compute_metrics(X_test, Z_test, cfg, labels_test)
+        metrics_test = compute_metrics(
+            X_test, Z_test, cfg, labels_test,
+            scale_admission=(panel_scale_admission if len(X_test) >= 8_000_000 else None))
 
     # ── Standard UMAP baseline ──
     umap_baseline = {}
@@ -768,7 +842,9 @@ def run_single_experiment(cfg: ExperimentConfig) -> dict:
 
 # ─── Sweep Runner ────────────────────────────────────────────────────────────
 
-def run_sweep(cfg: ExperimentConfig, sweep_file: str) -> list:
+def run_sweep(cfg: ExperimentConfig, sweep_file: str, *,
+              performance_gate: str | None = None,
+              release_sha: str | None = None) -> list:
     """Run a parameter sweep defined in a YAML file."""
     with open(sweep_file) as f:
         sweep_def = yaml.safe_load(f)
@@ -782,7 +858,8 @@ def run_sweep(cfg: ExperimentConfig, sweep_file: str) -> list:
         logging.info(f"\n{'='*60}")
         logging.info(f"  Sweep run {i+1}/{len(configs)}: {c.name}")
         logging.info(f"{'='*60}")
-        results = run_single_experiment(c)
+        results = run_single_experiment(
+            c, performance_gate=performance_gate, release_sha=release_sha)
         all_results.append(results)
 
     # Print comparison table
@@ -813,6 +890,8 @@ def _print_sweep_summary(results_list):
 # ─── CLI ─────────────────────────────────────────────────────────────────────
 
 def main():
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("experiments/run_experiment.py")
     parser = argparse.ArgumentParser(description="Run parametric UMAP experiments")
     parser.add_argument("config", type=str, help="Path to YAML config file")
     parser.add_argument("--override", nargs="*", default=[],
@@ -821,6 +900,10 @@ def main():
                         help="Path to sweep YAML file")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print config and exit without running")
+    parser.add_argument("--performance-gate",
+                        help="exact signed Round 0005 certificate required at >=8M")
+    parser.add_argument("--release-sha",
+                        help="exact clean release bound by an >=8M certificate")
     args = parser.parse_args()
 
     # Parse overrides
@@ -849,9 +932,11 @@ def main():
         return
 
     if args.sweep:
-        run_sweep(cfg, args.sweep)
+        run_sweep(cfg, args.sweep, performance_gate=args.performance_gate,
+                  release_sha=args.release_sha)
     else:
-        run_single_experiment(cfg)
+        run_single_experiment(cfg, performance_gate=args.performance_gate,
+                              release_sha=args.release_sha)
 
 
 if __name__ == "__main__":

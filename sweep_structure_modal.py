@@ -12,6 +12,10 @@ Key ideas:
 Usage:
   modal run sweep_structure_modal.py
 """
+from basemap.round0005_retirement import refuse_retired_launcher
+
+refuse_retired_launcher("sweep_structure_modal.py")
+
 import time
 import logging
 import numpy as np

@@ -24,7 +24,7 @@ Also computes:
     pipeline" construction is a documented, defensible analog — not a
     byte-for-byte reproduction of whatever produced the original eval set;
   - a prompted-vs-unprompted PRE-TRAINING shift report: high-D kNN neighbour
-    overlap (Jaccard@k over anchor rows, same row ids in both spaces) and
+    retention and true Jaccard at k over anchor rows (same row ids in both spaces) and
     centroid-cluster agreement (ARI of nearest-centroid assignment between
     the two spaces), so the orchestrator can see how much the prompt moved
     the space before spending GPU hours training either map.
@@ -51,7 +51,9 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from basemap.graph_validation import graph_manifest_v2, edge_endpoint_cosine_check, write_manifest
+from basemap.graph_validation import graph_manifest_v2, edge_endpoint_cosine_check
+from basemap.output_safety import (atomic_save_new_npy, atomic_save_new_npz,
+                                   atomic_write_new_json, refuse_existing)
 from experiments.embed_prompted_200k import (
     apply_prompt, assert_row_identity, load_model, embed_texts, sha_file,
     verify_shard_alignment, fetch_texts_for_indices, build_shard_offsets,
@@ -133,22 +135,34 @@ def build_fuzzy_graph(X, k=50, seed=42, device="cuda", chunk=4096):
 # --------------------------------------------------------------------------
 
 def neighbor_overlap_report(X_a, X_b, anchor_pos, k=50, device="cuda", chunk=4096):
-    """Jaccard@k neighbour overlap between two spaces (X_a, X_b MUST be the
-    SAME row-id space — row i in X_a and row i in X_b are the same source
-    text). Returns per-anchor overlap fraction + summary stats."""
+    """Emit retention and true Jaccard separately with explicit self exclusion."""
     Xq_a = X_a[anchor_pos]
     Xq_b = X_b[anchor_pos]
     ids = anchor_pos.astype(np.int64)
     nbr_a, _ = topk_neighbors(Xq_a, X_a, k, device=device, chunk=chunk, exclude_self_ids=ids)
     nbr_b, _ = topk_neighbors(Xq_b, X_b, k, device=device, chunk=chunk, exclude_self_ids=ids)
-    overlaps = np.empty(len(anchor_pos), dtype=np.float32)
+    if nbr_a.shape != (len(anchor_pos), k) or nbr_b.shape != (len(anchor_pos), k):
+        raise ValueError("neighbor reporter did not receive exact n_anchor x k matrices")
+    retention = np.empty(len(anchor_pos), dtype=np.float32)
+    jaccard = np.empty(len(anchor_pos), dtype=np.float32)
     for i in range(len(anchor_pos)):
         sa, sb = set(nbr_a[i].tolist()), set(nbr_b[i].tolist())
-        overlaps[i] = len(sa & sb) / float(k)
+        if len(sa) != k or len(sb) != k:
+            raise ValueError("neighbor reporter received duplicate IDs within a top-k row")
+        if int(ids[i]) in sa or int(ids[i]) in sb:
+            raise RuntimeError("neighbor reporter failed to exclude a query's self ID")
+        intersection = len(sa & sb)
+        union = len(sa | sb)
+        retention[i] = intersection / float(k)
+        jaccard[i] = intersection / float(union) if union else 1.0
+    def summary(values):
+        return {"mean": float(values.mean()), "std": float(values.std()),
+                "min": float(values.min()), "max": float(values.max())}
     return {
-        "k": int(k), "n_anchors": int(len(anchor_pos)),
-        "mean_overlap": float(overlaps.mean()), "std_overlap": float(overlaps.std()),
-        "min_overlap": float(overlaps.min()), "max_overlap": float(overlaps.max()),
+        "schema": "neighbor_overlap_metrics.v2",
+        "k": int(k), "n_anchors": int(len(anchor_pos)), "self_excluded": True,
+        "retention": {"formula": "|intersection|/k", **summary(retention)},
+        "true_jaccard": {"formula": "|intersection|/|union|", **summary(jaccard)},
     }
 
 
@@ -206,6 +220,8 @@ def select_holdout_ids(total_n, sample_indices, n_holdout, seed=123):
 # --------------------------------------------------------------------------
 
 def main():
+    from basemap.round0005_retirement import refuse_retired_launcher
+    refuse_retired_launcher("experiments/build_prompted_graph.py")
     ap = argparse.ArgumentParser()
     ap.add_argument("--prompted", default="/data/latent-basemap/jina-en-200k-prompted")
     ap.add_argument("--unprompted", default="/data/latent-basemap/jina-en-200k")
@@ -217,10 +233,23 @@ def main():
     ap.add_argument("--n-holdout", type=int, default=5000)
     ap.add_argument("--n-anchors", type=int, default=2000)
     ap.add_argument("--n-cluster-sample", type=int, default=20000)
-    ap.add_argument("--batch-size", type=int, default=512)
+    ap.add_argument("--batch-size", type=int, default=256)
     ap.add_argument("--dtype", default="float32", choices=["float32", "float16", "bfloat16"])
     ap.add_argument("--device", default=None)
     args = ap.parse_args()
+    if args.batch_size != 256:
+        raise ValueError("production Jina builder requires batch size 256")
+
+    graph_path = os.path.join(args.prompted, f"edges_k{args.k}_fuzzy.npz")
+    heldout_embeddings = os.path.join(args.prompted, "holdout_query_embeddings.npy")
+    heldout_ids_path = os.path.join(args.prompted, "holdout_query_ids.npy")
+    heldout_manifest_path = heldout_embeddings + ".manifest.json"
+    shift_path = os.path.join(args.prompted, "prompt_shift_report.json")
+    for path in (graph_path, graph_path + ".manifest.json",
+                 os.path.join(args.prompted, "centroids_k256.npy"),
+                 os.path.join(args.prompted, "centroids_k1024.npy"),
+                 heldout_embeddings, heldout_ids_path, heldout_manifest_path, shift_path):
+        refuse_existing(path, label="prompted graph builder output")
 
     import torch
     device = args.device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -248,9 +277,8 @@ def main():
     t0 = time.time()
     sources, targets, weights, ginfo = build_fuzzy_graph(Xp, k=args.k, seed=args.seed, device=device)
     print(f"[build_prompted_graph] fuzzy graph: {ginfo} in {time.time() - t0:.1f}s", flush=True)
-    graph_path = os.path.join(args.prompted, f"edges_k{args.k}_fuzzy.npz")
-    np.savez(graph_path, sources=sources, targets=targets, weights=weights,
-            n_nodes=n, k=args.k)
+    atomic_save_new_npz(graph_path, immutable=True, sources=sources, targets=targets,
+                        weights=weights, n_nodes=n, k=args.k)
     probe = edge_endpoint_cosine_check(sources, targets, Xp, n_probe=20000, seed=0, min_margin=0.15)
     print(f"[build_prompted_graph] endpoint-cosine probe: {probe}", flush=True)
     man = graph_manifest_v2(
@@ -263,7 +291,7 @@ def main():
         extra={"builder": "build_prompted_graph.py", "prompt_prefix": PROMPT_PREFIX,
               "mean_out_degree": ginfo["mean_out_degree"]},
     )
-    write_manifest(graph_path + ".manifest.json", man)
+    atomic_write_new_json(graph_path + ".manifest.json", man, immutable=True)
     print(f"[build_prompted_graph] wrote {graph_path} + manifest", flush=True)
 
     # ---- 2. frozen centroids k256/k1024 over the PROMPTED embeddings ----
@@ -280,8 +308,8 @@ def main():
     ho_prompted = apply_prompt(ho_texts, PROMPT_PREFIX)
     model, commit = load_model(device=device, dtype=args.dtype)
     ho_emb = embed_texts(model, ho_prompted, batch_size=args.batch_size, show_progress=True)
-    np.save(os.path.join(args.prompted, "holdout_query_embeddings.npy"), ho_emb)
-    np.save(os.path.join(args.prompted, "holdout_query_ids.npy"), holdout_ids)
+    atomic_save_new_npy(heldout_embeddings, ho_emb, immutable=True)
+    atomic_save_new_npy(heldout_ids_path, holdout_ids, immutable=True)
     ho_manifest = {
         "schema": "prompted_holdout_manifest.v1", "n_holdout": int(len(holdout_ids)),
         "model_id": MODEL_ID, "model_commit": commit, "prompt_prefix": PROMPT_PREFIX,
@@ -291,8 +319,7 @@ def main():
                "testbed's original held-out eval sets (that builder script is not "
                "present in this checkout) — a documented analog construction.",
     }
-    json.dump(ho_manifest, open(os.path.join(args.prompted, "holdout_query_embeddings.npy.manifest.json"), "w"),
-              indent=1)
+    atomic_write_new_json(heldout_manifest_path, ho_manifest, immutable=True, indent=1)
     print(f"[build_prompted_graph] wrote holdout_query_embeddings.npy "
           f"({ho_emb.shape}) + ids + manifest", flush=True)
 
@@ -301,11 +328,12 @@ def main():
     anchor_pos = np.sort(rng.choice(n, min(args.n_anchors, n), replace=False))
     nbr_report = neighbor_overlap_report(Xu, Xp, anchor_pos, k=args.k, device=device)
     print(f"[build_prompted_graph] kNN overlap (unprompted vs prompted, k={args.k}): "
-          f"mean={nbr_report['mean_overlap']:.4f} std={nbr_report['std_overlap']:.4f}", flush=True)
+          f"retention={nbr_report['retention']['mean']:.4f} "
+          f"jaccard={nbr_report['true_jaccard']['mean']:.4f}", flush=True)
 
     cents_u_path_ok = all(os.path.exists(os.path.join(args.unprompted, f"centroids_k{k}.npy"))
                           for k in (256, 1024))
-    shift_report = {"neighbor_overlap": nbr_report}
+    shift_report = {"schema": "prompt_shift_report.v2", "neighbor_overlap": nbr_report}
     if cents_u_path_ok:
         cents_u = {256: np.load(os.path.join(args.unprompted, "centroids_k256.npy")),
                   1024: np.load(os.path.join(args.unprompted, "centroids_k1024.npy"))}
@@ -319,9 +347,8 @@ def main():
               "centroid_agreement (neighbor_overlap still computed)", flush=True)
     shift_report["seed"] = 7
     shift_report["created_utc"] = _now()
-    out_path = os.path.join(args.prompted, "prompt_shift_report.json")
-    json.dump(shift_report, open(out_path, "w"), indent=1)
-    print(f"[build_prompted_graph] wrote {out_path}", flush=True)
+    atomic_write_new_json(shift_path, shift_report, immutable=True, indent=1)
+    print(f"[build_prompted_graph] wrote {shift_path}", flush=True)
 
 
 def _git_commit():

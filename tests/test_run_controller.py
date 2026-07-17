@@ -1,6 +1,7 @@
 """P0-D: fail-closed GPU controller — cross-process lease, crash-safety,
 chain-stop, output validation, idempotency, co-tenant policy."""
-import sys, os, json, time, tempfile, subprocess, textwrap, signal
+import sys, os, json, time, tempfile, subprocess, textwrap, signal, fcntl
+import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from basemap import run_controller as rc
 
@@ -38,9 +39,10 @@ def test_lease_survives_controller_death_via_inherited_fd():
     from basemap.run_controller import GpuLease
     L = GpuLease(path=lp, timeout=0); L.acquire()
     child = subprocess.Popen([sys.executable, '-c',
-        f"import time,os; time.sleep(3)"], pass_fds=(L.fileno(),), close_fds=False)
+        f"import time,os; time.sleep(3)"], pass_fds=L.pass_fds(), close_fds=False)
     # 'controller' dies (close its fd) but child still holds the inherited fd
     os.close(L._fd); L._fd = None
+    os.close(L._guard_fd); L._guard_fd = None
     time.sleep(0.3)
     try:
         rc.GpuLease(path=lp, timeout=0).acquire()
@@ -59,7 +61,7 @@ def test_nonzero_job1_stops_job2():
     j1 = rc.Job(name='a', argv=['false'], outputs=[], done_marker=os.path.join(d, 'a.done'), certifying=False)
     j2 = rc.Job(name='b', argv=['bash', '-c', f'touch {d}/b.out'],
                 outputs=[f'{d}/b.out'], done_marker=os.path.join(d, 'b.done'))
-    s = rc.run_jobs([j1, j2])
+    s = rc._run_jobs_fixture_only([j1, j2])
     assert s['jobs'][0]['status'].startswith('exit_')
     assert len(s['jobs']) == 1 and 'stopped' in s['stop_reason']
     assert not os.path.exists(f'{d}/b.out')   # job 2 never ran
@@ -70,7 +72,7 @@ def test_exit_zero_without_outputs_is_failure():
     d = tempfile.mkdtemp(); os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
     import importlib; importlib.reload(rc)
     j = rc.Job(name='x', argv=['true'], outputs=[f'{d}/never'], done_marker=os.path.join(d, 'x.done'))
-    s = rc.run_jobs([j])
+    s = rc._run_jobs_fixture_only([j])
     assert s['jobs'][0]['status'] == 'missing_outputs'
     assert not os.path.exists(os.path.join(d, 'x.done'))   # no completion record
     print("PASS exit-0 without outputs = failure")
@@ -82,11 +84,11 @@ def test_stale_output_does_not_skip_without_done_record():
     open(f'{d}/out', 'w').close()   # stale output present, but NO valid .done record
     j = rc.Job(name='x', argv=['bash', '-c', f'echo redo > {d}/out'],
                outputs=[f'{d}/out'], done_marker=os.path.join(d, 'x.done'))
-    s = rc.run_jobs([j])
+    s = rc._run_jobs_fixture_only([j])
     assert s['jobs'][0]['status'] == 'ok'   # it RE-RAN (not skipped)
     assert open(f'{d}/out').read().strip() == 'redo'
     # second run WITH the completion record skips
-    s2 = rc.run_jobs([j]); assert s2['jobs'][0]['status'] == 'skipped_done'
+    s2 = rc._run_jobs_fixture_only([j]); assert s2['jobs'][0]['status'] == 'skipped_done'
     print("PASS stale output re-runs; valid record skips")
 
 
@@ -95,7 +97,7 @@ def test_final_manifest_has_status_and_telemetry():
     import importlib; importlib.reload(rc)
     j = rc.Job(name='x', argv=['bash', '-c', f'touch {d}/o'], outputs=[f'{d}/o'],
                done_marker=os.path.join(d, 'x.done'), manifest=os.path.join(d, 'x.manifest.json'))
-    rc.run_jobs([j])
+    rc._run_jobs_fixture_only([j])
     m = json.load(open(os.path.join(d, 'x.manifest.json')))
     assert m['status'] == 'ok' and m['exit_code'] == 0 and 'gpu_post' in m and 'output_sigs' in m
     print("PASS final manifest has status + telemetry")
@@ -108,7 +110,7 @@ def test_p0_5_stale_noop_over_existing_output_fails():
     import importlib; importlib.reload(rc)
     with open(f'{d}/out', 'w') as f: f.write("stale")
     j = rc.Job(name='x', argv=['true'], outputs=[f'{d}/out'], done_marker=os.path.join(d, 'x.done'))
-    s = rc.run_jobs([j])
+    s = rc._run_jobs_fixture_only([j])
     assert s['jobs'][0]['status'] == 'stale_outputs', s['jobs'][0]
     assert not os.path.exists(os.path.join(d, 'x.done'))
     assert open(f'{d}/out').read() == "stale"
@@ -119,11 +121,11 @@ def test_p0_5_changed_argv_cannot_reuse_done_record():
     import importlib; importlib.reload(rc)
     j1 = rc.Job(name='x', argv=['bash', '-c', f'echo a > {d}/out'],
                 outputs=[f'{d}/out'], done_marker=os.path.join(d, 'x.done'))
-    assert rc.run_jobs([j1])['jobs'][0]['status'] == 'ok'
+    assert rc._run_jobs_fixture_only([j1])['jobs'][0]['status'] == 'ok'
     # different argv (same name/outputs) → digest differs → must NOT skip; re-runs
     j2 = rc.Job(name='x', argv=['bash', '-c', f'echo b > {d}/out'],
                 outputs=[f'{d}/out'], done_marker=os.path.join(d, 'x.done'))
-    assert rc.run_jobs([j2])['jobs'][0]['status'] == 'ok'
+    assert rc._run_jobs_fixture_only([j2])['jobs'][0]['status'] == 'ok'
     assert open(f'{d}/out').read().strip() == 'b'
 
 
@@ -132,10 +134,10 @@ def test_p0_5_mutated_output_invalidates_skip():
     import importlib; importlib.reload(rc)
     j = rc.Job(name='x', argv=['bash', '-c', f'echo a > {d}/out'],
                outputs=[f'{d}/out'], done_marker=os.path.join(d, 'x.done'))
-    assert rc.run_jobs([j])['jobs'][0]['status'] == 'ok'
-    assert rc.run_jobs([j])['jobs'][0]['status'] == 'skipped_done'   # unchanged → skip
+    assert rc._run_jobs_fixture_only([j])['jobs'][0]['status'] == 'ok'
+    assert rc._run_jobs_fixture_only([j])['jobs'][0]['status'] == 'skipped_done'   # unchanged → skip
     with open(f'{d}/out', 'w') as f: f.write("tampered")             # mutate output
-    assert rc.run_jobs([j])['jobs'][0]['status'] == 'ok'             # re-runs, not skipped
+    assert rc._run_jobs_fixture_only([j])['jobs'][0]['status'] == 'ok'             # re-runs, not skipped
 
 
 def test_p0_5_known_service_pids_matches_by_identity(monkeypatch):
@@ -155,7 +157,7 @@ def test_s1_certifying_job_needs_outputs():
     d = tempfile.mkdtemp(); os.environ['BASEMAP_GPU_LEASE'] = os.path.join(d, '.lease')
     import importlib; importlib.reload(rc)
     j = rc.Job(name='x', argv=['true'], outputs=[], done_marker=os.path.join(d, 'x.done'))  # certifying default
-    s = rc.run_jobs([j])
+    s = rc._run_jobs_fixture_only([j])
     assert s['jobs'][0]['status'].startswith('config_error'), s['jobs'][0]
     assert 'stop_reason' in s
 
@@ -165,7 +167,7 @@ def test_s1_missing_declared_input_fails():
     import importlib; importlib.reload(rc)
     j = rc.Job(name='x', argv=['bash', '-c', f'touch {d}/o'], outputs=[f'{d}/o'],
                done_marker=os.path.join(d, 'x.done'), input_paths=[f'{d}/does_not_exist'])
-    s = rc.run_jobs([j])
+    s = rc._run_jobs_fixture_only([j])
     assert s['jobs'][0]['status'].startswith('missing_inputs'), s['jobs'][0]
     assert not os.path.exists(f'{d}/o')   # never launched
 
@@ -204,10 +206,10 @@ def test_p1_done_digest_binds_input_content():
     def mk():
         return rc.Job(name='x', argv=['bash', '-c', f'cp {inp} {d}/out'],   # output reflects input
                       outputs=[f'{d}/out'], done_marker=os.path.join(d, 'x.done'), input_paths=[inp])
-    assert rc.run_jobs([mk()])['jobs'][0]['status'] == 'ok'
-    assert rc.run_jobs([mk()])['jobs'][0]['status'] == 'skipped_done'   # unchanged → skip
+    assert rc._run_jobs_fixture_only([mk()])['jobs'][0]['status'] == 'ok'
+    assert rc._run_jobs_fixture_only([mk()])['jobs'][0]['status'] == 'skipped_done'   # unchanged → skip
     with open(inp, 'w') as f: f.write("v2 CHANGED\n")                    # change the input
-    assert rc.run_jobs([mk()])['jobs'][0]['status'] == 'ok'             # re-runs, not skipped
+    assert rc._run_jobs_fixture_only([mk()])['jobs'][0]['status'] == 'ok'             # re-runs, not skipped
     assert open(f'{d}/out').read() == "v2 CHANGED\n"
 
 
@@ -224,8 +226,164 @@ def test_p0_5_require_active_lease():
     finally:
         L.release()
     os.environ['BASEMAP_UNSAFE_NO_LEASE'] = '1'
-    rc.require_active_lease()                         # explicit override
+    with pytest.raises(RuntimeError, match="forbidden"):
+        rc.require_active_lease()                     # unsafe override is rejected
     del os.environ['BASEMAP_UNSAFE_NO_LEASE']
+
+
+def test_unlocked_fd_to_locked_inode_does_not_prove_inherited_ownership():
+    import pytest
+    d = tempfile.mkdtemp(); lp = os.path.join(d, '.lease')
+    lease = rc.GpuLease(path=lp, timeout=0).acquire()
+    unlocked = os.open(lp, os.O_RDONLY)
+    token = lease.token
+    rc._OWNED_LEASE_FDS.pop(lease.fileno(), None)
+    os.environ['BASEMAP_GPU_LEASE_FD'] = str(unlocked)
+    os.environ['BASEMAP_GPU_LEASE_TOKEN'] = token
+    try:
+        with pytest.raises(RuntimeError, match="owned/inherited"):
+            rc.require_active_lease(lp)
+    finally:
+        os.environ.pop('BASEMAP_GPU_LEASE_FD', None)
+        os.environ.pop('BASEMAP_GPU_LEASE_TOKEN', None)
+        os.close(unlocked)
+        lease.release()
+
+
+def test_lease_rejects_symlink_path_and_detects_unlink_recreate():
+    d = tempfile.mkdtemp(); real = os.path.join(d, 'real.lease')
+    open(real, 'w').close()
+    link = os.path.join(d, 'link.lease'); os.symlink(real, link)
+    with pytest.raises((OSError, RuntimeError)):
+        rc.GpuLease(path=link, timeout=0).acquire()
+    os.unlink(link)
+    lease = rc.GpuLease(path=real, timeout=0).acquire()
+    os.unlink(real)
+    open(real, 'w').close()
+    try:
+        with pytest.raises(RuntimeError, match="inode|linked|identity"):
+            lease.verify_current()
+        with pytest.raises(RuntimeError, match="held by"):
+            rc.GpuLease(path=real, timeout=0).acquire()
+    finally:
+        lease.release()
+
+
+@pytest.mark.parametrize(
+    "failure", ["integrity", "blocking-integrity", "base-exception"])
+def test_lease_acquire_closes_all_descriptors_and_locks_on_every_failure(
+        tmp_path, monkeypatch, failure):
+    path = str(tmp_path / f"{failure}.lease")
+    lease = rc.GpuLease(path=path, timeout=0)
+    before = len(os.listdir("/proc/self/fd"))
+
+    def fail_verify():
+        if failure == "base-exception":
+            raise KeyboardInterrupt("fixture interruption")
+        if failure == "blocking-integrity":
+            raise BlockingIOError("fixture post-lock verification race")
+        raise RuntimeError("fixture verify_current race")
+
+    monkeypatch.setattr(lease, "verify_current", fail_verify)
+    expected = (KeyboardInterrupt if failure == "base-exception" else
+                BlockingIOError if failure == "blocking-integrity" else RuntimeError)
+    with pytest.raises(expected):
+        lease.acquire()
+    assert lease._fd is None and lease._guard_fd is None
+    assert lease._token is None and lease._inode is None
+    assert len(os.listdir("/proc/self/fd")) == before
+    # The same persistent process can serialize immediately after the failed
+    # attempt; neither the leaf OFD lock nor the parent guard survived.
+    rc.GpuLease(path=path, timeout=0).acquire().release()
+
+
+def test_lease_timeout_diagnostic_closes_probe_and_guard_on_pread_failure(
+        tmp_path, monkeypatch):
+    path = str(tmp_path / "diagnostic-cleanup.lease")
+    holder = rc.GpuLease(path=path, timeout=0).acquire()
+    before = len(os.listdir("/proc/self/fd"))
+
+    def fail_pread(_fd, _length, _offset):
+        raise OSError("adversarial diagnostic read failure")
+
+    monkeypatch.setattr(rc.os, "pread", fail_pread)
+    try:
+        with pytest.raises(RuntimeError, match="held by"):
+            rc.GpuLease(path=path, timeout=0).acquire()
+        assert len(os.listdir("/proc/self/fd")) == before
+    finally:
+        monkeypatch.undo()
+        holder.release()
+
+
+def test_lease_release_closes_both_descriptors_even_when_unlock_raises(
+        tmp_path, monkeypatch):
+    path = str(tmp_path / "unlock-error.lease")
+    lease = rc.GpuLease(path=path, timeout=0).acquire()
+    before_release = len(os.listdir("/proc/self/fd"))
+    real_set_lock = rc._ofd_set_lock
+
+    def fail_unlock(fd, lock_type):
+        if lock_type == fcntl.F_UNLCK:
+            raise RuntimeError("adversarial unlock failure")
+        return real_set_lock(fd, lock_type)
+
+    monkeypatch.setattr(rc, "_ofd_set_lock", fail_unlock)
+    with pytest.raises(RuntimeError, match="unlock failure"):
+        lease.release()
+    assert lease._fd is None and lease._guard_fd is None
+    assert len(os.listdir("/proc/self/fd")) == before_release - 2
+    monkeypatch.setattr(rc, "_ofd_set_lock", real_set_lock)
+    rc.GpuLease(path=path, timeout=0).acquire().release()
+
+
+def test_self_acquired_public_lease_parent_cannot_launch_canonical_child(tmp_path):
+    """Owning the public lease and being PPID is not a child capability."""
+    lease_path = str(tmp_path / "self-parent.lease")
+    lease = rc.GpuLease(path=lease_path, timeout=0).acquire()
+    environment = dict(os.environ)
+    environment.update({
+        "CUDA_VISIBLE_DEVICES": "", "BASEMAP_GPU_LEASE": lease_path,
+        "BASEMAP_GPU_LEASE_FD": str(lease.fileno()),
+        "BASEMAP_GPU_LEASE_TOKEN": lease.token,
+    })
+    for key in (
+            "BASEMAP_ROUND0005_ADMISSION", "BASEMAP_ROUND0005_MANIFEST",
+            "BASEMAP_ROUND0005_NODE", "BASEMAP_ROUND0005_CAPABILITY_FD",
+            "BASEMAP_ROUND0005_LAUNCH_NONCE"):
+        environment.pop(key, None)
+    try:
+        process = subprocess.run(
+            [sys.executable, os.path.join(REPO, "experiments",
+                                          "score_complete_panel.py"), "--help"],
+            env=environment, pass_fds=lease.pass_fds(), text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+    finally:
+        lease.release()
+    assert process.returncode != 0
+    assert "requires controller admission identity" in process.stderr
+
+
+def test_controller_death_kills_cpu_hidden_sentinel_child():
+    d = tempfile.mkdtemp(); sentinel = os.path.join(d, 'must-not-exist')
+    script = textwrap.dedent(f"""
+        import os, subprocess, sys
+        sys.path.insert(0, {REPO!r})
+        from basemap.run_controller import _child_parent_death_setup
+        parent = os.getpid()
+        env = dict(os.environ); env['CUDA_VISIBLE_DEVICES'] = ''
+        subprocess.Popen(
+            [sys.executable, '-c',
+             "import os,time; assert os.environ.get('CUDA_VISIBLE_DEVICES') == ''; "
+             "time.sleep(1.5); open({sentinel!r}, 'x').write('survived')"],
+            env=env, start_new_session=True,
+            preexec_fn=lambda: _child_parent_death_setup(parent))
+        os._exit(0)
+    """)
+    controller = subprocess.Popen([sys.executable, '-c', script])
+    controller.wait(timeout=5)
+    time.sleep(2.0)
+    assert not os.path.lexists(sentinel)
 
 
 
@@ -238,7 +396,7 @@ def test_co_tenant_policy_blocks_gpu_job_with_unknown_pid():
     import importlib; importlib.reload(rc)
     j = rc.Job(name='big', argv=['true'], outputs=[], done_marker=os.path.join(d, 'big.done'), certifying=False,
                required_free_gb=100000.0)   # impossible → policy must block
-    s = rc.run_jobs([j])
+    s = rc._run_jobs_fixture_only([j])
     assert s['jobs'][0]['status'] == 'co_tenant_block', s
     assert not os.path.exists(os.path.join(d, 'big.done'))
     print("PASS co-tenant policy blocks insufficient-VRAM job")
@@ -251,7 +409,7 @@ def test_s2_long_run_without_canary_dep_rejected():
     import importlib; importlib.reload(rc)
     j = rc.Job(name='train8m', argv=['bash', '-c', f'touch {d}/o'], outputs=[f'{d}/o'],
                done_marker=os.path.join(d, 'j.done'), predicted_wall_s=1800.0)
-    s = rc.run_jobs([j])
+    s = rc._run_jobs_fixture_only([j])
     assert s['jobs'][0]['status'] == 'config_error:long_run_without_canary_dep', s
     assert not os.path.exists(f'{d}/o')            # never launched
     print("PASS long run without canary dep rejected")
@@ -267,7 +425,7 @@ def test_s2_subfloor_canary_blocks_long_run():
     train = rc.Job(name='train8m', argv=['bash', '-c', f'touch {d}/o'], outputs=[f'{d}/o'],
                    done_marker=os.path.join(d, 't.done'), predicted_wall_s=1800.0,
                    deps=['canary'], canary_dep='canary')
-    s = rc.run_jobs([canary, train], allowed_pids=rc.known_service_pids())
+    s = rc._run_jobs_fixture_only([canary, train], allowed_pids=rc.known_service_pids())
     assert s['jobs'][0]['status'].startswith('exit_')      # canary failed
     assert not os.path.exists(f'{d}/o')                    # train never ran
     print("PASS sub-floor canary blocks long run")
@@ -281,7 +439,7 @@ def test_s2_passing_canary_admits_long_run():
     train = rc.Job(name='train8m', argv=['bash', '-c', f'touch {d}/o'], outputs=[f'{d}/o'],
                    done_marker=os.path.join(d, 't.done'), predicted_wall_s=1800.0,
                    deps=['canary'], canary_dep='canary')
-    s = rc.run_jobs([canary, train], allowed_pids=rc.known_service_pids())
+    s = rc._run_jobs_fixture_only([canary, train], allowed_pids=rc.known_service_pids())
     assert [j['status'] for j in s['jobs']] == ['ok', 'ok'], s
     assert os.path.exists(f'{d}/o')
     print("PASS passing canary admits long run")
@@ -299,7 +457,7 @@ def test_l03_touch_canary_does_not_release_train():
                    done_marker=os.path.join(d, 't.done'), predicted_wall_s=1800.0,
                    deps=['perf_canary'], canary_dep='perf_canary',
                    require_passing_verdict=verdict)
-    s = rc.run_jobs([canary, train], allowed_pids=rc.known_service_pids())
+    s = rc._run_jobs_fixture_only([canary, train], allowed_pids=rc.known_service_pids())
     assert s['jobs'][0]['status'] == 'ok'                 # touch job "succeeds"
     assert s['jobs'][1]['status'] == 'blocked:verdict_not_passing', s
     assert not os.path.exists(f'{d}/o')                   # train never ran
@@ -316,7 +474,7 @@ def test_l03_failing_verdict_blocks_train():
                    done_marker=os.path.join(d, 't.done'), predicted_wall_s=1800.0,
                    deps=['perf_canary'], canary_dep='perf_canary',
                    require_passing_verdict=verdict)
-    s = rc.run_jobs([canary, train], allowed_pids=rc.known_service_pids())
+    s = rc._run_jobs_fixture_only([canary, train], allowed_pids=rc.known_service_pids())
     assert s['jobs'][1]['status'] == 'blocked:verdict_not_passing'
     assert not os.path.exists(f'{d}/o')
 
@@ -332,7 +490,7 @@ def test_l03_passing_verdict_admits_train():
                    done_marker=os.path.join(d, 't.done'), predicted_wall_s=1800.0,
                    deps=['perf_canary'], canary_dep='perf_canary',
                    require_passing_verdict=verdict)
-    s = rc.run_jobs([canary, train], allowed_pids=rc.known_service_pids())
+    s = rc._run_jobs_fixture_only([canary, train], allowed_pids=rc.known_service_pids())
     assert [j['status'] for j in s['jobs']] == ['ok', 'ok'], s
     assert os.path.exists(f'{d}/o')
 

@@ -33,12 +33,37 @@ import numpy as np
 
 from .artifact_identity import (canonical_json, ordered_array_sha256, path_signature,
                                 sha256_bytes)
+from .output_safety import (atomic_save_new_npz, atomic_write_new_json,
+                            create_fresh_directory, refuse_existing)
+from .round0005_retirement import refuse_retired_launcher
 
 FORMULA_VERSION = "panel_v2.2-2026-07-15"   # exact top-k_hit truth + approx k_frac membership; byte-capped rerank
 PANEL_SCHEMA = "panel_v2"
+HID_REFERENCE_SCHEMA = "hiD_reference.v3"
+HID_REFERENCE_IDENTITY_SCHEMA = "hiD_reference_identity.v2"
 D_DEFAULT_FRAC = 0.001
 D_K_DENSITY = 15
 D_K_HIT = 10
+
+
+def _require_cuda_scoring_admission() -> dict:
+    """Require the non-copyable live controller capability before CUDA probing."""
+    from .run_controller import require_active_round0005_child_admission
+    return require_active_round0005_child_admission()
+
+
+def _torch_scoring_device():
+    """Return ``(torch, device)`` without allowing an ambient direct CUDA lane."""
+    admission = None
+    # Missing/nonempty visibility can select a GPU.  Authenticate before even
+    # asking torch about CUDA so adversarial tests never initialize a device.
+    if os.environ.get("CUDA_VISIBLE_DEVICES") != "":
+        admission = _require_cuda_scoring_admission()
+    import torch
+    cuda_available = bool(torch.cuda.is_available())
+    if cuda_available and admission is None:
+        _require_cuda_scoring_admission()
+    return torch, ("cuda" if cuda_available else "cpu")
 
 
 @dataclasses.dataclass
@@ -267,6 +292,15 @@ def align_x_to_z(X, Z, x_ids, z_ids):
         _check_ids(z_ids, n_full, name="z_ids(into X)")
         if len(z_ids) != len(Z):
             raise ValueError(f"z_ids len {len(z_ids)} != len(Z) {len(Z)} (P0-C).")
+        # The production 2M maps carry the exact semantic universe 0..N-1.  Fancy
+        # indexing a memmap by that identity permutation materialises the entire
+        # 6.1 GB corpus and also changes its content identity from ordered shards
+        # to an in-memory array.  Preserve the original object when the gather is
+        # provably the identity; non-identity permutations still take the exact
+        # semantic gather below.
+        if len(z_ids) == n_full and np.array_equal(
+                z_ids, np.arange(n_full, dtype=np.int64)):
+            return X, z_ids, "semantic_identity_arange_zero_copy"
         return X[z_ids], z_ids, "gather_X_by_z_ids"
     if x_ids is not None and z_ids is None:
         raise ValueError("x_ids given but z_ids missing: cannot align without coord ids (P0-C).")
@@ -337,10 +371,9 @@ def _self_knn(F, anchor_idx, k, cfg: PanelV2Config, hi_dim=True, want_dist=False
     membership is approximate and labelled so. want_dist REQUIRES exact.
 
     low_dim: single deterministic exact pass over the (tiny) coord corpus."""
-    import torch
+    torch, dev = _torch_scoring_device()
     if want_dist and not exact:
         raise ValueError("radii (want_dist) require exact reranking (P2)")
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
     N = len(F); m = len(anchor_idx)
     kk = k + 1                                            # +1 for self
     if hi_dim:
@@ -470,6 +503,64 @@ def _peak_rss_gb():
     return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024.0 ** 2), 3)
 
 
+def reset_process_cuda_peak(cuda_backend=None) -> bool:
+    """Reset CUDA peak counters once at a process boundary.
+
+    Callers deliberately own the reset point.  ``score_panel`` never resets the
+    counters because doing so between maps would erase model-load/transform peaks
+    from the Round 0005 process-global memory certificate.  ``cuda_backend`` is
+    injectable so the accounting contract is testable with CUDA hidden.
+    """
+    injected_fixture_backend = cuda_backend is not None
+    if os.environ.get("CUDA_VISIBLE_DEVICES") != "":
+        _require_cuda_scoring_admission()
+    if cuda_backend is None:
+        try:
+            import torch
+            cuda_backend = torch.cuda
+        except Exception:
+            return False
+    available = bool(cuda_backend.is_available())
+    if available and not injected_fixture_backend:
+        _require_cuda_scoring_admission()
+    if not available:
+        return False
+    cuda_backend.reset_peak_memory_stats()
+    return True
+
+
+def process_cuda_peak(cuda_backend=None) -> dict:
+    """Return process-global allocated *and* reserved CUDA peaks in bytes/GiB."""
+    injected_fixture_backend = cuda_backend is not None
+    if os.environ.get("CUDA_VISIBLE_DEVICES") != "":
+        _require_cuda_scoring_admission()
+    if cuda_backend is None:
+        try:
+            import torch
+            cuda_backend = torch.cuda
+        except Exception:
+            cuda_backend = None
+    available = bool(cuda_backend is not None and cuda_backend.is_available())
+    if available and not injected_fixture_backend:
+        _require_cuda_scoring_admission()
+    if not available:
+        return {
+            "schema": "process_cuda_peak.v1", "available": False,
+            "allocated_bytes": None, "reserved_bytes": None,
+            "allocated_gib": None, "reserved_gib": None, "maximum_gib": None,
+        }
+    allocated = int(cuda_backend.max_memory_allocated())
+    reserved = int(cuda_backend.max_memory_reserved())
+    gib = float(1024 ** 3)
+    return {
+        "schema": "process_cuda_peak.v1", "available": True,
+        "allocated_bytes": allocated, "reserved_bytes": reserved,
+        "allocated_gib": round(allocated / gib, 6),
+        "reserved_gib": round(reserved / gib, 6),
+        "maximum_gib": round(max(allocated, reserved) / gib, 6),
+    }
+
+
 # ── projection fidelity (P0-C) ───────────────────────────────────────────────────
 
 def cross_knn(Q, corpus, k, cfg: PanelV2Config, hi_dim=True, q_tile=4096, exact=True):
@@ -479,8 +570,7 @@ def cross_knn(Q, corpus, k, cfg: PanelV2Config, hi_dim=True, q_tile=4096, exact=
     implementation for projection + the decision scorer. hi_dim + exact: overselect
     fast-expansion candidates, then EXACT fp32 rerank (byte-capped q_tile) — so
     high-D projection top-k_hit is exact truth, not the v2.1 fast-only IDs (P2)."""
-    import torch
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    torch, dev = _torch_scoring_device()
     cc = min(len(corpus), max(1, cfg.corpus_chunk))
     cand = (k + cfg.overselect + 1) if (hi_dim and exact) else k
     # cap q_tile by the DISTANCE-MATRIX size (q_tile × cc), not just the rerank
@@ -511,6 +601,325 @@ def cross_knn(Q, corpus, k, cfg: PanelV2Config, hi_dim=True, q_tile=4096, exact=
             best_i = torch.gather(best_i, 1, torch.sort(ex, dim=1).indices); del nb, ex
         out[q0:q0 + len(Qt)] = best_i[:, :k].cpu().numpy(); del Qt, best_d, best_i
     return out
+
+
+QUERY_TRUTH_SCHEMA = "heldout_query_truth.v2"
+
+
+def query_truth_policy(cfg: PanelV2Config, *, k: int,
+                       metric: str = "squared_l2",
+                       candidate_compute_backend: str | None = None) -> dict:
+    """Every choice that can change candidate selection or exact reranking."""
+    import inspect
+    if candidate_compute_backend is None:
+        try:
+            _torch, backend = _torch_scoring_device()
+        except Exception:
+            backend = "unavailable"
+    else:
+        if candidate_compute_backend not in {"cpu", "cuda"}:
+            raise ValueError("query truth candidate backend is unsupported")
+        backend = candidate_compute_backend
+    return {
+        "algorithm": "cross_knn_streamed_topk_then_exact_rerank",
+        "implementation_sha256": sha256_bytes(inspect.getsource(cross_knn).encode("utf-8")),
+        "candidate_compute_backend": backend,
+        "metric": metric,
+        "high_dimensional": True,
+        "maximum_k": int(k),
+        "query_tile_requested": 4096,
+        "candidate_selection": {
+            "corpus_chunk": int(cfg.corpus_chunk),
+            "block_elems": int(cfg.block_elems),
+            "overselect": int(cfg.overselect),
+            "candidate_count": int(k + cfg.overselect + 1),
+            "fast_distance": "fp32_squared_l2_expansion",
+        },
+        "rerank": {
+            "enabled": True,
+            "distance": "fp32_squared_l2_gather",
+            "byte_cap": int(cfg.rerank_byte_cap),
+            "scratch_multiplier": float(cfg.rerank_scratch),
+            "final_order": "ascending_exact_distance",
+        },
+        "formula_version": cfg.formula_version,
+    }
+
+
+def query_truth_key(*, corpus_identity: dict, query_identity: dict,
+                    cfg: PanelV2Config, k: int = 15,
+                    metric: str = "squared_l2", corpus_cardinality: int,
+                    query_rows: int, dimensions: int,
+                    candidate_compute_backend: str | None = None):
+    """Bind reusable high-D held-out truth to its complete scientific tuple."""
+    if not isinstance(corpus_identity, dict) or not corpus_identity:
+        raise ValueError("query truth requires a nonempty complete corpus identity")
+    if not isinstance(query_identity, dict) or not query_identity:
+        raise ValueError("query truth requires a nonempty complete query identity")
+    for name, value in (("k", k), ("corpus_cardinality", corpus_cardinality),
+                        ("query_rows", query_rows), ("dimensions", dimensions)):
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"query truth {name} must be a positive integer")
+    if k > corpus_cardinality:
+        raise ValueError("query truth k exceeds corpus cardinality")
+    parts = {
+        "schema": QUERY_TRUTH_SCHEMA,
+        "ordered_X": corpus_identity,
+        "query": query_identity,
+        "corpus_cardinality": int(corpus_cardinality),
+        "query_rows": int(query_rows),
+        "dimensions": int(dimensions),
+        "policy": query_truth_policy(
+            cfg, k=k, metric=metric,
+            candidate_compute_backend=candidate_compute_backend),
+    }
+    return sha256_bytes(canonical_json(parts)), parts
+
+
+def _validate_truth_neighbors(neighbors: np.ndarray, *, k: int, query_rows: int,
+                              corpus_cardinality: int) -> None:
+    if neighbors.dtype != np.dtype("int64"):
+        raise ValueError("query truth neighbors must have exact int64 dtype")
+    if neighbors.ndim != 2 or neighbors.shape != (query_rows, k):
+        raise ValueError("query truth neighbor matrix shape/row count does not match identity")
+    if neighbors.size and (int(neighbors.min()) < 0 or
+                           int(neighbors.max()) >= corpus_cardinality):
+        raise ValueError("query truth neighbor index is outside the corpus")
+    if any(len(np.unique(row)) != k for row in neighbors):
+        raise ValueError("query truth contains a duplicate neighbor within a row")
+
+
+def build_query_truth(Xq, corpus, *, cfg: PanelV2Config, corpus_identity: dict,
+                      query_identity: dict, k: int = 15) -> dict:
+    if k < cfg.k_hit:
+        raise ValueError(f"query truth k={k} is below panel k_hit={cfg.k_hit}")
+    if len(Xq.shape) != 2 or len(corpus.shape) != 2 or Xq.shape[1] != corpus.shape[1]:
+        raise ValueError("query truth query/corpus dimensions differ")
+    key, parts = query_truth_key(
+        corpus_identity=corpus_identity, query_identity=query_identity, cfg=cfg, k=k,
+        corpus_cardinality=len(corpus), query_rows=len(Xq), dimensions=Xq.shape[1])
+    started = time.time()
+    neighbors = np.asarray(
+        cross_knn(Xq, corpus, k, cfg, hi_dim=True, exact=True), dtype=np.int64)
+    _validate_truth_neighbors(neighbors, k=k, query_rows=len(Xq),
+                              corpus_cardinality=len(corpus))
+    return {
+        "schema": QUERY_TRUTH_SCHEMA,
+        "key": key,
+        "key_parts": parts,
+        "k": int(k),
+        "query_rows": int(len(Xq)),
+        "corpus_cardinality": int(len(corpus)),
+        "neighbors": neighbors,
+        "payload_sha256": ordered_array_sha256(neighbors),
+        "build_wall_s": round(time.time() - started, 6),
+    }
+
+
+def save_query_truth(truth: dict, path: str) -> str:
+    path = path if path.endswith(".npz") else path + ".npz"
+    neighbors = np.asarray(truth["neighbors"])
+    _validate_truth_neighbors(
+        neighbors, k=int(truth["k"]), query_rows=int(truth["query_rows"]),
+        corpus_cardinality=int(truth["corpus_cardinality"]))
+    payload_sha256 = ordered_array_sha256(neighbors)
+    if payload_sha256 != truth.get("payload_sha256"):
+        raise ValueError("query truth in-memory payload SHA-256 mismatch")
+    if sha256_bytes(canonical_json(truth.get("key_parts"))) != truth.get("key"):
+        raise ValueError("query truth in-memory key does not match its complete identity")
+    meta = {
+        "schema": truth["schema"],
+        "key_parts": truth["key_parts"],
+        "build_wall_s": truth.get("build_wall_s"),
+    }
+    atomic_save_new_npz(
+        path, immutable=True, key=np.array(truth["key"]), k=np.array(int(truth["k"])),
+        query_rows=np.array(int(truth["query_rows"])),
+        corpus_cardinality=np.array(int(truth["corpus_cardinality"])),
+        payload_sha256=np.array(payload_sha256), neighbors=neighbors,
+        meta=np.array(json.dumps(meta, sort_keys=True, separators=(",", ":"))))
+    return path
+
+
+def load_query_truth(path: str, *, expected_key: str | None = None,
+                     expected_key_parts: dict | None = None,
+                     expected_candidate_compute_backend: str | None = None) -> dict:
+    path = path if path.endswith(".npz") else path + ".npz"
+    with np.load(path, allow_pickle=False) as archive:
+        required_fields = {"key", "k", "query_rows", "corpus_cardinality",
+                           "payload_sha256", "neighbors", "meta"}
+        if set(archive.files) != required_fields:
+            raise ValueError(
+                f"query truth archive fields mismatch: {sorted(archive.files)}")
+        meta = json.loads(str(archive["meta"]))
+        if not isinstance(meta, dict) or set(meta) != {
+                "schema", "key_parts", "build_wall_s"}:
+            raise ValueError("query truth metadata fields are incomplete or ambiguous")
+        if meta.get("schema") != QUERY_TRUTH_SCHEMA:
+            raise ValueError(f"query truth schema must be {QUERY_TRUTH_SCHEMA}")
+        key_parts = meta.get("key_parts")
+        if not isinstance(key_parts, dict) or set(key_parts) != {
+                "schema", "ordered_X", "query", "corpus_cardinality",
+                "query_rows", "dimensions", "policy"}:
+            raise ValueError("query truth complete identity fields are invalid")
+        if key_parts.get("schema") != QUERY_TRUTH_SCHEMA:
+            raise ValueError("query truth complete identity schema mismatch")
+        policy = key_parts.get("policy")
+        if not isinstance(policy, dict) or set(policy) != {
+                "algorithm", "implementation_sha256", "candidate_compute_backend",
+                "metric", "high_dimensional", "maximum_k", "query_tile_requested",
+                "candidate_selection", "rerank", "formula_version"}:
+            raise ValueError("query truth exactness policy fields are invalid")
+        import inspect
+        current_implementation = sha256_bytes(inspect.getsource(cross_knn).encode("utf-8"))
+        if expected_candidate_compute_backend is None:
+            try:
+                _torch, current_backend = _torch_scoring_device()
+            except Exception:
+                current_backend = "unavailable"
+        else:
+            if expected_candidate_compute_backend not in {"cpu", "cuda"}:
+                raise ValueError("expected query truth candidate backend is unsupported")
+            current_backend = expected_candidate_compute_backend
+        if (policy.get("implementation_sha256") != current_implementation or
+                policy.get("candidate_compute_backend") != current_backend):
+            raise ValueError("query truth implementation/backend identity mismatch")
+        candidate = policy.get("candidate_selection")
+        rerank = policy.get("rerank")
+        if not isinstance(candidate, dict) or set(candidate) != {
+                "corpus_chunk", "block_elems", "overselect", "candidate_count",
+                "fast_distance"}:
+            raise ValueError("query truth candidate-selection policy is incomplete")
+        if not isinstance(rerank, dict) or set(rerank) != {
+                "enabled", "distance", "byte_cap", "scratch_multiplier", "final_order"}:
+            raise ValueError("query truth rerank policy is incomplete")
+        if (policy.get("algorithm") != "cross_knn_streamed_topk_then_exact_rerank" or
+                policy.get("metric") != "squared_l2" or
+                policy.get("high_dimensional") is not True or
+                policy.get("query_tile_requested") != 4096 or
+                candidate.get("fast_distance") != "fp32_squared_l2_expansion" or
+                rerank.get("enabled") is not True or
+                rerank.get("distance") != "fp32_squared_l2_gather" or
+                rerank.get("final_order") != "ascending_exact_distance"):
+            raise ValueError("query truth exactness policy labels are invalid")
+        for field in ("corpus_chunk", "block_elems", "overselect", "candidate_count"):
+            if (not isinstance(candidate.get(field), int) or
+                    isinstance(candidate.get(field), bool) or candidate[field] < 0):
+                raise ValueError(f"query truth candidate policy {field} is invalid")
+        if (not isinstance(rerank.get("byte_cap"), int) or
+                isinstance(rerank.get("byte_cap"), bool) or rerank["byte_cap"] <= 0 or
+                not isinstance(rerank.get("scratch_multiplier"), (int, float)) or
+                isinstance(rerank.get("scratch_multiplier"), bool) or
+                float(rerank["scratch_multiplier"]) <= 0):
+            raise ValueError("query truth rerank memory policy is invalid")
+        recomputed_key = sha256_bytes(canonical_json(key_parts))
+        key = str(archive["key"])
+        if key != recomputed_key:
+            raise ValueError("query truth stored key collides with/rejects its complete identity")
+        if expected_key is not None and key != expected_key:
+            raise ValueError("persisted query truth key mismatch")
+        if expected_key_parts is not None and key_parts != expected_key_parts:
+            raise ValueError("persisted query truth policy/identity mismatch")
+        k = int(archive["k"])
+        query_rows = int(archive["query_rows"])
+        corpus_cardinality = int(archive["corpus_cardinality"])
+        if k <= 0 or query_rows <= 0 or corpus_cardinality < k:
+            raise ValueError("query truth k/row/cardinality values are invalid")
+        if (policy.get("maximum_k") != k or
+                candidate.get("candidate_count") != k + candidate.get("overselect", -1) + 1):
+            raise ValueError("query truth maximum-k/candidate policy is inconsistent")
+        neighbors = archive["neighbors"]
+        _validate_truth_neighbors(neighbors, k=k, query_rows=query_rows,
+                                  corpus_cardinality=corpus_cardinality)
+        payload_sha256 = str(archive["payload_sha256"])
+        if (len(payload_sha256) != 64 or
+                any(char not in "0123456789abcdef" for char in payload_sha256)):
+            raise ValueError("query truth payload SHA-256 is malformed")
+        if ordered_array_sha256(neighbors) != payload_sha256:
+            raise ValueError("query truth payload SHA-256 mismatch")
+        if (key_parts.get("query_rows") != query_rows or
+                key_parts.get("corpus_cardinality") != corpus_cardinality or
+                (key_parts.get("policy") or {}).get("maximum_k") != k):
+            raise ValueError("query truth counts/k disagree with complete identity")
+        neighbors = np.array(neighbors, copy=True)
+    return {
+        "schema": meta["schema"], "key": key, "k": k,
+        "query_rows": query_rows, "corpus_cardinality": corpus_cardinality,
+        "neighbors": neighbors, "payload_sha256": payload_sha256,
+        "key_parts": key_parts, "build_wall_s": meta.get("build_wall_s"), "path": path,
+    }
+
+
+class QueryTruthCache:
+    """One-process cache with persisted identity and explicit build/hit telemetry."""
+    def __init__(self, *, cache_dir: str | None, enabled: bool):
+        if enabled and not cache_dir:
+            raise ValueError("enabled query truth cache requires cache_dir")
+        if cache_dir and not os.path.realpath(cache_dir).startswith("/data/"):
+            raise ValueError("query truth cache must live under /data")
+        self.cache_dir = os.path.realpath(cache_dir) if cache_dir else None
+        self.enabled = bool(enabled)
+        self.build_count = 0
+        self.disk_load_count = 0
+        self.consumers = []
+        self.truth = None
+        self.path = None
+
+    def get_or_build(self, Xq, corpus, *, cfg: PanelV2Config, corpus_identity: dict,
+                     query_identity: dict, k: int = 15) -> dict:
+        key, parts = query_truth_key(
+            corpus_identity=corpus_identity, query_identity=query_identity, cfg=cfg, k=k,
+            corpus_cardinality=len(corpus), query_rows=len(Xq), dimensions=Xq.shape[1])
+        path = os.path.join(self.cache_dir, f"{key}.npz") if self.enabled else None
+        if path and os.path.isfile(path):
+            truth = load_query_truth(path, expected_key=key, expected_key_parts=parts)
+            self.disk_load_count += 1
+        else:
+            if path:
+                if not os.path.exists(self.cache_dir):
+                    create_fresh_directory(self.cache_dir, label="query truth cache root")
+                elif os.listdir(self.cache_dir):
+                    raise FileExistsError(
+                        f"refuse nonempty query truth cache without exact key {key}: "
+                        f"{self.cache_dir}")
+            truth = build_query_truth(Xq, corpus, cfg=cfg,
+                                      corpus_identity=corpus_identity,
+                                      query_identity=query_identity, k=k)
+            self.build_count += 1
+            if path:
+                save_query_truth(truth, path)
+                truth["path"] = path
+        self.truth = truth
+        self.path = path
+        return truth
+
+    def use(self, consumer: str, *, k: int) -> np.ndarray:
+        if self.truth is None:
+            raise RuntimeError("query truth cache has not been initialized")
+        if not isinstance(consumer, str) or not consumer:
+            raise ValueError("query truth consumer name must be a nonempty string")
+        if any(item["consumer"] == consumer for item in self.consumers):
+            raise ValueError(f"duplicate query truth consumer: {consumer}")
+        if k > int(self.truth["k"]):
+            raise ValueError(f"consumer requested k={k} above built k={self.truth['k']}")
+        self.consumers.append({"consumer": consumer, "k": int(k)})
+        return self.truth["neighbors"][:, :k]
+
+    def telemetry(self) -> dict:
+        uses = len(self.consumers)
+        first_was_build = 1 if self.build_count else 0
+        return {
+            "enabled": self.enabled,
+            "key": self.truth.get("key") if self.truth else None,
+            "path": self.path,
+            "maximum_k": int(self.truth["k"]) if self.truth else None,
+            "build_count": int(self.build_count),
+            "disk_load_count": int(self.disk_load_count),
+            "consumer_count": uses,
+            "hit_count": max(0, uses - first_was_build),
+            "consumers": self.consumers,
+            "build_wall_s": self.truth.get("build_wall_s") if self.truth else None,
+        }
 
 
 def score_projection(Xa, Z, cfg: PanelV2Config, projection: dict, x_ids=None):
@@ -585,7 +994,7 @@ def hiD_reference_key(Xa, aidx, cfg: PanelV2Config, centroids_by_k=None, kf=None
     queries = (None if query_ids is None else
                np.ascontiguousarray(np.asarray(query_ids, dtype=np.int64)))
     parts = {
-        "schema": "hiD_reference_identity.v2",
+        "schema": HID_REFERENCE_IDENTITY_SCHEMA,
         "data": data_identity or _matrix_identity(Xa),
         "anchors": {"count": len(anchors), "sha256": sha256_bytes(anchors.tobytes())},
         "queries": (None if queries is None else
@@ -621,33 +1030,299 @@ def build_hiD_reference(Xa, aidx, cfg: PanelV2Config, centroids_by_k=None,
     _, hd_r, guard_den = _self_knn(Xa, aidx, cfg.k_density, cfg, hi_dim=True, want_dist=True)
     r_hd = hd_r.mean(1)                              # per-anchor hi-D radius (all anchors)
     labels = _label_by_centroids(Xa, centroids_by_k) if centroids_by_k else {}
-    return {"key": key, "key_parts": parts, "kf": int(kf),
-            "hi_hit": hi_hit, "hi_frac": hi_frac, "r_hd": r_hd,
-            "labels": {int(k): v for k, v in labels.items()},
-            "guard_hit": guard_hit, "guard_den": guard_den,
-            "formula_version": cfg.formula_version}
+    ref = {
+        "schema": HID_REFERENCE_SCHEMA,
+        "key": key,
+        "key_parts": parts,
+        "kf": int(kf),
+        "anchor_ids": np.ascontiguousarray(np.asarray(aidx, dtype=np.int64)),
+        "hi_hit": np.ascontiguousarray(np.asarray(hi_hit, dtype=np.int64)),
+        "hi_frac": np.ascontiguousarray(np.asarray(hi_frac, dtype=np.int64)),
+        "r_hd": np.ascontiguousarray(np.asarray(r_hd, dtype=np.float64)),
+        "labels": {int(k): np.ascontiguousarray(np.asarray(v, dtype=np.int32))
+                   for k, v in labels.items()},
+        "guard_hit": guard_hit,
+        "guard_den": guard_den,
+        "formula_version": cfg.formula_version,
+    }
+    ref["payloads"] = _hiD_reference_payloads(ref)
+    ref["content_sha256"] = _hiD_reference_content_sha256(ref)
+    return validate_hiD_reference(ref)
+
+
+def _valid_sha256(value) -> bool:
+    return (isinstance(value, str) and len(value) == 64 and
+            all(char in "0123456789abcdef" for char in value))
+
+
+def _array_payload(value) -> dict:
+    array = np.asarray(value)
+    return {
+        "shape": [int(v) for v in array.shape],
+        "dtype": array.dtype.str,
+        "sha256": ordered_array_sha256(array),
+    }
+
+
+def _hiD_reference_payloads(ref: dict) -> dict:
+    labels = ref.get("labels") or {}
+    return {
+        "anchor_ids": _array_payload(ref["anchor_ids"]),
+        "hi_hit": _array_payload(ref["hi_hit"]),
+        "hi_frac": _array_payload(ref["hi_frac"]),
+        "r_hd": _array_payload(ref["r_hd"]),
+        "labels": {str(int(k)): _array_payload(value)
+                   for k, value in sorted(labels.items())},
+    }
+
+
+def _hiD_reference_content_sha256(ref: dict) -> str:
+    body = {
+        "schema": HID_REFERENCE_SCHEMA,
+        "identity_key": ref.get("key"),
+        "kf": ref.get("kf"),
+        "formula_version": ref.get("formula_version"),
+        "guard_hit": ref.get("guard_hit"),
+        "guard_den": ref.get("guard_den"),
+        "payloads": ref.get("payloads"),
+    }
+    return sha256_bytes(canonical_json(body))
+
+
+def _validate_matrix_identity(value: dict) -> tuple[int, int]:
+    if not isinstance(value, dict):
+        raise ValueError("hiD reference ordered-data identity must be an object")
+    kind = value.get("kind")
+    required = {"kind", "shape", "dtype", "sha256"} if kind == "ordered_array" \
+        else {"kind", "shape", "dtype", "shards"}
+    if kind not in {"ordered_array", "ordered_shards"} or set(value) != required:
+        raise ValueError("hiD reference ordered-data identity fields are invalid")
+    shape = value.get("shape")
+    if (not isinstance(shape, list) or len(shape) != 2 or
+            any(not isinstance(v, int) or isinstance(v, bool) or v <= 0 for v in shape)):
+        raise ValueError("hiD reference ordered-data shape is invalid")
+    try:
+        np.dtype(value.get("dtype"))
+    except Exception as exc:
+        raise ValueError("hiD reference ordered-data dtype is invalid") from exc
+    if kind == "ordered_array":
+        if not _valid_sha256(value.get("sha256")):
+            raise ValueError("hiD reference ordered-array SHA-256 is invalid")
+    else:
+        shards = value.get("shards")
+        if not isinstance(shards, list) or not shards:
+            raise ValueError("hiD reference ordered shard list is empty")
+        for position, shard in enumerate(shards):
+            if (not isinstance(shard, dict) or set(shard) != {
+                    "position", "name", "bytes", "sha256"} or
+                    shard.get("position") != position or
+                    not isinstance(shard.get("name"), str) or not shard["name"] or
+                    not isinstance(shard.get("bytes"), int) or isinstance(shard["bytes"], bool) or
+                    shard["bytes"] <= 0 or not _valid_sha256(shard.get("sha256"))):
+                raise ValueError("hiD reference ordered shard identity is invalid")
+    return int(shape[0]), int(shape[1])
+
+
+def _validate_reference_neighbors(name: str, values: np.ndarray, *, rows: int, width: int,
+                                  cardinality: int, anchors: np.ndarray) -> None:
+    if values.dtype != np.dtype("int64") or values.shape != (rows, width):
+        raise ValueError(f"hiD reference {name} shape/dtype mismatch")
+    if values.size and (int(values.min()) < 0 or int(values.max()) >= cardinality):
+        raise ValueError(f"hiD reference {name} contains an out-of-range row")
+    if any(len(np.unique(row)) != width for row in values):
+        raise ValueError(f"hiD reference {name} contains duplicate neighbors")
+    if values.size and np.any(values == anchors[:, None]):
+        raise ValueError(f"hiD reference {name} violates self exclusion")
+
+
+def validate_hiD_reference(ref: dict, *, expected_key: str | None = None,
+                           expected_key_parts: dict | None = None) -> dict:
+    """Strictly validate both the reference identity and every scientific payload.
+
+    The identity key binds source/config/centroids; ``content_sha256`` additionally
+    binds the computed neighbor/radius/label arrays and guards.  A valid key with
+    corrupted payload bytes is therefore never accepted.
+    """
+    required = {
+        "schema", "key", "key_parts", "content_sha256", "kf", "anchor_ids",
+        "hi_hit", "hi_frac", "r_hd", "labels", "guard_hit", "guard_den",
+        "formula_version", "payloads",
+    }
+    if not isinstance(ref, dict) or set(ref) != required:
+        raise ValueError(f"hiD reference fields must be exactly {sorted(required)}")
+    if ref.get("schema") != HID_REFERENCE_SCHEMA:
+        raise ValueError(f"hiD reference schema must be {HID_REFERENCE_SCHEMA}")
+    key = ref.get("key")
+    parts = ref.get("key_parts")
+    if not _valid_sha256(key) or not isinstance(parts, dict):
+        raise ValueError("hiD reference key/identity is malformed")
+    part_fields = {"schema", "data", "anchors", "queries", "config",
+                   "k_frac_effective", "formula", "convention", "centroids"}
+    if set(parts) != part_fields or parts.get("schema") != HID_REFERENCE_IDENTITY_SCHEMA:
+        raise ValueError("hiD reference complete identity fields/schema are invalid")
+    if sha256_bytes(canonical_json(parts)) != key:
+        raise ValueError("hiD reference key does not bind its complete identity")
+    if expected_key is not None and key != expected_key:
+        raise ValueError("hiD reference key mismatch")
+    # JSON persistence normalizes tuples (notably ``k_clust``) to lists.  Compare
+    # the canonical identity bytes rather than Python container implementation
+    # details; the content-addressed key above binds those same canonical bytes.
+    if (expected_key_parts is not None and
+            canonical_json(parts) != canonical_json(expected_key_parts)):
+        raise ValueError("hiD reference complete identity mismatch")
+    cardinality, dimensions = _validate_matrix_identity(parts["data"])
+    config = parts.get("config")
+    config_fields = {field.name for field in dataclasses.fields(PanelV2Config)}
+    if not isinstance(config, dict) or set(config) != config_fields:
+        raise ValueError("hiD reference panel configuration fields are invalid")
+    if (parts.get("formula") != config.get("formula_version") or
+            ref.get("formula_version") != parts.get("formula")):
+        raise ValueError("hiD reference formula versions disagree")
+    if not isinstance(parts.get("convention"), dict) or not parts["convention"]:
+        raise ValueError("hiD reference convention is missing")
+    query_identity = parts.get("queries")
+    if (query_identity is not None and
+            (not isinstance(query_identity, dict) or
+             set(query_identity) != {"count", "sha256"} or
+             not isinstance(query_identity.get("count"), int) or
+             isinstance(query_identity.get("count"), bool) or
+             query_identity["count"] <= 0 or
+             not _valid_sha256(query_identity.get("sha256")))):
+        raise ValueError("hiD reference query identity is invalid")
+
+    anchors = np.asarray(ref["anchor_ids"])
+    anchor_identity = parts.get("anchors")
+    if (anchors.dtype != np.dtype("int64") or anchors.ndim != 1 or not len(anchors) or
+            len(np.unique(anchors)) != len(anchors) or int(anchors.min()) < 0 or
+            int(anchors.max()) >= cardinality or not isinstance(anchor_identity, dict) or
+            set(anchor_identity) != {"count", "sha256"} or
+            anchor_identity.get("count") != len(anchors) or
+            anchor_identity.get("sha256") != sha256_bytes(
+                np.ascontiguousarray(anchors).tobytes())):
+        raise ValueError("hiD reference anchor payload/identity is invalid")
+    kf = ref.get("kf")
+    if (not isinstance(kf, int) or isinstance(kf, bool) or kf <= 0 or
+            kf != parts.get("k_frac_effective")):
+        raise ValueError("hiD reference k_frac is invalid or unbound")
+    k_hit = config.get("k_hit")
+    k_density = config.get("k_density")
+    if any(not isinstance(value, int) or isinstance(value, bool) or value <= 0
+           for value in (k_hit, k_density)):
+        raise ValueError("hiD reference neighbor configuration is invalid")
+    hi_hit = np.asarray(ref["hi_hit"])
+    hi_frac = np.asarray(ref["hi_frac"])
+    _validate_reference_neighbors(
+        "hi_hit", hi_hit, rows=len(anchors), width=k_hit,
+        cardinality=cardinality, anchors=anchors)
+    _validate_reference_neighbors(
+        "hi_frac", hi_frac, rows=len(anchors), width=kf,
+        cardinality=cardinality, anchors=anchors)
+    r_hd = np.asarray(ref["r_hd"])
+    if (r_hd.dtype != np.dtype("float64") or r_hd.shape != (len(anchors),) or
+            not np.isfinite(r_hd).all() or np.any(r_hd < 0)):
+        raise ValueError("hiD reference radius payload is invalid")
+
+    centroid_ids = parts.get("centroids")
+    labels = ref.get("labels")
+    if not isinstance(centroid_ids, dict) or not isinstance(labels, dict):
+        raise ValueError("hiD reference centroid/label fields are invalid")
+    if {str(int(k)) for k in labels} != set(centroid_ids):
+        raise ValueError("hiD reference labels do not match centroid identities")
+    for key_name, identity in centroid_ids.items():
+        if (not isinstance(identity, dict) or set(identity) != {"shape", "dtype", "sha256"}
+                or not _valid_sha256(identity.get("sha256"))):
+            raise ValueError("hiD reference centroid identity is invalid")
+        kc = int(key_name)
+        shape = identity.get("shape")
+        if shape != [kc, dimensions]:
+            raise ValueError("hiD reference centroid identity shape is invalid")
+        values = np.asarray(labels[kc])
+        if (values.dtype != np.dtype("int32") or values.shape != (cardinality,) or
+                (values.size and (int(values.min()) < 0 or int(values.max()) >= kc))):
+            raise ValueError("hiD reference label payload is invalid")
+
+    for guard_name in ("guard_hit", "guard_den"):
+        guard = ref.get(guard_name)
+        gap = guard.get("boundary_min_gap") if isinstance(guard, dict) else None
+        if (not isinstance(guard, dict) or
+                set(guard) != {"boundary_min_gap", "overselect"} or
+                guard.get("overselect") != config.get("overselect") or
+                (gap is not None and
+                 (not isinstance(gap, (int, float)) or isinstance(gap, bool) or
+                  not np.isfinite(float(gap)) or float(gap) < 0))):
+            raise ValueError(f"hiD reference {guard_name} is invalid")
+    observed_payloads = _hiD_reference_payloads(ref)
+    if ref.get("payloads") != observed_payloads:
+        raise ValueError("hiD reference payload content hashes mismatch")
+    if not _valid_sha256(ref.get("content_sha256")) or \
+            ref["content_sha256"] != _hiD_reference_content_sha256(ref):
+        raise ValueError("hiD reference content certificate mismatch")
+    return ref
 
 
 def save_hiD_reference(ref, path):
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    np.savez(path, key=ref["key"], kf=ref["kf"], hi_hit=ref["hi_hit"],
-             hi_frac=ref["hi_frac"], r_hd=ref["r_hd"],
-             label_keys=np.array(sorted(ref["labels"]), dtype=np.int64),
-             meta=json.dumps({"key_parts": ref["key_parts"], "guard_hit": ref["guard_hit"],
-                              "guard_den": ref["guard_den"],
-                              "formula_version": ref["formula_version"]}),
-             **{f"labels_{k}": v for k, v in ref["labels"].items()})
+    path = path if path.endswith(".npz") else path + ".npz"
+    validate_hiD_reference(ref)
+    label_keys = np.array(sorted(ref["labels"]), dtype=np.int64)
+    meta = {
+        "schema": ref["schema"],
+        "key_parts": ref["key_parts"],
+        "guard_hit": ref["guard_hit"],
+        "guard_den": ref["guard_den"],
+        "formula_version": ref["formula_version"],
+        "payloads": ref["payloads"],
+    }
+    atomic_save_new_npz(
+        path, immutable=True, schema=np.array(ref["schema"]), key=np.array(ref["key"]),
+        content_sha256=np.array(ref["content_sha256"]), kf=np.array(ref["kf"]),
+        anchor_ids=ref["anchor_ids"], hi_hit=ref["hi_hit"],
+        hi_frac=ref["hi_frac"], r_hd=ref["r_hd"], label_keys=label_keys,
+        meta=np.array(json.dumps(meta, sort_keys=True, separators=(",", ":"))),
+        **{f"labels_{k}": v for k, v in ref["labels"].items()})
     return path
 
 
-def load_hiD_reference(path):
-    z = np.load(path if path.endswith(".npz") else path + ".npz", allow_pickle=False)
-    meta = json.loads(str(z["meta"]))
-    labels = {int(k): z[f"labels_{int(k)}"] for k in z["label_keys"].tolist()}
-    return {"key": str(z["key"]), "kf": int(z["kf"]), "hi_hit": z["hi_hit"],
-            "hi_frac": z["hi_frac"], "r_hd": z["r_hd"], "labels": labels,
-            "key_parts": meta["key_parts"], "guard_hit": meta["guard_hit"],
-            "guard_den": meta["guard_den"], "formula_version": meta["formula_version"]}
+def load_hiD_reference(path, *, expected_key: str | None = None,
+                       expected_key_parts: dict | None = None):
+    path = path if path.endswith(".npz") else path + ".npz"
+    with np.load(path, allow_pickle=False) as archive:
+        base_fields = {"schema", "key", "content_sha256", "kf", "anchor_ids",
+                       "hi_hit", "hi_frac", "r_hd", "label_keys", "meta"}
+        if not base_fields.issubset(archive.files):
+            raise ValueError("hiD reference archive is missing required fields")
+        label_keys = archive["label_keys"]
+        if (label_keys.dtype != np.dtype("int64") or label_keys.ndim != 1 or
+                not np.array_equal(label_keys, np.unique(label_keys))):
+            raise ValueError("hiD reference label key index is invalid")
+        label_fields = {f"labels_{int(k)}" for k in label_keys.tolist()}
+        if set(archive.files) != base_fields | label_fields:
+            raise ValueError("hiD reference archive has missing/extra label fields")
+        meta = json.loads(str(archive["meta"]))
+        meta_fields = {"schema", "key_parts", "guard_hit", "guard_den",
+                       "formula_version", "payloads"}
+        if not isinstance(meta, dict) or set(meta) != meta_fields:
+            raise ValueError("hiD reference metadata fields are invalid")
+        if str(archive["schema"]) != meta.get("schema"):
+            raise ValueError("hiD reference archive/metadata schema mismatch")
+        ref = {
+            "schema": str(archive["schema"]),
+            "key": str(archive["key"]),
+            "key_parts": meta["key_parts"],
+            "content_sha256": str(archive["content_sha256"]),
+            "kf": int(archive["kf"]),
+            "anchor_ids": np.array(archive["anchor_ids"], copy=True),
+            "hi_hit": np.array(archive["hi_hit"], copy=True),
+            "hi_frac": np.array(archive["hi_frac"], copy=True),
+            "r_hd": np.array(archive["r_hd"], copy=True),
+            "labels": {int(k): np.array(archive[f"labels_{int(k)}"], copy=True)
+                       for k in label_keys.tolist()},
+            "guard_hit": meta["guard_hit"],
+            "guard_den": meta["guard_den"],
+            "formula_version": meta["formula_version"],
+            "payloads": meta["payloads"],
+        }
+    return validate_hiD_reference(
+        ref, expected_key=expected_key, expected_key_parts=expected_key_parts)
 
 
 def _resolve_reference(Xa, aidx, cfg, centroids_by_k, hiD_reference,
@@ -656,22 +1331,72 @@ def _resolve_reference(Xa, aidx, cfg, centroids_by_k, hiD_reference,
     supplied one against a freshly recomputed content key and RAISE on any drift
     (fail-closed, S2.5 'verified')."""
     if hiD_reference is None:
-        return build_hiD_reference(Xa, aidx, cfg, centroids_by_k,
-                                   **(reference_identity or {})), False
+        ref = build_hiD_reference(Xa, aidx, cfg, centroids_by_k,
+                                  **(reference_identity or {}))
+        return validate_hiD_reference(ref), False
     kf = max(cfg.k_hit, int(np.ceil(cfg.frac * len(Xa))))
     key, _ = hiD_reference_key(Xa, aidx, cfg, centroids_by_k, kf=kf,
                                **(reference_identity or {}))
-    if key != hiD_reference.get("key"):
-        raise ValueError(f"hiD_reference key mismatch: supplied {hiD_reference.get('key')} "
-                         f"!= recomputed {key} (data/anchors/params/centroids drifted).")
-    if int(hiD_reference.get("kf", -1)) != int(kf):
+    validate_hiD_reference(hiD_reference, expected_key=key)
+    if int(hiD_reference["kf"]) != int(kf):
         raise ValueError("hiD_reference k_frac mismatch (stale reference).")
     return hiD_reference, True
 
 
+def _scale_matrix_origin_matches(X, row_derivation: dict) -> bool:
+    """Prove a scale matrix is the reopened signed file/directory, not a copy."""
+    signature = row_derivation["embedding_input"]
+    source = signature["canonical_path"]
+    if len(X) != row_derivation["scientific_rows"]:
+        return False
+    shape = getattr(X, "shape", None)
+    if (not isinstance(shape, tuple) or len(shape) != 2 or
+            int(shape[1]) != row_derivation["dimensions"]):
+        return False
+    filename = getattr(X, "filename", None)
+    if isinstance(filename, (str, os.PathLike)):
+        return signature.get("kind") == "file" and os.path.realpath(filename) == source
+    shard_paths = (getattr(X, "shard_paths", None) or
+                   getattr(X, "loaded_shard_paths", None))
+    if not isinstance(shard_paths, list) or signature.get("kind") != "directory":
+        return False
+    if os.path.isdir(source):
+        expected = sorted(glob.glob(os.path.join(source, "*.npy"))) or \
+                   sorted(glob.glob(os.path.join(source, "*.bin"))) or \
+                   sorted(glob.glob(os.path.join(source, "*")))
+        expected = [os.path.realpath(path) for path in expected if os.path.isfile(path)]
+        return [os.path.realpath(path) for path in shard_paths] == expected
+    return False
+
+
+def _require_score_panel_scale_admission(X, scale_admission):
+    rows = len(X)
+    if rows < 8_000_000:
+        if scale_admission is not None:
+            raise RuntimeError("below-scale score_panel call cannot carry scale admission")
+        return None
+    required = {"performance_gate", "release_sha", "row_derivation", "scale_policy"}
+    if not isinstance(scale_admission, dict) or set(scale_admission) != required:
+        raise RuntimeError(
+            "score_panel >=8,000,000 rows requires exact replayable scale admission")
+    row_derivation = scale_admission["row_derivation"]
+    if not isinstance(row_derivation, dict) or not _scale_matrix_origin_matches(
+            X, row_derivation):
+        raise RuntimeError(
+            "score_panel scale matrix is not the reopened signed embedding input")
+    # Delayed import avoids a module cycle and, critically, executes before any
+    # torch import or CUDA availability query in the evaluator.
+    from experiments.round0005_performance_gate import require_scale_performance_gate
+    return require_scale_performance_gate(
+        scale_admission["performance_gate"], scientific_rows=rows,
+        row_derivation=row_derivation, release_sha=scale_admission["release_sha"],
+        scale_policy=scale_admission["scale_policy"])
+
+
 def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
                 centroids_by_k=None, anchor_masks=None, projection=None,
-                hiD_reference=None, reference_identity=None, provenance):
+                hiD_reference=None, reference_identity=None,
+                scale_admission=None, provenance):
     """The single evaluator both the runner and CLI call. Aligns X to Z exactly,
     runs ONE high-D and ONE low-D neighbour pass shared across ffr/recall/purity,
     an exact-radius pass for density, optional projection fidelity, and emits a
@@ -686,10 +1411,13 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
     ``provenance`` is REQUIRED: a dict of caller-supplied fingerprints (data,
     coord, checkpoint, query paths/hashes). Computed provenance (git, memory,
     device, alignment, guards) is added here."""
-    import torch
+    # This check precedes torch import, CUDA discovery, data alignment, output,
+    # and every scale-specific path.  Exact empty visibility remains the private
+    # CPU-library fixture lane used by unit tests.
+    if os.environ.get("CUDA_VISIBLE_DEVICES") != "":
+        _require_cuda_scoring_admission()
+    scale_certificate = _require_score_panel_scale_admission(X, scale_admission)
     t0 = time.time()
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
     cfg = config
     Xa, aligned_ids, align_note = align_x_to_z(X, Z, x_ids, z_ids)
     n = len(Z)
@@ -766,8 +1494,12 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
         res["projection"] = score_projection(Xa, Z, cfg, projection, x_ids=aligned_ids)
 
     commit, dirty = _git_state()
+    cuda_peak = process_cuda_peak()
     res["provenance"] = {
         **(provenance or {}),
+        "scale_performance_certificate_identity": (
+            scale_certificate.get("identity_sha256")
+            if isinstance(scale_certificate, dict) else None),
         "code_commit": commit, "code_dirty": dirty,
         "alignment": align_note,
         "aligned_ids_hash": _ids_hash(aligned_ids) if aligned_ids is not None else None,
@@ -776,9 +1508,14 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
         # approximate fast-expansion; density radii are exact; low-D is exact.
         "exactness": ("hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; "
                       "density:exact; lo:single_pass_exact"),
-        "device": "cuda" if torch.cuda.is_available() else "cpu",
-        "peak_gpu_gb": (round(torch.cuda.max_memory_allocated() / (1024 ** 3), 3)
-                        if torch.cuda.is_available() else None),
+        "device": "cuda" if cuda_peak["available"] else "cpu",
+        # Process-global values: the caller resets exactly once before any CUDA
+        # allocation, so model loads and transforms between panel calls remain in
+        # the certificate instead of being erased by a per-map reset.
+        "cuda_peak": cuda_peak,
+        "peak_gpu_allocated_gb": cuda_peak["allocated_gib"],
+        "peak_gpu_reserved_gb": cuda_peak["reserved_gib"],
+        "peak_gpu_gb": cuda_peak["maximum_gib"],
         "peak_rss_gb": _peak_rss_gb(),
         "wall_s": round(time.time() - t0, 2),
         # S2.5: which high-D reference produced the truth, and whether it was a
@@ -790,8 +1527,7 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
 
 
 def _label_by_centroids(Xa, centroids_by_k):
-    import torch
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    torch, dev = _torch_scoring_device()
     n = len(Xa); out = {}
     for kc, C in centroids_by_k.items():
         Ct = torch.from_numpy(np.asarray(C, dtype=np.float32)).to(dev)
@@ -820,6 +1556,7 @@ def run_panel(X, Z, cfg: PanelV2Config, centroids=None, ids=None, restrict=None,
 # ── CLI (P0-C: same core as the runner) ──────────────────────────────────────────
 
 def main():
+    refuse_retired_launcher("basemap/panel_v2.py")
     import argparse
     ap = argparse.ArgumentParser(description="Panel v2 canonical evaluator")
     ap.add_argument("--emb", required=True, help="file | dir | comma-list of embedding shards")
@@ -830,6 +1567,7 @@ def main():
     ap.add_argument("--n-anchors", type=int, default=10000)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
+    refuse_existing(args.out, label="panel report")
     cfg = PanelV2Config(frac=args.frac, n_anchors=args.n_anchors)
     emb = args.emb.split(",") if "," in args.emb else args.emb
     X = load_embeddings(emb, dim=args.dim)
@@ -841,8 +1579,7 @@ def main():
             C = np.load(p); cbk[len(C)] = C
     prov = {"emb": args.emb, "coords": args.coords, "coords_sha": _file_sha(args.coords)}
     res = score_panel(X, Z, config=cfg, z_ids=z_ids, centroids_by_k=cbk, provenance=prov)
-    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-    json.dump(res, open(args.out, "w"), indent=1)
+    atomic_write_new_json(args.out, res, immutable=True, indent=1)
     print(json.dumps(res, indent=1))
 
 

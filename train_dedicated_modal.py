@@ -5,6 +5,10 @@ Train on dedicated 15M and 30M indexes (100% usable edges).
 Usage:
   modal run train_dedicated_modal.py
 """
+from basemap.round0005_retirement import refuse_retired_launcher
+
+refuse_retired_launcher("train_dedicated_modal.py")
+
 import time
 import logging
 import numpy as np

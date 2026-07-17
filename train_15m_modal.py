@@ -7,6 +7,10 @@ Usage:
   modal run train_15m_modal.py --gpu a10g         # cheaper GPU
   modal run train_15m_modal.py --n-epochs 50      # longer training
 """
+from basemap.round0005_retirement import refuse_retired_launcher
+
+refuse_retired_launcher("train_15m_modal.py")
+
 import time
 import logging
 import os

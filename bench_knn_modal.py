@@ -7,6 +7,10 @@ Usage:
   modal run bench_knn_modal.py --n-samples 100000
   modal run bench_knn_modal.py --n-samples 1000000
 """
+from basemap.round0005_retirement import refuse_retired_launcher
+
+refuse_retired_launcher("bench_knn_modal.py")
+
 import time
 import json
 import logging
