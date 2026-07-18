@@ -494,6 +494,26 @@ class StreamedCoordinateArray:
             del array
         return output
 
+    def _reduce_axis0(self, ufunc, seed):
+        acc = np.full(2, seed, dtype="<f4")
+        for member in self._members:
+            array = np.load(member["path"], mmap_mode="r", allow_pickle=False)
+            acc = ufunc(acc, ufunc.reduce(np.asarray(array, dtype="<f4"), axis=0))
+            del array
+        return acc
+
+    def min(self, axis=None):
+        if axis not in (0, None):
+            raise ValueError(f"{ROUND_LABEL} coordinate min supports axis in {{0, None}}")
+        column = self._reduce_axis0(np.minimum, np.inf)
+        return column if axis == 0 else column.min()
+
+    def max(self, axis=None):
+        if axis not in (0, None):
+            raise ValueError(f"{ROUND_LABEL} coordinate max supports axis in {{0, None}}")
+        column = self._reduce_axis0(np.maximum, -np.inf)
+        return column if axis == 0 else column.max()
+
 
 def _run_transform(active: dict[str, Any], job: dict[str, Any]) -> None:
     train = active["manifest"]["jobs"][1]["outputs"][0]
