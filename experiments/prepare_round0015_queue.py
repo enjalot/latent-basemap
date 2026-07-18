@@ -20,13 +20,15 @@ from basemap.release_preflight import (issue_release_preflight_receipt,
 from basemap.round0015_program import (
     ACCEPTED_CAPABILITY_SHA256, ACCEPTED_MANIFEST_FILE_SHA256,
     ACCEPTED_MANIFEST_RECEIPT_SHA256, GPU_HOURS_CAP, GPU_LEASE_PATH, NODES,
-    PROGRAM, PROGRAM_INPUT_ROLES, ROUND_FILE, ROUND_ID, ROUND_SHA256,
-    SEQUENCED_REVIEW_FILE, derived_node_policy, expected_argv, expected_outputs,
-    program_policy,
+    PROGRAM, PROGRAM_INPUT_ROLES, REQUIRED_PROGRAM_INPUT_ROLES,
+    REQUIRED_REGISTERED_INPUTS, REQUIRED_SOURCE_CLOSURE_MEMBERS, ROUND_FILE,
+    ROUND_ID, ROUND_SHA256, SEQUENCED_REVIEW_FILE, derived_node_policy,
+    expected_argv, expected_outputs, program_policy, round0015_release_chain,
 )
 from basemap.round0015_service import (JOB_CAP_MIB, POLICY,
                                       load_service_decision)
-from basemap.round0015_staging import validate_input_reference_manifest
+from basemap.round0015_staging import (validate_input_reference_manifest,
+                                       verify_release_chain)
 from basemap.roundwatch_gate import canonical_roundwatch_binding
 from basemap.source_closure import round0015_source_closure_receipt
 
@@ -68,11 +70,13 @@ def _load_environment(path: str) -> dict:
 
 def build_queue(args) -> dict:
     if args.implementation_commit != args.release_sha:
-        raise ValueError("Round 0015 has exactly one implementation commit/release")
+        raise ValueError("Round 0015 corrected implementation must equal its release")
     round_root = canonical_data_path(args.round_root, label="Round 0015 root")
     if round_root != ROUND_ROOT or not os.path.isdir(round_root):
         raise ValueError(f"Round 0015 root must already exist at {ROUND_ROOT}")
     run_root = os.path.realpath(args.run_root)
+    release_evidence = verify_release_chain(run_root, args.release_sha)
+    implementation_commits = release_evidence["implementation_commits"]
     out = canonical_data_path(args.out, label="Round 0015 queue manifest")
     queue_root = os.path.dirname(out)
     if out != os.path.join(round_root, "queue", "queue.json"):
@@ -104,7 +108,7 @@ def build_queue(args) -> dict:
     }
     preflight = verify_release(
         integration_repo=args.integration_repo, release_sha=args.release_sha,
-        implementation_commits=[args.implementation_commit],
+        implementation_commits=implementation_commits,
         pushed_ref=args.pushed_ref, run_checkout=run_root,
         environment_manifest=environment_path,
         cache_environment=cache_environment)
@@ -113,7 +117,11 @@ def build_queue(args) -> dict:
                            "; ".join(preflight["errors"]))
     with open(args.staging_manifest, encoding="utf-8") as handle:
         staged = validate_input_reference_manifest(json.load(handle), full_hash=True)
+    if staged["release_evidence"] != release_evidence:
+        raise RuntimeError("Round 0015 staged release evidence changed")
     sources = round0015_source_closure_receipt(run_root, require_tracked=True)
+    if len(sources["members"]) != REQUIRED_SOURCE_CLOSURE_MEMBERS:
+        raise RuntimeError("Round 0015 source closure must contain exactly 47 members")
     roundwatch = canonical_roundwatch_binding()
 
     create_fresh_directory(queue_root, label="Round 0015 queue root")
@@ -138,7 +146,7 @@ def build_queue(args) -> dict:
     issued = issue_release_preflight_receipt(
         release_receipt_path, integration_repo=args.integration_repo,
         release_sha=args.release_sha,
-        implementation_commits=[args.implementation_commit],
+        implementation_commits=implementation_commits,
         pushed_ref=args.pushed_ref, run_checkout=run_root,
         environment_manifest=environment_path,
         cache_environment=cache_environment)
@@ -177,6 +185,8 @@ def build_queue(args) -> dict:
     }
     if tuple(sorted(role_paths)) != PROGRAM_INPUT_ROLES:
         raise AssertionError("Round 0015 program-input role drift")
+    if len(role_paths) != REQUIRED_PROGRAM_INPUT_ROLES:
+        raise AssertionError("Round 0015 must retain exactly 10 program roles")
     extra_paths = [
         *role_paths.values(), environment["freeze_file"], python,
         roundwatch["cli"]["path"], roundwatch["interpreter"]["canonical_path"],
@@ -187,6 +197,9 @@ def build_queue(args) -> dict:
     for path in extra_paths:
         signature(path)
     registry = [signature_cache[path] for path in sorted(signature_cache)]
+    if len(registry) != REQUIRED_REGISTERED_INPUTS:
+        raise RuntimeError(
+            "Round 0015 global input registry must contain exactly 139 entries")
     program_inputs = [
         {"role": role, "signature": signature_cache[role_paths[role]]}
         for role in sorted(role_paths)
@@ -289,6 +302,8 @@ def main(argv=None) -> int:
         "job_gpu_memory_cap_mib": JOB_CAP_MIB,
         "payloads_copied": manifest["input_staging"]["payloads_copied"],
         "registered_pre_gate_inputs": len(manifest["global_input_registry"]),
+        "implementation_commits": round0015_release_chain(
+            manifest["release_sha"])["implementation_commits"],
     }, indent=2, sort_keys=True))
     return 0
 

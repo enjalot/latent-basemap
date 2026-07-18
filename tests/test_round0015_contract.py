@@ -4,8 +4,10 @@ from __future__ import annotations
 import ast
 import base64
 import copy
+import hashlib
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -14,10 +16,15 @@ from basemap.artifact_identity import (canonical_json,
                                        expected_input_signature, sha256_bytes)
 from basemap import gate_preparation
 from basemap import round0015_service as service
+from basemap import round0015_staging as staging
 from basemap.round0014_program import (NODES as ROUND0014_NODES,
                                        TRAIN_CONFIG as ROUND0014_CONFIG)
 from basemap.round0015_program import (
-    GPU_HOURS_CAP, NODES, TRAIN_CONFIG, derived_node_policy, program_policy,
+    FIRST_IMPLEMENTATION_COMMIT, FIRST_RELEASE_TREE, GPU_HOURS_CAP,
+    ISSUED_BASE, NODES, PROGRAM_INPUT_ROLES, REQUIRED_REGISTERED_INPUTS,
+    REQUIRED_SOURCE_CLOSURE_MEMBERS, ROUND_FILE, ROUND_SHA256, TRAIN_CONFIG,
+    derived_node_policy, program_policy, round0015_release_chain,
+    validate_global_input_registry,
 )
 from basemap.run_controller import (
     GpuLease, _round0015_release_with_receipt,
@@ -28,6 +35,86 @@ from basemap.source_closure import (ROUND0015_RUNTIME_ENTRYPOINTS,
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_round0015_amended_hash_and_139_member_contract_are_bound():
+    assert hashlib.sha256(Path(ROUND_FILE).read_bytes()).hexdigest() == \
+        ROUND_SHA256 == \
+        "12c5d46cbc40d1e63bc9ea055ee42063054ccc3b6e1fefadb5726e648fff43be"
+    assert ISSUED_BASE == "73659a917efcdbe3943d3da7d7e43581ae5c9084"
+    assert FIRST_IMPLEMENTATION_COMMIT == \
+        "ebce2f0db5f400e860f67e845c57356547f30c78"
+    assert FIRST_RELEASE_TREE == "f3d26e47f458e961013171dc387fac4446678a09"
+    assert REQUIRED_REGISTERED_INPUTS == 139
+    assert len(PROGRAM_INPUT_ROLES) == 10
+    assert len(runtime_source_closure(
+        str(ROOT), ROUND0015_RUNTIME_ENTRYPOINTS)) == \
+        REQUIRED_SOURCE_CLOSURE_MEMBERS == 47
+
+
+def test_round0015_release_evidence_lists_both_implementation_commits():
+    corrected = "c" * 40
+    evidence = round0015_release_chain(corrected)
+    assert evidence["implementation_commits"] == [
+        FIRST_IMPLEMENTATION_COMMIT, corrected]
+    assert evidence["ancestry"] == [
+        ISSUED_BASE, FIRST_IMPLEMENTATION_COMMIT, corrected]
+    assert evidence["commits_after_issued_base"] == 2
+
+
+def test_round0015_staging_requires_the_exact_two_commit_ancestry(tmp_path):
+    repo = tmp_path / "release"
+    subprocess.run(
+        ["/usr/bin/git", "clone", "-q", "--no-hardlinks", str(ROOT), str(repo)],
+        check=True)
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(repo), "checkout", "-q",
+         FIRST_IMPLEMENTATION_COMMIT], check=True)
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(repo), "config", "user.name",
+         "Round 0015 Fixture"], check=True)
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(repo), "config", "user.email",
+         "round0015-fixture@example.invalid"], check=True)
+    (repo / "cardinality-reset-fixture.txt").write_text(
+        "cardinality-only scope reset\n", encoding="utf-8")
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(repo), "add",
+         "cardinality-reset-fixture.txt"], check=True)
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(repo), "commit", "-q", "-m",
+         "Round 0015 cardinality-only fixture"], check=True)
+    corrected = subprocess.run(
+        ["/usr/bin/git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
+    subprocess.run(
+        ["/usr/bin/git", "-C", str(repo), "checkout", "-q", "--detach",
+         corrected], check=True)
+    evidence = staging.verify_release_chain(str(repo), corrected)
+    assert evidence["parent"] == FIRST_IMPLEMENTATION_COMMIT
+    assert evidence["grandparent"] == ISSUED_BASE
+    assert evidence["implementation_commits"] == [
+        FIRST_IMPLEMENTATION_COMMIT, corrected]
+    assert evidence["ancestry"] == [
+        ISSUED_BASE, FIRST_IMPLEMENTATION_COMMIT, corrected]
+    assert staging.validate_release_evidence(evidence) == evidence
+
+
+def test_round0015_registry_requires_exactly_139_unique_sorted_paths():
+    registry = [
+        {"canonical_path": f"/fixture/input-{index:03d}"}
+        for index in range(REQUIRED_REGISTERED_INPUTS)
+    ]
+    required = {registry[0]["canonical_path"], registry[-1]["canonical_path"]}
+    assert validate_global_input_registry(
+        registry, required_paths=required) == [
+            item["canonical_path"] for item in registry]
+    with pytest.raises(ValueError, match="exactly 139"):
+        validate_global_input_registry(registry[:-1], required_paths=required)
+    with pytest.raises(ValueError, match="exactly 139"):
+        validate_global_input_registry(
+            [*registry, {"canonical_path": "/fixture/input-999"}],
+            required_paths=required)
 
 
 def _environment(tmp_path: Path) -> str:

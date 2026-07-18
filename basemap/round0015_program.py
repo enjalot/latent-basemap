@@ -35,8 +35,10 @@ from .source_closure import validate_round0015_source_closure_receipt
 ROUND_ID = "0015"
 PROGRAM = "basemap-100m"
 ISSUED_BASE = "73659a917efcdbe3943d3da7d7e43581ae5c9084"
+FIRST_IMPLEMENTATION_COMMIT = "ebce2f0db5f400e860f67e845c57356547f30c78"
+FIRST_RELEASE_TREE = "f3d26e47f458e961013171dc387fac4446678a09"
 ROUND_FILE = "/home/enjalot/code/latent-labs/basemap-100m/round-0015-2026-07-18.md"
-ROUND_SHA256 = "6521345cb7bbbc9f3c2127d5c247262a239c80f1a6de6e62ff9e264194a9272d"
+ROUND_SHA256 = "12c5d46cbc40d1e63bc9ea055ee42063054ccc3b6e1fefadb5726e648fff43be"
 SEQUENCED_REVIEW_FILE = (
     "/home/enjalot/code/latent-labs/basemap-100m/review-0013-2026-07-18.md")
 SEQUENCED_REVIEW_SHA256 = (
@@ -44,6 +46,10 @@ SEQUENCED_REVIEW_SHA256 = (
 GPU_HOURS_CAP = 5.5
 GPU_LEASE_PATH = "/data/latent-basemap/.gpu_lease"
 HASH64 = re.compile(r"[0-9a-f]{64}")
+FULL_SHA = re.compile(r"[0-9a-f]{40}")
+REQUIRED_REGISTERED_INPUTS = 139
+REQUIRED_SOURCE_CLOSURE_MEMBERS = 47
+REQUIRED_PROGRAM_INPUT_ROLES = 10
 
 PROGRAM_INPUT_ROLES = (
     "accepted_pack_manifest",
@@ -98,6 +104,22 @@ NODES = (
 NODE_BY_ID = {item.node_id: item for item in NODES}
 
 
+def round0015_release_chain(release_sha: str) -> dict[str, Any]:
+    """Return the only reset-authorized Round-0015 release ancestry."""
+    if (not isinstance(release_sha, str) or not FULL_SHA.fullmatch(release_sha) or
+            release_sha in {ISSUED_BASE, FIRST_IMPLEMENTATION_COMMIT}):
+        raise ValueError("Round 0015 corrected release SHA is invalid")
+    return {
+        "reviewed_base": ISSUED_BASE,
+        "first_implementation_commit": FIRST_IMPLEMENTATION_COMMIT,
+        "first_release_tree": FIRST_RELEASE_TREE,
+        "corrected_release": release_sha,
+        "implementation_commits": [FIRST_IMPLEMENTATION_COMMIT, release_sha],
+        "ancestry": [ISSUED_BASE, FIRST_IMPLEMENTATION_COMMIT, release_sha],
+        "commits_after_issued_base": 2,
+    }
+
+
 def accepted_reference_records(*, full_hash: bool) -> list[dict[str, Any]]:
     return _round0014_reference_records(full_hash=full_hash)
 
@@ -135,15 +157,35 @@ def _role_map(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
         roles[entry["role"]] = entry["signature"]
     if tuple(sorted(roles)) != PROGRAM_INPUT_ROLES:
         raise ValueError("Round 0015 program input roles changed")
+    if len(roles) != REQUIRED_PROGRAM_INPUT_ROLES:
+        raise ValueError("Round 0015 must retain exactly 10 program input roles")
     return roles
 
 
 def _validate_bound_release(manifest: dict[str, Any]) -> dict[str, Any]:
     signature = _role_map(manifest)["release_preflight_receipt"]
-    return validate_release_preflight_receipt(
+    release = validate_release_preflight_receipt(
         signature["canonical_path"],
         expected_identity_sha256=manifest["release_preflight_identity"],
         expected_signature=signature)
+    expected = round0015_release_chain(release["release_sha"])
+    if release["implementation_commits"] != expected["implementation_commits"]:
+        raise ValueError("Round 0015 release receipt omits an implementation commit")
+    return release
+
+
+def validate_global_input_registry(
+        registry: Any, *, required_paths: set[str]) -> list[str]:
+    paths = [item.get("canonical_path") for item in registry] \
+        if isinstance(registry, list) else []
+    if (len(paths) != REQUIRED_REGISTERED_INPUTS or paths != sorted(paths) or
+            len(paths) != len(set(paths))):
+        raise ValueError(
+            "Round 0015 global input registry must contain exactly 139 "
+            "unique sorted paths")
+    if not required_paths.issubset(set(paths)):
+        raise ValueError("Round 0015 global registry omits a required source/input")
+    return paths
 
 
 def expected_argv(spec: NodeSpec, *, manifest: dict[str, Any],
@@ -188,6 +230,9 @@ def derive_program_context(manifest: dict[str, Any], *,
         raise ValueError("Round 0015 release receipt differs from queue checkout")
     validate_round0015_source_closure_receipt(
         manifest["source_closure"], repo_root=repo_root)
+    if len(manifest["source_closure"]["members"]) != \
+            REQUIRED_SOURCE_CLOSURE_MEMBERS:
+        raise ValueError("Round 0015 must retain all 47 source closure members")
     with open(paths["production_config"], encoding="utf-8") as handle:
         config_record = json.load(handle)
     if config_record != {
@@ -223,11 +268,6 @@ def validate_exact_program(manifest: dict[str, Any], *, manifest_path: str,
     if not isinstance(jobs, list) or [item.get("id") for item in jobs] != [
             item.node_id for item in NODES]:
         raise ValueError("Round 0015 queue must contain its exact six nodes in order")
-    registry = manifest.get("global_input_registry")
-    paths = [item.get("canonical_path") for item in registry] \
-        if isinstance(registry, list) else []
-    if not paths or paths != sorted(paths) or len(paths) != len(set(paths)):
-        raise ValueError("Round 0015 global input registry is not sorted/unique")
     required = {
         entry["signature"]["canonical_path"] for entry in manifest["program_inputs"]
     } | {
@@ -236,8 +276,16 @@ def validate_exact_program(manifest: dict[str, Any], *, manifest_path: str,
     } | {
         item["canonical_path"] for item in context["reference_manifest"]["references"]
     }
-    if not required.issubset(set(paths)):
-        raise ValueError("Round 0015 global registry omits a required source/input")
+    registry = manifest.get("global_input_registry")
+    paths = validate_global_input_registry(registry, required_paths=required)
+    release_evidence = context["reference_manifest"]["release_evidence"]
+    expected_chain = round0015_release_chain(manifest["release_sha"])
+    if any(release_evidence.get(key) != value
+           for key, value in expected_chain.items()):
+        raise ValueError("Round 0015 exact two-commit ancestry changed")
+    if context["release"]["implementation_commits"] != \
+            release_evidence["implementation_commits"]:
+        raise ValueError("Round 0015 staging/release commit lists differ")
     queue_root = os.path.dirname(os.path.realpath(manifest_path))
     for position, (job, spec) in enumerate(zip(jobs, NODES)):
         dependency = [] if spec.dependency is None else [spec.dependency]
@@ -283,6 +331,9 @@ def program_policy() -> dict[str, Any]:
         "service_policy": POLICY,
         "job_gpu_memory_cap_mib": JOB_CAP_MIB,
         "terminal_lease_release_required": True,
+        "registered_global_inputs": REQUIRED_REGISTERED_INPUTS,
+        "source_closure_members": REQUIRED_SOURCE_CLOSURE_MEMBERS,
+        "program_input_roles": REQUIRED_PROGRAM_INPUT_ROLES,
         "retry_count": 0,
         "registered_p90_plus_margin_seconds": sum(
             item.p90_wall_s * 1.15 for item in NODES),

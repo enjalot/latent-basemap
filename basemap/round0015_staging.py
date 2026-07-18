@@ -13,8 +13,9 @@ from .output_safety import (atomic_write_new_json, create_fresh_directory,
 from .round0015_program import (
     ACCEPTED_CAPABILITY_SHA256, ACCEPTED_MANIFEST,
     ACCEPTED_MANIFEST_FILE_SHA256, ACCEPTED_MANIFEST_RECEIPT_SHA256,
-    ISSUED_BASE, ROUND_ID, SEQUENCED_REVIEW_FILE, SEQUENCED_REVIEW_SHA256,
-    TRAIN_CONFIG, TRAIN_CONFIG_SHA256, accepted_reference_records,
+    FIRST_IMPLEMENTATION_COMMIT, FIRST_RELEASE_TREE, ISSUED_BASE, ROUND_ID,
+    SEQUENCED_REVIEW_FILE, SEQUENCED_REVIEW_SHA256, TRAIN_CONFIG,
+    TRAIN_CONFIG_SHA256, accepted_reference_records, round0015_release_chain,
 )
 
 
@@ -38,21 +39,63 @@ def _git(repo: str, *args: str) -> str:
     return process.stdout.strip()
 
 
-def _verify_release(release_root: str, release_sha: str) -> dict[str, Any]:
+def verify_release_chain(release_root: str, release_sha: str) -> dict[str, Any]:
     root = os.path.realpath(release_root)
     if root != release_root or _git(root, "rev-parse", "HEAD") != release_sha:
         raise RuntimeError("Round 0015 staging release checkout/commit changed")
-    if _git(root, "rev-parse", "HEAD^") != ISSUED_BASE:
-        raise RuntimeError("Round 0015 release is not the issued base's direct child")
+    expected = round0015_release_chain(release_sha)
+    if (_git(root, "rev-parse", "HEAD^") != FIRST_IMPLEMENTATION_COMMIT or
+            _git(root, "rev-parse", "HEAD^^") != ISSUED_BASE or
+            _git(root, "rev-parse", f"{FIRST_IMPLEMENTATION_COMMIT}^") !=
+            ISSUED_BASE or
+            _git(root, "rev-parse", f"{FIRST_IMPLEMENTATION_COMMIT}^{{tree}}") !=
+            FIRST_RELEASE_TREE or
+            _git(root, "rev-list", "--ancestry-path", "--reverse",
+                 f"{ISSUED_BASE}..{release_sha}").splitlines() !=
+            expected["implementation_commits"]):
+        raise RuntimeError("Round 0015 release is not the exact reset-authorized chain")
     if _git(root, "status", "--porcelain=v1", "--untracked-files=all"):
         raise RuntimeError("Round 0015 staging release checkout is dirty")
     if subprocess.run(
             ["/usr/bin/git", "-C", root, "symbolic-ref", "-q", "HEAD"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
         raise RuntimeError("Round 0015 staging requires the detached run checkout")
-    return {"release_root": root, "release_sha": release_sha,
-            "parent": ISSUED_BASE, "tree": _git(root, "rev-parse", "HEAD^{tree}"),
-            "detached": True, "clean": True}
+    body = {
+        "schema": "round0015-two-commit-release-evidence-v1",
+        "release_root": root,
+        **expected,
+        "tree": _git(root, "rev-parse", "HEAD^{tree}"),
+        "parent": FIRST_IMPLEMENTATION_COMMIT,
+        "grandparent": ISSUED_BASE,
+        "detached": True,
+        "clean": True,
+    }
+    return _seal(body)
+
+
+def validate_release_evidence(value: dict[str, Any]) -> dict[str, Any]:
+    required = {
+        "schema", "release_root", "reviewed_base",
+        "first_implementation_commit", "first_release_tree",
+        "corrected_release", "implementation_commits", "ancestry",
+        "commits_after_issued_base", "tree", "parent", "grandparent",
+        "detached", "clean", "identity_sha256",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise ValueError("Round 0015 release evidence fields changed")
+    body = {key: value[key] for key in value if key != "identity_sha256"}
+    expected = round0015_release_chain(value.get("corrected_release"))
+    if (value["identity_sha256"] != sha256_bytes(canonical_json(body)) or
+            value["schema"] != "round0015-two-commit-release-evidence-v1" or
+            any(value.get(key) != expected_value
+                for key, expected_value in expected.items()) or
+            value["parent"] != FIRST_IMPLEMENTATION_COMMIT or
+            value["grandparent"] != ISSUED_BASE or
+            value["detached"] is not True or value["clean"] is not True or
+            not isinstance(value["release_root"], str) or
+            not os.path.isabs(value["release_root"])):
+        raise ValueError("Round 0015 exact release evidence changed")
+    return value
 
 
 def _expected_references(*, full_hash: bool) -> list[dict[str, Any]]:
@@ -72,7 +115,8 @@ def validate_input_reference_manifest(value: dict[str, Any], *,
     body = {key: value[key] for key in value if key != "identity_sha256"}
     required = {
         "schema", "round_id", "payloads_copied", "accepted_tuple",
-        "sequenced_review", "reference_count", "references", "identity_sha256",
+        "sequenced_review", "release_evidence", "reference_count",
+        "references", "identity_sha256",
     }
     if (identity != sha256_bytes(canonical_json(body)) or set(value) != required or
             value["schema"] != REFERENCE_SCHEMA or value["round_id"] != ROUND_ID or
@@ -92,6 +136,7 @@ def validate_input_reference_manifest(value: dict[str, Any], *,
         "status": "accepted", "releases": ["0015"], "blocks": ["0006"],
     }:
         raise ValueError("Round 0015 sequenced review binding changed")
+    validate_release_evidence(value["release_evidence"])
     expected = _expected_references(full_hash=full_hash)
     if value["reference_count"] != 77 or value["references"] != expected:
         raise ValueError("Round 0015 reference-only closure changed")
@@ -103,7 +148,7 @@ def stage_input_references(*, round_root: str, release_root: str,
     root = os.path.realpath(round_root)
     if root != ROUND_ROOT or not os.path.isdir(root) or os.path.islink(root):
         raise ValueError(f"Round 0015 staging root must be existing {ROUND_ROOT}")
-    release = _verify_release(release_root, release_sha)
+    release = verify_release_chain(release_root, release_sha)
     inputs = os.path.join(root, "inputs")
     create_fresh_directory(inputs, label="Round 0015 reference staging root")
     manifest_path = os.path.join(inputs, "immutable-input-references.json")
@@ -128,6 +173,7 @@ def stage_input_references(*, round_root: str, release_root: str,
             "path": SEQUENCED_REVIEW_FILE, "sha256": SEQUENCED_REVIEW_SHA256,
             "status": "accepted", "releases": ["0015"], "blocks": ["0006"],
         },
+        "release_evidence": release,
         "reference_count": len(references), "references": references,
     }
     manifest = _seal(body)
