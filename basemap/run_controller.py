@@ -20,6 +20,7 @@ chains) through here; direct launches are unsafe.
 """
 from __future__ import annotations
 import os, sys, json, time, uuid, fcntl, subprocess, datetime, dataclasses, hashlib
+import importlib
 import signal
 import secrets
 import stat
@@ -544,7 +545,10 @@ def _validate_child_live_authority(manifest: dict, manifest_path: str,
     from .gate_preparation import validate_gate_preparation_receipt
     from .roundwatch_gate import RoundwatchGateAuthority
 
-    if manifest.get("round_id") == "0015":
+    if manifest.get("round_id") == "0016":
+        validate_exact_program = importlib.import_module(
+            ".round0016_program", __package__).validate_exact_program
+    elif manifest.get("round_id") == "0015":
         from .round0015_program import validate_exact_program
     elif manifest.get("round_id") == "0014":
         from .round0014_program import validate_exact_program
@@ -1453,6 +1457,15 @@ def _round0015_terminal_identity(summary: dict) -> dict:
     return {**body, "identity_sha256": sha256_bytes(canonical_json(body))}
 
 
+def _round0016_terminal_identity(summary: dict) -> dict:
+    """Reuse the exact terminal fields with a Round-0016 target seal."""
+    prior = _round0015_terminal_identity(summary)
+    body = {key: value for key, value in prior.items()
+            if key != "identity_sha256"}
+    body["schema"] = "round0016-controller-terminal-identity-v1"
+    return {**body, "identity_sha256": sha256_bytes(canonical_json(body))}
+
+
 def _round0015_parent_guard_is_owned(path: str) -> dict:
     """Prove a separate parent open description conflicts before release."""
     probe, parent = _open_parent_directory_no_symlinks(path)
@@ -1514,24 +1527,27 @@ def _round0015_prove_released(path: str) -> dict:
 
 def _round0015_release_with_receipt(
         lease: GpuLease, *, receipt_path: str,
-        terminal_identity: dict, _fixture_only: bool = False) -> dict:
-    """Neutralize, release, and prove both locks for Round 0015 only."""
-    expected = "/data/latent-basemap/runs/round-0015/queue/lease-release.json"
+        terminal_identity: dict, _fixture_only: bool = False,
+        _round0016: bool = False) -> dict:
+    """Neutralize, release, and prove both locks for Round 0015/0016."""
+    round_id = "0016" if _round0016 else "0015"
+    round_label = f"Round {round_id}"
+    expected = f"/data/latent-basemap/runs/round-{round_id}/queue/lease-release.json"
     if (os.path.realpath(receipt_path) != receipt_path or
             (not _fixture_only and receipt_path != expected) or
             os.path.lexists(receipt_path)):
-        raise RuntimeError("Round 0015 lease-release receipt destination changed")
+        raise RuntimeError(f"{round_label} lease-release receipt destination changed")
     if _fixture_only and os.environ.get("CUDA_VISIBLE_DEVICES") != "":
-        raise RuntimeError("Round 0015 lease-release fixture requires CUDA hidden")
+        raise RuntimeError(f"{round_label} lease-release fixture requires CUDA hidden")
     acquisition = lease.verify_current()
     _round0015_parent_guard_is_owned(lease.path)
     before = os.pread(lease._fd, 4096, 0)
     before_state = os.fstat(lease._fd)
     if json.loads(before.decode("utf-8")) != acquisition:
-        raise RuntimeError("Round 0015 lease payload differs from acquisition identity")
+        raise RuntimeError(f"{round_label} lease payload differs from acquisition identity")
     released_at = _utcnow()
     neutral = {
-        "schema": "round0015_gpu_lease_released.v1",
+        "schema": f"round{round_id}_gpu_lease_released.v1",
         "state": "released",
         "controller_id": acquisition["controller_id"],
         "controller_pid": acquisition["controller_pid"],
@@ -1551,10 +1567,10 @@ def _round0015_release_with_receipt(
         os.ftruncate(lease._fd, 0)
         written = os.pwrite(lease._fd, neutral_bytes, 0)
         if written != len(neutral_bytes):
-            raise RuntimeError("Round 0015 neutral lease payload write was short")
+            raise RuntimeError(f"{round_label} neutral lease payload write was short")
         os.fsync(lease._fd)
         if os.pread(lease._fd, len(neutral_bytes) + 1, 0) != neutral_bytes:
-            raise RuntimeError("Round 0015 neutral lease payload did not persist")
+            raise RuntimeError(f"{round_label} neutral lease payload did not persist")
     except BaseException as exc:
         release_error = f"{type(exc).__name__}: {exc}"
     try:
@@ -1569,7 +1585,7 @@ def _round0015_release_with_receipt(
         release_error = detail if release_error is None else f"{release_error}; {detail}"
     after = open(lease.path, "rb").read()
     body = {
-        "schema": "round0015-terminal-lease-release-receipt-v1",
+        "schema": f"round{round_id}-terminal-lease-release-receipt-v1",
         "status": "passed" if release_error is None else "failed",
         "lease_path": lease.path,
         "lease_device": int(before_state.st_dev),
@@ -1589,7 +1605,7 @@ def _round0015_release_with_receipt(
     atomic_write_new_json(receipt_path, receipt, immutable=True)
     if release_error is not None:
         raise RuntimeError(
-            f"Round 0015 terminal lease release proof failed: {release_error}")
+            f"{round_label} terminal lease release proof failed: {release_error}")
     return receipt
 
 
@@ -2476,6 +2492,8 @@ def _run_admitted_jobs(jobs: Optional[list], *, controller_id: Optional[str], ad
         "gpu_elapsed_s": 0.0, "terminal_verdict": "running",
     }
     round0015 = manifest.get("round_id") == "0015"
+    round0016 = manifest.get("round_id") == "0016"
+    terminal_release_round = round0015 or round0016
     done: set[str] = set()
     cumulative_registry: dict[str, dict] = {}
     lease = None
@@ -2526,13 +2544,18 @@ def _run_admitted_jobs(jobs: Optional[list], *, controller_id: Optional[str], ad
                 manifest, job, gpu_elapsed_s=summary["gpu_elapsed_s"],
                 phase="job-boundary")
             _fresh_job_paths(job)
-            round0014_or_0015 = manifest.get("round_id") in {"0014", "0015"}
-            if job.scientific_rows >= SCALE_PERFORMANCE_ROWS and not round0014_or_0015:
+            target_scale_round = manifest.get("round_id") in {"0014", "0015", "0016"}
+            if job.scientific_rows >= SCALE_PERFORMANCE_ROWS and not target_scale_round:
                 raise RuntimeError("issued Round 0005 program unexpectedly contains a scale node")
             if not job.node_policy:
                 raise RuntimeError("runtime node lacks its canonical derived policy")
-            if round0014_or_0015:
-                if round0015:
+            if target_scale_round:
+                if round0016:
+                    NODE_BY_ID = importlib.import_module(
+                        ".round0016_program", __package__).NODE_BY_ID
+                    canary_schema = "round0016-canary-verdict-v1"
+                    round_label = "Round 0016"
+                elif round0015:
                     from .round0015_program import NODE_BY_ID
                     canary_schema = "round0015-canary-verdict-v1"
                     round_label = "Round 0015"
@@ -2970,7 +2993,7 @@ def _run_admitted_jobs(jobs: Optional[list], *, controller_id: Optional[str], ad
         summary["finished"] = _utcnow()
         summary["required_jobs"] = [job.name for job in jobs]
         summary["completed_jobs"] = [job.name for job in jobs]
-        if not round0015:
+        if not terminal_release_round:
             writer.write("terminal", {
                 "controller_id": cid, "terminal_verdict": "passed",
                 "stop_reason": summary["stop_reason"],
@@ -3005,18 +3028,21 @@ def _run_admitted_jobs(jobs: Optional[list], *, controller_id: Optional[str], ad
             "gpu_elapsed_s": summary["gpu_elapsed_s"],
         })
     finally:
-        if round0015 and lease is not None:
+        if terminal_release_round and lease is not None:
             summary["finished"] = summary.get("finished") or _utcnow()
             summary["required_jobs"] = [job.name for job in (jobs or [])]
             summary["completed_jobs"] = [job.name for job in (jobs or [])
                                          if job.name in done]
-            terminal_identity = _round0015_terminal_identity(summary)
+            terminal_identity = (_round0016_terminal_identity(summary)
+                                 if round0016 else
+                                 _round0015_terminal_identity(summary))
             summary["pre_release_terminal_identity"] = terminal_identity
             try:
                 release_receipt = _round0015_release_with_receipt(
                     lease,
                     receipt_path=manifest["lease_release_receipt"],
-                    terminal_identity=terminal_identity)
+                    terminal_identity=terminal_identity,
+                    _round0016=round0016)
                 summary["lease_release_receipt"] = expected_input_signature(
                     manifest["lease_release_receipt"])
                 summary["lease_release_receipt_identity_sha256"] = \
@@ -3031,7 +3057,7 @@ def _run_admitted_jobs(jobs: Optional[list], *, controller_id: Optional[str], ad
                     except BaseException as cleanup_exc:
                         try:
                             release_exc.add_note(
-                                f"Round 0015 fallback lease cleanup failed: "
+                                f"Round {manifest.get('round_id')} fallback lease cleanup failed: "
                                 f"{cleanup_exc!r}")
                         except AttributeError:
                             pass

@@ -1375,7 +1375,7 @@ def _require_score_panel_scale_admission(X, scale_admission):
         if scale_admission is not None:
             raise RuntimeError("below-scale score_panel call cannot carry scale admission")
         return None
-    # Rounds 0014/0015 do not promote the diagnostic Round-0005 scale
+    # Rounds 0014/0015/0016 do not promote the diagnostic Round-0005 scale
     # certificate.  Their exact accepted pack and live owner-gated controller
     # capability are the scale authority.  Keep this branch type- and
     # round-specific so no historical or arbitrary >=8M matrix can enter it.
@@ -1388,10 +1388,10 @@ def _require_score_panel_scale_admission(X, scale_admission):
             active = require_active_round0005_child_admission()
             manifest = active.get("manifest", {})
             round_id = manifest.get("round_id")
-            if (round_id not in {"0014", "0015"} or
+            if (round_id not in {"0014", "0015", "0016"} or
                     manifest.get("execution_authority") != "owner-gpu"):
                 raise RuntimeError(
-                    "Round 0014/0015 scale scorer lacks its owner-gated capability")
+                    "Round 0014/0015/0016 scale scorer lacks its owner-gated capability")
             pack = validate_device_uniform_pack(
                 X, manifest["input_staging"]["graph_path"]
                 if "graph_path" in manifest["input_staging"] else

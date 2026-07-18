@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import importlib
 import json
 import os
 import re
@@ -330,6 +331,10 @@ def _validate_parent_chain(path: str, *, label: str) -> None:
 
 def validate_queue_manifest(data: dict, path: str) -> dict[str, Any]:
     """Validate the exact production program before gate, lease, or output work."""
+    if isinstance(data, dict) and data.get("round_id") == "0016":
+        validator = importlib.import_module(
+            ".round0016_admission", __package__).validate_round0016_queue_manifest
+        return validator(data, path)
     if isinstance(data, dict) and data.get("round_id") == "0015":
         from .round0015_admission import validate_round0015_queue_manifest
 
@@ -950,6 +955,11 @@ class QueueAdmission:
                          include_output_absence: bool) -> dict[str, Any]:
         if self.fixture_only:
             source_closure = self.manifest["source_closure"]
+        elif self.manifest.get("round_id") == "0016":
+            validator = importlib.import_module(
+                ".source_closure", __package__).validate_round0016_source_closure_receipt
+            source_closure = validator(
+                self.manifest["source_closure"], repo_root=self.repo_root)
         elif self.manifest.get("round_id") == "0015":
             from .source_closure import validate_round0015_source_closure_receipt
 

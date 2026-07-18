@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import os
 import sys
@@ -50,6 +51,21 @@ def configure_round0015() -> None:
     TRAIN_CONFIG = round0015_config
     TRAIN_CONFIG_SHA256 = round0015_config_sha256
     NODES = round0015_nodes
+
+
+def configure_round0016() -> None:
+    """Select the path-bound Round-0016 wrapper before child admission."""
+    global ROUND_ID, ROUND_LABEL, SCHEMA_PREFIX, RUNTIME_SCRIPT
+    global RoundMaterializedArray, TRAIN_CONFIG, TRAIN_CONFIG_SHA256, NODES
+    program = importlib.import_module("basemap.round0016_program")
+    ROUND_ID = "0016"
+    ROUND_LABEL = "Round 0016"
+    SCHEMA_PREFIX = "round0016"
+    RUNTIME_SCRIPT = "experiments/run_round0016_node.py"
+    RoundMaterializedArray = program.Round0016MaterializedArray
+    TRAIN_CONFIG = program.TRAIN_CONFIG
+    TRAIN_CONFIG_SHA256 = program.TRAIN_CONFIG_SHA256
+    NODES = program.NODES
 
 
 def _schema(name: str) -> str:
