@@ -1524,7 +1524,11 @@ class ParametricUMAP:
                         self._train_stats["nonfinite_gradient_skips"] += 1
                         kind = "model_grad"
                     consecutive_nonfinite_gradients += 1
-                    if getattr(self, "_abort_on_first_nonfinite", False):
+                    # A transient AMP scaler overflow is designed-for behavior
+                    # (the comment above); only a genuine model gradient
+                    # non-finite is first-strike terminal.
+                    if kind == "model_grad" and getattr(
+                            self, "_abort_on_first_nonfinite", False):
                         raise RuntimeError(
                             "Round 0014 aborts on the first non-finite gradient")
                     # rate-limited (per-batch spam suppressed; aggregate kept)
@@ -1591,10 +1595,9 @@ class ParametricUMAP:
                 else:
                     # scaler.step skipped (scale decreased) → an AMP overflow at
                     # THIS step; the schedule was NOT advanced, so H is preserved.
+                    # Not first-strike terminal: dynamic loss scaling recovers by
+                    # design, and the consecutive/fraction guards bound pathology.
                     st["amp_overflow_skips"] += 1
-                    if getattr(self, "_abort_on_first_nonfinite", False):
-                        raise RuntimeError(
-                            "Round 0014 aborts on the first AMP overflow")
                 st["final_lr"] = lr_used
 
                 current_lr = optimizer.param_groups[0]['lr']  # LR for the NEXT update

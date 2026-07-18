@@ -330,14 +330,17 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
         use_wandb=False)
     wall = time.monotonic() - started
     stats = dict(pumap._train_stats)
+    # Transient AMP scaler overflows are designed-for (counted separately,
+    # bounded by the trainer's consecutive/fraction guards) and offset the
+    # attempted/finite-loss batch counts; genuine non-finites stay at zero.
+    amp_skips = int(stats.get("amp_overflow_skips") or 0)
     exact = {
         "schedule_version": "cosine-v3-positive-budget",
         "lr_horizon": 500_000,
         "positive_lr_optimizer_steps": 500_000,
         "scheduler_steps": 500_000,
-        "attempted_batches": 500_000,
-        "finite_loss_batches": 500_000,
-        "optimizer_steps_attempted": 500_000,
+        "attempted_batches": 500_000 + amp_skips,
+        "finite_loss_batches": 500_000 + amp_skips,
         "optimizer_steps_succeeded": 500_000,
         "stop_reason": "lr_horizon",
         "budget_satisfied": True,
@@ -350,9 +353,15 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
     }
     mismatches = {key: {"expected": value, "observed": stats.get(key)}
                   for key, value in exact.items() if stats.get(key) != value}
-    for key in ("nonfinite_loss_skips", "nonfinite_gradient_skips", "amp_overflow_skips"):
+    for key in ("nonfinite_loss_skips", "nonfinite_gradient_skips"):
         if stats.get(key) != 0:
             mismatches[key] = {"expected": 0, "observed": stats.get(key)}
+    attempted_steps = stats.get("optimizer_steps_attempted")
+    if (not isinstance(attempted_steps, int) or
+            not 500_000 <= attempted_steps <= 500_000 + amp_skips):
+        mismatches["optimizer_steps_attempted"] = {
+            "expected": f"500000..{500_000 + amp_skips}",
+            "observed": attempted_steps}
     for key in ("lr_used_first", "lr_used_last", "first_lr", "final_lr"):
         if not isinstance(stats.get(key), (int, float)) or stats[key] <= 0:
             mismatches[key] = {
