@@ -25,17 +25,48 @@ from basemap.round0014_program import (
 )
 
 
+ROUND_ID = "0014"
+ROUND_LABEL = "Round 0014"
+SCHEMA_PREFIX = "round0014"
+RUNTIME_SCRIPT = "experiments/run_round0014_node.py"
+RoundMaterializedArray = Round0014MaterializedArray
+
+
+def configure_round0015() -> None:
+    """Select the one additive Round-0015 wrapper before child admission."""
+    global ROUND_ID, ROUND_LABEL, SCHEMA_PREFIX, RUNTIME_SCRIPT
+    global RoundMaterializedArray, TRAIN_CONFIG, TRAIN_CONFIG_SHA256, NODES
+    from basemap.round0015_program import (
+        NODES as round0015_nodes,
+        Round0015MaterializedArray,
+        TRAIN_CONFIG as round0015_config,
+        TRAIN_CONFIG_SHA256 as round0015_config_sha256,
+    )
+    ROUND_ID = "0015"
+    ROUND_LABEL = "Round 0015"
+    SCHEMA_PREFIX = "round0015"
+    RUNTIME_SCRIPT = "experiments/run_round0015_node.py"
+    RoundMaterializedArray = Round0015MaterializedArray
+    TRAIN_CONFIG = round0015_config
+    TRAIN_CONFIG_SHA256 = round0015_config_sha256
+    NODES = round0015_nodes
+
+
+def _schema(name: str) -> str:
+    return f"{SCHEMA_PREFIX}-{name}-v1"
+
+
 def _seal(body: dict[str, Any]) -> dict[str, Any]:
     return {**body, "identity_sha256": sha256_bytes(canonical_json(body))}
 
 
 def _node_job(active: dict[str, Any], node_id: str) -> dict[str, Any]:
     if active.get("node_id") != node_id or active.get("manifest", {}).get(
-            "round_id") != "0014":
-        raise RuntimeError("Round 0014 executable received another node/round capability")
+            "round_id") != ROUND_ID:
+        raise RuntimeError(f"{ROUND_LABEL} executable received another capability")
     job = active["job"]
     if job.get("id") != node_id or len(job.get("outputs") or []) != 1:
-        raise RuntimeError("Round 0014 executable output contract changed")
+        raise RuntimeError(f"{ROUND_LABEL} executable output contract changed")
     return job
 
 
@@ -85,7 +116,7 @@ def _fixture_scalar_equivalence(root: str) -> dict[str, Any]:
             report.get("checks", {}).get("cached_real_build_once") is not True or
             report.get("checks", {}).get("maximum_k_15") is not True or
             report.get("checks", {}).get("cached_truth_shared") is not True):
-        raise RuntimeError("Round 0014 registered scorer scalar equivalence failed")
+        raise RuntimeError(f"{ROUND_LABEL} registered scorer scalar equivalence failed")
     return {
         "passed": True,
         "fixture": expected_input_signature(fixture_path),
@@ -108,7 +139,7 @@ def _fixture_semantic_render(root: str) -> dict[str, Any]:
     positions = np.searchsorted(permuted_ids[order], sample_ids)
     gathered = permuted_coordinates[order[positions]]
     if not np.array_equal(gathered, coordinates[sample_ids]):
-        raise RuntimeError("Round 0014 canary semantic-ID gathering is misaligned")
+        raise RuntimeError(f"{ROUND_LABEL} canary semantic-ID gathering is misaligned")
     sample_path = os.path.join(root, "semantic-sample-ids.npy")
     image_path = os.path.join(root, "semantic-alignment.png")
     atomic_save_new_npy(sample_path, sample_ids, immutable=True)
@@ -138,10 +169,10 @@ def _fixture_semantic_render(root: str) -> dict[str, Any]:
 
 
 def _run_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
-    output = create_fresh_directory(job["outputs"][0], label="Round 0014 canary output")
+    output = create_fresh_directory(job["outputs"][0], label=f"{ROUND_LABEL} canary output")
     import torch
 
-    X = Round0014MaterializedArray()
+    X = RoundMaterializedArray()
     pumap = _new_exact_model()
     dataset, loader, edges = pumap._prepare_edge_list_training(
         X, GRAPH_PATH, len(X), False, 42)
@@ -160,15 +191,15 @@ def _run_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
             int((batch_targets == 1.0).sum().item()) != 409 or
             int((batch_targets == 0.0).sum().item()) != 7783 or
             edges != 450_000_000 or headroom_gib < 1.5):
-        raise RuntimeError("Round 0014 no-training setup/headroom contract failed")
+        raise RuntimeError(f"{ROUND_LABEL} no-training setup/headroom contract failed")
     scalar = _fixture_scalar_equivalence(output)
     semantic = _fixture_semantic_render(output)
     aggregate = sum(float(item["p90_wall_s"]) * 1.15
                     for item in active["manifest"]["jobs"])
     if aggregate > 5.5 * 3600:
-        raise RuntimeError("Round 0014 full-queue p90+15% exceeds 5.5 hours")
+        raise RuntimeError(f"{ROUND_LABEL} full-queue p90+15% exceeds 5.5 hours")
     evidence = {
-        "schema": "round0014-canary-evidence-v1",
+        "schema": _schema("canary-evidence"),
         "accepted_capability_sha256": ACCEPTED_CAPABILITY_SHA256,
         "production_config_sha256": TRAIN_CONFIG_SHA256,
         "optimizer_updates": 0,
@@ -195,7 +226,7 @@ def _run_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
     evidence_path = os.path.join(output, "evidence.json")
     atomic_write_new_json(evidence_path, _seal(evidence), immutable=True)
     verdict_body = {
-        "schema": "round0014-canary-verdict-v1", "passed": True,
+        "schema": _schema("canary-verdict"), "passed": True,
         "optimizer_updates": 0, "pipeline": "device_uniform",
         "sampling": "uniform-over-directed-edges",
         "headroom_gib": headroom_gib,
@@ -213,7 +244,7 @@ def _run_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
 def _publish_model(model, path: str) -> None:
     temporary = os.path.join(os.path.dirname(path), f".model.partial-{os.getpid()}")
     if os.path.lexists(temporary) or os.path.lexists(path):
-        raise FileExistsError("Round 0014 model output/temporary already exists")
+        raise FileExistsError(f"{ROUND_LABEL} model output/temporary already exists")
     model.save(temporary)
     with open(temporary, "rb") as handle:
         os.fsync(handle.fileno())
@@ -242,16 +273,16 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
             verdict.get("sampling") != "uniform-over-directed-edges" or
             not isinstance(evidence, dict) or
             expected_input_signature(evidence.get("canonical_path", "")) != evidence):
-        raise RuntimeError("Round 0014 training lacks its passing no-update canary")
-    output = create_fresh_directory(job["outputs"][0], label="Round 0014 train output")
+        raise RuntimeError(f"{ROUND_LABEL} training lacks its passing no-update canary")
+    output = create_fresh_directory(job["outputs"][0], label=f"{ROUND_LABEL} train output")
     atomic_write_new_json(
         os.path.join(output, "production-config.json"),
-        {"schema": "round0014-production-config-receipt-v1",
+        {"schema": _schema("production-config-receipt"),
          "config": TRAIN_CONFIG, "config_sha256": TRAIN_CONFIG_SHA256},
         immutable=True)
     import torch
     np.random.seed(42); torch.manual_seed(42); torch.cuda.manual_seed_all(42)
-    X = Round0014MaterializedArray()
+    X = RoundMaterializedArray()
     pumap = _new_exact_model()
     pumap._max_train_steps = 500_000
     pumap._bench_warmup = 200
@@ -296,14 +327,14 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
             mismatches[key] = {
                 "expected": "finite positive LR", "observed": stats.get(key)}
     if mismatches:
-        raise RuntimeError(f"Round 0014 exact train accounting failed: {mismatches}")
+        raise RuntimeError(f"{ROUND_LABEL} exact train accounting failed: {mismatches}")
     model_path = os.path.join(output, "model.pt")
     _publish_model(pumap, model_path)
     profiler = pumap._canary_profiler.finalize(
         bench_seconds=pumap._bench_seconds,
         setup_seconds=getattr(pumap, "_setup_seconds", None))
     receipt = {
-        "schema": "round0014-train-receipt-v1",
+        "schema": _schema("train-receipt"),
         "production_config_sha256": TRAIN_CONFIG_SHA256,
         "accepted_capability_sha256": ACCEPTED_CAPABILITY_SHA256,
         "model": expected_input_signature(model_path),
@@ -321,33 +352,33 @@ class StreamedCoordinateArray:
     def __init__(self, root: str) -> None:
         self.root = os.path.realpath(root)
         if self.root != root or not os.path.isdir(self.root) or os.path.islink(root):
-            raise ValueError("Round 0014 coordinate root is not canonical")
+            raise ValueError(f"{ROUND_LABEL} coordinate root is not canonical")
         with open(os.path.join(self.root, "actual-transform.json"), encoding="utf-8") as handle:
             self.record = json.load(handle)
         record_body = {key: self.record[key] for key in self.record
                        if key != "identity_sha256"}
-        if (self.record.get("schema") != "round0014-transform-capability-v1" or
+        if (self.record.get("schema") != _schema("transform-capability") or
                 self.record.get("identity_sha256") !=
                 sha256_bytes(canonical_json(record_body)) or
                 self.record.get("actual_transform", {}).get(
                     "transform_config_sha256") !=
                 sha256_bytes(canonical_json(
                     self.record["actual_transform"]["transform_config"]))):
-            raise ValueError("Round 0014 actual transform record is not sealed")
+            raise ValueError(f"{ROUND_LABEL} actual transform record is not sealed")
         stream = self.record.get("stream_capability")
         capability = stream.get("capability_payload") if isinstance(stream, dict) else None
         if (not isinstance(capability, dict) or
                 stream.get("capability_sha256") !=
                 sha256_bytes(canonical_json(capability))):
-            raise ValueError("Round 0014 stream capability seal changed")
+            raise ValueError(f"{ROUND_LABEL} stream capability seal changed")
         plan = capability["plan"]
         if (capability.get("schema") != "round0013-stream-output-v1" or
                 plan["output"]["shape"] != [30_000_000, 2] or
                 plan["output"]["dtype"] != "<f4"):
-            raise ValueError("Round 0014 coordinate stream capability changed")
+            raise ValueError(f"{ROUND_LABEL} coordinate stream capability changed")
         ordered = capability.get("ordered_chunks")
         if not isinstance(ordered, list) or len(ordered) != 30:
-            raise ValueError("Round 0014 coordinate stream is not thirty chunks")
+            raise ValueError(f"{ROUND_LABEL} coordinate stream is not thirty chunks")
         self._members = []
         cursor = 0
         for position, item in enumerate(ordered):
@@ -359,11 +390,11 @@ class StreamedCoordinateArray:
                     item.get("global_row_stop") != min(cursor + 1_000_000, 30_000_000) or
                     signature.get("sha256") != item.get("sha256") or
                     signature.get("bytes") != item.get("size_bytes")):
-                raise ValueError("Round 0014 coordinate chunk identity/order changed")
+                raise ValueError(f"{ROUND_LABEL} coordinate chunk identity/order changed")
             self._members.append({**item, "path": path, "signature": signature})
             cursor = int(item["global_row_stop"])
         if cursor != 30_000_000:
-            raise ValueError("Round 0014 coordinate stream row coverage changed")
+            raise ValueError(f"{ROUND_LABEL} coordinate stream row coverage changed")
         self.shape = (30_000_000, 2); self.dtype = np.dtype("<f4")
         self.shard_paths = [item["path"] for item in self._members]
 
@@ -385,7 +416,7 @@ class StreamedCoordinateArray:
         else:
             indices = np.asarray(key, dtype=np.int64)
         if indices.ndim != 1 or np.any(indices < 0) or np.any(indices >= len(self)):
-            raise IndexError("Round 0014 coordinate row selection is invalid")
+            raise IndexError(f"{ROUND_LABEL} coordinate row selection is invalid")
         output = np.empty((len(indices), 2), dtype="<f4")
         for member in self._members:
             lo, hi = int(member["global_row_start"]), int(member["global_row_stop"])
@@ -394,7 +425,7 @@ class StreamedCoordinateArray:
                 continue
             array = np.load(member["path"], mmap_mode="r", allow_pickle=False)
             if array.shape != (hi - lo, 2) or array.dtype.str != "<f4":
-                raise ValueError("Round 0014 coordinate chunk changed")
+                raise ValueError(f"{ROUND_LABEL} coordinate chunk changed")
             output[selected] = array[indices[selected] - lo]
             del array
         return output
@@ -418,7 +449,7 @@ def _run_transform(active: dict[str, Any], job: dict[str, Any]) -> None:
     query_path = os.path.join(job["outputs"][0], "heldout-query-coordinates.npy")
     atomic_save_new_npy(query_path, query_coordinates, immutable=True)
     body = {
-        "schema": "round0014-transform-capability-v1",
+        "schema": _schema("transform-capability"),
         **result,
         "heldout_queries": expected_input_signature(QUERIES_PATH),
         "heldout_query_provenance": expected_input_signature(QUERY_PROVENANCE_PATH),
@@ -443,8 +474,8 @@ def _run_high_d_reference(active: dict[str, Any], job: dict[str, Any]) -> None:
     from basemap.panel_v2 import (build_hiD_reference, load_hiD_reference,
                                   sample_anchors, save_hiD_reference, _self_knn)
     output = create_fresh_directory(
-        job["outputs"][0], label="Round 0014 high-D reference output")
-    X = Round0014MaterializedArray(); cfg = _panel_config()
+        job["outputs"][0], label=f"{ROUND_LABEL} high-D reference output")
+    X = RoundMaterializedArray(); cfg = _panel_config()
     centroids = {
         256: np.load(CENTROIDS_K256_PATH, mmap_mode="r", allow_pickle=False),
         1024: np.load(CENTROIDS_K1024_PATH, mmap_mode="r", allow_pickle=False),
@@ -460,7 +491,7 @@ def _run_high_d_reference(active: dict[str, Any], job: dict[str, Any]) -> None:
     hi50_path = os.path.join(output, "recall50-truth.npy")
     atomic_save_new_npy(hi50_path, np.asarray(hi50, dtype=np.int64), immutable=True)
     bundle = {
-        "schema": "round0014-high-d-reference-v1",
+        "schema": _schema("high-d-reference"),
         "accepted_capability_sha256": ACCEPTED_CAPABILITY_SHA256,
         "base_reference": expected_input_signature(reference_path),
         "base_identity_key": reopened["key"],
@@ -484,11 +515,11 @@ def _run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
                                   load_hiD_reference, recall_at_k_from_neighbors,
                                   score_panel)
     from experiments.score_complete_panel import score_query_bundle
-    output = create_fresh_directory(job["outputs"][0], label="Round 0014 panel output")
+    output = create_fresh_directory(job["outputs"][0], label=f"{ROUND_LABEL} panel output")
     transform = active["manifest"]["jobs"][2]["outputs"][0]
     reference_root = active["manifest"]["jobs"][3]["outputs"][0]
     train_root = active["manifest"]["jobs"][1]["outputs"][0]
-    X = Round0014MaterializedArray(); Z = StreamedCoordinateArray(transform)
+    X = RoundMaterializedArray(); Z = StreamedCoordinateArray(transform)
     cfg = _panel_config()
     centroids = {
         256: np.load(CENTROIDS_K256_PATH, mmap_mode="r", allow_pickle=False),
@@ -499,7 +530,7 @@ def _run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
         X, Z, config=cfg, centroids_by_k=centroids,
         hiD_reference=reference, scale_admission=None,
         provenance={
-            "round_id": "0014", "release_sha": active["manifest"]["release_sha"],
+            "round_id": ROUND_ID, "release_sha": active["manifest"]["release_sha"],
             "accepted_capability_sha256": ACCEPTED_CAPABILITY_SHA256,
             "coordinate_capability": expected_input_signature(
                 os.path.join(transform, "actual-transform.json")),
@@ -526,11 +557,11 @@ def _run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
         }, k=15)
     projection = score_query_bundle(
         X=X, Z=Z, Xq=queries, Zq=query_coords, cfg=cfg,
-        truth_cache=cache, label="round0014-seed42", random_seed=123)
+        truth_cache=cache, label=f"{SCHEMA_PREFIX}-seed42", random_seed=123)
     cache_telemetry = cache.telemetry()
     if (cache_telemetry["build_count"] != 1 or cache_telemetry["hit_count"] != 3 or
             cache_telemetry["maximum_k"] != 15):
-        raise RuntimeError("Round 0014 query truth cache build/hit contract changed")
+        raise RuntimeError(f"{ROUND_LABEL} query truth cache contract changed")
     canary_root = active["manifest"]["jobs"][0]["outputs"][0]
     with open(os.path.join(canary_root, "evidence.json"), encoding="utf-8") as handle:
         canary_equivalence = json.load(handle)["scorer_scalar_equivalence"]
@@ -551,7 +582,7 @@ def _run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
         "canary_cache_scalar_equivalence": canary_equivalence["passed"] is True,
     }
     report = {
-        "schema": "round0014-registered-panel-v1",
+        "schema": _schema("registered-panel"),
         "production_config_sha256": TRAIN_CONFIG_SHA256,
         "accepted_capability_sha256": ACCEPTED_CAPABILITY_SHA256,
         "registered_inputs": {
@@ -588,7 +619,7 @@ def _streamed_arange_identity(rows: int, block: int = 1_000_000) -> str:
 
 def _run_semantic_renders(active: dict[str, Any], job: dict[str, Any]) -> None:
     output = create_fresh_directory(
-        job["outputs"][0], label="Round 0014 semantic render output")
+        job["outputs"][0], label=f"{ROUND_LABEL} semantic render output")
     transform = active["manifest"]["jobs"][2]["outputs"][0]
     panel_root = active["manifest"]["jobs"][4]["outputs"][0]
     Z = StreamedCoordinateArray(transform)
@@ -596,7 +627,7 @@ def _run_semantic_renders(active: dict[str, Any], job: dict[str, Any]) -> None:
     sample_ids = np.sort(rng.choice(len(Z), 50_000, replace=False)).astype(np.int64)
     points = Z[sample_ids]
     if not np.isfinite(points).all():
-        raise RuntimeError("Round 0014 semantic render sample contains non-finite points")
+        raise RuntimeError(f"{ROUND_LABEL} semantic render has non-finite points")
     sample_path = os.path.join(output, "sample-semantic-ids.npy")
     rows_path = os.path.join(output, "gathered-row-positions.npy")
     image_path = os.path.join(output, "seed42-map.png")
@@ -611,7 +642,7 @@ def _run_semantic_renders(active: dict[str, Any], job: dict[str, Any]) -> None:
         axis.scatter(points[:, 0], points[:, 1], s=0.15, alpha=0.35,
                      linewidths=0, rasterized=True)
         axis.set_aspect("equal", adjustable="box")
-        axis.set_title("Round 0014 seed-42 30M MiniLM map")
+        axis.set_title(f"{ROUND_LABEL} seed-42 30M MiniLM map")
         axis.set_xticks([]); axis.set_yticks([])
         figure.tight_layout()
         figure.savefig(path, format="png", dpi=180, bbox_inches="tight")
@@ -621,7 +652,7 @@ def _run_semantic_renders(active: dict[str, Any], job: dict[str, Any]) -> None:
     universe = _streamed_arange_identity(len(Z))
     namespace = {
         "schema": "basemap_semantic_id_namespace.v1",
-        "name": "round0014:30m-minilm-row-position",
+        "name": f"{SCHEMA_PREFIX}:30m-minilm-row-position",
         "kind": "row_position",
         "corpus_identity_sha256": ACCEPTED_CAPABILITY_SHA256,
         "universe_sha256": universe, "row_count": len(Z),
@@ -635,7 +666,7 @@ def _run_semantic_renders(active: dict[str, Any], job: dict[str, Any]) -> None:
         "collapsed": bool(np.any(points.std(axis=0) <= 1e-8)),
     }
     render = {
-        "schema": "round0014-semantic-render-v1",
+        "schema": _schema("semantic-render"),
         "semantic_namespace": namespace,
         "sample_seed": 20260717, "sample_size": 50_000,
         "sample_semantic_ids": expected_input_signature(sample_path),
@@ -658,14 +689,14 @@ def main(argv=None) -> int:
     # discovery, or any scientific read.  The process blocks until the live
     # controller releases its one exact child capability.
     from basemap.run_controller import require_round0005_child_admission
-    active = require_round0005_child_admission("experiments/run_round0014_node.py")
+    active = require_round0005_child_admission(RUNTIME_SCRIPT)
     parser = argparse.ArgumentParser()
     parser.add_argument("--queue-manifest", required=True)
     parser.add_argument("--node", choices=[item.node_id for item in NODES], required=True)
     args = parser.parse_args(argv)
     if (os.path.realpath(args.queue_manifest) !=
             os.path.realpath(os.environ["BASEMAP_ROUND0005_MANIFEST"])):
-        raise RuntimeError("Round 0014 argv manifest differs from child capability")
+        raise RuntimeError(f"{ROUND_LABEL} argv manifest differs from child capability")
     job = _node_job(active, args.node)
     handlers = {
         "no_training_seal_canary": _run_canary,

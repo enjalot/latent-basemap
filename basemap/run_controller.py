@@ -544,7 +544,9 @@ def _validate_child_live_authority(manifest: dict, manifest_path: str,
     from .gate_preparation import validate_gate_preparation_receipt
     from .roundwatch_gate import RoundwatchGateAuthority
 
-    if manifest.get("round_id") == "0014":
+    if manifest.get("round_id") == "0015":
+        from .round0015_program import validate_exact_program
+    elif manifest.get("round_id") == "0014":
         from .round0014_program import validate_exact_program
     else:
         from .round0005_program import validate_exact_program
@@ -1430,6 +1432,167 @@ class GpuLease:
         return False
 
 
+def _round0015_terminal_identity(summary: dict) -> dict:
+    """Bind the terminal facts that exist before the lease can be released."""
+    body = {
+        "schema": "round0015-controller-terminal-identity-v1",
+        "controller_id": summary["controller_id"],
+        "controller_pid": summary["controller_pid"],
+        "controller_starttime_ticks": summary["controller_starttime_ticks"],
+        "queue_manifest_path": summary["queue_manifest_path"],
+        "queue_manifest_sha256": summary["queue_manifest_sha256"],
+        "queue_release_sha": summary["queue_release_sha"],
+        "started": summary["started"],
+        "finished": summary["finished"],
+        "terminal_verdict": summary["terminal_verdict"],
+        "stop_reason": summary.get("stop_reason"),
+        "required_jobs": summary["required_jobs"],
+        "completed_jobs": summary["completed_jobs"],
+        "gpu_elapsed_s": summary["gpu_elapsed_s"],
+    }
+    return {**body, "identity_sha256": sha256_bytes(canonical_json(body))}
+
+
+def _round0015_parent_guard_is_owned(path: str) -> dict:
+    """Prove a separate parent open description conflicts before release."""
+    probe, parent = _open_parent_directory_no_symlinks(path)
+    try:
+        try:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError) as exc:
+            if isinstance(exc, BlockingIOError) or getattr(exc, "errno", None) in {11, 13}:
+                return {"parent": parent, "independent_probe_conflicted": True}
+            raise
+        else:
+            fcntl.flock(probe, fcntl.LOCK_UN)
+            raise RuntimeError("Round 0015 parent serialization guard is not owned")
+    finally:
+        os.close(probe)
+
+
+def _round0015_prove_released(path: str) -> dict:
+    """Independently acquire both exact locks nonblocking after close."""
+    guard_fd, parent = _open_parent_directory_no_symlinks(path)
+    leaf_fd = None
+    try:
+        fcntl.flock(guard_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        leaf_fd = os.open(
+            os.path.basename(path),
+            os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW,
+            dir_fd=guard_fd)
+        _ofd_set_lock(leaf_fd, fcntl.F_WRLCK)
+        state = os.fstat(leaf_fd)
+        proof = {
+            "proved_at": _utcnow(),
+            "parent_path": parent,
+            "parent_serialization_lock_nonblocking_acquired": True,
+            "lease_file_ofd_lock_nonblocking_acquired": True,
+            "lease_device": int(state.st_dev),
+            "lease_inode": int(state.st_ino),
+            "lease_links": int(state.st_nlink),
+        }
+        _ofd_set_lock(leaf_fd, fcntl.F_UNLCK)
+        os.close(leaf_fd); leaf_fd = None
+        fcntl.flock(guard_fd, fcntl.LOCK_UN)
+        return proof
+    finally:
+        if leaf_fd is not None:
+            try:
+                _ofd_set_lock(leaf_fd, fcntl.F_UNLCK)
+            except BaseException:
+                pass
+            try:
+                os.close(leaf_fd)
+            except BaseException:
+                pass
+        try:
+            fcntl.flock(guard_fd, fcntl.LOCK_UN)
+        except BaseException:
+            pass
+        os.close(guard_fd)
+
+
+def _round0015_release_with_receipt(
+        lease: GpuLease, *, receipt_path: str,
+        terminal_identity: dict, _fixture_only: bool = False) -> dict:
+    """Neutralize, release, and prove both locks for Round 0015 only."""
+    expected = "/data/latent-basemap/runs/round-0015/queue/lease-release.json"
+    if (os.path.realpath(receipt_path) != receipt_path or
+            (not _fixture_only and receipt_path != expected) or
+            os.path.lexists(receipt_path)):
+        raise RuntimeError("Round 0015 lease-release receipt destination changed")
+    if _fixture_only and os.environ.get("CUDA_VISIBLE_DEVICES") != "":
+        raise RuntimeError("Round 0015 lease-release fixture requires CUDA hidden")
+    acquisition = lease.verify_current()
+    _round0015_parent_guard_is_owned(lease.path)
+    before = os.pread(lease._fd, 4096, 0)
+    before_state = os.fstat(lease._fd)
+    if json.loads(before.decode("utf-8")) != acquisition:
+        raise RuntimeError("Round 0015 lease payload differs from acquisition identity")
+    released_at = _utcnow()
+    neutral = {
+        "schema": "round0015_gpu_lease_released.v1",
+        "state": "released",
+        "controller_id": acquisition["controller_id"],
+        "controller_pid": acquisition["controller_pid"],
+        "controller_starttime_ticks": acquisition["controller_starttime_ticks"],
+        "token": acquisition["token"],
+        "acquired_at": acquisition["acquired_at"],
+        "released_at": released_at,
+        "terminal_identity_sha256": terminal_identity["identity_sha256"],
+    }
+    neutral_bytes = canonical_json(neutral)
+    release_error = None
+    proof = None
+    try:
+        # Both the leaf OFD lock and parent flock are still owned here.
+        lease.verify_current()
+        _round0015_parent_guard_is_owned(lease.path)
+        os.ftruncate(lease._fd, 0)
+        written = os.pwrite(lease._fd, neutral_bytes, 0)
+        if written != len(neutral_bytes):
+            raise RuntimeError("Round 0015 neutral lease payload write was short")
+        os.fsync(lease._fd)
+        if os.pread(lease._fd, len(neutral_bytes) + 1, 0) != neutral_bytes:
+            raise RuntimeError("Round 0015 neutral lease payload did not persist")
+    except BaseException as exc:
+        release_error = f"{type(exc).__name__}: {exc}"
+    try:
+        lease.release()
+    except BaseException as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        release_error = detail if release_error is None else f"{release_error}; {detail}"
+    try:
+        proof = _round0015_prove_released(lease.path)
+    except BaseException as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        release_error = detail if release_error is None else f"{release_error}; {detail}"
+    after = open(lease.path, "rb").read()
+    body = {
+        "schema": "round0015-terminal-lease-release-receipt-v1",
+        "status": "passed" if release_error is None else "failed",
+        "lease_path": lease.path,
+        "lease_device": int(before_state.st_dev),
+        "lease_inode": int(before_state.st_ino),
+        "payload_before_sha256": sha256_bytes(before),
+        "payload_after_sha256": sha256_bytes(after),
+        "payload_before": acquisition,
+        "payload_after": neutral if after == neutral_bytes else None,
+        "neutral_payload_sha256": sha256_bytes(neutral_bytes),
+        "controller_acquisition_identity": acquisition,
+        "terminal_identity": terminal_identity,
+        "released_at": released_at,
+        "lock_proof": proof,
+        "release_error": release_error,
+    }
+    receipt = {**body, "identity_sha256": sha256_bytes(canonical_json(body))}
+    atomic_write_new_json(receipt_path, receipt, immutable=True)
+    if release_error is not None:
+        raise RuntimeError(
+            f"Round 0015 terminal lease release proof failed: {release_error}")
+    return receipt
+
+
 DEFAULT_SERVICE_MARKERS = ("ls-serve", "moonshine-web")   # known always-on viewers
 
 
@@ -2312,6 +2475,7 @@ def _run_admitted_jobs(jobs: Optional[list], *, controller_id: Optional[str], ad
         "controller_claim_sha256": controller_claim_sha256,
         "gpu_elapsed_s": 0.0, "terminal_verdict": "running",
     }
+    round0015 = manifest.get("round_id") == "0015"
     done: set[str] = set()
     cumulative_registry: dict[str, dict] = {}
     lease = None
@@ -2362,17 +2526,24 @@ def _run_admitted_jobs(jobs: Optional[list], *, controller_id: Optional[str], ad
                 manifest, job, gpu_elapsed_s=summary["gpu_elapsed_s"],
                 phase="job-boundary")
             _fresh_job_paths(job)
-            round0014 = manifest.get("round_id") == "0014"
-            if job.scientific_rows >= SCALE_PERFORMANCE_ROWS and not round0014:
+            round0014_or_0015 = manifest.get("round_id") in {"0014", "0015"}
+            if job.scientific_rows >= SCALE_PERFORMANCE_ROWS and not round0014_or_0015:
                 raise RuntimeError("issued Round 0005 program unexpectedly contains a scale node")
             if not job.node_policy:
                 raise RuntimeError("runtime node lacks its canonical derived policy")
-            if round0014:
-                from .round0014_program import NODE_BY_ID
+            if round0014_or_0015:
+                if round0015:
+                    from .round0015_program import NODE_BY_ID
+                    canary_schema = "round0015-canary-verdict-v1"
+                    round_label = "Round 0015"
+                else:
+                    from .round0014_program import NODE_BY_ID
+                    canary_schema = "round0014-canary-verdict-v1"
+                    round_label = "Round 0014"
 
                 expected_training = NODE_BY_ID[job.name].training_performed
                 if job.node_policy.get("training_performed") is not expected_training:
-                    raise RuntimeError("Round 0014 runtime training policy changed")
+                    raise RuntimeError(f"{round_label} runtime training policy changed")
                 if job.name == "train_seed42_30m":
                     canary_output = manifest["jobs"][0]["outputs"][0]
                     verdict_path = os.path.join(canary_output, "verdict.json")
@@ -2381,7 +2552,7 @@ def _run_admitted_jobs(jobs: Optional[list], *, controller_id: Optional[str], ad
                     verdict_body = {key: verdict[key] for key in verdict
                                     if key != "identity_sha256"}
                     evidence = verdict.get("evidence")
-                    if (verdict.get("schema") != "round0014-canary-verdict-v1" or
+                    if (verdict.get("schema") != canary_schema or
                             verdict.get("passed") is not True or
                             verdict.get("optimizer_updates") != 0 or
                             verdict.get("pipeline") != "device_uniform" or
@@ -2401,7 +2572,7 @@ def _run_admitted_jobs(jobs: Optional[list], *, controller_id: Optional[str], ad
                             verdict.get("identity_sha256") !=
                             sha256_bytes(canonical_json(verdict_body))):
                         raise RuntimeError(
-                            "Round 0014 training predecessor is not the passing exact canary")
+                            f"{round_label} training predecessor is not the passing exact canary")
             elif job.node_policy.get("training_performed") is not False:
                 raise RuntimeError("runtime node lacks canonical derived no-training policy")
             preflight = _strict_gpu_preflight(manifest, job)
@@ -2760,10 +2931,9 @@ def _run_admitted_jobs(jobs: Optional[list], *, controller_id: Optional[str], ad
                 active_process = None
         if len(done) != len(jobs):
             raise RuntimeError("not every required manifest node completed")
-        # Terminal success is published while the lease is still held, after a
-        # fresh service gate/control check and a full comparison that includes
-        # every completed output, done marker, log, job receipt, checkpoint, and
-        # gate receipt with filesystem identity (not content hash alone).
+        # Complete the scientific terminal comparison while the lease is still
+        # held.  Round 0015 defers its terminal publication until its exact
+        # neutralization/release/proof receipt exists.
         _verify_cumulative_registry(cumulative_registry)
         terminal_gate = QueueAdmission.terminal_boundary(admission, jobs[-1].name)
         cumulative_registry = _extend_cumulative_registry(
@@ -2800,22 +2970,24 @@ def _run_admitted_jobs(jobs: Optional[list], *, controller_id: Optional[str], ad
         summary["finished"] = _utcnow()
         summary["required_jobs"] = [job.name for job in jobs]
         summary["completed_jobs"] = [job.name for job in jobs]
-        writer.write("terminal", {
-            "controller_id": cid, "terminal_verdict": "passed",
-            "stop_reason": summary["stop_reason"],
-            "gpu_elapsed_s": summary["gpu_elapsed_s"],
-            "cumulative_registry_sha256": summary["cumulative_registry_sha256"],
-        })
-        cumulative_registry = _extend_cumulative_registry(
-            cumulative_registry, job=jobs[-1], checkpoint_root=writer.root,
-            gate_receipts_root=manifest["gate_receipts_dir"])
-        summary["cumulative_registry"] = cumulative_registry
-        summary["cumulative_registry_sha256"] = sha256_bytes(
-            canonical_json(cumulative_registry))
-        _verify_cumulative_registry(cumulative_registry)
-        lease.verify_current()
-        atomic_write_new_json(summary_path, summary, immutable=True)
-        terminal_published = True
+        if not round0015:
+            writer.write("terminal", {
+                "controller_id": cid, "terminal_verdict": "passed",
+                "stop_reason": summary["stop_reason"],
+                "gpu_elapsed_s": summary["gpu_elapsed_s"],
+                "cumulative_registry_sha256": summary[
+                    "cumulative_registry_sha256"],
+            })
+            cumulative_registry = _extend_cumulative_registry(
+                cumulative_registry, job=jobs[-1], checkpoint_root=writer.root,
+                gate_receipts_root=manifest["gate_receipts_dir"])
+            summary["cumulative_registry"] = cumulative_registry
+            summary["cumulative_registry_sha256"] = sha256_bytes(
+                canonical_json(cumulative_registry))
+            _verify_cumulative_registry(cumulative_registry)
+            lease.verify_current()
+            atomic_write_new_json(summary_path, summary, immutable=True)
+            terminal_published = True
     except Exception as exc:
         if active_process is not None and active_process.poll() is None:
             _terminate_process_group(active_process)
@@ -2833,18 +3005,60 @@ def _run_admitted_jobs(jobs: Optional[list], *, controller_id: Optional[str], ad
             "gpu_elapsed_s": summary["gpu_elapsed_s"],
         })
     finally:
-        if lease is not None:
-            lease.release()
-        if not terminal_published:
-            summary["finished"] = _utcnow()
+        if round0015 and lease is not None:
+            summary["finished"] = summary.get("finished") or _utcnow()
             summary["required_jobs"] = [job.name for job in (jobs or [])]
             summary["completed_jobs"] = [job.name for job in (jobs or [])
                                          if job.name in done]
+            terminal_identity = _round0015_terminal_identity(summary)
+            summary["pre_release_terminal_identity"] = terminal_identity
+            try:
+                release_receipt = _round0015_release_with_receipt(
+                    lease,
+                    receipt_path=manifest["lease_release_receipt"],
+                    terminal_identity=terminal_identity)
+                summary["lease_release_receipt"] = expected_input_signature(
+                    manifest["lease_release_receipt"])
+                summary["lease_release_receipt_identity_sha256"] = \
+                    release_receipt["identity_sha256"]
+            except BaseException as release_exc:
+                # The target helper normally releases before reporting a failed
+                # proof.  This cleanup covers only validation failures that
+                # happened before it reached that release step.
+                if lease._fd is not None or lease._guard_fd is not None:
+                    try:
+                        lease.release()
+                    except BaseException as cleanup_exc:
+                        try:
+                            release_exc.add_note(
+                                f"Round 0015 fallback lease cleanup failed: "
+                                f"{cleanup_exc!r}")
+                        except AttributeError:
+                            pass
+                previous = summary.get("stop_reason")
+                detail = f"{type(release_exc).__name__}: {release_exc}"
+                summary["terminal_verdict"] = "failed"
+                summary["stop_reason"] = (
+                    f"{previous}; terminal lease release failed: {detail}"
+                    if previous else f"terminal lease release failed: {detail}")
+                if os.path.isfile(manifest["lease_release_receipt"]):
+                    summary["lease_release_receipt"] = expected_input_signature(
+                        manifest["lease_release_receipt"])
+        elif lease is not None:
+            lease.release()
+        if not terminal_published:
+            summary["finished"] = summary.get("finished") or _utcnow()
+            summary["required_jobs"] = summary.get(
+                "required_jobs", [job.name for job in (jobs or [])])
+            summary["completed_jobs"] = summary.get(
+                "completed_jobs", [job.name for job in (jobs or [])
+                                   if job.name in done])
             writer.write("terminal", {
                 "controller_id": cid,
                 "terminal_verdict": summary["terminal_verdict"],
                 "stop_reason": summary.get("stop_reason"),
                 "gpu_elapsed_s": summary["gpu_elapsed_s"],
+                "lease_release_receipt": summary.get("lease_release_receipt"),
             })
             atomic_write_new_json(summary_path, summary, immutable=True)
     return summary

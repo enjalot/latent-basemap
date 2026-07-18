@@ -51,6 +51,26 @@ ROUND0014_RUNTIME_ENTRYPOINTS = (
     "experiments/run_round0014_node.py",
 )
 
+# The additive Round-0015 closure keeps the reviewed scientific implementation
+# but binds only its new exact-service construction, target wrapper, staging,
+# and lease-release behavior.
+ROUND0015_RUNTIME_ENTRYPOINTS = (
+    "basemap/gate_preparation.py",
+    "basemap/queue_admission.py",
+    "basemap/release_preflight.py",
+    "basemap/round0014_program.py",
+    "basemap/round0014_transform.py",
+    "basemap/round0015_admission.py",
+    "basemap/round0015_program.py",
+    "basemap/round0015_service.py",
+    "basemap/round0015_staging.py",
+    "basemap/roundwatch_gate.py",
+    "basemap/run_controller.py",
+    "basemap/source_closure.py",
+    "experiments/run_round0014_node.py",
+    "experiments/run_round0015_node.py",
+)
+
 # Dynamic imports and package-level exports cannot all be discovered from an
 # AST edge.  Keep this list narrowly focused and assert it is present in the
 # generated closure.  In particular these are the omissions called out by the
@@ -217,6 +237,15 @@ def round0014_source_closure_receipt(
         schema="round0014-runtime-source-closure-v1")
 
 
+def round0015_source_closure_receipt(
+        repo_root: str, *, require_tracked: bool = True) -> dict:
+    """Bind the exact tracked runtime for the one Round 0015 queue."""
+    return _source_closure_receipt(
+        os.path.realpath(repo_root), require_tracked=require_tracked,
+        entrypoints=ROUND0015_RUNTIME_ENTRYPOINTS,
+        schema="round0015-runtime-source-closure-v1")
+
+
 def _source_closure_receipt(
         repo_root: str, *, require_tracked: bool,
         entrypoints: tuple[str, ...], schema: str) -> dict:
@@ -280,6 +309,21 @@ def validate_round0014_source_closure_receipt(
         repo_root, require_tracked=True)
     if current != recorded:
         raise RuntimeError("Round 0014 tracked runtime import closure changed")
+    return current
+
+
+def validate_round0015_source_closure_receipt(
+        recorded: dict, *, repo_root: str) -> dict:
+    """Reopen the exact Round 0015 source closure without variants."""
+    if (not isinstance(recorded, dict) or
+            recorded.get("schema") != "round0015-runtime-source-closure-v1" or
+            tuple(recorded.get("entrypoints") or ()) !=
+            ROUND0015_RUNTIME_ENTRYPOINTS):
+        raise RuntimeError("Round 0015 source closure identity/entrypoints changed")
+    current = round0015_source_closure_receipt(
+        repo_root, require_tracked=True)
+    if current != recorded:
+        raise RuntimeError("Round 0015 tracked runtime import closure changed")
     return current
 
 

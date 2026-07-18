@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from .artifact_identity import canonical_json, expected_input_signature, sha256_bytes, sha256_file
@@ -40,6 +41,60 @@ def _validate_bound_release(manifest: dict[str, Any], *, fixture_only: bool) -> 
         expected_signature=matches[0])
 
 
+def _round0015_service_binding(manifest: dict[str, Any], *,
+                               require_current: bool) -> dict[str, Any]:
+    """Bind the single construction snapshot and re-probe its exact service."""
+    matches = [entry["signature"] for entry in manifest.get("program_inputs", [])
+               if entry.get("role") == "service_decision"]
+    if len(matches) != 1:
+        raise RuntimeError("Round 0015 gate has no unique service decision")
+    signature = matches[0]
+    from .round0015_service import load_service_decision
+    decision = load_service_decision(
+        signature["canonical_path"],
+        environment_manifest=manifest["environment_manifest"],
+        require_current=require_current)
+    snapshot_body = {
+        "gpu": decision["gpu"],
+        "declared_services": decision["declared_services"],
+        "memory_reservation": decision["memory_reservation"],
+        "allowed_validation": decision["allowed_validation"],
+    }
+    return {
+        "schema": "round0015-service-construction-binding-v1",
+        "policy": decision["policy"],
+        "decision_signature": signature,
+        "decision_identity_sha256": decision["identity_sha256"],
+        "construction_snapshot_sha256": sha256_bytes(
+            canonical_json(snapshot_body)),
+        "allowed_processes": decision["allowed_processes"],
+        "current_identity_revalidated": bool(require_current),
+        "revalidated_at_utc": datetime.now(timezone.utc).isoformat(
+            timespec="microseconds"),
+    }
+
+
+def _validate_round0015_service_binding(value: Any,
+                                        manifest: dict[str, Any]) -> None:
+    if not isinstance(value, dict) or set(value) != {
+            "schema", "policy", "decision_signature",
+            "decision_identity_sha256", "construction_snapshot_sha256",
+            "allowed_processes", "current_identity_revalidated",
+            "revalidated_at_utc"}:
+        raise RuntimeError("Round 0015 gate service binding fields changed")
+    expected = _round0015_service_binding(manifest, require_current=False)
+    stable = set(expected) - {"revalidated_at_utc", "current_identity_revalidated"}
+    try:
+        checked = datetime.fromisoformat(
+            value["revalidated_at_utc"].replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise RuntimeError("Round 0015 gate service revalidation time is invalid") from exc
+    if (checked.tzinfo is None or value["current_identity_revalidated"] is not True or
+            any(value[key] != expected[key] for key in stable) or
+            value["allowed_processes"] != manifest.get("allowed_processes")):
+        raise RuntimeError("Round 0015 gate service snapshot/decision binding changed")
+
+
 def validate_gate_preparation_receipt(path: str, *, manifest_path: str,
                                       manifest: dict[str, Any]) -> dict[str, Any]:
     with open(path, encoding="utf-8") as handle:
@@ -51,6 +106,9 @@ def validate_gate_preparation_receipt(path: str, *, manifest_path: str,
         "schema", "manifest_path", "manifest_sha256", "round_sha256",
         "release_sha", "release_preflight_identity", "gate", "identity_sha256",
     }
+    round0015 = manifest.get("round_id") == "0015"
+    if round0015:
+        expected_fields.add("service_construction")
     gate = receipt.get("gate") if isinstance(receipt, dict) else None
     fixture_only = manifest.get("schema") == "round0005_fixture_queue.v2"
     release = _validate_bound_release(manifest, fixture_only=fixture_only)
@@ -75,6 +133,10 @@ def validate_gate_preparation_receipt(path: str, *, manifest_path: str,
     expected_status = "pending"
     fixture_approval = (not fixture_only or (
         isinstance(gate, dict) and gate.get("approval") is None))
+    if round0015:
+        _validate_round0015_service_binding(
+            receipt.get("service_construction") if isinstance(receipt, dict) else None,
+            manifest)
     if (not isinstance(receipt, dict) or set(receipt) != expected_fields or
             os.path.realpath(path) != os.path.realpath(
                 manifest["gate_preparation_receipt"]) or
@@ -213,6 +275,59 @@ def seal_exact_round0014_prepared_gate(
         "round_sha256": manifest["round_sha256"],
         "release_sha": manifest["release_sha"],
         "release_preflight_identity": release["identity_sha256"],
+        "gate": gate,
+    }
+    receipt = {**body, "identity_sha256": sha256_bytes(canonical_json(body))}
+    atomic_write_new_json(receipt_path, receipt, immutable=True)
+    return validate_gate_preparation_receipt(
+        receipt_path, manifest_path=path, manifest=manifest)
+
+
+def seal_exact_round0015_prepared_gate(
+        manifest_path: str, gate: dict[str, Any]) -> dict[str, Any]:
+    """Seal the sole externally invoked Round-0015 pending owner gate."""
+    path = os.path.realpath(manifest_path)
+    with open(path, encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    if manifest.get("round_id") != "0015":
+        raise RuntimeError("external prepared-gate sealing is Round 0015 only")
+    validate_queue_manifest(manifest, path)
+    manifest_sha = sha256_file(path)
+    release = _validate_bound_release(manifest, fixture_only=False)
+    receipt_path = manifest["gate_preparation_receipt"]
+    refuse_existing(receipt_path, label="Round 0015 gate preparation receipt")
+    # This is the gate-preparation re-probe required by allow_exact_service.
+    service_construction = _round0015_service_binding(
+        manifest, require_current=True)
+    try:
+        gpu_hours = float(gate.get("gpu_hours", -1))
+        expires_at = float(gate.get("expires_at", 0))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise RuntimeError("Round 0015 prepared gate has malformed cap/expiry") from exc
+    if (not isinstance(gate, dict) or
+            not isinstance(gate.get("id"), int) or
+            isinstance(gate.get("id"), bool) or gate["id"] <= 0 or
+            gate.get("program") != manifest["program"] or
+            gate.get("round_id") != "0015" or
+            gate.get("round_sha") != manifest["round_sha256"] or
+            gate.get("release_sha") != manifest["release_sha"] or
+            gate.get("env_sha") != manifest["environment_freeze_sha"] or
+            gate.get("env_identity_sha") != manifest["environment_identity_sha"] or
+            not re.fullmatch(r"[0-9a-f]{64}", str(gate.get("reviews_sha", ""))) or
+            gate.get("queue_manifest_path") != path or
+            gate.get("queue_manifest_sha") != manifest_sha or
+            gpu_hours != float(manifest["gpu_hours_cap"]) or
+            gate.get("status") != "pending" or gate.get("approval") is not None or
+            expires_at <= time.time()):
+        raise RuntimeError("Round 0015 CLI did not return the exact pending owner gate")
+    body = {
+        "schema": "round0005_gate_preparation_receipt.v1",
+        "manifest_path": path,
+        "manifest_sha256": manifest_sha,
+        "round_sha256": manifest["round_sha256"],
+        "release_sha": manifest["release_sha"],
+        "release_preflight_identity": release["identity_sha256"],
+        "service_construction": service_construction,
         "gate": gate,
     }
     receipt = {**body, "identity_sha256": sha256_bytes(canonical_json(body))}

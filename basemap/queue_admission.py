@@ -330,6 +330,10 @@ def _validate_parent_chain(path: str, *, label: str) -> None:
 
 def validate_queue_manifest(data: dict, path: str) -> dict[str, Any]:
     """Validate the exact production program before gate, lease, or output work."""
+    if isinstance(data, dict) and data.get("round_id") == "0015":
+        from .round0015_admission import validate_round0015_queue_manifest
+
+        return validate_round0015_queue_manifest(data, path)
     if isinstance(data, dict) and data.get("round_id") == "0014":
         # The Round-0005 seal remains byte-for-byte useful, but its scientific
         # program is not promoted.  Round 0014 has one target-specific static
@@ -946,6 +950,11 @@ class QueueAdmission:
                          include_output_absence: bool) -> dict[str, Any]:
         if self.fixture_only:
             source_closure = self.manifest["source_closure"]
+        elif self.manifest.get("round_id") == "0015":
+            from .source_closure import validate_round0015_source_closure_receipt
+
+            source_closure = validate_round0015_source_closure_receipt(
+                self.manifest["source_closure"], repo_root=self.repo_root)
         elif self.manifest.get("round_id") == "0014":
             from .source_closure import validate_round0014_source_closure_receipt
 
