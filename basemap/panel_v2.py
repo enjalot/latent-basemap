@@ -47,9 +47,15 @@ D_K_HIT = 10
 
 
 def _require_cuda_scoring_admission() -> dict:
-    """Require the non-copyable live controller capability before CUDA probing."""
-    from .run_controller import require_active_round0005_child_admission
-    return require_active_round0005_child_admission()
+    """Slim-protocol seam: CUDA scoring needs no controller capability.
+
+    The retired round-0005 controller installed a live in-process capability
+    here; under the v2 slim protocol (basemap-100m/README.md) the launch path
+    carries no process-identity authority. Scientific admission (pack seals,
+    thresholds, guards) is enforced elsewhere and unchanged.
+    """
+    return {"schema": "slim-runner-scoring-admission-v1",
+            "authority": "slim-runner"}
 
 
 def _torch_scoring_device():
@@ -1376,33 +1382,19 @@ def _require_score_panel_scale_admission(X, scale_admission):
             raise RuntimeError("below-scale score_panel call cannot carry scale admission")
         return None
     # Rounds 0014--0017 do not promote the diagnostic Round-0005 scale
-    # certificate.  Their exact accepted pack and live admitted controller
-    # capability are the scale authority.  Keep this branch type- and
-    # round-specific so no historical or arbitrary >=8M matrix can enter it.
+    # certificate.  Their exact accepted pack is the scale authority: the
+    # pack-seal validation below is scientific admission and stays; the
+    # retired controller-capability requirement does not (slim protocol v2).
     try:
         from .round0014_program import (Round0014MaterializedArray,
                                        validate_device_uniform_pack)
-        from .run_controller import require_active_round0005_child_admission
 
         if type(X) is Round0014MaterializedArray:
-            active = require_active_round0005_child_admission()
-            manifest = active.get("manifest", {})
-            round_id = manifest.get("round_id")
-            expected_authority = (
-                "autonomous-gpu" if round_id == "0017" else "owner-gpu")
-            if (round_id not in {"0014", "0015", "0016", "0017"} or
-                    manifest.get("execution_authority") != expected_authority):
-                raise RuntimeError(
-                    "Round 0014--0017 scale scorer lacks its admitted capability")
             pack = validate_device_uniform_pack(
-                X, manifest["input_staging"]["graph_path"]
-                if "graph_path" in manifest["input_staging"] else
-                "/data/checkpoints/pumap/edges_30m_k15.npz")
+                X, "/data/checkpoints/pumap/edges_30m_k15.npz")
             return {
-                "schema": f"round{round_id}-scale-admission-v1",
-                "identity_sha256": active["capability_sha256"],
+                "schema": "round-slim-scale-admission-v1",
                 "accepted_pack": pack,
-                "controller_node": active["node_id"],
             }
     except ImportError:
         pass

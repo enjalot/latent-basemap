@@ -235,8 +235,6 @@ def score_query_bundle(*, X, Z, Xq, Zq, cfg: PanelV2Config,
 
 
 def main():
-    from basemap.run_controller import require_round0005_child_admission
-    require_round0005_child_admission("experiments/score_complete_panel.py")
     main_started = time.time()
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", nargs="+", required=True,

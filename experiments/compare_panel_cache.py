@@ -274,18 +274,14 @@ def _run_complete_panel_child(*, runs: list[str], testbed: str, query_artifact: 
         cache_mode=cache_mode, dim=dim, frac=frac, n_anchors=n_anchors,
         seed=seed, require_nine_maps=require_nine_maps)
     contract = complete_panel_child_output_contract(out_root, cache_mode)
-    from basemap.run_controller import run_round0005_admitted_descendant
-    pass_fds = _inherited_lease_pass_fds()
-    if len(pass_fds) != 1:
-        raise RuntimeError("scalar-equivalence child lacks its exact inherited lease")
-    proc = run_round0005_admitted_descendant(
+    proc = subprocess.run(
         argv, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     atomic_write_new_json(
         contract["child_process_receipt"],
         {"argv": argv, "returncode": proc.returncode,
          "stdout": proc.stdout, "stderr": proc.stderr,
-         "inherited_lease_fd": (pass_fds[0] if pass_fds else None),
+         "inherited_lease_fd": None,
          "output_contract": contract}, immutable=True)
     if proc.returncode:
         raise RuntimeError(
@@ -369,8 +365,6 @@ def run_equivalence(*, fixture_path: str, out_root: str) -> dict:
 
 
 def main(argv=None) -> int:
-    from basemap.run_controller import require_round0005_child_admission
-    require_round0005_child_admission("experiments/compare_panel_cache.py")
     parser = argparse.ArgumentParser()
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--fixture")

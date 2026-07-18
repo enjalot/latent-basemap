@@ -163,11 +163,6 @@ def _gpu_knn_ids(X, anchor_idx: np.ndarray, k: int, device="cuda", achunk: int =
     (radii for density_preservation) — computed from the *same* topk matrix, so
     recall and density share one GPU pass instead of two full-corpus kNNs.
     """
-    if str(device).lower().startswith("cuda"):
-        # The legacy CLI is retired, but imported library calls must also be
-        # incapable of selecting CUDA outside the genuine Round 0005 child.
-        from .run_controller import require_active_round0005_child_admission
-        require_active_round0005_child_admission()
     import torch
     Xt = torch.from_numpy(np.ascontiguousarray(np.asarray(X))).to(device, torch.float32)
     # ||row||^2 in blocks — (Xt*Xt) would materialize a full second copy of Xt.
