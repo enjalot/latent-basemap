@@ -29,7 +29,9 @@ ROUNDWATCH_URL = "http://127.0.0.1:8710"
 ROUNDWATCH_STATE_DIR = "/home/enjalot/.agent/rounds"
 MINIMUM_WORKSHOP_COMMIT = "14a338d43d130338b1056451437d33070d7d57d5"
 ISSUED_PROTOCOL_COMMIT = "d9bc73d6823bb05fabd1b5e0722a9b2f2de3ad11"
-ROUNDWATCH_AUTHORITY_VALUES = {"planner-no-training", "planner-gpu", "owner-gpu"}
+ROUNDWATCH_AUTHORITY_VALUES = {
+    "planner-no-training", "planner-gpu", "autonomous-gpu", "owner-gpu",
+}
 ROUNDWATCH_ISOLATED_BOOTSTRAP = (
     "import runpy,sys\n"
     f"sys.path.insert(0, {ROUNDWATCH_ROUNDS_DIR!r})\n"

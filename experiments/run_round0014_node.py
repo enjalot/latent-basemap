@@ -68,6 +68,21 @@ def configure_round0016() -> None:
     NODES = program.NODES
 
 
+def configure_round0017() -> None:
+    """Select the path-bound Round-0017 metadata adapter before admission."""
+    global ROUND_ID, ROUND_LABEL, SCHEMA_PREFIX, RUNTIME_SCRIPT
+    global RoundMaterializedArray, TRAIN_CONFIG, TRAIN_CONFIG_SHA256, NODES
+    program = importlib.import_module("basemap.round0017_program")
+    ROUND_ID = "0017"
+    ROUND_LABEL = "Round 0017"
+    SCHEMA_PREFIX = "round0017"
+    RUNTIME_SCRIPT = "experiments/run_round0017_node.py"
+    RoundMaterializedArray = program.Round0017MaterializedArray
+    TRAIN_CONFIG = program.TRAIN_CONFIG
+    TRAIN_CONFIG_SHA256 = program.TRAIN_CONFIG_SHA256
+    NODES = program.NODES
+
+
 def _schema(name: str) -> str:
     return f"{SCHEMA_PREFIX}-{name}-v1"
 

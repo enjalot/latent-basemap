@@ -166,9 +166,10 @@ def validate_gate_preparation_receipt(path: str, *, manifest_path: str,
     }
     round0015 = manifest.get("round_id") == "0015"
     round0016 = manifest.get("round_id") == "0016"
+    round0017 = manifest.get("round_id") == "0017"
     if round0015:
         expected_fields.add("service_construction")
-    if round0016:
+    if round0016 or round0017:
         expected_fields.add("exclusive_gpu_construction")
     gate = receipt.get("gate") if isinstance(receipt, dict) else None
     fixture_only = manifest.get("schema") == "round0005_fixture_queue.v2"
@@ -198,7 +199,7 @@ def validate_gate_preparation_receipt(path: str, *, manifest_path: str,
         _validate_round0015_service_binding(
             receipt.get("service_construction") if isinstance(receipt, dict) else None,
             manifest)
-    if round0016:
+    if round0016 or round0017:
         _validate_round0016_exclusive_binding(
             receipt.get("exclusive_gpu_construction")
             if isinstance(receipt, dict) else None, manifest)
@@ -287,6 +288,9 @@ def prepare_gate(manifest_path: str, *, _fixture_authority=None,
         "release_preflight_identity": release["identity_sha256"],
         "gate": gate,
     }
+    if manifest.get("round_id") == "0017":
+        body["exclusive_gpu_construction"] = _round0016_exclusive_binding(
+            manifest, require_current=True)
     receipt = {**body, "identity_sha256": sha256_bytes(canonical_json(body))}
     atomic_write_new_json(receipt_path, receipt, immutable=True)
     if _fixture_phase_hook is not None:
