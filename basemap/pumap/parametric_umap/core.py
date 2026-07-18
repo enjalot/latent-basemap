@@ -1177,9 +1177,17 @@ class ParametricUMAP:
         if 'cuda' in str(self.device):
             torch.backends.cudnn.benchmark = True
 
-        # Mixed precision: only on CUDA (MPS and CPU don't support GradScaler)
-        use_amp = self.use_amp and 'cuda' in str(self.device)
-        scaler = torch.amp.GradScaler(self.device, enabled=use_amp) if use_amp else None
+        # Mixed precision: only on CUDA (MPS and CPU don't support GradScaler).
+        # use_amp accepts True (fp16 autocast + GradScaler) or "bf16" (bfloat16
+        # autocast, fp32 exponent range, no loss scaling — immune to the fp16
+        # overflow that killed the 30M/h2048 run at step 408k).
+        # NB: `self.use_amp and ...` would collapse the "bf16" string to the
+        # boolean second operand — preserve the mode value exactly.
+        use_amp = self.use_amp if 'cuda' in str(self.device) else False
+        amp_bf16 = use_amp == "bf16"
+        amp_dtype = torch.bfloat16 if amp_bf16 else None
+        scaler = (torch.amp.GradScaler(self.device, enabled=True)
+                  if use_amp and not amp_bf16 else None)
 
         optimizer = AdamW(self.model.parameters(), lr=self.learning_rate)
 
@@ -1232,6 +1240,8 @@ class ParametricUMAP:
             # P0-3: budget accounting — H successful positive-LR updates.
             "lr_used_first": None, "lr_used_last": None, "next_lr": None,
             "budget_satisfied": None, "use_amp": bool(use_amp),
+            "amp_dtype": ("bfloat16" if amp_bf16 else
+                          ("float16" if use_amp else None)),
             # P1: the ACTUAL input pipeline + positive-sampling semantics that ran
             # (device|hybrid|legacy, weighted|uniform), stamped before update 0.
             **{f"pipeline_{k}": v for k, v in getattr(self, "_pipeline_info", {}).items()},
@@ -1339,7 +1349,7 @@ class ParametricUMAP:
 
                 _fwd_ph = _ph("forward")   # S2: forward + kernel + BCE loss
                 _fwd_ph.__enter__()
-                with torch.autocast(device_type='cuda' if use_amp else 'cpu', enabled=use_amp):
+                with torch.autocast(device_type='cuda' if use_amp else 'cpu', enabled=bool(use_amp), dtype=amp_dtype):
                     # Forward pass
                     src_embeddings = self.model(src_values)
                     dst_embeddings = self.model(dst_values)
@@ -1397,7 +1407,7 @@ class ParametricUMAP:
                                 self._sample_midnear_features(
                                     dataset, mn_m, n_train_rows, mn_rng)
                         with torch.autocast(device_type='cuda' if use_amp else 'cpu',
-                                            enabled=use_amp):
+                                            enabled=bool(use_amp), dtype=amp_dtype):
                             z_a = self.model(anchor_feats)
                             z_b = self.model(partner_feats)
                         # PaCMAP mid-near loss: d~ = ||z_a - z_b||^2 + 1;
@@ -1450,7 +1460,7 @@ class ParametricUMAP:
                             self._hold_sampled_row_ids.extend(np.asarray(row_np).tolist())
                     h_tgt = self._anchor_targets_dev.index_select(0, pool_idx)
                     with torch.autocast(device_type='cuda' if use_amp else 'cpu',
-                                        enabled=use_amp):
+                                        enabled=bool(use_amp), dtype=amp_dtype):
                         z_h = self.model(h_feats)
                     hold_loss = (z_h.float() - h_tgt.float()).pow(2).sum(dim=1).mean()
                     loss = loss + self.anchor_hold_weight * hold_loss

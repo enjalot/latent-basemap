@@ -83,6 +83,21 @@ def configure_round0017() -> None:
     NODES = program.NODES
 
 
+def configure_round0018() -> None:
+    """Select the bf16-autocast Round-0018 metadata adapter before admission."""
+    global ROUND_ID, ROUND_LABEL, SCHEMA_PREFIX, RUNTIME_SCRIPT
+    global RoundMaterializedArray, TRAIN_CONFIG, TRAIN_CONFIG_SHA256, NODES
+    program = importlib.import_module("basemap.round0018_program")
+    ROUND_ID = "0018"
+    ROUND_LABEL = "Round 0018"
+    SCHEMA_PREFIX = "round0018"
+    RUNTIME_SCRIPT = "experiments/run_round0018_node.py"
+    RoundMaterializedArray = program.Round0018MaterializedArray
+    TRAIN_CONFIG = program.TRAIN_CONFIG
+    TRAIN_CONFIG_SHA256 = program.TRAIN_CONFIG_SHA256
+    NODES = program.NODES
+
+
 def _schema(name: str) -> str:
     return f"{SCHEMA_PREFIX}-{name}-v1"
 
@@ -334,7 +349,10 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
     # bounded by the trainer's consecutive/fraction guards) and offset the
     # attempted/finite-loss batch counts; genuine non-finites stay at zero.
     amp_skips = int(stats.get("amp_overflow_skips") or 0)
+    requested_amp = TRAIN_CONFIG["optimizer"]["use_amp"]
     exact = {
+        "amp_dtype": ("bfloat16" if requested_amp == "bf16" else
+                      ("float16" if requested_amp else None)),
         "schedule_version": "cosine-v3-positive-budget",
         "lr_horizon": 500_000,
         "positive_lr_optimizer_steps": 500_000,
