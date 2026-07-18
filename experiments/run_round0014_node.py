@@ -473,6 +473,12 @@ class StreamedCoordinateArray:
             indices = np.arange(start, stop, dtype=np.int64)
         else:
             indices = np.asarray(key, dtype=np.int64)
+        # N-D fancy indexing (e.g. panel kNN gather Z[nb] with nb shape (nq,k))
+        # mirrors numpy: gather on the flattened row ids, restore the index
+        # shape with the trailing coordinate axis. Bounds are still enforced.
+        if indices.ndim >= 2:
+            flat = self[indices.reshape(-1)]
+            return flat.reshape(indices.shape + (2,))
         if indices.ndim != 1 or np.any(indices < 0) or np.any(indices >= len(self)):
             raise IndexError(f"{ROUND_LABEL} coordinate row selection is invalid")
         output = np.empty((len(indices), 2), dtype="<f4")
