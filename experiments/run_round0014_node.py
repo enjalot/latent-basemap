@@ -120,6 +120,71 @@ def configure_round0019() -> None:
     NODES = program.NODES
 
 
+def configure_round0020() -> None:
+    """Select the CPU-only global duplicate-census node."""
+    global ROUND_ID, ROUND_LABEL, SCHEMA_PREFIX, RUNTIME_SCRIPT
+    global _run_canary
+    ROUND_ID = "0020"
+    ROUND_LABEL = "Round 0020"
+    SCHEMA_PREFIX = "round0020"
+    RUNTIME_SCRIPT = "experiments/duplicate_census.py"
+    _run_canary = _run_round0020_duplicate_census
+
+
+def configure_round0022() -> None:
+    """Select the MiniLM universality-panel nodes."""
+    global ROUND_ID, ROUND_LABEL, SCHEMA_PREFIX, RUNTIME_SCRIPT
+    global _run_canary, _run_panel, _run_semantic_renders
+    ROUND_ID = "0022"
+    ROUND_LABEL = "Round 0022"
+    SCHEMA_PREFIX = "round0022"
+    RUNTIME_SCRIPT = "experiments/universality_panel.py"
+    _run_canary = _run_round0022_canary
+    _run_panel = _run_round0022_panel
+    _run_semantic_renders = _run_round0022_renders
+
+
+def _run_round0020_duplicate_census(active: dict[str, Any], job: dict[str, Any]) -> None:
+    output = job["outputs"][0]
+    configure_round0019()
+    coordinates = StreamedCoordinateArray(
+        "/data/latent-basemap/runs/round-0019/queue/artifacts/coordinates"
+    )
+    from basemap.duplicate_census import build_duplicate_census
+
+    build_duplicate_census(
+        pack_manifest="/data/latent-basemap/runs/round-0013/30m-input-pack-v1.json",
+        output_root=output,
+        coordinates=coordinates,
+        coordinate_receipt_path=(
+            "/data/latent-basemap/runs/round-0019/queue/artifacts/coordinates/"
+            "actual-transform.json"
+        ),
+    )
+
+
+def _run_round0022_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
+    from experiments.universality_panel import run_canary
+
+    run_canary(output_root=job["outputs"][0])
+
+
+def _run_round0022_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
+    from experiments.universality_panel import run_panel
+
+    canary_path = os.path.join(active["manifest"]["jobs"][0]["outputs"][0], "verdict.json")
+    run_panel(canary_path=canary_path, output_root=job["outputs"][0])
+
+
+def _run_round0022_renders(active: dict[str, Any], job: dict[str, Any]) -> None:
+    from experiments.universality_panel import run_renders
+
+    panel_path = os.path.join(
+        active["manifest"]["jobs"][1]["outputs"][0], "universality-panel-v1.json"
+    )
+    run_renders(panel_path=panel_path, output_root=job["outputs"][0])
+
+
 def _schema(name: str) -> str:
     return f"{SCHEMA_PREFIX}-{name}-v1"
 
