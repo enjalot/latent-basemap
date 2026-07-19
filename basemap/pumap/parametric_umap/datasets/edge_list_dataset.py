@@ -163,6 +163,8 @@ class DeviceEdgeSampler:
                  random_state=0, positive_target_mode="binary",
                  weighted_edge_sampling=False,
                  uniform_with_replacement=False,
+                 positive_source_rows=None,
+                 fixed_edges_per_source=None,
                  device="cpu"):
         self.dataset = dataset          # DeviceArrayDataset
         self.device = device
@@ -171,9 +173,41 @@ class DeviceEdgeSampler:
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.positive_target_mode = positive_target_mode
-        self.n_pos = int(len(sources))
+        self.source_n_pos = int(len(sources))
         self.num_pos = max(1, int(batch_size * pos_ratio))
         self.num_neg = batch_size - self.num_pos
+
+        self.positive_source_rows_t = None
+        self.fixed_edges_per_source = None
+        if (positive_source_rows is None) != (fixed_edges_per_source is None):
+            raise ValueError(
+                "positive_source_rows and fixed_edges_per_source must be supplied together"
+            )
+        if positive_source_rows is not None:
+            allowed = np.asarray(positive_source_rows, dtype=np.int64)
+            k = int(fixed_edges_per_source)
+            if (
+                allowed.ndim != 1
+                or len(allowed) < 2
+                or not np.array_equal(allowed, np.unique(allowed))
+                or allowed[0] < 0
+                or allowed[-1] >= self.n_nodes
+                or k <= 0
+                or self.source_n_pos != self.n_nodes * k
+                or weighted_edge_sampling
+                or not uniform_with_replacement
+            ):
+                raise ValueError(
+                    "capped source universe requires sorted unique in-range rows, "
+                    "a fixed-k graph, and uniform-with-replacement sampling"
+                )
+            self.positive_source_rows_t = torch.as_tensor(
+                allowed, dtype=torch.int32, device=device
+            )
+            self.fixed_edges_per_source = k
+            self.n_pos = len(allowed) * k
+        else:
+            self.n_pos = self.source_n_pos
 
         if positive_target_mode not in ("binary", "probability"):
             raise ValueError(f"Unknown positive_target_mode: {positive_target_mode}")
@@ -260,6 +294,23 @@ class DeviceEdgeSampler:
 
     def _draw_idx(self, m):
         """Draw m positive-edge indices (per-batch mode)."""
+        if self.positive_source_rows_t is not None:
+            positions = torch.randint(
+                0,
+                len(self.positive_source_rows_t),
+                (m,),
+                generator=self.gen,
+                device=self.device,
+            )
+            rows = self.positive_source_rows_t.index_select(0, positions).long()
+            slots = torch.randint(
+                0,
+                self.fixed_edges_per_source,
+                (m,),
+                generator=self.gen,
+                device=self.device,
+            )
+            return rows * self.fixed_edges_per_source + slots
         if self.weighted_edge_sampling:
             u = torch.rand(m, generator=self.gen, device=self.device,
                            dtype=torch.float64)
@@ -288,6 +339,19 @@ class DeviceEdgeSampler:
         return self
 
     def _sample_negatives(self, n):
+        if self.positive_source_rows_t is not None:
+            universe = len(self.positive_source_rows_t)
+            src_pos = torch.randint(
+                0, universe, (n,), generator=self.gen, device=self.device
+            )
+            offset = torch.randint(
+                1, universe, (n,), generator=self.gen, device=self.device
+            )
+            dst_pos = (src_pos + offset) % universe
+            return (
+                self.positive_source_rows_t.index_select(0, src_pos).long(),
+                self.positive_source_rows_t.index_select(0, dst_pos).long(),
+            )
         neg_src = torch.randint(0, self.n_nodes, (n,), generator=self.gen,
                                 device=self.device)
         # offset in [1, n_nodes-1] -> dst != src, uniform over non-self nodes.

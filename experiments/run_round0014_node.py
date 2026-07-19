@@ -105,12 +105,31 @@ def configure_round0018() -> None:
     NODES = program.NODES
 
 
+def configure_round0019() -> None:
+    """Select the exact-duplicate multiplicity treatment before admission."""
+    global ROUND_ID, ROUND_LABEL, SCHEMA_PREFIX, RUNTIME_SCRIPT
+    global RoundMaterializedArray, TRAIN_CONFIG, TRAIN_CONFIG_SHA256, NODES
+    program = importlib.import_module("basemap.round0019_program")
+    ROUND_ID = "0019"
+    ROUND_LABEL = "Round 0019"
+    SCHEMA_PREFIX = "round0019"
+    RUNTIME_SCRIPT = "experiments/run_round0019_node.py"
+    RoundMaterializedArray = program.Round0019MaterializedArray
+    TRAIN_CONFIG = program.TRAIN_CONFIG
+    TRAIN_CONFIG_SHA256 = program.TRAIN_CONFIG_SHA256
+    NODES = program.NODES
+
+
 def _schema(name: str) -> str:
     return f"{SCHEMA_PREFIX}-{name}-v1"
 
 
 def _seal(body: dict[str, Any]) -> dict[str, Any]:
     return {**body, "identity_sha256": sha256_bytes(canonical_json(body))}
+
+
+def _multiplicity_treatment() -> dict[str, Any] | None:
+    return TRAIN_CONFIG["execution"].get("duplicate_multiplicity")
 
 
 def _node_job(active: dict[str, Any], node_id: str) -> dict[str, Any]:
@@ -128,7 +147,7 @@ def _new_exact_model():
 
     model = TRAIN_CONFIG["model"]
     train = TRAIN_CONFIG["optimizer"]
-    return ParametricUMAP(
+    instance = ParametricUMAP(
         n_components=model["output_dimension"],
         hidden_dim=model["hidden_dimension"], n_layers=model["hidden_layers"],
         n_neighbors=15, a=model["a"], b=model["b"],
@@ -149,6 +168,14 @@ def _new_exact_model():
         anchor_hold_weight=0.0, midnear_enabled=False, mn_pairs_per_batch=0,
         weighted_edge_sampling=False, gpu_resident_data="auto",
         gpu_resident_vram_budget_gb=31.0)
+    multiplicity = TRAIN_CONFIG["execution"].get("duplicate_multiplicity")
+    if multiplicity:
+        instance.duplicate_multiplicity_cap_path = multiplicity["artifact_path"]
+        instance.duplicate_multiplicity_cap_sha256 = multiplicity["artifact_sha256"]
+        instance.duplicate_multiplicity_fixed_k = multiplicity[
+            "fixed_edges_per_source"
+        ]
+    return instance
 
 
 def _fixture_scalar_equivalence(root: str) -> dict[str, Any]:
@@ -233,6 +260,27 @@ def _run_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
     torch.cuda.synchronize("cuda")
     free_bytes, total_bytes = torch.cuda.mem_get_info("cuda")
     headroom_gib = free_bytes / 1024**3
+    multiplicity = _multiplicity_treatment()
+    expected_edges = (
+        multiplicity["effective_positive_edges"] if multiplicity else 450_000_000
+    )
+    multiplicity_ok = (
+        pumap._pipeline_info.get("multiplicity_policy")
+        == ("exact_duplicate_cap_one" if multiplicity else "row_multiplicity_uncapped")
+    )
+    if multiplicity:
+        multiplicity_ok = bool(
+            multiplicity_ok
+            and pumap._pipeline_info.get("multiplicity_cap_artifact_sha256")
+            == multiplicity["artifact_sha256"]
+            and pumap._pipeline_info.get("multiplicity_excluded_source_rows")
+            == multiplicity["excluded_rows"]
+            and pumap._pipeline_info.get("multiplicity_retained_rows")
+            == multiplicity["retained_rows"]
+            and loader.positive_source_rows_t is not None
+            and len(loader.positive_source_rows_t) == multiplicity["retained_rows"]
+            and loader.fixed_edges_per_source == multiplicity["fixed_edges_per_source"]
+        )
     if (pumap.model is not None or hasattr(pumap, "_train_stats") or
             pumap._pipeline_info.get("pipeline") != "device_uniform" or
             pumap._pipeline_info.get("positive_sampling") != "uniform" or
@@ -243,7 +291,7 @@ def _run_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
             tuple(dst_batch.shape) != (8192, 384) or
             int((batch_targets == 1.0).sum().item()) != 409 or
             int((batch_targets == 0.0).sum().item()) != 7783 or
-            edges != 450_000_000 or headroom_gib < 1.5):
+            edges != expected_edges or not multiplicity_ok or headroom_gib < 1.5):
         raise RuntimeError(f"{ROUND_LABEL} no-training setup/headroom contract failed")
     scalar = _fixture_scalar_equivalence(output)
     semantic = _fixture_semantic_render(output)
@@ -281,7 +329,7 @@ def _run_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
     verdict_body = {
         "schema": _schema("canary-verdict"), "passed": True,
         "optimizer_updates": 0, "pipeline": "device_uniform",
-        "sampling": "uniform-over-directed-edges",
+        "sampling": TRAIN_CONFIG["graph"]["sampling"],
         "headroom_gib": headroom_gib,
         "scorer_scalar_equivalence": True,
         "semantic_render_alignment": True,
@@ -323,7 +371,7 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
             verdict.get("passed") is not True or
             verdict.get("optimizer_updates") != 0 or
             verdict.get("pipeline") != "device_uniform" or
-            verdict.get("sampling") != "uniform-over-directed-edges" or
+            verdict.get("sampling") != TRAIN_CONFIG["graph"]["sampling"] or
             not isinstance(evidence, dict) or
             expected_input_signature(evidence.get("canonical_path", "")) != evidence):
         raise RuntimeError(f"{ROUND_LABEL} training lacks its passing no-update canary")
@@ -376,6 +424,29 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
         "pipeline_weighted_requested": False,
         "pipeline_weighted_effective": False,
     }
+    multiplicity = _multiplicity_treatment()
+    if multiplicity:
+        exact.update({
+            "n_pos_edges": multiplicity["effective_positive_edges"],
+            "pipeline_multiplicity_policy": "exact_duplicate_cap_one",
+            "pipeline_multiplicity_cap_artifact_sha256": multiplicity[
+                "artifact_sha256"
+            ],
+            "pipeline_multiplicity_excluded_source_rows": multiplicity[
+                "excluded_rows"
+            ],
+            "pipeline_multiplicity_retained_rows": multiplicity["retained_rows"],
+            "pipeline_multiplicity_positive_edges_effective": multiplicity[
+                "effective_positive_edges"
+            ],
+            "pipeline_multiplicity_positive_source_sampling": (
+                "uniform_retained_rows_then_fixed_k_slot_with_replacement"
+            ),
+            "pipeline_multiplicity_negative_sampling": (
+                "uniform_retained_rows_nonself"
+            ),
+            "pipeline_multiplicity_positive_destinations": "original_graph_rows",
+        })
     mismatches = {key: {"expected": value, "observed": stats.get(key)}
                   for key, value in exact.items() if stats.get(key) != value}
     for key in ("nonfinite_loss_skips", "nonfinite_gradient_skips"):
@@ -598,6 +669,28 @@ def _load_minilm_untrained_floor() -> dict[str, Any]:
     return {"receipt": signature, "floor_ffr": float(floor), "controls": controls}
 
 
+def _load_duplicate_baseline(treatment: dict[str, Any]) -> dict[str, Any]:
+    path = treatment["baseline_diagnostic_path"]
+    signature = expected_input_signature(path)
+    if signature["sha256"] != treatment["baseline_diagnostic_sha256"]:
+        raise ValueError(f"{ROUND_LABEL} duplicate-component baseline changed")
+    with open(path, encoding="utf-8") as handle:
+        receipt = json.load(handle)
+    body = {key: receipt[key] for key in receipt if key != "identity_sha256"}
+    diagnostics = receipt.get("diagnostics")
+    if (
+        receipt.get("schema") != "round0019-duplicate-component-baseline.v1"
+        or receipt.get("identity_sha256") != sha256_bytes(canonical_json(body))
+        or not isinstance(diagnostics, dict)
+        or diagnostics.get("method")
+        != "fixed-sample-mahalanobis-excluding-selected-component"
+        or diagnostics.get("maximum_representative_mahalanobis")
+        != treatment["baseline_maximum_mahalanobis"]
+    ):
+        raise ValueError(f"{ROUND_LABEL} duplicate-component baseline is invalid")
+    return {"receipt": signature, "diagnostics": diagnostics}
+
+
 def _registered_panel_decision(
         panel: dict[str, Any], projection: dict[str, Any], recall50: float,
         canary_equivalence: dict[str, Any], untrained_floor_ffr: float,
@@ -728,6 +821,42 @@ def _run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
     random_floor_ratio = (
         projection["proj_ffr"] / projection["proj_random_floor_ffr"]
         if projection["proj_random_floor_ffr"] > 0 else float("inf"))
+    duplicate_diagnostics = None
+    multiplicity = _multiplicity_treatment()
+    if multiplicity:
+        from basemap.duplicate_diagnostics import duplicate_component_diagnostics
+        from basemap.duplicate_multiplicity import load_duplicate_cap
+
+        cap = load_duplicate_cap(
+            multiplicity["artifact_path"],
+            expected_sha256=multiplicity["artifact_sha256"],
+            row_count=len(Z),
+            fixed_edges_per_source=multiplicity["fixed_edges_per_source"],
+        )
+        baseline = _load_duplicate_baseline(multiplicity)
+        observed = duplicate_component_diagnostics(
+            Z,
+            excluded_rows=cap["excluded_rows"],
+            representative_rows=cap["representative_rows"],
+        )
+        if (
+            observed["sample_ids_sha256"]
+            != baseline["diagnostics"]["sample_ids_sha256"]
+        ):
+            raise RuntimeError(f"{ROUND_LABEL} duplicate diagnostic sample changed")
+        observed_max = observed["maximum_representative_mahalanobis"]
+        baseline_max = baseline["diagnostics"]["maximum_representative_mahalanobis"]
+        decision_checks["duplicate_component_offset_reduced_50pct"] = (
+            observed_max <= multiplicity["required_maximum_mahalanobis"]
+        )
+        duplicate_diagnostics = {
+            "baseline": baseline,
+            "observed": observed,
+            "observed_over_baseline": observed_max / baseline_max,
+            "required_maximum_mahalanobis": multiplicity[
+                "required_maximum_mahalanobis"
+            ],
+        }
     report = {
         "schema": _schema("registered-panel"),
         "production_config_sha256": TRAIN_CONFIG_SHA256,
@@ -747,6 +876,7 @@ def _run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
         "registered_untrained_projection_floor": untrained_floor,
         "projection_over_untrained_floor": projection_ratio,
         "projection_over_random_bbox_floor": random_floor_ratio,
+        "duplicate_component": duplicate_diagnostics,
         "query_truth_cache": cache_telemetry,
         "canary_scalar_equivalence": canary_equivalence,
         "decision_checks": decision_checks,

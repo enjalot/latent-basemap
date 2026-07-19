@@ -2,11 +2,12 @@
 
 Identical to Round 0017 in every registered respect (inputs, graph, seed,
 500k positive-LR updates, h2048, device_uniform pipeline, thresholds) except
-the autocast dtype: fp16 + GradScaler diverged at step 408,317 when the
-low-distance gradient singularity exceeded fp16's exponent range (299 amp
-overflows, then 100 consecutive at one step — see round-0017 addendum 3).
-bfloat16 keeps fp16-class throughput with fp32-class range and needs no loss
-scaler, so any non-finite gradient is genuine and stays first-strike fatal.
+the autocast dtype. The fp16 + GradScaler path stopped after 408,317 successful
+updates on a terminal run of consecutive non-finite gradients; its accounting
+cannot distinguish scaler overflow from a genuine fp16 model-gradient event.
+Round 0018 establishes that bf16 completes the treatment, not why fp16 failed.
+bfloat16 uses no loss scaler, so its non-finite-gradient guard stays
+first-strike fatal.
 """
 from __future__ import annotations
 

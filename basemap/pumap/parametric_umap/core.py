@@ -243,6 +243,8 @@ class ParametricUMAP:
             edge_bytes += n_pos_edges * 8     # f64 sampling CDF
         if self.positive_target_mode == "probability":
             edge_bytes += n_pos_edges * 4     # f32 weights
+        if getattr(self, "duplicate_multiplicity_cap_path", ""):
+            edge_bytes += n_train * 4         # retained-row int32 sampling universe
         need = x_bytes + edge_bytes
         if mode in ("true", "1", "on", "force"):
             return True, f"forced (need ~{need/1e9:.2f} GB on device)"
@@ -359,7 +361,53 @@ class ParametricUMAP:
                 weights = np.ascontiguousarray(np.asarray(weights)[mask])
             logging.info("Kept %d / %d edges after filtering.", len(sources), len(mask))
 
-        n_pos_edges = int(len(sources))
+        resident_edge_count = int(len(sources))
+        n_pos_edges = resident_edge_count
+        positive_source_rows = None
+        fixed_edges_per_source = None
+        duplicate_cap_path = str(
+            getattr(self, "duplicate_multiplicity_cap_path", "") or ""
+        )
+        if duplicate_cap_path:
+            from basemap.duplicate_multiplicity import load_duplicate_cap
+
+            duplicate_cap = load_duplicate_cap(
+                duplicate_cap_path,
+                expected_sha256=str(
+                    getattr(self, "duplicate_multiplicity_cap_sha256", "") or ""
+                ),
+                row_count=n_train,
+                fixed_edges_per_source=int(
+                    getattr(self, "duplicate_multiplicity_fixed_k", 0) or 0
+                ),
+            )
+            excluded = duplicate_cap["excluded_rows"]
+            allowed_mask = np.ones(n_train, dtype=bool)
+            allowed_mask[excluded] = False
+            positive_source_rows = np.flatnonzero(allowed_mask).astype(
+                np.int32, copy=False
+            )
+            del allowed_mask
+            fixed_edges_per_source = int(
+                duplicate_cap["metadata"]["fixed_edges_per_source"]
+            )
+            n_pos_edges = int(duplicate_cap["metadata"]["effective_positive_edges"])
+            self._duplicate_multiplicity_info = {
+                "multiplicity_policy": "exact_duplicate_cap_one",
+                "multiplicity_cap_artifact_sha256": duplicate_cap["signature"]["sha256"],
+                "multiplicity_excluded_source_rows": int(len(excluded)),
+                "multiplicity_retained_rows": int(len(positive_source_rows)),
+                "multiplicity_positive_edges_effective": n_pos_edges,
+                "multiplicity_positive_source_sampling": (
+                    "uniform_retained_rows_then_fixed_k_slot_with_replacement"
+                ),
+                "multiplicity_negative_sampling": "uniform_retained_rows_nonself",
+                "multiplicity_positive_destinations": "original_graph_rows",
+            }
+        else:
+            self._duplicate_multiplicity_info = {
+                "multiplicity_policy": "row_multiplicity_uncapped"
+            }
 
         edge_set = None
         if self.reject_neighbors:
@@ -380,7 +428,8 @@ class ParametricUMAP:
                 "weighted_requested": bool(self.weighted_edge_sampling),
                 "weighted_effective": bool(self.weighted_edge_sampling and weighted_ok),
                 "uniform_with_replacement": bool(uniform_with_replacement),
-                "path_reason": reason}
+                "path_reason": reason,
+                **self._duplicate_multiplicity_info}
             # weighted request must NEVER silently reach a uniform sampler.
             if self.weighted_edge_sampling and not weighted_ok:
                 raise RuntimeError(
@@ -399,7 +448,7 @@ class ParametricUMAP:
         # gathers + negative sampling on-device. See _decide_gpu_resident.
         n_features = int(X.shape[1])
         use_fast, reason = self._decide_gpu_resident(
-            n_train, n_features, n_pos_edges, edge_set, low_memory)
+            n_train, n_features, resident_edge_count, edge_set, low_memory)
         if use_fast:
             logging.info("Edge-list mode: GPU-resident fast path (%s).", reason)
             exact_uniform = (
@@ -421,9 +470,17 @@ class ParametricUMAP:
                 positive_target_mode=self.positive_target_mode,
                 weighted_edge_sampling=self.weighted_edge_sampling,
                 uniform_with_replacement=exact_uniform,
+                positive_source_rows=positive_source_rows,
+                fixed_edges_per_source=fixed_edges_per_source,
                 device=self.device,
             )
             return ddataset, loader, n_pos_edges
+
+        if positive_source_rows is not None:
+            raise RuntimeError(
+                "duplicate multiplicity cap is implemented only on the required "
+                "device_uniform pipeline"
+            )
 
         # Hybrid path (B1): X alone fits resident but X+edges+CDF don't (the
         # k=50 fuzzy edge wall). Keep X on GPU; stream positive edges + weighted
@@ -1520,12 +1577,13 @@ class ParametricUMAP:
                 if not bool(torch.isfinite(total_norm)):
                     optimizer.zero_grad(set_to_none=True)
                     if scaler is not None:
-                        # P0-3: with AMP, unscale_() already flagged found_inf; a
-                        # non-finite UNSCALED gradient here is overwhelmingly a
-                        # scaler overflow (transient, recovers as the scale
-                        # lowers), NOT a model-gradient failure. update() lowers
-                        # the scale and resets the state machine. Count it as an
-                        # AMP overflow, on its OWN consecutive counter.
+                        # Historical receipts call this ``amp_overflow`` because
+                        # it occurs on the GradScaler path and update() lowers the
+                        # scale. That label does NOT identify the cause: released
+                        # accounting cannot distinguish a scale-induced overflow
+                        # from a genuine fp16 model-gradient non-finite. Keep the
+                        # field for receipt compatibility and bound it on its own
+                        # consecutive counter without making a causal claim.
                         scaler.update()
                         self._train_stats["amp_overflow_skips"] += 1
                         kind = "amp_overflow"
