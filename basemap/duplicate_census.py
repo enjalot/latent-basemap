@@ -474,6 +474,9 @@ def build_duplicate_census(
     arrays["family_hash_h1"] = family_h1
     known_status = known_r0019_status(arrays, members)
     summary = duplicate["summary"]
+    artifact_summary = {
+        key: value for key, value in summary.items() if key != "wall_seconds"
+    }
     observed_counts = [
         int(item["global_exact_family_count"]) for item in known_status
     ]
@@ -489,7 +492,7 @@ def build_duplicate_census(
         "row_dtype": "<f2",
         "row_hash": "sha256(exact-768-byte-fp16-row) truncated to first 128 bits",
         "accepted_input_pack_sha256": ACCEPTED_INPUT_PACK_SHA256,
-        "summary": summary,
+        "summary": artifact_summary,
         "known_r0019_rows": known_status,
         "array_sha256": {
             name: ordered_array_sha256(value) for name, value in arrays.items()

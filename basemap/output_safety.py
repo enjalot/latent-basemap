@@ -8,12 +8,14 @@ existing destination) and create output roots with ``mkdir`` rather than
 from __future__ import annotations
 
 import json
+import io
 import os
 import secrets
 import shutil
 import stat
 import tempfile
 from typing import Any
+import zipfile
 
 
 DATA_ROOT = "/data"
@@ -273,8 +275,20 @@ def atomic_save_new_npz(path: str | os.PathLike, *, immutable: bool = False,
     fd, tmp, parent_fd, temp_name = _new_temp_file(destination)
     try:
         with os.fdopen(fd, "wb") as handle:
-            writer = np.savez_compressed if compressed else np.savez
-            writer(handle, **arrays)
+            compression = zipfile.ZIP_DEFLATED if compressed else zipfile.ZIP_STORED
+            with zipfile.ZipFile(handle, mode="w", compression=compression) as archive:
+                for name, value in arrays.items():
+                    if "/" in name or "\\" in name or name.startswith("."):
+                        raise ValueError(f"unsafe npz member name: {name!r}")
+                    member = zipfile.ZipInfo(f"{name}.npy", date_time=(1980, 1, 1, 0, 0, 0))
+                    member.compress_type = compression
+                    member.create_system = 3
+                    member.external_attr = (0o644 & 0xFFFF) << 16
+                    payload = io.BytesIO()
+                    np.lib.format.write_array(
+                        payload, np.asanyarray(value), allow_pickle=False
+                    )
+                    archive.writestr(member, payload.getvalue())
             handle.flush()
             os.fsync(handle.fileno())
         return _publish_temp_new(

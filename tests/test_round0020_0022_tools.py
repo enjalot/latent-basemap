@@ -4,6 +4,7 @@ import json
 
 import numpy as np
 
+from basemap.output_safety import atomic_save_new_npz
 from basemap.duplicate_census import save_cap_npz
 from basemap.duplicate_multiplicity import load_duplicate_cap
 from experiments import run_round0014_node as node
@@ -34,6 +35,18 @@ def test_round0020_global_cap_uses_duplicate_cap_schema(tmp_path):
     assert loaded["representative_rows"].tolist() == [10, 20]
     assert loaded["excluded_rows"].tolist() == [11, 12, 21]
     assert loaded["metadata"]["retained_row_count"] == 29_999_997
+
+
+def test_round0020_npz_writer_is_byte_deterministic(tmp_path):
+    left = tmp_path / "left.npz"
+    right = tmp_path / "right.npz"
+    arrays = {
+        "metadata": np.asarray('{"schema":"test"}'),
+        "rows": np.asarray([3, 1, 4], dtype=np.int64),
+    }
+    atomic_save_new_npz(str(left), **arrays)
+    atomic_save_new_npz(str(right), **arrays)
+    assert left.read_bytes() == right.read_bytes()
 
 
 def test_round0022_ffr_math_counts_true_neighbors_inside_hit_set():
