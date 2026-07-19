@@ -245,7 +245,7 @@ def find_duplicate_families(
         member_rows = np.concatenate(families).astype(np.int64, copy=False)
     else:
         member_rows = np.empty(0, dtype=np.int64)
-    if member_rows.size and not np.array_equal(member_rows, np.unique(member_rows)):
+    if member_rows.size and len(np.unique(member_rows)) != member_rows.size:
         raise RuntimeError("duplicate census produced overlapping exact families")
     total_family_rows = int(family_counts.sum()) if family_counts.size else 0
     unique_rows = ROW_COUNT - total_family_rows
