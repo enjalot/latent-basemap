@@ -38,6 +38,8 @@ R0019_COORDINATE_RECEIPT_SHA256 = (
     "8d6d5ab2b16be0e08b636a248f667d6a963217d1ec3a223af0b0730875d491d9"
 )
 MINILM_QUERIES = "/data/latent-basemap/track1/minilm_queries.npy"
+INPUT_PACK_MANIFEST = "/data/latent-basemap/runs/round-0013/30m-input-pack-v1.json"
+INPUT_PACK_SHA256 = "8f5a6ba8203aa583bbbdca3383f050e29c443ca0e25d628735bba873075bf7f2"
 SENTENCE_MODEL_SNAPSHOT = (
     "/data/hf/sentence-transformers/models--sentence-transformers--all-MiniLM-L6-v2/"
     "snapshots/1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
@@ -590,6 +592,11 @@ def run_panel(*, canary_path: str, output_root: str) -> dict[str, Any]:
         ),
         "canary": expected_input_signature(canary_path),
         "seed": SEED,
+        "matched_control_source": {
+            "input_pack_manifest": expected_input_signature(INPUT_PACK_MANIFEST),
+            "input_pack_capability_sha256": INPUT_PACK_SHA256,
+            "heldout_query_pool": expected_input_signature(MINILM_QUERIES),
+        },
         "scoring_formula": {
             "true_set": "top-10 exact cosine neighbors within the probe/control corpus",
             "hit_set": "top max(50, ceil(0.01*N_corpus)) map-space neighbors",
