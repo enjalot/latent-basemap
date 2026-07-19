@@ -22,7 +22,7 @@ def test_round0020_global_cap_uses_duplicate_cap_schema(tmp_path):
         family_counts=family_counts,
         member_rows=member_rows,
         family_offsets=offsets,
-        census_signature={"sha256": "0" * 64},
+        census_identity_sha256="0" * 64,
     )
     digest = __import__("hashlib").sha256(path.read_bytes()).hexdigest()
     loaded = load_duplicate_cap(
@@ -53,4 +53,3 @@ def test_round0020_0022_configure_existing_runner_node_names():
     assert node._run_canary.__name__ == "_run_round0022_canary"
     assert node._run_panel.__name__ == "_run_round0022_panel"
     assert node._run_semantic_renders.__name__ == "_run_round0022_renders"
-

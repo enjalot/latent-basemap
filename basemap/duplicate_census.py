@@ -338,7 +338,7 @@ def save_cap_npz(
     family_counts: np.ndarray,
     member_rows: np.ndarray,
     family_offsets: np.ndarray,
-    census_signature: dict[str, Any] | None,
+    census_identity_sha256: str,
 ) -> str:
     exclusions: list[np.ndarray] = []
     for index in range(len(representative_rows)):
@@ -374,7 +374,7 @@ def save_cap_npz(
             name: ordered_array_sha256(value) for name, value in arrays.items()
         },
         "inputs": {
-            "census": census_signature,
+            "census_identity_sha256": census_identity_sha256,
         },
     }
     metadata = _seal(payload)
@@ -498,10 +498,6 @@ def build_duplicate_census(
             "input_pack_manifest": manifest_signature,
             "materialized_members": member_verification,
         },
-        "elapsed": {
-            "fingerprinting": fingerprint_receipt,
-            "total_wall_seconds_so_far": time.monotonic() - started,
-        },
     }
     census_metadata = _seal(payload)
     census_path = os.path.join(output_root, "global-duplicate-census-v1.npz")
@@ -519,7 +515,7 @@ def build_duplicate_census(
         family_counts=arrays["family_counts"],
         member_rows=arrays["member_rows"],
         family_offsets=arrays["family_offsets"],
-        census_signature=census_signature,
+        census_identity_sha256=census_metadata["identity_sha256"],
     )
     outputs = {
         "census": expected_input_signature(census_path),
@@ -537,7 +533,7 @@ def build_duplicate_census(
             {
                 **baseline_body,
                 "inputs": {
-                    "census": outputs["census"],
+                    "census_identity_sha256": census_metadata["identity_sha256"],
                     "coordinate_receipt": coordinate_signature,
                 },
             }
@@ -553,6 +549,10 @@ def build_duplicate_census(
         "known_r0019_rows": known_status,
         "outputs": outputs,
         "baseline_included": baseline is not None,
+        "elapsed": {
+            "fingerprinting": fingerprint_receipt,
+            "total_wall_seconds": time.monotonic() - started,
+        },
         "wall_seconds": time.monotonic() - started,
     }
     receipt = _seal(receipt_body)
