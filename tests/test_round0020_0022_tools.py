@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 
 from basemap.output_safety import atomic_save_new_npz
 from basemap.duplicate_census import save_cap_npz
 from basemap.duplicate_multiplicity import load_duplicate_cap
+from basemap.round0014_transform import build_transform_template
+from basemap.round0024_program import train_config_for_cell
 from experiments import run_round0014_node as node
 from experiments.universality_panel import _ffr_from_neighbors
 
@@ -66,3 +69,29 @@ def test_round0020_0022_configure_existing_runner_node_names():
     assert node._run_canary.__name__ == "_run_round0022_canary"
     assert node._run_panel.__name__ == "_run_round0022_panel"
     assert node._run_semantic_renders.__name__ == "_run_round0022_renders"
+
+
+def test_round0024_configure_uses_job_scoped_width():
+    node.configure_round0024(job={"cell": "h4096"})
+    assert node.ROUND_ID == "0024"
+    assert node.SCHEMA_PREFIX == "round0024-h4096"
+    assert node.TRAIN_CONFIG["model"]["hidden_dimension"] == 4096
+    assert node.TRAIN_CONFIG["execution"]["round0024_capacity_ladder_cell"][
+        "minimum_train_upd_s"
+    ] == 25.0
+
+
+def test_round0024_transform_template_binds_active_config_digest():
+    config, digest = train_config_for_cell("h1024")
+    template = build_transform_template(
+        release_root=str(Path(__file__).resolve().parents[1]),
+        release_sha="2" * 40,
+        train_output_relative_path="artifacts/h1024/train/model.pt",
+        production_config=config,
+        production_config_sha256=digest,
+    )
+    assert template["template_config"]["production_config_sha256"] == digest
+    assert template["template_config"]["architecture"]["hidden_dimension"] == 1024
+    assert template["template_config"]["trained_model"][
+        "controller_output_relative_path"
+    ] == "artifacts/h1024/train/model.pt"

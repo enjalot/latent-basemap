@@ -35,24 +35,27 @@ def production_transform(block: np.ndarray) -> np.ndarray:
     return result
 
 
-def _template_config(*, release_sha: str,
-                     train_output_relative_path: str) -> dict[str, Any]:
+def _template_config(*, release_sha: str, train_output_relative_path: str,
+                     production_config: dict[str, Any] | None = None,
+                     production_config_sha256: str | None = None) -> dict[str, Any]:
     if not isinstance(train_output_relative_path, str) or \
             train_output_relative_path.startswith("/") or ".." in \
             train_output_relative_path.split("/"):
         raise ValueError("trained-model output binding must be release/queue relative")
-    transform = TRAIN_CONFIG["transform"]
+    active_config = production_config or TRAIN_CONFIG
+    active_config_sha256 = production_config_sha256 or TRAIN_CONFIG_SHA256
+    transform = active_config["transform"]
     return {
         "schema": "round0014-transform-config-template-v1",
         "release_sha": release_sha,
-        "production_config_sha256": TRAIN_CONFIG_SHA256,
+        "production_config_sha256": active_config_sha256,
         "trained_model": {
             "producer_node": "train_seed42_30m",
             "controller_output_relative_path": train_output_relative_path,
             "content_binding": "runtime-full-sha256-before-transform-spec-seal",
             "pre_gate_hash_available": False,
         },
-        "architecture": TRAIN_CONFIG["model"],
+        "architecture": active_config["model"],
         "model_weight_dtype": transform["model_weight_dtype"],
         "input_dtype": transform["input_dtype"],
         "output_dtype": transform["output_dtype"],
@@ -67,12 +70,16 @@ def _template_config(*, release_sha: str,
 
 
 def build_transform_template(*, release_root: str, release_sha: str,
-                             train_output_relative_path: str) -> dict[str, Any]:
+                             train_output_relative_path: str,
+                             production_config: dict[str, Any] | None = None,
+                             production_config_sha256: str | None = None) -> dict[str, Any]:
     if release_sha == ISSUED_BASE:
         raise ValueError("Round 0014 transform template requires the implementation release")
     config = _template_config(
         release_sha=release_sha,
-        train_output_relative_path=train_output_relative_path)
+        train_output_relative_path=train_output_relative_path,
+        production_config=production_config,
+        production_config_sha256=production_config_sha256)
     spec = build_transform_execution_spec(
         production_transform, release_root=release_root,
         release_commit=release_sha, transform_config=config)
@@ -99,7 +106,9 @@ def build_transform_template(*, release_root: str, release_sha: str,
 
 
 def validate_transform_template(path: str, *, release_root: str,
-                                release_sha: str) -> dict[str, Any]:
+                                release_sha: str,
+                                production_config: dict[str, Any] | None = None,
+                                production_config_sha256: str | None = None) -> dict[str, Any]:
     with open(path, encoding="utf-8") as handle:
         value = json.load(handle)
     identity = value.get("identity_sha256") if isinstance(value, dict) else None
@@ -109,7 +118,11 @@ def validate_transform_template(path: str, *, release_root: str,
         raise ValueError("Round 0014 transform template seal changed")
     expected = build_transform_template(
         release_root=release_root, release_sha=release_sha,
-        train_output_relative_path="artifacts/train/model.pt")
+        train_output_relative_path=value["template_config"]["trained_model"][
+            "controller_output_relative_path"
+        ],
+        production_config=production_config,
+        production_config_sha256=production_config_sha256)
     if value != expected:
         raise ValueError("Round 0014 transform callable/source/config/release changed")
     return value
@@ -130,20 +143,24 @@ def _actual_config(*, template: dict[str, Any], model_signature: dict[str, Any])
 
 def authenticate_model_and_build_spec(*, model_path: str, template_path: str,
                                       release_root: str,
-                                      release_sha: str) -> dict[str, Any]:
+                                      release_sha: str,
+                                      production_config: dict[str, Any] | None = None,
+                                      production_config_sha256: str | None = None) -> dict[str, Any]:
     """Reopen the sole trained model and bind it into the actual spec."""
     global _ACTIVE_MODEL, _ACTIVE_CONFIG
     if _ACTIVE_MODEL is not None or _ACTIVE_CONFIG is not None:
         raise RuntimeError("Round 0014 production transform is one-use per process")
     template = validate_transform_template(
-        template_path, release_root=release_root, release_sha=release_sha)
+        template_path, release_root=release_root, release_sha=release_sha,
+        production_config=production_config,
+        production_config_sha256=production_config_sha256)
     model_signature = expected_input_signature(model_path)
     if model_signature["kind"] != "file":
         raise ValueError("Round 0014 trained model must be one regular file")
     from .pumap.parametric_umap import ParametricUMAP
 
     model = ParametricUMAP.load(model_path, device="cuda")
-    expected_model = TRAIN_CONFIG["model"]
+    expected_model = (production_config or TRAIN_CONFIG)["model"]
     observed = {
         "architecture": model.architecture,
         "input_dimension": model.input_dim,
@@ -181,11 +198,15 @@ def authenticate_model_and_build_spec(*, model_path: str, template_path: str,
 
 def stream_production_coordinates(*, model_path: str, template_path: str,
                                   release_root: str, release_sha: str,
-                                  output_root: str) -> dict[str, Any]:
+                                  output_root: str,
+                                  production_config: dict[str, Any] | None = None,
+                                  production_config_sha256: str | None = None) -> dict[str, Any]:
     """Authenticate first, then let the public pack API resolve the destination."""
     actual = authenticate_model_and_build_spec(
         model_path=model_path, template_path=template_path,
-        release_root=release_root, release_sha=release_sha)
+        release_root=release_root, release_sha=release_sha,
+        production_config=production_config,
+        production_config_sha256=production_config_sha256)
     config = actual["transform_config"]
     implementation = sha256_bytes(canonical_json({
         "release_sha": release_sha,

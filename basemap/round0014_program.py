@@ -428,7 +428,7 @@ def validate_device_uniform_pack(X: Any, edges_path: str) -> dict[str, Any]:
         "materialized_members_sha256": X.round0014_pack_seal[
             "materialized_members_sha256"],
         "pipeline": "device_uniform",
-        "sampling": "uniform-over-directed-edges",
+        "graph_sampling_semantics": "uniform-over-directed-edges",
         "with_replacement": True,
         "weights_consumed": False,
     }

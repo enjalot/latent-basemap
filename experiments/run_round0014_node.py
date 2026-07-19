@@ -144,6 +144,23 @@ def configure_round0022() -> None:
     _run_semantic_renders = _run_round0022_renders
 
 
+def configure_round0024(*, job: dict[str, Any] | None = None,
+                        manifest: dict[str, Any] | None = None) -> None:
+    """Select the Round 0024 capacity-ladder cell for the active job."""
+    global ROUND_ID, ROUND_LABEL, SCHEMA_PREFIX, RUNTIME_SCRIPT
+    global RoundMaterializedArray, TRAIN_CONFIG, TRAIN_CONFIG_SHA256, NODES
+    program = importlib.import_module("basemap.round0024_program")
+    cell = program.cell_from_job(job or {})
+    ROUND_ID = "0024"
+    ROUND_LABEL = f"Round 0024 {cell['label']}"
+    SCHEMA_PREFIX = f"round0024-{cell['label']}"
+    RUNTIME_SCRIPT = "experiments/run_round0014_node.py"
+    RoundMaterializedArray = program.Round0024MaterializedArray
+    TRAIN_CONFIG = cell["train_config"]
+    TRAIN_CONFIG_SHA256 = cell["train_config_sha256"]
+    NODES = program.NODES
+
+
 def _run_round0020_duplicate_census(active: dict[str, Any], job: dict[str, Any]) -> None:
     output = job["outputs"][0]
     configure_round0019()
@@ -195,6 +212,11 @@ def _seal(body: dict[str, Any]) -> dict[str, Any]:
 
 def _multiplicity_treatment() -> dict[str, Any] | None:
     return TRAIN_CONFIG["execution"].get("duplicate_multiplicity")
+
+
+def _capacity_ladder_cell() -> dict[str, Any] | None:
+    cell = TRAIN_CONFIG["execution"].get("round0024_capacity_ladder_cell")
+    return cell if isinstance(cell, dict) else None
 
 
 def _node_job(active: dict[str, Any], node_id: str) -> dict[str, Any]:
@@ -362,8 +384,10 @@ def _run_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
     semantic = _fixture_semantic_render(output)
     aggregate = sum(float(item["p90_wall_s"]) * 1.15
                     for item in active["manifest"]["jobs"])
-    if aggregate > 5.5 * 3600:
-        raise RuntimeError(f"{ROUND_LABEL} full-queue p90+15% exceeds 5.5 hours")
+    gpu_hours_cap = float(active["manifest"].get("gpu_hours_cap", 5.5))
+    if aggregate > gpu_hours_cap * 3600:
+        raise RuntimeError(
+            f"{ROUND_LABEL} full-queue p90+15% exceeds {gpu_hours_cap} hours")
     evidence = {
         "schema": _schema("canary-evidence"),
         "accepted_capability_sha256": ACCEPTED_CAPABILITY_SHA256,
@@ -387,7 +411,7 @@ def _run_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
         "scorer_scalar_equivalence": scalar,
         "semantic_render_alignment": semantic,
         "registered_p90_plus_margin_seconds": aggregate,
-        "gpu_hours_cap": 5.5,
+        "gpu_hours_cap": gpu_hours_cap,
     }
     evidence_path = os.path.join(output, "evidence.json")
     atomic_write_new_json(evidence_path, _seal(evidence), immutable=True)
@@ -427,7 +451,7 @@ def _publish_model(model, path: str) -> None:
 
 
 def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
-    canary = active["manifest"]["jobs"][0]["outputs"][0]
+    canary = job.get("canary_output") or active["manifest"]["jobs"][0]["outputs"][0]
     with open(os.path.join(canary, "verdict.json"), encoding="utf-8") as handle:
         verdict = json.load(handle)
     verdict_body = {key: verdict[key] for key in verdict if key != "identity_sha256"}
@@ -453,8 +477,9 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
     pumap._max_train_steps = 500_000
     pumap._bench_warmup = 200
     pumap._perf_profile = True
-    pumap._perf_floor = 45.0
-    pumap._perf_warn_rate = 55.0
+    cell = _capacity_ladder_cell() or {}
+    pumap._perf_floor = float(cell.get("minimum_train_upd_s", 45.0))
+    pumap._perf_warn_rate = float(cell.get("warn_train_upd_s", 55.0))
     pumap._perf_subfloor_patience = 2
     pumap._abort_on_first_nonfinite = True
     pumap._admission_artifact_path = os.path.join(output, "admission.json")
@@ -659,18 +684,22 @@ class StreamedCoordinateArray:
 
 
 def _run_transform(active: dict[str, Any], job: dict[str, Any]) -> None:
-    train = active["manifest"]["jobs"][1]["outputs"][0]
+    train = job.get("train_output") or active["manifest"]["jobs"][1]["outputs"][0]
     model_path = os.path.join(train, "model.pt")
-    template = [item["signature"]["canonical_path"]
-                for item in active["manifest"]["program_inputs"]
-                if item["role"] == "transform_spec_template"][0]
+    template = job.get("transform_spec_template")
+    if template is None:
+        template = [item["signature"]["canonical_path"]
+                    for item in active["manifest"].get("program_inputs", [])
+                    if item["role"] == "transform_spec_template"][0]
     from basemap.round0014_transform import (production_transform,
                                              stream_production_coordinates)
     result = stream_production_coordinates(
         model_path=model_path, template_path=template,
         release_root=active["manifest"]["repo_root"],
         release_sha=active["manifest"]["release_sha"],
-        output_root=job["outputs"][0])
+        output_root=job["outputs"][0],
+        production_config=TRAIN_CONFIG,
+        production_config_sha256=TRAIN_CONFIG_SHA256)
     queries = np.load(QUERIES_PATH, mmap_mode="r", allow_pickle=False)
     query_coordinates = production_transform(np.asarray(queries, dtype="<f4"))
     query_path = os.path.join(job["outputs"][0], "heldout-query-coordinates.npy")
@@ -732,6 +761,90 @@ def _load_minilm_untrained_floor() -> dict[str, Any]:
     ):
         raise ValueError(f"{ROUND_LABEL} registered untrained floor is invalid")
     return {"receipt": signature, "floor_ffr": float(floor), "controls": controls}
+
+
+def _score_current_untrained_floor(
+    *,
+    coordinates,
+    queries: np.ndarray,
+    hi_truth: np.ndarray,
+    cfg,
+    trained_ffr: float,
+    output_root: str,
+) -> dict[str, Any]:
+    """Score the current configured architecture's untrained projection control."""
+    from experiments.score_complete_panel import projection_ffr
+    import torch
+
+    cells = []
+    floor_path = os.path.join(output_root, "untrained-floor.json")
+    started = time.monotonic()
+    for seed in (0, 1, 2):
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        model = _new_exact_model()
+        model._init_model(queries.shape[1])
+        model.is_fitted = True
+        cell_started = time.monotonic()
+        query_coordinates = model.transform(queries, batch_size=8192).astype(
+            np.float32, copy=False
+        )
+        ffr, recall = projection_ffr(
+            None,
+            coordinates,
+            None,
+            query_coordinates,
+            cfg,
+            hi_truth=hi_truth[:, : cfg.k_hit],
+        )
+        cells.append(
+            {
+                "seed": seed,
+                "projection_ffr": ffr,
+                "projection_recall_at_k": recall,
+                "query_coordinate_min": query_coordinates.min(axis=0).tolist(),
+                "query_coordinate_max": query_coordinates.max(axis=0).tolist(),
+                "query_coordinate_std": query_coordinates.std(axis=0).tolist(),
+                "wall_seconds": round(time.monotonic() - cell_started, 6),
+            }
+        )
+        del model, query_coordinates
+        torch.cuda.empty_cache()
+    floor = max(float(cell["projection_ffr"]) for cell in cells)
+    body = {
+        "schema": f"{SCHEMA_PREFIX}-untrained-projection-floor-v1",
+        "purpose": "registered per-width untrained projection floor",
+        "round_id": ROUND_ID,
+        "architecture": {
+            "name": TRAIN_CONFIG["model"]["architecture"],
+            "input_dimension": TRAIN_CONFIG["model"]["input_dimension"],
+            "hidden_dimension": TRAIN_CONFIG["model"]["hidden_dimension"],
+            "hidden_layers": TRAIN_CONFIG["model"]["hidden_layers"],
+            "output_dimension": TRAIN_CONFIG["model"]["output_dimension"],
+            "use_batchnorm": TRAIN_CONFIG["model"]["use_batchnorm"],
+            "use_dropout": TRAIN_CONFIG["model"]["use_dropout"],
+        },
+        "controls": cells,
+        "floor_policy": "maximum of three deterministic untrained seeds",
+        "untrained_projection_floor_ffr": floor,
+        "trained_projection_ffr": trained_ffr,
+        "trained_lift_over_untrained_floor": (
+            trained_ffr / floor if floor > 0 else float("inf")
+        ),
+        "inputs": {
+            "queries": expected_input_signature(QUERIES_PATH),
+            "query_provenance": expected_input_signature(QUERY_PROVENANCE_PATH),
+        },
+        "total_wall_seconds": round(time.monotonic() - started, 6),
+        "training_performed": False,
+    }
+    receipt = _seal(body)
+    atomic_write_new_json(floor_path, receipt, immutable=True)
+    return {
+        "receipt": expected_input_signature(floor_path),
+        "floor_ffr": floor,
+        "controls": cells,
+    }
 
 
 def _load_duplicate_baseline(treatment: dict[str, Any]) -> dict[str, Any]:
@@ -830,9 +943,9 @@ def _run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
                                   score_panel)
     from experiments.score_complete_panel import score_query_bundle
     output = create_fresh_directory(job["outputs"][0], label=f"{ROUND_LABEL} panel output")
-    transform = active["manifest"]["jobs"][2]["outputs"][0]
-    reference_root = active["manifest"]["jobs"][3]["outputs"][0]
-    train_root = active["manifest"]["jobs"][1]["outputs"][0]
+    transform = job.get("transform_output") or active["manifest"]["jobs"][2]["outputs"][0]
+    reference_root = job.get("reference_output") or active["manifest"]["jobs"][3]["outputs"][0]
+    train_root = job.get("train_output") or active["manifest"]["jobs"][1]["outputs"][0]
     X = RoundMaterializedArray(); Z = StreamedCoordinateArray(transform)
     cfg = _panel_config()
     centroids = {
@@ -862,7 +975,7 @@ def _run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
         mmap_mode="r", allow_pickle=False)
     cache = QueryTruthCache(
         cache_dir=os.path.join(output, "query-truth-cache"), enabled=True)
-    cache.get_or_build(
+    truth = cache.get_or_build(
         queries, X, cfg=cfg,
         corpus_identity=reference["key_parts"]["data"],
         query_identity={
@@ -876,13 +989,41 @@ def _run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
     if (cache_telemetry["build_count"] != 1 or cache_telemetry["hit_count"] != 3 or
             cache_telemetry["maximum_k"] != 15):
         raise RuntimeError(f"{ROUND_LABEL} query truth cache contract changed")
-    canary_root = active["manifest"]["jobs"][0]["outputs"][0]
+    canary_root = job.get("canary_output") or active["manifest"]["jobs"][0]["outputs"][0]
     with open(os.path.join(canary_root, "evidence.json"), encoding="utf-8") as handle:
         canary_equivalence = json.load(handle)["scorer_scalar_equivalence"]
-    untrained_floor = _load_minilm_untrained_floor()
-    projection_ratio, decision_checks = _registered_panel_decision(
-        panel, projection, recall50, canary_equivalence,
-        untrained_floor["floor_ffr"])
+    capacity_cell = _capacity_ladder_cell()
+    if capacity_cell:
+        untrained_floor = _score_current_untrained_floor(
+            coordinates=Z,
+            queries=np.asarray(queries, dtype="<f4"),
+            hi_truth=truth["neighbors"],
+            cfg=cfg,
+            trained_ffr=float(projection["proj_ffr"]),
+            output_root=output,
+        )
+        projection_ratio = (
+            projection["proj_ffr"] / untrained_floor["floor_ffr"]
+            if untrained_floor["floor_ffr"] > 0
+            else float("inf")
+        )
+        guards = panel.get("guards")
+        numerical_guards = bool(
+            isinstance(guards, dict)
+            and guards.get("coords_finite") is True
+            and guards.get("coords_collapsed") is False
+            and guards.get("emb_finite") is True
+            and guards.get("emb_zero_rows") == 0
+        )
+        decision_checks = {
+            "numerical_guards": numerical_guards,
+            "canary_cache_scalar_equivalence": canary_equivalence["passed"] is True,
+        }
+    else:
+        untrained_floor = _load_minilm_untrained_floor()
+        projection_ratio, decision_checks = _registered_panel_decision(
+            panel, projection, recall50, canary_equivalence,
+            untrained_floor["floor_ffr"])
     random_floor_ratio = (
         projection["proj_ffr"] / projection["proj_random_floor_ffr"]
         if projection["proj_random_floor_ffr"] > 0 else float("inf"))
@@ -926,6 +1067,7 @@ def _run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
         "schema": _schema("registered-panel"),
         "production_config_sha256": TRAIN_CONFIG_SHA256,
         "accepted_capability_sha256": ACCEPTED_CAPABILITY_SHA256,
+        "capacity_ladder_cell": capacity_cell,
         "registered_inputs": {
             "graph": expected_input_signature(GRAPH_PATH),
             "index": expected_input_signature(INDEX_PATH),
@@ -946,7 +1088,8 @@ def _run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
         "canary_scalar_equivalence": canary_equivalence,
         "decision_checks": decision_checks,
         "selector_passed": all(decision_checks.values()),
-        "valid_threshold_miss_is_terminal_negative": True,
+        "valid_threshold_miss_is_terminal_negative": capacity_cell is None,
+        "measurement_cell_quality_floors_disabled": capacity_cell is not None,
     }
     atomic_write_new_json(
         os.path.join(output, "panel.json"), _seal(report), immutable=True)
@@ -964,8 +1107,8 @@ def _streamed_arange_identity(rows: int, block: int = 1_000_000) -> str:
 def _run_semantic_renders(active: dict[str, Any], job: dict[str, Any]) -> None:
     output = create_fresh_directory(
         job["outputs"][0], label=f"{ROUND_LABEL} semantic render output")
-    transform = active["manifest"]["jobs"][2]["outputs"][0]
-    panel_root = active["manifest"]["jobs"][4]["outputs"][0]
+    transform = job.get("transform_output") or active["manifest"]["jobs"][2]["outputs"][0]
+    panel_root = job.get("panel_output") or active["manifest"]["jobs"][4]["outputs"][0]
     Z = StreamedCoordinateArray(transform)
     rng = np.random.RandomState(20260717)
     sample_ids = np.sort(rng.choice(len(Z), 50_000, replace=False)).astype(np.int64)
@@ -1026,6 +1169,125 @@ def _run_semantic_renders(active: dict[str, Any], job: dict[str, Any]) -> None:
     }
     atomic_write_new_json(
         os.path.join(output, "render-manifest.json"), _seal(render), immutable=True)
+
+
+def _run_round0024_width_decision(active: dict[str, Any], job: dict[str, Any]) -> None:
+    output = create_fresh_directory(
+        job["outputs"][0], label="Round 0024 width decision output")
+    panel_roots = job["panel_outputs"]
+    reference_panel_path = job["reference_panel"]
+    cells: dict[str, dict[str, Any]] = {}
+    for label in ("h1024", "h4096"):
+        panel_path = os.path.join(panel_roots[label], "panel.json")
+        with open(panel_path, encoding="utf-8") as handle:
+            panel = json.load(handle)
+        body = {key: panel[key] for key in panel if key != "identity_sha256"}
+        if (
+            panel.get("schema") != f"round0024-{label}-registered-panel-v1"
+            or panel.get("identity_sha256") != sha256_bytes(canonical_json(body))
+            or panel.get("capacity_ladder_cell", {}).get("label") != label
+        ):
+            raise RuntimeError(f"Round 0024 {label} panel seal/cell changed")
+        cells[label] = {
+            "panel": panel,
+            "panel_receipt": expected_input_signature(panel_path),
+            "train_receipt": expected_input_signature(
+                os.path.join(job["train_outputs"][label], "train-receipt.json")
+            ),
+            "transform_receipt": expected_input_signature(
+                os.path.join(job["transform_outputs"][label], "actual-transform.json")
+            ),
+            "render_receipt": expected_input_signature(
+                os.path.join(job["render_outputs"][label], "render-manifest.json")
+            ),
+        }
+    with open(reference_panel_path, encoding="utf-8") as handle:
+        reference = json.load(handle)
+    ref_body = {key: reference[key] for key in reference if key != "identity_sha256"}
+    if reference.get("identity_sha256") != sha256_bytes(canonical_json(ref_body)):
+        raise RuntimeError("Round 0024 h2048 reference panel seal changed")
+    ffr_ref = float(reference["panel"]["ffr"])
+    purity_ref = float(reference["panel"]["purity"]["k1024"])
+    ffr_1024 = float(cells["h1024"]["panel"]["panel"]["ffr"])
+    ffr_4096 = float(cells["h4096"]["panel"]["panel"]["ffr"])
+    purity_4096 = float(cells["h4096"]["panel"]["panel"]["purity"]["k1024"])
+    guards_1024 = bool(cells["h1024"]["panel"].get("selector_passed"))
+    guards_4096 = bool(cells["h4096"]["panel"].get("selector_passed"))
+    h1024_ratio = ffr_ref / ffr_1024 if ffr_1024 > 0 else float("inf")
+    h4096_ffr_ratio = ffr_4096 / ffr_ref if ffr_ref > 0 else float("inf")
+    h4096_purity_ratio = (
+        purity_4096 / purity_ref if purity_ref > 0 else float("inf")
+    )
+    h1024_registered_default = guards_1024 and h1024_ratio <= 1.05
+    h4096_evaluate_100m = guards_4096 and (
+        h4096_ffr_ratio >= 1.10 or h4096_purity_ratio >= 1.10
+    )
+    if not guards_1024 or not guards_4096:
+        width_default = "h2048"
+        verdict_reason = "one-or-more-measurement-cell-guards-failed"
+    elif h1024_registered_default:
+        width_default = "h1024"
+        verdict_reason = "h2048-over-h1024-ffr-ratio-at-most-1.05"
+    else:
+        width_default = "h2048"
+        verdict_reason = "h1024-loss-exceeds-registered-5pct-band"
+    body = {
+        "schema": "round0024-capacity-ladder-v1",
+        "round_id": "0024",
+        "release_sha": active["manifest"]["release_sha"],
+        "accepted_capability_sha256": ACCEPTED_CAPABILITY_SHA256,
+        "reference_h2048": {
+            "panel": expected_input_signature(reference_panel_path),
+            "ffr": ffr_ref,
+            "purity_k1024": purity_ref,
+            "hidden_dimension": 2048,
+        },
+        "cells": {
+            label: {
+                "hidden_dimension": cells[label]["panel"][
+                    "capacity_ladder_cell"
+                ]["hidden_dimension"],
+                "panel": cells[label]["panel_receipt"],
+                "train_receipt": cells[label]["train_receipt"],
+                "transform_receipt": cells[label]["transform_receipt"],
+                "render_receipt": cells[label]["render_receipt"],
+                "ffr": float(cells[label]["panel"]["panel"]["ffr"]),
+                "purity_k1024": float(
+                    cells[label]["panel"]["panel"]["purity"]["k1024"]
+                ),
+                "projection_ffr": float(
+                    cells[label]["panel"]["projection"]["proj_ffr"]
+                ),
+                "guards_passed": bool(cells[label]["panel"]["selector_passed"]),
+                "production_config_sha256": cells[label]["panel"][
+                    "production_config_sha256"
+                ],
+            }
+            for label in ("h1024", "h4096")
+        },
+        "registered_rule": {
+            "h1024_default_if": "ffr(h2048_ref) / ffr(h1024) <= 1.05",
+            "h4096_evaluate_if": (
+                "ffr(h4096) / ffr(h2048_ref) >= 1.10 OR "
+                "purity_k1024(h4096) / purity_k1024(ref) >= 1.10"
+            ),
+            "guards_required": True,
+        },
+        "ratios": {
+            "ffr_h2048_over_h1024": h1024_ratio,
+            "ffr_h4096_over_h2048": h4096_ffr_ratio,
+            "purity_k1024_h4096_over_h2048": h4096_purity_ratio,
+        },
+        "width_default_for_ge50m": width_default,
+        "h4096_evaluate_for_100m": h4096_evaluate_100m,
+        "verdict_reason": verdict_reason,
+        "selector_passed": guards_1024 and guards_4096,
+    }
+    atomic_write_new_json(
+        os.path.join(output, "capacity-ladder-v1.json"),
+        _seal(body),
+        immutable=True,
+    )
 
 
 def main(argv=None) -> int:

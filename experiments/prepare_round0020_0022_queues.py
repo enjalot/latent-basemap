@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare slim queue manifests for basemap-100m rounds 0020 and 0022."""
+"""Prepare slim queue manifests for basemap-100m rounds 0020, 0022, and 0024."""
 from __future__ import annotations
 
 import argparse
@@ -26,6 +26,11 @@ INPUT_PACK_MANIFEST = "/data/latent-basemap/runs/round-0013/30m-input-pack-v1.js
 R0019_COORDINATES = "/data/latent-basemap/runs/round-0019/queue/artifacts/coordinates"
 MODEL_PATH = "/data/latent-basemap/runs/round-0019/queue/artifacts/train/model.pt"
 MINILM_QUERIES = "/data/latent-basemap/track1/minilm_queries.npy"
+R0019_QUEUE = "/data/latent-basemap/runs/round-0019/queue/queue.json"
+R0019_HIGH_D_REFERENCE = (
+    "/data/latent-basemap/runs/round-0019/queue/artifacts/high-d-reference"
+)
+R0019_PANEL = "/data/latent-basemap/runs/round-0019/queue/artifacts/panel/panel.json"
 GPU_LEASE_PATH = "/data/latent-basemap/.gpu_lease"
 GPU_UUID = "GPU-2c4d2a68-2646-901a-e61c-fbc61f5c9072"
 SENTENCE_MODEL_SNAPSHOT = (
@@ -284,12 +289,210 @@ def prepare_round0022(release_sha: str) -> str:
     return path
 
 
+def _r0019_queue_inputs() -> list[dict[str, Any]]:
+    with open(R0019_QUEUE, encoding="utf-8") as handle:
+        queue = json.load(handle)
+    inputs: list[dict[str, Any]] = []
+    for job in queue["jobs"]:
+        inputs.extend(job.get("expected_inputs", []))
+    return inputs
+
+
+def _round0024_reference_inputs() -> list[dict[str, Any]]:
+    paths = [
+        R0019_QUEUE,
+        R0019_PANEL,
+        os.path.join(R0019_HIGH_D_REFERENCE, "reference.npz"),
+        os.path.join(R0019_HIGH_D_REFERENCE, "reference-receipt.json"),
+        os.path.join(R0019_HIGH_D_REFERENCE, "recall50-truth.npy"),
+        "/data/latent-basemap/runs/round-0019/input/duplicate-cap.npz",
+        "/data/latent-basemap/runs/round-0019/input/r0018-duplicate-baseline.json",
+        "/data/latent-basemap/runs/round-0018/posthoc-untrained-floor.json",
+        "/data/latent-basemap/track1/minilm_queries.npy",
+        "/data/latent-basemap/track1/minilm_queries_prov.json",
+    ]
+    return _file_inputs(paths)
+
+
+def _round0024_transform_templates(
+    *,
+    queue_root: str,
+    release_sha: str,
+) -> dict[str, str]:
+    from basemap.round0014_transform import build_transform_template
+    from basemap.round0024_program import train_config_for_cell
+
+    inputs_root = ensure_data_directory(os.path.join(queue_root, "inputs"))
+    templates: dict[str, str] = {}
+    for label in ("h1024", "h4096"):
+        config, digest = train_config_for_cell(label)
+        relative_model = f"artifacts/{label}/train/model.pt"
+        template = build_transform_template(
+            release_root=RUN_ROOT,
+            release_sha=release_sha,
+            train_output_relative_path=relative_model,
+            production_config=config,
+            production_config_sha256=digest,
+        )
+        path = os.path.join(inputs_root, f"{label}-transform-spec-template.json")
+        atomic_write_new_json(path, template, immutable=True)
+        templates[label] = path
+    return templates
+
+
+def prepare_round0024(release_sha: str) -> str:
+    round_root = ensure_data_directory("/data/latent-basemap/runs/round-0024")
+    queue_root = create_fresh_directory(os.path.join(round_root, "queue"), label="R0024 queue")
+    artifacts = ensure_data_directory(os.path.join(queue_root, "artifacts"))
+    templates = _round0024_transform_templates(
+        queue_root=queue_root, release_sha=release_sha)
+    inputs = _dedupe(
+        [
+            *_r0019_queue_inputs(),
+            *_round0024_reference_inputs(),
+            *_file_inputs(
+                [
+                    os.path.join(LAB_ROOT, "round-0024-2026-07-19.md"),
+                    templates["h1024"],
+                    templates["h4096"],
+                ]
+            ),
+        ]
+    )
+    manifest = _base_manifest(
+        round_id="0024",
+        release_sha=release_sha,
+        round_file=os.path.join(LAB_ROOT, "round-0024-2026-07-19.md"),
+        queue_root=queue_root,
+        gpu_hours_cap=6.5,
+        execution_authority="autonomous-gpu",
+        gpu=True,
+    )
+    manifest["training_performed"] = True
+    manifest["scientific_contract"] = {
+        "cells": ["h1024", "h4096"],
+        "reference_h2048_panel": expected_input_signature(R0019_PANEL),
+        "reuse_high_d_reference": expected_input_signature(
+            os.path.join(R0019_HIGH_D_REFERENCE, "reference-receipt.json")
+        ),
+        "base_treatment": "R0019 duplicate-cap map; only model.hidden_dimension changes",
+    }
+    cell_paths: dict[str, dict[str, str]] = {}
+    jobs: list[dict[str, Any]] = []
+    for label, train_p90 in (("h1024", 3000.0), ("h4096", 10200.0)):
+        root = ensure_data_directory(os.path.join(artifacts, label))
+        paths = {
+            "canary": os.path.join(root, "canary"),
+            "train": os.path.join(root, "train"),
+            "coordinates": os.path.join(root, "coordinates"),
+            "panel": os.path.join(root, "panel"),
+            "semantic_renders": os.path.join(root, "semantic-renders"),
+        }
+        cell_paths[label] = paths
+        prior = None
+        specs = [
+            ("no_training_seal_canary", "no_training_seal_canary", 300.0, paths["canary"], {}),
+            (
+                "train_seed42_30m",
+                "train_seed42_30m",
+                train_p90,
+                paths["train"],
+                {"canary_output": paths["canary"]},
+            ),
+            (
+                "transform_30m",
+                "transform_30m",
+                300.0,
+                paths["coordinates"],
+                {
+                    "train_output": paths["train"],
+                    "transform_spec_template": templates[label],
+                },
+            ),
+            (
+                "registered_panel",
+                "registered_panel",
+                2400.0,
+                paths["panel"],
+                {
+                    "canary_output": paths["canary"],
+                    "train_output": paths["train"],
+                    "transform_output": paths["coordinates"],
+                    "reference_output": R0019_HIGH_D_REFERENCE,
+                },
+            ),
+            (
+                "semantic_renders",
+                "semantic_renders",
+                300.0,
+                paths["semantic_renders"],
+                {
+                    "transform_output": paths["coordinates"],
+                    "panel_output": paths["panel"],
+                },
+            ),
+        ]
+        for role, handler, p90, output, extra in specs:
+            job_id = f"{label}_{role}"
+            jobs.append(
+                {
+                    "id": job_id,
+                    "handler": handler,
+                    "cell": label,
+                    "deps": [] if prior is None else [prior],
+                    "done_marker": os.path.join(artifacts, f"{job_id}.done.json"),
+                    "outputs": [output],
+                    "expected_inputs": inputs,
+                    "p90_wall_s": p90,
+                    "node_policy": {
+                        "gpu_required": True,
+                        "training_performed": handler == "train_seed42_30m",
+                    },
+                    **extra,
+                }
+            )
+            prior = job_id
+    jobs.append(
+        {
+            "id": "width_decision",
+            "handler": "round0024_width_decision",
+            "deps": ["h1024_semantic_renders", "h4096_semantic_renders"],
+            "done_marker": os.path.join(artifacts, "width_decision.done.json"),
+            "outputs": [os.path.join(artifacts, "width-decision")],
+            "expected_inputs": inputs,
+            "p90_wall_s": 300.0,
+            "node_policy": {"gpu_required": False, "training_performed": False},
+            "panel_outputs": {
+                "h1024": cell_paths["h1024"]["panel"],
+                "h4096": cell_paths["h4096"]["panel"],
+            },
+            "train_outputs": {
+                "h1024": cell_paths["h1024"]["train"],
+                "h4096": cell_paths["h4096"]["train"],
+            },
+            "transform_outputs": {
+                "h1024": cell_paths["h1024"]["coordinates"],
+                "h4096": cell_paths["h4096"]["coordinates"],
+            },
+            "render_outputs": {
+                "h1024": cell_paths["h1024"]["semantic_renders"],
+                "h4096": cell_paths["h4096"]["semantic_renders"],
+            },
+            "reference_panel": R0019_PANEL,
+        }
+    )
+    manifest["jobs"] = jobs
+    path = os.path.join(queue_root, "queue.json")
+    atomic_write_new_json(path, manifest, immutable=True)
+    return path
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-sha", required=True)
     parser.add_argument(
         "--round",
-        choices=("0020", "0022", "both"),
+        choices=("0020", "0022", "0024", "both"),
         default="both",
         help="which queue to prepare",
     )
@@ -299,10 +502,11 @@ def main(argv: list[str] | None = None) -> int:
         paths.append(prepare_round0020(args.release_sha))
     if args.round in {"0022", "both"}:
         paths.append(prepare_round0022(args.release_sha))
+    if args.round == "0024":
+        paths.append(prepare_round0024(args.release_sha))
     print(json.dumps({"queue_manifests": paths}, indent=2, sort_keys=True))
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
