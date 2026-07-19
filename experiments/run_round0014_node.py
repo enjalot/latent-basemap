@@ -32,6 +32,13 @@ SCHEMA_PREFIX = "round0014"
 RUNTIME_SCRIPT = "experiments/run_round0014_node.py"
 RoundMaterializedArray = Round0014MaterializedArray
 
+MINILM_UNTRAINED_FLOOR_PATH = (
+    "/data/latent-basemap/runs/round-0018/posthoc-untrained-floor.json"
+)
+MINILM_UNTRAINED_FLOOR_SHA256 = (
+    "d0bf82364a004850fb766e7ff647c01b4cab7437567c2dc2b1b634f6795fdc1c"
+)
+
 
 def configure_round0015() -> None:
     """Select the one additive Round-0015 wrapper before child admission."""
@@ -554,6 +561,71 @@ def _panel_config():
         peak_byte_cap=26_000_000_000)
 
 
+def _load_minilm_untrained_floor() -> dict[str, Any]:
+    signature = expected_input_signature(MINILM_UNTRAINED_FLOOR_PATH)
+    if signature["sha256"] != MINILM_UNTRAINED_FLOOR_SHA256:
+        raise ValueError(f"{ROUND_LABEL} registered untrained floor changed")
+    with open(MINILM_UNTRAINED_FLOOR_PATH, encoding="utf-8") as handle:
+        receipt = json.load(handle)
+    body = {key: receipt[key] for key in receipt if key != "identity_sha256"}
+    controls = receipt.get("controls")
+    floor = receipt.get("untrained_projection_floor_ffr")
+    architecture = receipt.get("architecture")
+    expected_architecture = {
+        "name": TRAIN_CONFIG["model"]["architecture"],
+        "input_dimension": TRAIN_CONFIG["model"]["input_dimension"],
+        "hidden_dimension": TRAIN_CONFIG["model"]["hidden_dimension"],
+        "hidden_layers": TRAIN_CONFIG["model"]["hidden_layers"],
+        "output_dimension": TRAIN_CONFIG["model"]["output_dimension"],
+        "use_batchnorm": TRAIN_CONFIG["model"]["use_batchnorm"],
+        "use_dropout": TRAIN_CONFIG["model"]["use_dropout"],
+    }
+    if (
+        receipt.get("schema") != "round0018-minilm-untrained-projection-floor.v1"
+        or receipt.get("identity_sha256") != sha256_bytes(canonical_json(body))
+        or receipt.get("training_performed") is not False
+        or architecture != expected_architecture
+        or not isinstance(controls, list)
+        or len(controls) < 3
+        or len({cell.get("seed") for cell in controls}) != len(controls)
+        or not isinstance(floor, (int, float))
+        or isinstance(floor, bool)
+        or not np.isfinite(floor)
+        or floor <= 0
+        or floor != max(float(cell["projection_ffr"]) for cell in controls)
+    ):
+        raise ValueError(f"{ROUND_LABEL} registered untrained floor is invalid")
+    return {"receipt": signature, "floor_ffr": float(floor), "controls": controls}
+
+
+def _registered_panel_decision(
+        panel: dict[str, Any], projection: dict[str, Any], recall50: float,
+        canary_equivalence: dict[str, Any], untrained_floor_ffr: float,
+) -> tuple[float, dict[str, bool]]:
+    if not np.isfinite(untrained_floor_ffr) or untrained_floor_ffr <= 0:
+        raise ValueError(f"{ROUND_LABEL} untrained projection floor must be positive")
+    projection_ratio = projection["proj_ffr"] / untrained_floor_ffr
+    guards = panel.get("guards")
+    numerical_guards = bool(
+        isinstance(guards, dict)
+        and guards.get("coords_finite") is True
+        and guards.get("coords_collapsed") is False
+        and guards.get("emb_finite") is True
+        and guards.get("emb_zero_rows") == 0
+    )
+    checks = {
+        "ffr": panel["ffr"] >= 0.40,
+        "density": panel["density"] >= 0.55,
+        "purity_k256": panel["purity"]["k256"] >= 0.50,
+        "purity_k1024": panel["purity"]["k1024"] >= 0.50,
+        "projection_over_untrained_floor": projection_ratio >= 100.0,
+        "recall50_gt_recall10": recall50 > panel["recall@k"],
+        "numerical_guards": numerical_guards,
+        "canary_cache_scalar_equivalence": canary_equivalence["passed"] is True,
+    }
+    return projection_ratio, checks
+
+
 def _run_high_d_reference(active: dict[str, Any], job: dict[str, Any]) -> None:
     from basemap.panel_v2 import (build_hiD_reference, load_hiD_reference,
                                   sample_anchors, save_hiD_reference, _self_knn)
@@ -649,22 +721,13 @@ def _run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
     canary_root = active["manifest"]["jobs"][0]["outputs"][0]
     with open(os.path.join(canary_root, "evidence.json"), encoding="utf-8") as handle:
         canary_equivalence = json.load(handle)["scorer_scalar_equivalence"]
-    projection_ratio = (
+    untrained_floor = _load_minilm_untrained_floor()
+    projection_ratio, decision_checks = _registered_panel_decision(
+        panel, projection, recall50, canary_equivalence,
+        untrained_floor["floor_ffr"])
+    random_floor_ratio = (
         projection["proj_ffr"] / projection["proj_random_floor_ffr"]
         if projection["proj_random_floor_ffr"] > 0 else float("inf"))
-    decision_checks = {
-        "ffr": panel["ffr"] >= 0.40,
-        "density": panel["density"] >= 0.55,
-        "purity_k256": panel["purity"]["k256"] >= 0.50,
-        "purity_k1024": panel["purity"]["k1024"] >= 0.50,
-        "projection_over_floor": projection_ratio >= 100.0,
-        "recall50_gt_recall10": recall50 > panel["recall@k"],
-        "numerical_guards": all(not value for value in (
-            panel["guards"].get("nonfinite_high"),
-            panel["guards"].get("nonfinite_low"),
-            panel["guards"].get("collapsed_low"))),
-        "canary_cache_scalar_equivalence": canary_equivalence["passed"] is True,
-    }
     report = {
         "schema": _schema("registered-panel"),
         "production_config_sha256": TRAIN_CONFIG_SHA256,
@@ -681,7 +744,9 @@ def _run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
         "recall@10": panel["recall@k"], "recall@50": recall50,
         "recall50_guard": guard50,
         "projection": projection,
+        "registered_untrained_projection_floor": untrained_floor,
         "projection_over_untrained_floor": projection_ratio,
+        "projection_over_random_bbox_floor": random_floor_ratio,
         "query_truth_cache": cache_telemetry,
         "canary_scalar_equivalence": canary_equivalence,
         "decision_checks": decision_checks,
