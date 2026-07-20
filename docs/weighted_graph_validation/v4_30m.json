@@ -1,0 +1,10 @@
+{
+  "test": "V4_spot_physical",
+  "n_nodes": 20,
+  "k": 15,
+  "weight_matches_min_dist": 20,
+  "weight_monotone_decay": 20,
+  "mutual_pairs_tested": 60,
+  "mutual_dominates": 60,
+  "PASS": true
+}
