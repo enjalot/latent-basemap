@@ -120,6 +120,16 @@ def configure_round0019() -> None:
     NODES = program.NODES
 
 
+def configure_round0025(*, job: dict[str, Any] | None = None,
+                        manifest: dict[str, Any] | None = None) -> None:
+    """Select the Round 0025 int8 gather benchmark handlers for slim-runner."""
+    global ROUND_ID, ROUND_LABEL, SCHEMA_PREFIX, RUNTIME_SCRIPT
+    ROUND_ID = "0025"
+    ROUND_LABEL = "Round 0025"
+    SCHEMA_PREFIX = "round0025"
+    RUNTIME_SCRIPT = "experiments/bench_int8_gather.py"
+
+
 def _schema(name: str) -> str:
     return f"{SCHEMA_PREFIX}-{name}-v1"
 
@@ -961,6 +971,72 @@ def _run_semantic_renders(active: dict[str, Any], job: dict[str, Any]) -> None:
     }
     atomic_write_new_json(
         os.path.join(output, "render-manifest.json"), _seal(render), immutable=True)
+
+
+def _round0025_source_plan(active: dict[str, Any]) -> dict[str, Any]:
+    if active.get("manifest", {}).get("round_id") != "0025":
+        raise RuntimeError("Round 0025 handler received another manifest")
+    plan = active["manifest"].get("round0025", {}).get("source_plan")
+    if not isinstance(plan, dict) or plan.get("schema") != "round0025-source-plan-v1":
+        raise RuntimeError("Round 0025 queue lacks a bound source plan")
+    return plan
+
+
+def _round0025_output(job: dict[str, Any], *, handler: str) -> str:
+    if job.get("handler") != handler or len(job.get("outputs") or []) != 1:
+        raise RuntimeError(f"Round 0025 job contract changed for {handler}")
+    return job["outputs"][0]
+
+
+def _run_round0025_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
+    from experiments.bench_int8_gather import run_canary
+
+    receipt = run_canary(
+        _round0025_source_plan(active),
+        _round0025_output(job, handler="round0025_canary"),
+    )
+    if receipt.get("passed") is not True:
+        raise RuntimeError("Round 0025 canary verdict failed")
+
+
+def _run_round0025_quantize(active: dict[str, Any], job: dict[str, Any]) -> None:
+    from experiments.bench_int8_gather import quantize_full
+
+    quantize_full(
+        _round0025_source_plan(active),
+        _round0025_output(job, handler="round0025_quantize"),
+        block_rows=int(job.get("block_rows", 65_536)),
+    )
+
+
+def _run_round0025_bench(active: dict[str, Any], job: dict[str, Any]) -> None:
+    from experiments.bench_int8_gather import (
+        _attach_file_signature,
+        _load_manifest,
+        run_benchmark,
+    )
+
+    output = _round0025_output(job, handler="round0025_bench")
+    shard_manifest_path = os.path.realpath(job["shard_manifest"])
+    expected = os.path.realpath(
+        active["manifest"]["round0025"]["shard_manifest"])
+    if shard_manifest_path != expected:
+        raise RuntimeError("Round 0025 shard manifest path changed")
+    shard_manifest = _attach_file_signature(
+        shard_manifest_path, _load_manifest(shard_manifest_path))
+    result = run_benchmark(
+        shard_manifest,
+        output,
+        iterations=int(job.get("iterations", 20_000)),
+        warmup=int(job.get("warmup", 500)),
+        batch_rows=int(job.get("batch_rows", 8192)),
+    )
+    cells = {cell["name"]: cell for cell in result.get("cells", [])}
+    missing = {"ram-150m", "nvme-150m-cold", "nvme-405m"} - set(cells)
+    if missing:
+        raise RuntimeError(f"Round 0025 benchmark omitted cells: {sorted(missing)}")
+    if cells["nvme-150m-cold"].get("skipped") or cells["nvme-405m"].get("skipped"):
+        raise RuntimeError("Round 0025 required NVMe benchmark cell skipped")
 
 
 def main(argv=None) -> int:
