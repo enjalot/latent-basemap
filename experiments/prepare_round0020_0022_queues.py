@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare slim queue manifests for basemap-100m rounds 0020 and 0022."""
+"""Prepare slim queue manifests for basemap-100m universality/census rounds."""
 from __future__ import annotations
 
 import argparse
@@ -31,6 +31,10 @@ GPU_UUID = "GPU-2c4d2a68-2646-901a-e61c-fbc61f5c9072"
 SENTENCE_MODEL_SNAPSHOT = (
     "/data/hf/sentence-transformers/models--sentence-transformers--all-MiniLM-L6-v2/"
     "snapshots/1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+)
+R0022_PROVISIONAL_PANEL = (
+    "/data/latent-basemap/runs/round-0022/queue/artifacts/panel/"
+    "universality-panel-v1.json"
 )
 
 
@@ -208,10 +212,8 @@ def prepare_round0020(release_sha: str) -> str:
     return path
 
 
-def prepare_round0022(release_sha: str) -> str:
-    round_root = ensure_data_directory("/data/latent-basemap/runs/round-0022")
-    queue_root = create_fresh_directory(os.path.join(round_root, "queue"), label="R0022 queue")
-    artifacts = ensure_data_directory(os.path.join(queue_root, "artifacts"))
+def _universality_inputs(*, include_r0022_panel: bool) -> list[dict[str, Any]]:
+    extra = [R0022_PROVISIONAL_PANEL] if include_r0022_panel else []
     probe_inputs = _file_inputs(
         [
             MODEL_PATH,
@@ -231,9 +233,10 @@ def prepare_round0022(release_sha: str) -> str:
             "/data/embeddings/dadabase/minilm.npy",
             "/data/embeddings/dadabase/jokes.parquet",
             "/data/latent-basemap/runs/round-0019/queue/artifacts/semantic-renders/sample-semantic-ids.npy",
+            *extra,
         ]
     )
-    inputs = _dedupe(
+    return _dedupe(
         [
             *probe_inputs,
             *_materialized_chunk_inputs(),
@@ -241,12 +244,25 @@ def prepare_round0022(release_sha: str) -> str:
             *_hf_snapshot_file_inputs(),
         ]
     )
+
+
+def _prepare_universality_round(
+    *,
+    round_id: str,
+    release_sha: str,
+    gpu_hours_cap: float,
+    include_r0022_panel: bool,
+) -> str:
+    round_root = ensure_data_directory(f"/data/latent-basemap/runs/round-{round_id}")
+    queue_root = create_fresh_directory(os.path.join(round_root, "queue"), label=f"R{round_id} queue")
+    artifacts = ensure_data_directory(os.path.join(queue_root, "artifacts"))
+    inputs = _universality_inputs(include_r0022_panel=include_r0022_panel)
     manifest = _base_manifest(
-        round_id="0022",
+        round_id=round_id,
         release_sha=release_sha,
-        round_file=os.path.join(LAB_ROOT, "round-0022-2026-07-19.md"),
+        round_file=os.path.join(LAB_ROOT, f"round-{round_id}-2026-07-19.md"),
         queue_root=queue_root,
-        gpu_hours_cap=1.5,
+        gpu_hours_cap=gpu_hours_cap,
         execution_authority="autonomous-gpu",
         gpu=True,
     )
@@ -284,12 +300,30 @@ def prepare_round0022(release_sha: str) -> str:
     return path
 
 
+def prepare_round0022(release_sha: str) -> str:
+    return _prepare_universality_round(
+        round_id="0022",
+        release_sha=release_sha,
+        gpu_hours_cap=1.5,
+        include_r0022_panel=False,
+    )
+
+
+def prepare_round0028(release_sha: str) -> str:
+    return _prepare_universality_round(
+        round_id="0028",
+        release_sha=release_sha,
+        gpu_hours_cap=0.03,
+        include_r0022_panel=True,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-sha", required=True)
     parser.add_argument(
         "--round",
-        choices=("0020", "0022", "both"),
+        choices=("0020", "0022", "0028", "both"),
         default="both",
         help="which queue to prepare",
     )
@@ -299,10 +333,11 @@ def main(argv: list[str] | None = None) -> int:
         paths.append(prepare_round0020(args.release_sha))
     if args.round in {"0022", "both"}:
         paths.append(prepare_round0022(args.release_sha))
+    if args.round == "0028":
+        paths.append(prepare_round0028(args.release_sha))
     print(json.dumps({"queue_manifests": paths}, indent=2, sort_keys=True))
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
