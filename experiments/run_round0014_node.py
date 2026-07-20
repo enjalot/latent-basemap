@@ -120,6 +120,21 @@ def configure_round0019() -> None:
     NODES = program.NODES
 
 
+def configure_round0021() -> None:
+    """Select the global exact-family cap-one treatment before admission."""
+    global ROUND_ID, ROUND_LABEL, SCHEMA_PREFIX, RUNTIME_SCRIPT
+    global RoundMaterializedArray, TRAIN_CONFIG, TRAIN_CONFIG_SHA256, NODES
+    program = importlib.import_module("basemap.round0021_program")
+    ROUND_ID = "0021"
+    ROUND_LABEL = "Round 0021"
+    SCHEMA_PREFIX = "round0021"
+    RUNTIME_SCRIPT = "experiments/run_round0014_node.py"
+    RoundMaterializedArray = program.Round0021MaterializedArray
+    TRAIN_CONFIG = program.TRAIN_CONFIG
+    TRAIN_CONFIG_SHA256 = program.TRAIN_CONFIG_SHA256
+    NODES = program.NODES
+
+
 def configure_round0020() -> None:
     """Select the CPU-only global duplicate-census node."""
     global ROUND_ID, ROUND_LABEL, SCHEMA_PREFIX, RUNTIME_SCRIPT
@@ -355,7 +370,17 @@ def _run_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
         pumap._pipeline_info.get("multiplicity_policy")
         == ("exact_duplicate_cap_one" if multiplicity else "row_multiplicity_uncapped")
     )
+    multiplicity_receipt = None
     if multiplicity:
+        from basemap.duplicate_multiplicity import load_duplicate_cap
+
+        cap = load_duplicate_cap(
+            multiplicity["artifact_path"],
+            expected_sha256=multiplicity["artifact_sha256"],
+            row_count=len(X),
+            fixed_edges_per_source=multiplicity["fixed_edges_per_source"],
+        )
+        metadata = cap["metadata"]
         multiplicity_ok = bool(
             multiplicity_ok
             and pumap._pipeline_info.get("multiplicity_cap_artifact_sha256")
@@ -368,6 +393,34 @@ def _run_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
             and len(loader.positive_source_rows_t) == multiplicity["retained_rows"]
             and loader.fixed_edges_per_source == multiplicity["fixed_edges_per_source"]
         )
+        if "represented_exact_families" in multiplicity:
+            multiplicity_ok = bool(
+                multiplicity_ok
+                and metadata.get("selection", {}).get("exact_embedding_families")
+                == multiplicity["represented_exact_families"]
+                and metadata.get("identity_sha256")
+                == multiplicity["cap_identity_sha256"]
+                and int(len(cap["representative_rows"]))
+                == multiplicity["represented_exact_families"]
+                and int(len(cap["excluded_rows"])) == multiplicity["excluded_rows"]
+                and int(metadata.get("effective_positive_edges"))
+                == multiplicity["effective_positive_edges"]
+            )
+        multiplicity_receipt = {
+            "cap": cap["signature"],
+            "cap_identity_sha256": metadata.get("identity_sha256"),
+            "excluded_row_count": int(metadata["excluded_row_count"]),
+            "retained_row_count": int(metadata["retained_row_count"]),
+            "represented_exact_families": int(
+                metadata.get("selection", {}).get("exact_embedding_families", 0)
+            ),
+            "family_counts_sha256": metadata["array_sha256"]["family_counts"],
+            "representative_rows_sha256": metadata["array_sha256"][
+                "representative_rows"
+            ],
+            "excluded_rows_sha256": metadata["array_sha256"]["excluded_rows"],
+            "effective_positive_edges": int(metadata["effective_positive_edges"]),
+        }
     if (pumap.model is not None or hasattr(pumap, "_train_stats") or
             pumap._pipeline_info.get("pipeline") != "device_uniform" or
             pumap._pipeline_info.get("positive_sampling") != "uniform" or
@@ -408,6 +461,7 @@ def _run_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
             "free_bytes": int(free_bytes), "total_bytes": int(total_bytes),
             "headroom_gib": headroom_gib, "minimum_headroom_gib": 1.5,
         },
+        "multiplicity_cap": multiplicity_receipt,
         "scorer_scalar_equivalence": scalar,
         "semantic_render_alignment": semantic,
         "registered_p90_plus_margin_seconds": aggregate,
@@ -869,6 +923,213 @@ def _load_duplicate_baseline(treatment: dict[str, Any]) -> dict[str, Any]:
     return {"receipt": signature, "diagnostics": diagnostics}
 
 
+def _load_global_duplicate_baseline(treatment: dict[str, Any]) -> dict[str, Any]:
+    path = treatment["baseline_diagnostic_path"]
+    signature = expected_input_signature(path)
+    if signature["sha256"] != treatment["baseline_diagnostic_sha256"]:
+        raise ValueError(f"{ROUND_LABEL} global duplicate baseline changed")
+    with open(path, encoding="utf-8") as handle:
+        receipt = json.load(handle)
+    body = {key: receipt[key] for key in receipt if key != "identity_sha256"}
+    families = receipt.get("families")
+    if (
+        receipt.get("schema") != treatment["baseline_schema"]
+        or receipt.get("identity_sha256") != sha256_bytes(canonical_json(body))
+        or receipt.get("method") != treatment["baseline_method"]
+        or receipt.get("top_family_count") != treatment["baseline_top_family_count"]
+        or not isinstance(families, list)
+        or len(families) != treatment["baseline_top_family_count"]
+        or receipt.get("sample_seed") != treatment["baseline_sample_seed"]
+        or receipt.get("sample_size_requested")
+        != treatment["baseline_sample_size_requested"]
+        or receipt.get("sample_size_effective")
+        != treatment["baseline_sample_size_effective"]
+        or receipt.get("sample_ids_sha256")
+        != treatment["baseline_sample_ids_sha256"]
+        or receipt.get("maximum_top_family_representative_mahalanobis")
+        != treatment["baseline_maximum_mahalanobis"]
+    ):
+        raise ValueError(f"{ROUND_LABEL} global duplicate baseline is invalid")
+    return {"receipt": signature, "diagnostics": receipt}
+
+
+def _compare_global_top_families(
+    baseline_families: list[dict[str, Any]],
+    observed_distances: np.ndarray,
+) -> dict[str, Any]:
+    if len(baseline_families) != len(observed_distances):
+        raise ValueError("global-family comparison length mismatch")
+    families = []
+    for baseline, observed in zip(baseline_families, observed_distances):
+        baseline_distance = float(baseline["representative_mahalanobis"])
+        observed_distance = float(observed)
+        required = 0.5 * baseline_distance
+        families.append(
+            {
+                "rank": int(baseline["rank"]),
+                "representative_row": int(baseline["representative_row"]),
+                "family_count": int(baseline["family_count"]),
+                "baseline_representative_mahalanobis": baseline_distance,
+                "observed_representative_mahalanobis": observed_distance,
+                "required_representative_mahalanobis": required,
+                "observed_over_baseline": (
+                    observed_distance / baseline_distance
+                    if baseline_distance > 0
+                    else float("inf")
+                ),
+                "passed": observed_distance <= required,
+            }
+        )
+    failures = [item for item in families if not item["passed"]]
+    return {
+        "families": families,
+        "all_top50_representatives_reduced_50pct": not failures,
+        "failed_representative_rows": [
+            int(item["representative_row"]) for item in failures
+        ],
+        "maximum_observed_top_family_representative_mahalanobis": (
+            max(float(item["observed_representative_mahalanobis"]) for item in families)
+            if families
+            else None
+        ),
+    }
+
+
+def _mahalanobis_tail_census(coordinates: StreamedCoordinateArray, *, center, inverse) -> dict[str, Any]:
+    tail_count = 0
+    finite_count = 0
+    total_count = 0
+    maximum = 0.0
+    for member in coordinates._members:
+        array = np.load(member["path"], mmap_mode="r", allow_pickle=False)
+        points = np.asarray(array, dtype=np.float64)
+        finite = np.isfinite(points).all(axis=1)
+        total_count += len(points)
+        finite_count += int(finite.sum())
+        if finite.any():
+            delta = points[finite] - center
+            distance = np.sqrt(np.einsum("ni,ij,nj->n", delta, inverse, delta))
+            tail_count += int((distance > 5.0).sum())
+            if len(distance):
+                maximum = max(maximum, float(distance.max()))
+        del array
+    return {
+        "threshold_sample_mahalanobis": 5.0,
+        "tail_count": tail_count,
+        "finite_count": finite_count,
+        "row_count": total_count,
+        "finite_fraction": finite_count / total_count if total_count else 0.0,
+        "maximum_mahalanobis": maximum,
+    }
+
+
+def _global_duplicate_family_diagnostics(
+    coordinates: StreamedCoordinateArray,
+    *,
+    cap: dict[str, Any],
+    treatment: dict[str, Any],
+) -> dict[str, Any]:
+    baseline = _load_global_duplicate_baseline(treatment)
+    baseline_receipt = baseline["diagnostics"]
+    cap_metadata = cap["metadata"]
+    if (
+        cap_metadata.get("selection", {}).get("exact_embedding_families")
+        != treatment["represented_exact_families"]
+        or cap_metadata.get("excluded_row_count") != treatment["excluded_rows"]
+        or cap_metadata.get("retained_row_count") != treatment["retained_rows"]
+        or int(len(cap["representative_rows"]))
+        != treatment["represented_exact_families"]
+    ):
+        raise RuntimeError(f"{ROUND_LABEL} global cap metadata does not match contract")
+    baseline_families = baseline_receipt["families"]
+    top_rows = np.asarray(
+        [int(item["representative_row"]) for item in baseline_families],
+        dtype=np.int64,
+    )
+    if len(np.unique(top_rows)) != len(top_rows):
+        raise RuntimeError(f"{ROUND_LABEL} global top-family representatives changed")
+    selected_family_rows = np.sort(
+        np.concatenate([cap["excluded_rows"], cap["representative_rows"]])
+    ).astype(np.int64)
+    if (
+        len(selected_family_rows) != treatment["global_family_rows"]
+        or len(np.unique(selected_family_rows)) != len(selected_family_rows)
+    ):
+        raise RuntimeError(f"{ROUND_LABEL} global family row union changed")
+    rng = np.random.RandomState(treatment["baseline_sample_seed"])
+    sample_ids = np.sort(
+        rng.choice(
+            len(coordinates),
+            treatment["baseline_sample_size_requested"],
+            replace=False,
+        )
+    ).astype(np.int64)
+    sample_ids = sample_ids[
+        ~np.isin(sample_ids, selected_family_rows, assume_unique=True)
+    ]
+    if (
+        len(sample_ids) != treatment["baseline_sample_size_effective"]
+        or ordered_array_sha256(sample_ids) != treatment["baseline_sample_ids_sha256"]
+    ):
+        raise RuntimeError(f"{ROUND_LABEL} global duplicate diagnostic sample changed")
+    sample = np.asarray(coordinates[sample_ids], dtype=np.float64)
+    representatives = np.asarray(coordinates[top_rows], dtype=np.float64)
+    if (
+        sample.shape != (len(sample_ids), 2)
+        or representatives.shape != (len(top_rows), 2)
+        or not np.isfinite(sample).all()
+        or not np.isfinite(representatives).all()
+    ):
+        raise RuntimeError(f"{ROUND_LABEL} global duplicate diagnostic coordinates invalid")
+    center = sample.mean(axis=0)
+    covariance = np.cov(sample, rowvar=False)
+    if covariance.shape != (2, 2) or np.linalg.det(covariance) <= 0:
+        raise RuntimeError(f"{ROUND_LABEL} global duplicate diagnostic covariance invalid")
+    inverse = np.linalg.inv(covariance)
+    delta = representatives - center
+    observed = np.sqrt(np.einsum("ni,ij,nj->n", delta, inverse, delta))
+    sample_delta = sample - center
+    sample_distance = np.sqrt(
+        np.einsum("ni,ij,nj->n", sample_delta, inverse, sample_delta)
+    )
+    comparison = _compare_global_top_families(baseline_families, observed)
+    for item, coord in zip(comparison["families"], representatives):
+        item["observed_representative_coordinate"] = [
+            float(coord[0]),
+            float(coord[1]),
+        ]
+    return {
+        "kind": "global_top50_exact_family_mahalanobis",
+        "baseline": baseline,
+        "cap": {
+            "signature": cap["signature"],
+            "identity_sha256": cap_metadata.get("identity_sha256"),
+            "excluded_row_count": int(cap_metadata["excluded_row_count"]),
+            "retained_row_count": int(cap_metadata["retained_row_count"]),
+            "represented_exact_families": int(
+                cap_metadata["selection"]["exact_embedding_families"]
+            ),
+            "global_family_rows": int(len(selected_family_rows)),
+            "effective_positive_edges": int(cap_metadata["effective_positive_edges"]),
+        },
+        "observed": {
+            "method": treatment["baseline_method"],
+            "sample_seed": treatment["baseline_sample_seed"],
+            "sample_size_requested": treatment["baseline_sample_size_requested"],
+            "sample_size_effective": int(len(sample_ids)),
+            "sample_ids_sha256": ordered_array_sha256(sample_ids),
+            "reference_center": center.tolist(),
+            "reference_covariance": covariance.tolist(),
+            "sample_median_mahalanobis": float(np.median(sample_distance)),
+            "tail_census": _mahalanobis_tail_census(
+                coordinates, center=center, inverse=inverse
+            ),
+            **comparison,
+        },
+        "required_maximum_mahalanobis": treatment["required_maximum_mahalanobis"],
+    }
+
+
 def _registered_panel_decision(
         panel: dict[str, Any], projection: dict[str, Any], recall50: float,
         canary_equivalence: dict[str, Any], untrained_floor_ffr: float,
@@ -1030,7 +1291,6 @@ def _run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
     duplicate_diagnostics = None
     multiplicity = _multiplicity_treatment()
     if multiplicity:
-        from basemap.duplicate_diagnostics import duplicate_component_diagnostics
         from basemap.duplicate_multiplicity import load_duplicate_cap
 
         cap = load_duplicate_cap(
@@ -1039,30 +1299,41 @@ def _run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
             row_count=len(Z),
             fixed_edges_per_source=multiplicity["fixed_edges_per_source"],
         )
-        baseline = _load_duplicate_baseline(multiplicity)
-        observed = duplicate_component_diagnostics(
-            Z,
-            excluded_rows=cap["excluded_rows"],
-            representative_rows=cap["representative_rows"],
-        )
-        if (
-            observed["sample_ids_sha256"]
-            != baseline["diagnostics"]["sample_ids_sha256"]
-        ):
-            raise RuntimeError(f"{ROUND_LABEL} duplicate diagnostic sample changed")
-        observed_max = observed["maximum_representative_mahalanobis"]
-        baseline_max = baseline["diagnostics"]["maximum_representative_mahalanobis"]
-        decision_checks["duplicate_component_offset_reduced_50pct"] = (
-            observed_max <= multiplicity["required_maximum_mahalanobis"]
-        )
-        duplicate_diagnostics = {
-            "baseline": baseline,
-            "observed": observed,
-            "observed_over_baseline": observed_max / baseline_max,
-            "required_maximum_mahalanobis": multiplicity[
-                "required_maximum_mahalanobis"
-            ],
-        }
+        if multiplicity.get("diagnostic") == "global-top50-family-mahalanobis":
+            duplicate_diagnostics = _global_duplicate_family_diagnostics(
+                Z, cap=cap, treatment=multiplicity)
+            decision_checks["global_top50_family_offsets_reduced_50pct"] = (
+                duplicate_diagnostics["observed"][
+                    "all_top50_representatives_reduced_50pct"
+                ]
+            )
+        else:
+            from basemap.duplicate_diagnostics import duplicate_component_diagnostics
+
+            baseline = _load_duplicate_baseline(multiplicity)
+            observed = duplicate_component_diagnostics(
+                Z,
+                excluded_rows=cap["excluded_rows"],
+                representative_rows=cap["representative_rows"],
+            )
+            if (
+                observed["sample_ids_sha256"]
+                != baseline["diagnostics"]["sample_ids_sha256"]
+            ):
+                raise RuntimeError(f"{ROUND_LABEL} duplicate diagnostic sample changed")
+            observed_max = observed["maximum_representative_mahalanobis"]
+            baseline_max = baseline["diagnostics"]["maximum_representative_mahalanobis"]
+            decision_checks["duplicate_component_offset_reduced_50pct"] = (
+                observed_max <= multiplicity["required_maximum_mahalanobis"]
+            )
+            duplicate_diagnostics = {
+                "baseline": baseline,
+                "observed": observed,
+                "observed_over_baseline": observed_max / baseline_max,
+                "required_maximum_mahalanobis": multiplicity[
+                    "required_maximum_mahalanobis"
+                ],
+            }
     report = {
         "schema": _schema("registered-panel"),
         "production_config_sha256": TRAIN_CONFIG_SHA256,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare slim queue manifests for basemap-100m rounds 0020, 0022, and 0024."""
+"""Prepare slim queue manifests for basemap-100m rounds 0020, 0021, 0022, and 0024."""
 from __future__ import annotations
 
 import argparse
@@ -31,6 +31,18 @@ R0019_HIGH_D_REFERENCE = (
     "/data/latent-basemap/runs/round-0019/queue/artifacts/high-d-reference"
 )
 R0019_PANEL = "/data/latent-basemap/runs/round-0019/queue/artifacts/panel/panel.json"
+R0020_GLOBAL_CENSUS = (
+    "/data/latent-basemap/runs/round-0020/queue/artifacts/"
+    "duplicate-census/global-duplicate-census-v1.npz"
+)
+R0020_GLOBAL_CAP = (
+    "/data/latent-basemap/runs/round-0020/queue/artifacts/"
+    "duplicate-census/global-cap-v1.npz"
+)
+R0020_GLOBAL_BASELINE = (
+    "/data/latent-basemap/runs/round-0020/queue/artifacts/"
+    "duplicate-census/r0019-global-baseline.json"
+)
 GPU_LEASE_PATH = "/data/latent-basemap/.gpu_lease"
 GPU_UUID = "GPU-2c4d2a68-2646-901a-e61c-fbc61f5c9072"
 SENTENCE_MODEL_SNAPSHOT = (
@@ -314,6 +326,148 @@ def _round0024_reference_inputs() -> list[dict[str, Any]]:
     return _file_inputs(paths)
 
 
+def _round0021_reference_inputs() -> list[dict[str, Any]]:
+    paths = [
+        R0019_QUEUE,
+        R0019_PANEL,
+        os.path.join(R0019_HIGH_D_REFERENCE, "reference.npz"),
+        os.path.join(R0019_HIGH_D_REFERENCE, "reference-receipt.json"),
+        os.path.join(R0019_HIGH_D_REFERENCE, "recall50-truth.npy"),
+        R0020_GLOBAL_CENSUS,
+        R0020_GLOBAL_CAP,
+        R0020_GLOBAL_BASELINE,
+        "/data/latent-basemap/runs/round-0018/posthoc-untrained-floor.json",
+        "/data/latent-basemap/track1/minilm_queries.npy",
+        "/data/latent-basemap/track1/minilm_queries_prov.json",
+    ]
+    return _file_inputs(paths)
+
+
+def _round0021_transform_template(
+    *,
+    queue_root: str,
+    release_sha: str,
+) -> str:
+    from basemap.round0014_transform import build_transform_template
+    from basemap.round0021_program import TRAIN_CONFIG, TRAIN_CONFIG_SHA256
+
+    inputs_root = ensure_data_directory(os.path.join(queue_root, "inputs"))
+    template = build_transform_template(
+        release_root=RUN_ROOT,
+        release_sha=release_sha,
+        train_output_relative_path="artifacts/train/model.pt",
+        production_config=TRAIN_CONFIG,
+        production_config_sha256=TRAIN_CONFIG_SHA256,
+    )
+    path = os.path.join(inputs_root, "round0021-transform-spec-template.json")
+    atomic_write_new_json(path, template, immutable=True)
+    return path
+
+
+def prepare_round0021(release_sha: str) -> str:
+    round_root = ensure_data_directory("/data/latent-basemap/runs/round-0021")
+    queue_root = create_fresh_directory(os.path.join(round_root, "queue"), label="R0021 queue")
+    artifacts = ensure_data_directory(os.path.join(queue_root, "artifacts"))
+    template = _round0021_transform_template(
+        queue_root=queue_root, release_sha=release_sha)
+    inputs = _dedupe(
+        [
+            *_r0019_queue_inputs(),
+            *_round0021_reference_inputs(),
+            *_file_inputs(
+                [
+                    os.path.join(LAB_ROOT, "round-0021-2026-07-19.md"),
+                    template,
+                ]
+            ),
+        ]
+    )
+    manifest = _base_manifest(
+        round_id="0021",
+        release_sha=release_sha,
+        round_file=os.path.join(LAB_ROOT, "round-0021-2026-07-19.md"),
+        queue_root=queue_root,
+        gpu_hours_cap=2.7,
+        execution_authority="autonomous-gpu",
+        gpu=True,
+    )
+    manifest["required_reviews"] = ["0019", "0020"]
+    manifest["training_performed"] = True
+    manifest["scientific_contract"] = {
+        "treatment": "global exact-fp16 family cap-one",
+        "census": expected_input_signature(R0020_GLOBAL_CENSUS),
+        "cap": expected_input_signature(R0020_GLOBAL_CAP),
+        "baseline": expected_input_signature(R0020_GLOBAL_BASELINE),
+        "reuse_high_d_reference": expected_input_signature(
+            os.path.join(R0019_HIGH_D_REFERENCE, "reference-receipt.json")
+        ),
+        "positive_edges_effective": 446_726_370,
+        "retained_rows": 29_781_758,
+        "excluded_rows": 218_242,
+        "represented_exact_families": 138_601,
+    }
+    jobs = [
+        {
+            "id": "no_training_seal_canary",
+            "deps": [],
+            "done_marker": os.path.join(artifacts, "no_training_seal_canary.done.json"),
+            "outputs": [os.path.join(artifacts, "canary")],
+            "expected_inputs": inputs,
+            "p90_wall_s": 300.0,
+            "node_policy": {"gpu_required": True, "training_performed": False},
+        },
+        {
+            "id": "train_seed42_30m",
+            "deps": ["no_training_seal_canary"],
+            "done_marker": os.path.join(artifacts, "train_seed42_30m.done.json"),
+            "outputs": [os.path.join(artifacts, "train")],
+            "expected_inputs": inputs,
+            "p90_wall_s": 4800.0,
+            "node_policy": {"gpu_required": True, "training_performed": True},
+            "canary_output": os.path.join(artifacts, "canary"),
+        },
+        {
+            "id": "transform_30m",
+            "deps": ["train_seed42_30m"],
+            "done_marker": os.path.join(artifacts, "transform_30m.done.json"),
+            "outputs": [os.path.join(artifacts, "coordinates")],
+            "expected_inputs": inputs,
+            "p90_wall_s": 300.0,
+            "node_policy": {"gpu_required": True, "training_performed": False},
+            "train_output": os.path.join(artifacts, "train"),
+            "transform_spec_template": template,
+        },
+        {
+            "id": "registered_panel",
+            "deps": ["transform_30m"],
+            "done_marker": os.path.join(artifacts, "registered_panel.done.json"),
+            "outputs": [os.path.join(artifacts, "panel")],
+            "expected_inputs": inputs,
+            "p90_wall_s": 2700.0,
+            "node_policy": {"gpu_required": True, "training_performed": False},
+            "canary_output": os.path.join(artifacts, "canary"),
+            "train_output": os.path.join(artifacts, "train"),
+            "transform_output": os.path.join(artifacts, "coordinates"),
+            "reference_output": R0019_HIGH_D_REFERENCE,
+        },
+        {
+            "id": "semantic_renders",
+            "deps": ["registered_panel"],
+            "done_marker": os.path.join(artifacts, "semantic_renders.done.json"),
+            "outputs": [os.path.join(artifacts, "semantic-renders")],
+            "expected_inputs": inputs,
+            "p90_wall_s": 180.0,
+            "node_policy": {"gpu_required": True, "training_performed": False},
+            "transform_output": os.path.join(artifacts, "coordinates"),
+            "panel_output": os.path.join(artifacts, "panel"),
+        },
+    ]
+    manifest["jobs"] = jobs
+    path = os.path.join(queue_root, "queue.json")
+    atomic_write_new_json(path, manifest, immutable=True)
+    return path
+
+
 def _round0024_transform_templates(
     *,
     queue_root: str,
@@ -492,7 +646,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--release-sha", required=True)
     parser.add_argument(
         "--round",
-        choices=("0020", "0022", "0024", "both"),
+        choices=("0020", "0021", "0022", "0024", "both"),
         default="both",
         help="which queue to prepare",
     )
@@ -502,6 +656,8 @@ def main(argv: list[str] | None = None) -> int:
         paths.append(prepare_round0020(args.release_sha))
     if args.round in {"0022", "both"}:
         paths.append(prepare_round0022(args.release_sha))
+    if args.round == "0021":
+        paths.append(prepare_round0021(args.release_sha))
     if args.round == "0024":
         paths.append(prepare_round0024(args.release_sha))
     print(json.dumps({"queue_manifests": paths}, indent=2, sort_keys=True))

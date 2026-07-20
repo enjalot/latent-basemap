@@ -9,6 +9,7 @@ from basemap.output_safety import atomic_save_new_npz
 from basemap.duplicate_census import save_cap_npz
 from basemap.duplicate_multiplicity import load_duplicate_cap
 from basemap.round0014_transform import build_transform_template
+from basemap.round0021_program import TRAIN_CONFIG as ROUND0021_TRAIN_CONFIG
 from basemap.round0024_program import train_config_for_cell
 from experiments import run_round0014_node as node
 from experiments.universality_panel import _ffr_from_neighbors
@@ -71,6 +72,33 @@ def test_round0020_0022_configure_existing_runner_node_names():
     assert node._run_semantic_renders.__name__ == "_run_round0022_renders"
 
 
+def test_round0021_configure_uses_global_cap_artifact():
+    node.configure_round0021()
+    treatment = node.TRAIN_CONFIG["execution"]["duplicate_multiplicity"]
+    assert node.ROUND_ID == "0021"
+    assert node.SCHEMA_PREFIX == "round0021"
+    assert treatment["artifact_sha256"] == (
+        "9511ceca802da603bfbfe9164f8c6ffd7006df82df17b9499d4ed33288fde7cb"
+    )
+    assert treatment["excluded_rows"] == 218_242
+    assert treatment["retained_rows"] == 29_781_758
+    assert treatment["represented_exact_families"] == 138_601
+    assert treatment["effective_positive_edges"] == 446_726_370
+    assert node.TRAIN_CONFIG["graph"]["directed_edges_effective"] == 446_726_370
+
+
+def test_round0021_top_family_gate_is_per_family():
+    baseline = [
+        {"rank": 1, "representative_row": 10, "family_count": 5, "representative_mahalanobis": 10.0},
+        {"rank": 2, "representative_row": 20, "family_count": 4, "representative_mahalanobis": 2.0},
+    ]
+    report = node._compare_global_top_families(baseline, np.asarray([4.0, 1.1]))
+    assert report["all_top50_representatives_reduced_50pct"] is False
+    assert report["failed_representative_rows"] == [20]
+    assert report["families"][0]["passed"] is True
+    assert report["families"][1]["required_representative_mahalanobis"] == 1.0
+
+
 def test_round0024_configure_uses_job_scoped_width():
     node.configure_round0024(job={"cell": "h4096"})
     assert node.ROUND_ID == "0024"
@@ -83,6 +111,7 @@ def test_round0024_configure_uses_job_scoped_width():
 
 def test_round0024_transform_template_binds_active_config_digest():
     config, digest = train_config_for_cell("h1024")
+    assert ROUND0021_TRAIN_CONFIG["schema"] == "round0021-production-config-v1"
     template = build_transform_template(
         release_root=str(Path(__file__).resolve().parents[1]),
         release_sha="2" * 40,
