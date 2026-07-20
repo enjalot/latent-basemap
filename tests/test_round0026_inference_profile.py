@@ -4,7 +4,7 @@ import numpy as np
 
 from experiments import prepare_round0026_queue
 from experiments import run_round0014_node
-from experiments.export_inference_profile import _latency_summary, _make_batch
+from experiments.export_inference_profile import _latency_summary, _make_batch, _parity_gate_report
 
 
 def test_round0026_make_batch_tiles_sample_without_changing_dtype():
@@ -35,3 +35,13 @@ def test_round0026_configure_selects_profile_runtime():
     assert run_round0014_node.ROUND_ID == "0026"
     assert run_round0014_node.RUNTIME_SCRIPT == "experiments/export_inference_profile.py"
     assert hasattr(run_round0014_node, "_run_gpu_inference_profile")
+
+
+def test_round0026_optional_parity_failure_is_reported_not_required():
+    report = _parity_gate_report(0.003, required=False)
+    assert report["passed"] is False
+    assert report["required"] is False
+    assert report["consumption_status"] == "optional_extension_failed"
+
+    required = _parity_gate_report(0.003, required=True)
+    assert required["consumption_status"] == "terminal_required_failure"

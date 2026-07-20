@@ -36,6 +36,7 @@ QUERY_POOL = "/data/latent-basemap/track1/minilm_queries.npy"
 INPUT_PACK = "/data/latent-basemap/runs/round-0013/30m-input-pack-v1.json"
 PYTHON_DEPS = "/data/latent-basemap/runs/round-0026/python-deps"
 GPU_UUID = "GPU-2c4d2a68-2646-901a-e61c-fbc61f5c9072"
+FP32_PARITY_GATE = 1e-3
 
 
 @dataclass(frozen=True)
@@ -332,6 +333,18 @@ def _latency_summary(times: list[float], rows: int) -> dict[str, Any]:
     }
 
 
+def _parity_gate_report(max_abs: float, *, required: bool) -> dict[str, Any]:
+    passed = float(max_abs) <= FP32_PARITY_GATE
+    return {
+        "threshold_max_abs": FP32_PARITY_GATE,
+        "passed": passed,
+        "required": bool(required),
+        "consumption_status": (
+            "valid" if passed else "terminal_required_failure" if required else "optional_extension_failed"
+        ),
+    }
+
+
 def _time_ort(session: Any, batch: np.ndarray) -> dict[str, Any]:
     rows = len(batch)
     repeats = 100 if rows == 1 else 20 if rows == 1000 else 1
@@ -365,7 +378,8 @@ def run_canary(*, output_root: str) -> dict[str, Any]:
         session = _ort_session(export["onnx_fp32"]["canonical_path"], threads=1)
         ort_coords = np.asarray(_run_ort(session, sample), dtype=np.float32)
         max_abs = float(np.max(np.abs(torch_coords - ort_coords)))
-        if max_abs > 1e-3:
+        parity_gate = _parity_gate_report(max_abs, required=spec.required)
+        if not parity_gate["passed"] and spec.required:
             raise RuntimeError(f"R0026 canary fp32 parity failed for {spec.name}: {max_abs}")
         models[spec.name] = {
             **export,
@@ -373,6 +387,7 @@ def run_canary(*, output_root: str) -> dict[str, Any]:
             "torch_coords_sha256": ordered_array_sha256(torch_coords),
             "onnx_coords_sha256": ordered_array_sha256(ort_coords),
             "fp32_parity_max_abs": max_abs,
+            "fp32_parity_gate": parity_gate,
         }
     body = {
         "schema": "round0026-export-canary-v1",
@@ -403,7 +418,8 @@ def run_cpu_profile(*, canary_path: str, output_root: str) -> dict[str, Any]:
         session = _ort_session(export["onnx_fp32"]["canonical_path"], threads=8)
         ort_coords = np.asarray(_run_ort(session, sample), dtype=np.float32)
         fp32_parity = float(np.max(np.abs(torch_coords - ort_coords)))
-        if fp32_parity > 1e-3:
+        parity_gate = _parity_gate_report(fp32_parity, required=spec.required)
+        if not parity_gate["passed"] and spec.required:
             raise RuntimeError(f"R0026 fp32 parity failed for {spec.name}: {fp32_parity}")
         fp16_status: dict[str, Any]
         try:
@@ -429,6 +445,7 @@ def run_cpu_profile(*, canary_path: str, output_root: str) -> dict[str, Any]:
             "torch_fp32_coords_sha256": ordered_array_sha256(torch_coords),
             "onnx_fp32_coords_sha256": ordered_array_sha256(ort_coords),
             "fp32_parity_max_abs": fp32_parity,
+            "fp32_parity_gate": parity_gate,
             "fp16_export": fp16_status,
             "cpu_onnxruntime": cpu,
             "runtime_inference_panel_column_partial": {
@@ -449,6 +466,19 @@ def run_cpu_profile(*, canary_path: str, output_root: str) -> dict[str, Any]:
         "models": models,
         "batch_sizes": [1, 1000, 100000],
         "cpu_thread_counts": [1, 8],
+        "acceptance": {
+            "required_models_fp32_parity_at_most_1e_3": all(
+                item["fp32_parity_gate"]["passed"]
+                for item in models.values()
+                if item["fp32_parity_gate"]["required"]
+            ),
+            "optional_extension_fp32_parity_failures": [
+                name
+                for name, item in models.items()
+                if not item["fp32_parity_gate"]["required"]
+                and not item["fp32_parity_gate"]["passed"]
+            ],
+        },
     }
     receipt = _seal(body)
     path = os.path.join(output_root, "cpu-profile.json")
@@ -528,7 +558,23 @@ def run_gpu_merge(*, cpu_profile_path: str, output_root: str) -> dict[str, Any]:
         "models": models,
         "acceptance": {
             "all_fp32_parity_at_most_1e_3": all(
-                float(item["fp32_parity_max_abs"]) <= 1e-3 for item in models.values()
+                item["fp32_parity_gate"]["passed"] for item in models.values()
+            ),
+            "required_models_fp32_parity_at_most_1e_3": all(
+                item["fp32_parity_gate"]["passed"]
+                for item in models.values()
+                if item["fp32_parity_gate"]["required"]
+            ),
+            "optional_extension_fp32_parity_failures": [
+                name
+                for name, item in models.items()
+                if not item["fp32_parity_gate"]["required"]
+                and not item["fp32_parity_gate"]["passed"]
+            ],
+            "profiled_model_count": len(models),
+            "profiled_model_names": sorted(models),
+            "runtime_panel_columns_valid_for_models": sorted(
+                name for name, item in models.items() if item["fp32_parity_gate"]["passed"]
             ),
             "all_registered_measurements_present": True,
         },
