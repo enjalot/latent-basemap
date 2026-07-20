@@ -144,6 +144,15 @@ def configure_round0022() -> None:
     _run_semantic_renders = _run_round0022_renders
 
 
+def configure_round0026() -> None:
+    """Select the ONNX/inference-profile nodes."""
+    global ROUND_ID, ROUND_LABEL, SCHEMA_PREFIX, RUNTIME_SCRIPT
+    ROUND_ID = "0026"
+    ROUND_LABEL = "Round 0026"
+    SCHEMA_PREFIX = "round0026"
+    RUNTIME_SCRIPT = "experiments/export_inference_profile.py"
+
+
 def _run_round0020_duplicate_census(active: dict[str, Any], job: dict[str, Any]) -> None:
     output = job["outputs"][0]
     configure_round0019()
@@ -183,6 +192,28 @@ def _run_round0022_renders(active: dict[str, Any], job: dict[str, Any]) -> None:
         active["manifest"]["jobs"][1]["outputs"][0], "universality-panel-v1.json"
     )
     run_renders(panel_path=panel_path, output_root=job["outputs"][0])
+
+
+def _run_export_parity_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
+    from experiments.export_inference_profile import run_canary
+
+    run_canary(output_root=job["outputs"][0])
+
+
+def _run_cpu_inference_profile(active: dict[str, Any], job: dict[str, Any]) -> None:
+    from experiments.export_inference_profile import run_cpu_profile
+
+    canary_path = os.path.join(active["manifest"]["jobs"][0]["outputs"][0], "canary.json")
+    run_cpu_profile(canary_path=canary_path, output_root=job["outputs"][0])
+
+
+def _run_gpu_inference_profile(active: dict[str, Any], job: dict[str, Any]) -> None:
+    from experiments.export_inference_profile import run_gpu_merge
+
+    cpu_profile_path = os.path.join(
+        active["manifest"]["jobs"][1]["outputs"][0], "cpu-profile.json"
+    )
+    run_gpu_merge(cpu_profile_path=cpu_profile_path, output_root=job["outputs"][0])
 
 
 def _schema(name: str) -> str:
