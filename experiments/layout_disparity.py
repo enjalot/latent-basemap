@@ -170,8 +170,8 @@ def local_radius(points: np.ndarray, *, k: int = 15) -> np.ndarray:
             raise ValueError("could not compute self-excluded local radius")
         radii.append(kept[k - 1])
     values = np.asarray(radii, dtype=np.float64)
-    if not np.isfinite(values).all() or np.any(values <= 0.0):
-        raise ValueError("seed-42 local radii must be finite positive")
+    if not np.isfinite(values).all() or np.any(values < 0.0):
+        raise ValueError("seed-42 local radii must be finite nonnegative")
     return values
 
 
@@ -210,6 +210,11 @@ def retention_and_jaccard(left: np.ndarray, right: np.ndarray, *, k: int = 15) -
     }
 
 
+def _quantile_with_infinite(values: np.ndarray, q: float) -> tuple[float | None, bool]:
+    value = float(np.quantile(values, q))
+    return (value if np.isfinite(value) else None), bool(np.isposinf(value))
+
+
 def pair_metrics(
     reference_points: np.ndarray,
     moving_points: np.ndarray,
@@ -221,16 +226,40 @@ def pair_metrics(
 ) -> dict[str, Any]:
     aligned, transform = optimal_similarity(reference_points, moving_points)
     residual = np.linalg.norm(np.asarray(reference_points, dtype=np.float64) - aligned, axis=1)
-    drift = residual / radius15_seed42
-    if not np.isfinite(drift).all():
-        raise ValueError(f"non-finite local-r15 drift for pair {pair}")
+    radius = np.asarray(radius15_seed42, dtype=np.float64)
+    if radius.shape != residual.shape:
+        raise ValueError(f"local radius shape mismatch for pair {pair}")
+    positive = radius > 0.0
+    drift = np.empty_like(residual)
+    drift[positive] = residual[positive] / radius[positive]
+    zero_residual = residual <= 1e-12
+    drift[~positive & zero_residual] = 0.0
+    drift[~positive & ~zero_residual] = np.inf
+    if np.isnan(drift).any() or np.isneginf(drift).any():
+        raise ValueError(f"invalid local-r15 drift for pair {pair}")
+    median, median_inf = _quantile_with_infinite(drift, 0.50)
+    p90, p90_inf = _quantile_with_infinite(drift, 0.90)
+    p95, p95_inf = _quantile_with_infinite(drift, 0.95)
+    finite = np.isfinite(drift)
     return {
         "pair": list(pair),
         "procrustes": transform,
-        "median_drift_local_r15": float(np.median(drift)),
-        "p90_drift_local_r15": float(np.quantile(drift, 0.90)),
-        "p95_drift_local_r15": float(np.quantile(drift, 0.95)),
-        "max_drift_local_r15": float(drift.max()),
+        "zero_seed42_r15_count": int((~positive).sum()),
+        "undefined_infinite_drift_count": int(np.isposinf(drift).sum()),
+        "zero_radius_zero_residual_count": int((~positive & zero_residual).sum()),
+        "finite_drift_count": int(finite.sum()),
+        "drift_quantile_policy": (
+            "zero seed42 r15 with nonzero residual is +infinity; quantiles are "
+            "computed over all sample rows and represented as null only if infinite"
+        ),
+        "median_drift_local_r15": median,
+        "median_drift_local_r15_is_infinite": median_inf,
+        "p90_drift_local_r15": p90,
+        "p90_drift_local_r15_is_infinite": p90_inf,
+        "p95_drift_local_r15": p95,
+        "p95_drift_local_r15_is_infinite": p95_inf,
+        "finite_max_drift_local_r15": float(drift[finite].max()) if finite.any() else None,
+        "max_drift_local_r15_is_infinite": bool(np.isposinf(drift).any()),
         "neighbor_overlap": retention_and_jaccard(reference_knn, moving_knn, k=15),
     }
 
@@ -384,6 +413,8 @@ def run_layout_disparity(
         "local_radius": {
             "definition": "seed42 self-excluded 15th nearest neighbor distance on fixed 50k sample",
             "radius_file": expected_input_signature(radius_path),
+            "zero_radius_count": int((radius15 <= 0.0).sum()),
+            "zero_radius_fraction": float((radius15 <= 0.0).mean()),
             "median": float(np.median(radius15)),
             "p10": float(np.quantile(radius15, 0.10)),
             "p90": float(np.quantile(radius15, 0.90)),

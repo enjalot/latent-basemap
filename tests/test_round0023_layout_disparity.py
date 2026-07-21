@@ -59,3 +59,16 @@ def test_pair_metrics_uses_seed42_local_radius_units():
     assert got["pair"] == ["a", "b"]
     assert got["median_drift_local_r15"] < 1e-10
     assert got["neighbor_overlap"]["mean_retention"] == 1.0
+
+
+def test_pair_metrics_reports_zero_radius_without_aborting():
+    points = np.stack([np.arange(64), np.zeros(64)], axis=1).astype(float)
+    moved = points.copy()
+    radii = np.ones(64, dtype=float)
+    radii[:2] = 0.0
+    knn = knn_indices(points, k=15)
+    got = pair_metrics(points, moved, radii, knn, knn, pair=("a", "b"))
+    assert got["zero_seed42_r15_count"] == 2
+    assert got["zero_radius_zero_residual_count"] == 2
+    assert got["undefined_infinite_drift_count"] == 0
+    assert got["p90_drift_local_r15"] == 0.0
