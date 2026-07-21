@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Round 0022 MiniLM universality panel harness."""
+"""MiniLM universality panel harness for R0022 and its R0028 fp32 correction."""
 from __future__ import annotations
 
 import argparse
@@ -29,7 +29,7 @@ from basemap.output_safety import (
 )
 
 
-ROUND_ID = "0022"
+ROUND_ID = os.environ.get("BASEMAP_UNIVERSALITY_ROUND_ID", "0022")
 SEED = 20260722
 MODEL_PATH = "/data/latent-basemap/runs/round-0019/queue/artifacts/train/model.pt"
 MODEL_SHA256 = "2f5eb27582e26735491b4bed9417cf27992bb213ef942e433a5bcba97d481a32"
@@ -48,6 +48,19 @@ SCIFACT_ARROW = (
     "/data/hf/datasets/mteb___scifact/corpus/0.0.0/"
     "cf10ab6856b15b0e670ef8ae5dae4e266c12d035/scifact-corpus.arrow"
 )
+R0022_PROVISIONAL_PANEL = (
+    "/data/latent-basemap/runs/round-0022/queue/artifacts/panel/"
+    "universality-panel-v1.json"
+)
+R0022_PROVISIONAL_PANEL_SHA256 = (
+    "c879cf5b3926057f325a5fe14f69203de5fc960ca1654a317828f663c7d03425"
+)
+R0028_EXPECTED_CANARY_STATUS = {
+    "dadabase": "included",
+    "trec-covid": "included",
+    "scifact": "excluded",
+}
+_INPUT_PACK_MEMBERS_BY_PATH: dict[str, dict[str, Any]] | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +71,17 @@ class Probe:
     corpus_ids: np.ndarray
     query_ids: np.ndarray
     inputs: dict[str, Any]
+    corpus_source: dict[str, Any]
+    query_source: dict[str, Any]
+
+
+def configure_round0028() -> None:
+    global ROUND_ID
+    ROUND_ID = "0028"
+
+
+def _round_label() -> str:
+    return f"Round {ROUND_ID}"
 
 
 def _seal(body: dict[str, Any]) -> dict[str, Any]:
@@ -193,10 +217,135 @@ def _read_json(path: str) -> Any:
         return json.load(handle)
 
 
+def _array_source_signature(path: str, array: np.ndarray) -> dict[str, Any]:
+    return {
+        **expected_input_signature(path),
+        "array_shape": [int(value) for value in array.shape],
+        "array_dtype": np.dtype(array.dtype).str,
+        "array_dtype_name": np.dtype(array.dtype).name,
+    }
+
+
+def _materialized_member_source_signature(path: str, array: np.ndarray) -> dict[str, Any]:
+    global _INPUT_PACK_MEMBERS_BY_PATH
+    if _INPUT_PACK_MEMBERS_BY_PATH is None:
+        with open(INPUT_PACK_MANIFEST, encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        members = manifest["capability_payload"]["materialized_fp16"]["ordered_members"]
+        _INPUT_PACK_MEMBERS_BY_PATH = {
+            os.path.realpath(item["path"]): {
+                "canonical_path": os.path.realpath(item["path"]),
+                "kind": "file",
+                "bytes": int(item["size_bytes"]),
+                "sha256": str(item["sha256"]),
+                "hash_source": "accepted-input-pack-manifest",
+            }
+            for item in members
+        }
+    canonical = os.path.realpath(path)
+    signature = _INPUT_PACK_MEMBERS_BY_PATH.get(canonical)
+    if signature is None:
+        raise RuntimeError(f"materialized control chunk is not in the accepted input pack: {path}")
+    return {
+        **signature,
+        "array_shape": [int(value) for value in array.shape],
+        "array_dtype": np.dtype(array.dtype).str,
+        "array_dtype_name": np.dtype(array.dtype).name,
+    }
+
+
+def _array_observation(array: np.ndarray) -> dict[str, Any]:
+    observed = np.asarray(array)
+    return {
+        "shape": [int(value) for value in observed.shape],
+        "dtype": np.dtype(observed.dtype).str,
+        "dtype_name": np.dtype(observed.dtype).name,
+        "ordered_array_sha256": ordered_array_sha256(observed),
+    }
+
+
+def _dtype_identity_receipt(
+    *,
+    label: str,
+    source: dict[str, Any],
+    selected: np.ndarray,
+    expected_source_dtype: str,
+    expected_selected_dtype: str,
+) -> dict[str, Any]:
+    observed = _array_observation(selected)
+    declared = {
+        "source_file_dtype": np.dtype(expected_source_dtype).str,
+        "selected_array_dtype": np.dtype(expected_selected_dtype).str,
+        "projection_compute_dtype": np.dtype(np.float32).str,
+        "cosine_compute_dtype": np.dtype(np.float32).str,
+    }
+    source_dtype = source.get("array_dtype")
+    mismatches: dict[str, Any] = {}
+    if source_dtype != declared["source_file_dtype"]:
+        mismatches["source_file_dtype"] = {
+            "declared": declared["source_file_dtype"],
+            "observed": source_dtype,
+        }
+    if observed["dtype"] != declared["selected_array_dtype"]:
+        mismatches["selected_array_dtype"] = {
+            "declared": declared["selected_array_dtype"],
+            "observed": observed["dtype"],
+        }
+    if mismatches:
+        raise RuntimeError(
+            f"{_round_label()} dtype/identity contract failed for {label}: {mismatches}"
+        )
+    return {
+        "label": label,
+        "source": source,
+        "declared": declared,
+        "observed_selected_array": observed,
+        "validation": {
+            "source_dtype_matches_declared": True,
+            "selected_dtype_matches_declared": True,
+            "ordered_array_identity_recorded": True,
+            "projection_and_cosine_promote_to_fp32_at_compute_boundary": True,
+        },
+    }
+
+
+def _previous_panel_comparison(name: str, retention: float | None) -> dict[str, Any]:
+    signature = expected_input_signature(R0022_PROVISIONAL_PANEL)
+    if signature["sha256"] != R0022_PROVISIONAL_PANEL_SHA256:
+        raise RuntimeError("R0022 provisional universality panel changed")
+    panel = _read_json(signature["canonical_path"])
+    prior = panel.get("probes", {}).get(name)
+    if not isinstance(prior, dict) or prior.get("status") != "included":
+        return {
+            "provisional_panel": signature,
+            "prior_status": None if prior is None else prior.get("status"),
+            "prior_retention": None,
+            "prior_verdict": None,
+            "retention_delta": None,
+        }
+    prior_retention = prior.get("retention")
+    delta = (
+        None
+        if retention is None or not isinstance(prior_retention, (int, float))
+        else float(retention - float(prior_retention))
+    )
+    return {
+        "provisional_panel": signature,
+        "prior_status": prior.get("status"),
+        "prior_retention": float(prior_retention)
+        if isinstance(prior_retention, (int, float))
+        else None,
+        "prior_verdict": prior.get("verdict"),
+        "retention_delta": delta,
+    }
+
+
 def _load_beir_probe(root: str, *, name: str) -> Probe:
     corpus_name = "corpus_vectors.npy"
     query_name = "query_vectors.npy" if os.path.exists(os.path.join(root, "query_vectors.npy")) else "queries_vectors.npy"
     qids_name = "query_ids.json" if os.path.exists(os.path.join(root, "query_ids.json")) else "queries_ids.json"
+    corpus_path = os.path.join(root, corpus_name)
+    query_path = os.path.join(root, query_name)
     corpus_vectors = np.load(os.path.join(root, corpus_name), mmap_mode="r", allow_pickle=False)
     query_vectors = np.load(os.path.join(root, query_name), mmap_mode="r", allow_pickle=False)
     corpus_ids = np.asarray(_read_json(os.path.join(root, "corpus_ids.json")), dtype=object)
@@ -213,28 +362,36 @@ def _load_beir_probe(root: str, *, name: str) -> Probe:
             "corpus_ids": expected_input_signature(os.path.join(root, "corpus_ids.json")),
             "query_ids": expected_input_signature(os.path.join(root, qids_name)),
         },
+        corpus_source=_array_source_signature(corpus_path, corpus_vectors),
+        query_source=_array_source_signature(query_path, query_vectors),
     )
 
 
 def _load_dadabase_probe() -> Probe:
-    vectors = np.load("/data/embeddings/dadabase/minilm.npy", mmap_mode="r", allow_pickle=False)
+    vector_path = "/data/embeddings/dadabase/minilm.npy"
+    vectors = np.load(vector_path, mmap_mode="r", allow_pickle=False)
+    if np.dtype(vectors.dtype) != np.dtype(np.float16):
+        raise RuntimeError("dadabase vector source is no longer native fp16")
     rng = np.random.RandomState(SEED)
     query_rows = np.sort(rng.choice(len(vectors), 500, replace=False)).astype(np.int64)
     mask = np.ones(len(vectors), dtype=bool)
     mask[query_rows] = False
     corpus_rows = np.flatnonzero(mask).astype(np.int64)
+    vector_source = _array_source_signature(vector_path, vectors)
     return Probe(
         name="dadabase",
-        corpus_vectors=np.asarray(vectors[corpus_rows], dtype=np.float16),
-        query_vectors=np.asarray(vectors[query_rows], dtype=np.float16),
+        corpus_vectors=np.asarray(vectors[corpus_rows]),
+        query_vectors=np.asarray(vectors[query_rows]),
         corpus_ids=corpus_rows,
         query_ids=query_rows,
         inputs={
-            "vectors": expected_input_signature("/data/embeddings/dadabase/minilm.npy"),
+            "vectors": expected_input_signature(vector_path),
             "texts": expected_input_signature("/data/embeddings/dadabase/jokes.parquet"),
             "query_rows_sha256": ordered_array_sha256(query_rows),
             "corpus_rows_sha256": ordered_array_sha256(corpus_rows),
         },
+        corpus_source={**vector_source, "selected_rows_sha256": ordered_array_sha256(corpus_rows)},
+        query_source={**vector_source, "selected_rows_sha256": ordered_array_sha256(query_rows)},
     )
 
 
@@ -398,7 +555,7 @@ def _trec_canary() -> dict[str, Any]:
 
 
 def run_canary(*, output_root: str) -> dict[str, Any]:
-    output_root = create_fresh_directory(output_root, label="Round 0022 canary output")
+    output_root = create_fresh_directory(output_root, label=f"{_round_label()} canary output")
     started = time.monotonic()
     model = _load_model()
     smoke = np.load(
@@ -414,9 +571,17 @@ def run_canary(*, output_root: str) -> dict[str, Any]:
         "trec-covid": _trec_canary(),
         "scifact": _scifact_canary(),
     }
+    if ROUND_ID == "0028":
+        mismatches = {
+            name: {"expected": expected, "observed": canaries[name].get("status")}
+            for name, expected in R0028_EXPECTED_CANARY_STATUS.items()
+            if canaries[name].get("status") != expected
+        }
+        if mismatches:
+            raise RuntimeError(f"R0028 canary status changed: {mismatches}")
     included = sorted(name for name, item in canaries.items() if item.get("status") == "included")
     body = {
-        "schema": "round0022-universality-canary-v1",
+        "schema": f"round{ROUND_ID}-universality-canary-v1",
         "round_id": ROUND_ID,
         "model": expected_input_signature(MODEL_PATH),
         "model_sha256_expected": MODEL_SHA256,
@@ -439,33 +604,64 @@ def run_canary(*, output_root: str) -> dict[str, Any]:
     return {**receipt, "verdict": expected_input_signature(path)}
 
 
-def _gather_control_rows(rows: np.ndarray) -> np.ndarray:
-    result = np.empty((len(rows), 384), dtype=np.float16)
+def _gather_control_rows(rows: np.ndarray) -> tuple[np.ndarray, dict[str, Any]]:
+    result: np.ndarray | None = None
     order = np.argsort(rows, kind="stable")
     sorted_rows = rows[order]
+    chunks: list[dict[str, Any]] = []
+    source_dtype: np.dtype | None = None
     for chunk_index in np.unique(sorted_rows // 1_000_000).tolist():
         chunk_index = int(chunk_index)
         lo = chunk_index * 1_000_000
         hi = lo + 1_000_000
         positions = np.flatnonzero((sorted_rows >= lo) & (sorted_rows < hi))
+        path = (
+            f"/data/latent-basemap/runs/round-0010/materialized/"
+            f"chunk-{chunk_index:05d}/embeddings.npy"
+        )
         array = np.load(
-            f"/data/latent-basemap/runs/round-0010/materialized/chunk-{chunk_index:05d}/embeddings.npy",
+            path,
             mmap_mode="r",
             allow_pickle=False,
         )
+        if source_dtype is None:
+            source_dtype = np.dtype(array.dtype)
+            result = np.empty((len(rows), array.shape[1]), dtype=source_dtype)
+        if np.dtype(array.dtype) != source_dtype:
+            raise RuntimeError("matched-control materialized chunk dtype changed")
+        chunks.append(_materialized_member_source_signature(path, array))
         result[order[positions]] = array[sorted_rows[positions] - lo]
         del array
-    return result
+    if result is None or source_dtype is None:
+        raise RuntimeError("matched-control row selection is empty")
+    source = {
+        "kind": "ordered-materialized-control-selection",
+        "array_shape": [30_000_000, int(result.shape[1])],
+        "array_dtype": source_dtype.str,
+        "array_dtype_name": source_dtype.name,
+        "selected_rows_sha256": ordered_array_sha256(rows),
+        "chunks": chunks,
+    }
+    return result, source
 
 
-def _matched_control(n_corpus: int, n_query: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _matched_control(
+    n_corpus: int,
+    n_query: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any], dict[str, Any]]:
     rng = np.random.RandomState(SEED)
     corpus_rows = np.sort(rng.choice(30_000_000, n_corpus, replace=False)).astype(np.int64)
     query_pool = np.load(MINILM_QUERIES, mmap_mode="r", allow_pickle=False)
+    if np.dtype(query_pool.dtype) != np.dtype(np.float32):
+        raise RuntimeError("held-out MiniLM query pool is no longer fp32")
     query_rows = np.sort(rng.choice(len(query_pool), n_query, replace=False)).astype(np.int64)
-    corpus = _gather_control_rows(corpus_rows)
-    queries = np.asarray(query_pool[query_rows], dtype=np.float16)
-    return corpus, queries, corpus_rows, query_rows
+    corpus, corpus_source = _gather_control_rows(corpus_rows)
+    queries = np.asarray(query_pool[query_rows])
+    query_source = {
+        **_array_source_signature(MINILM_QUERIES, query_pool),
+        "selected_rows_sha256": ordered_array_sha256(query_rows),
+    }
+    return corpus, queries, corpus_rows, query_rows, corpus_source, query_source
 
 
 def _score_one(
@@ -475,10 +671,11 @@ def _score_one(
     query_vectors: np.ndarray,
     corpus_coords: np.ndarray,
     query_coords: np.ndarray,
+    device: str = "cuda",
 ) -> dict[str, Any]:
     hit_k = max(50, int(math.ceil(0.01 * len(corpus_vectors))))
-    true_top10 = _cosine_topk(corpus_vectors, query_vectors, 10)
-    hit_neighbors = _l2_topk(corpus_coords, query_coords, hit_k)
+    true_top10 = _cosine_topk(corpus_vectors, query_vectors, 10, device=device)
+    hit_neighbors = _l2_topk(corpus_coords, query_coords, hit_k, device=device)
     ffr, per_query = _ffr_from_neighbors(true_top10, hit_neighbors)
     return {
         "name": name,
@@ -499,7 +696,7 @@ def _score_one(
 
 
 def run_panel(*, canary_path: str, output_root: str) -> dict[str, Any]:
-    output_root = create_fresh_directory(output_root, label="Round 0022 panel output")
+    output_root = create_fresh_directory(output_root, label=f"{_round_label()} panel output")
     started = time.monotonic()
     canary = _read_json(canary_path)
     canary_body = {key: canary[key] for key in canary if key != "identity_sha256"}
@@ -517,12 +714,53 @@ def run_panel(*, canary_path: str, output_root: str) -> dict[str, Any]:
             }
             continue
         probe = load_probe(name)
-        corpus = np.asarray(probe.corpus_vectors, dtype=np.float16)
-        queries = np.asarray(probe.query_vectors, dtype=np.float16)
+        corpus = np.asarray(probe.corpus_vectors)
+        queries = np.asarray(probe.query_vectors)
+        if name in {"scifact", "trec-covid"}:
+            probe_expected_dtype = np.dtype(np.float32).str
+        elif name == "dadabase":
+            probe_expected_dtype = np.dtype(np.float16).str
+        else:
+            raise RuntimeError(f"unknown universality probe {name!r}")
+        dtype_receipts = {
+            "probe_corpus": _dtype_identity_receipt(
+                label=f"{name}.probe_corpus",
+                source=probe.corpus_source,
+                selected=corpus,
+                expected_source_dtype=probe_expected_dtype,
+                expected_selected_dtype=probe_expected_dtype,
+            ),
+            "probe_queries": _dtype_identity_receipt(
+                label=f"{name}.probe_queries",
+                source=probe.query_source,
+                selected=queries,
+                expected_source_dtype=probe_expected_dtype,
+                expected_selected_dtype=probe_expected_dtype,
+            ),
+        }
         corpus_coords = _project(model, corpus)
         query_coords = _project(model, queries)
-        control_corpus, control_queries, control_rows, control_query_rows = _matched_control(
-            len(corpus), len(queries)
+        (
+            control_corpus,
+            control_queries,
+            control_rows,
+            control_query_rows,
+            control_corpus_source,
+            control_query_source,
+        ) = _matched_control(len(corpus), len(queries))
+        dtype_receipts["control_corpus"] = _dtype_identity_receipt(
+            label=f"{name}.control_corpus",
+            source=control_corpus_source,
+            selected=control_corpus,
+            expected_source_dtype=np.dtype(np.float16).str,
+            expected_selected_dtype=np.dtype(np.float16).str,
+        )
+        dtype_receipts["control_queries"] = _dtype_identity_receipt(
+            label=f"{name}.control_queries",
+            source=control_query_source,
+            selected=control_queries,
+            expected_source_dtype=np.dtype(np.float32).str,
+            expected_selected_dtype=np.dtype(np.float32).str,
         )
         control_corpus_coords = _project(model, control_corpus)
         control_query_coords = _project(model, control_queries)
@@ -574,6 +812,10 @@ def run_panel(*, canary_path: str, output_root: str) -> dict[str, Any]:
                 else "amber"
             ),
             "coordinates": expected_input_signature(coords_path),
+            "dtype_identity_receipts": dtype_receipts,
+            "provisional_r0022_comparison": _previous_panel_comparison(name, retention)
+            if ROUND_ID == "0028"
+            else None,
             "sample_hashes": {
                 "probe_corpus_ids": _string_ids_sha256(np.asarray(probe.corpus_ids)),
                 "probe_query_ids": _string_ids_sha256(np.asarray(probe.query_ids)),
@@ -597,6 +839,19 @@ def run_panel(*, canary_path: str, output_root: str) -> dict[str, Any]:
             "input_pack_capability_sha256": INPUT_PACK_SHA256,
             "heldout_query_pool": expected_input_signature(MINILM_QUERIES),
         },
+        "dtype_contract": {
+            "beir_probe_and_query_arrays_preserved_as_fp32_until_compute": True,
+            "dadabase_and_training_rows_preserved_as_native_fp16_until_compute": True,
+            "heldout_minilm_control_queries_preserved_as_fp32_until_compute": True,
+            "projection_compute_dtype": np.dtype(np.float32).str,
+            "cosine_compute_dtype": np.dtype(np.float32).str,
+        },
+        "diagnostic_comparison": {
+            "provisional_r0022_panel": expected_input_signature(R0022_PROVISIONAL_PANEL),
+            "provisional_r0022_panel_sha256_expected": R0022_PROVISIONAL_PANEL_SHA256,
+        }
+        if ROUND_ID == "0028"
+        else None,
         "scoring_formula": {
             "true_set": "top-10 exact cosine neighbors within the probe/control corpus",
             "hit_set": "top max(50, ceil(0.01*N_corpus)) map-space neighbors",
@@ -634,7 +889,7 @@ def run_panel(*, canary_path: str, output_root: str) -> dict[str, Any]:
 
 
 def run_renders(*, panel_path: str, output_root: str) -> dict[str, Any]:
-    output_root = create_fresh_directory(output_root, label="Round 0022 render output")
+    output_root = create_fresh_directory(output_root, label=f"{_round_label()} render output")
     started = time.monotonic()
     import matplotlib
 
@@ -683,7 +938,7 @@ def run_renders(*, panel_path: str, output_root: str) -> dict[str, Any]:
             linewidths=0,
             label=f"{name} queries",
         )
-        axis.set_title(f"R0022 {name} over R0019 50k semantic sample")
+        axis.set_title(f"R{ROUND_ID} {name} over R0019 50k semantic sample")
         axis.set_aspect("equal", adjustable="box")
         axis.set_xticks([])
         axis.set_yticks([])
@@ -699,7 +954,7 @@ def run_renders(*, panel_path: str, output_root: str) -> dict[str, Any]:
             "base_sample_rows": int(len(base)),
         }
     body = {
-        "schema": "round0022-universality-renders-v1",
+        "schema": f"round{ROUND_ID}-universality-renders-v1",
         "round_id": ROUND_ID,
         "panel": expected_input_signature(panel_path),
         "r0019_coordinate_receipt": expected_input_signature(

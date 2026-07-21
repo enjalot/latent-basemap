@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from basemap.output_safety import atomic_save_new_npz
 from basemap.duplicate_census import save_cap_npz
@@ -12,7 +13,12 @@ from basemap.round0014_transform import build_transform_template
 from basemap.round0021_program import TRAIN_CONFIG as ROUND0021_TRAIN_CONFIG
 from basemap.round0024_program import train_config_for_cell
 from experiments import run_round0014_node as node
-from experiments.universality_panel import _ffr_from_neighbors
+from experiments.universality_panel import (
+    _array_source_signature,
+    _cosine_topk,
+    _dtype_identity_receipt,
+    _ffr_from_neighbors,
+)
 
 
 def test_round0020_global_cap_uses_duplicate_cap_schema(tmp_path):
@@ -70,6 +76,11 @@ def test_round0020_0022_configure_existing_runner_node_names():
     assert node._run_canary.__name__ == "_run_round0022_canary"
     assert node._run_panel.__name__ == "_run_round0022_panel"
     assert node._run_semantic_renders.__name__ == "_run_round0022_renders"
+    node.configure_round0028()
+    assert node.ROUND_ID == "0028"
+    assert node._run_canary.__name__ == "_run_round0028_canary"
+    assert node._run_panel.__name__ == "_run_round0028_panel"
+    assert node._run_semantic_renders.__name__ == "_run_round0028_renders"
 
 
 def test_round0021_configure_uses_global_cap_artifact():
@@ -124,3 +135,57 @@ def test_round0024_transform_template_binds_active_config_digest():
     assert template["template_config"]["trained_model"][
         "controller_output_relative_path"
     ] == "artifacts/h1024/train/model.pt"
+def test_round0028_dtype_receipt_fails_closed_on_fp32_narrowing(tmp_path):
+    path = tmp_path / "probe.npy"
+    values = np.arange(24, dtype=np.float32).reshape(6, 4)
+    np.save(path, values, allow_pickle=False)
+    loaded = np.load(path, mmap_mode="r", allow_pickle=False)
+    selected = np.asarray(loaded[[0, 2, 5]])
+    source = _array_source_signature(str(path), loaded)
+    receipt = _dtype_identity_receipt(
+        label="synthetic.probe_queries",
+        source=source,
+        selected=selected,
+        expected_source_dtype=np.dtype(np.float32).str,
+        expected_selected_dtype=np.dtype(np.float32).str,
+    )
+    assert receipt["observed_selected_array"]["dtype"] == np.dtype(np.float32).str
+    assert receipt["declared"]["cosine_compute_dtype"] == np.dtype(np.float32).str
+
+    with pytest.raises(RuntimeError, match="selected_array_dtype"):
+        _dtype_identity_receipt(
+            label="synthetic.probe_queries",
+            source=source,
+            selected=selected.astype(np.float16),
+            expected_source_dtype=np.dtype(np.float32).str,
+            expected_selected_dtype=np.dtype(np.float32).str,
+        )
+
+
+def test_round0028_fp32_cosine_regression_changes_after_fp16_rounding():
+    rng = np.random.default_rng(123)
+    dim = 32
+    corpus_rows = 16
+    query_rows = 3
+    corpus = rng.normal(size=(corpus_rows, dim)).astype(np.float32)
+    corpus /= np.linalg.norm(corpus, axis=1, keepdims=True)
+    queries = rng.normal(size=(query_rows, dim)).astype(np.float32)
+    queries /= np.linalg.norm(queries, axis=1, keepdims=True)
+    for query_index in range(query_rows):
+        noise = rng.normal(scale=0.002, size=dim).astype(np.float32)
+        corpus[2 * query_index] = queries[query_index] + noise
+        corpus[2 * query_index + 1] = (
+            queries[query_index]
+            + noise
+            + rng.normal(scale=0.0002, size=dim).astype(np.float32)
+        )
+
+    fp32_order = _cosine_topk(corpus, queries, 5, device="cpu")
+    rounded_order = _cosine_topk(
+        corpus.astype(np.float16).astype(np.float32),
+        queries.astype(np.float16).astype(np.float32),
+        5,
+        device="cpu",
+    )
+    assert fp32_order[1, :2].tolist() == [2, 3]
+    assert rounded_order[1, :2].tolist() == [3, 2]

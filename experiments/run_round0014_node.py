@@ -176,6 +176,19 @@ def configure_round0024(*, job: dict[str, Any] | None = None,
     NODES = program.NODES
 
 
+def configure_round0028() -> None:
+    """Select the corrected fp32 MiniLM universality-panel nodes."""
+    global ROUND_ID, ROUND_LABEL, SCHEMA_PREFIX, RUNTIME_SCRIPT
+    global _run_canary, _run_panel, _run_semantic_renders
+    ROUND_ID = "0028"
+    ROUND_LABEL = "Round 0028"
+    SCHEMA_PREFIX = "round0028"
+    RUNTIME_SCRIPT = "experiments/universality_panel.py"
+    _run_canary = _run_round0028_canary
+    _run_panel = _run_round0028_panel
+    _run_semantic_renders = _run_round0028_renders
+
+
 def _run_round0020_duplicate_census(active: dict[str, Any], job: dict[str, Any]) -> None:
     output = job["outputs"][0]
     configure_round0019()
@@ -215,6 +228,31 @@ def _run_round0022_renders(active: dict[str, Any], job: dict[str, Any]) -> None:
         active["manifest"]["jobs"][1]["outputs"][0], "universality-panel-v1.json"
     )
     run_renders(panel_path=panel_path, output_root=job["outputs"][0])
+
+
+def _run_round0028_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
+    from experiments import universality_panel
+
+    universality_panel.configure_round0028()
+    universality_panel.run_canary(output_root=job["outputs"][0])
+
+
+def _run_round0028_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
+    from experiments import universality_panel
+
+    universality_panel.configure_round0028()
+    canary_path = os.path.join(active["manifest"]["jobs"][0]["outputs"][0], "verdict.json")
+    universality_panel.run_panel(canary_path=canary_path, output_root=job["outputs"][0])
+
+
+def _run_round0028_renders(active: dict[str, Any], job: dict[str, Any]) -> None:
+    from experiments import universality_panel
+
+    universality_panel.configure_round0028()
+    panel_path = os.path.join(
+        active["manifest"]["jobs"][1]["outputs"][0], "universality-panel-v1.json"
+    )
+    universality_panel.run_renders(panel_path=panel_path, output_root=job["outputs"][0])
 
 
 def _schema(name: str) -> str:
