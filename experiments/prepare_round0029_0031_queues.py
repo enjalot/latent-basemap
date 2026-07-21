@@ -226,8 +226,7 @@ def prepare_round0032(release_sha: str) -> str:
     )
     manifest["required_reviews"] = ["0013", "0020", "0029"]
     manifest["capability_dependencies"] = [
-        "30m-input-pack-v1", "30m-duplicate-census-v1",
-        "r0029-weighted-graph-diagnostic"]
+        "30m-input-pack-v1", "30m-duplicate-census-v1"]
     manifest["capabilities_produced"] = ["30m-weighted-fuzzy-graph-v2"]
     manifest["scientific_contract"] = {
         "training_performed": False,
