@@ -1,8 +1,9 @@
 # Weighted fuzzy graph build and validation
 
-Status: corrected implementation prepared 2026-07-21. The artifact built on
-2026-07-20 is useful exploratory evidence, but it is not the canonical training
-input. A clean rebuild and production-path canary remain required before merge.
+Status: production-qualified 2026-07-21. R0029 produced the clean versioned
+30M graph, and accepted R0032 reused those exact bytes to pass CUDA-matched V4
+and the real capped production-path canary. The older 2026-07-20 artifact
+remains exploratory evidence and is not the canonical training input.
 
 This work implements Path A from
 `latent-labs/guides/spec-weighted-graph-build.md`: recompute exact cosine
@@ -16,12 +17,12 @@ uniform-versus-fuzzy training experiment described below.
 | Item | Current conclusion |
 | --- | --- |
 | Fuzzy membership math | V1 passes against `fuzzy_simplicial_set` on an identical 100k topology. |
-| Existing 30M artifact | Full structural scan passes: 738,221,242 unique, sorted, in-range, non-self directed edges with finite positive weights. File size is 4,586,950,577 bytes (4.59 GB decimal / 4.27 GiB). |
-| Existing manifest | Not trainer-admissible: it lacks the production `graph_sha`/`graph_sha256` contract and full ordered embedding identities. Builder provenance is dirty and points at the parent commit. |
-| Existing V2 | Directionally shows poor IVF-PQ recall (~0.254–0.258), but used unsafe rank-0 self removal under exact-vector ties. Rerun with explicit query IDs. |
-| Existing V3 | Proves only isolated `DeviceEdgeSampler` CDF behavior. It bypasses admission and does not instantiate the 30M production hybrid path. Its 9.51 GB RSS was sampled before the CDF and draw histogram, not at peak. |
-| Existing V4 | Directed weight monotonicity passes. The old report called all 60 probes mutual; only 29 were mutual. The corrected validator recomputes reverse membership and exact t-conorm values. |
-| 30M production readiness | Pending a fresh, versioned rebuild from a clean commit, CPU admission, corrected V4, and one no-update GPU canary that stamps `hybrid` / `HostStreamEdgeSampler` / weighted sampling / device-fp16 X. |
+| Canonical 30M artifact | R0029 graph SHA-256 `fe0dbc94...6542da2`: 738,221,242 unique, sorted, in-range, non-self directed edges with finite positive weights; 4,586,950,517 bytes. The clean manifest SHA-256 is `e0c35246...71d9c`. |
+| Canonical manifest | Trainer-admissible `graph_manifest.v2`: clean builder provenance, full graph/build identities, full topology scan, and all 30 ordered embedding identities. |
+| V2 / Path B | Accepted R0031 measured direct IVF-PQ recall@15 `0.2568`; exact top-64/top-128 candidate coverage was only `0.3117`/`0.3199` on 49,950 unambiguous queries. The current Path-B candidate generator is not a 30M priority. |
+| V3 | R0029 passes exact graph/data admission, host/device CDF equivalence, and a 10M-draw frequency diagnostic for the canonical graph. |
+| V4 | Accepted R0032 passes 60/60 CUDA-matched physical pairs at unchanged absolute tolerance `2e-5`; maximum delta `2.682209e-6`. The R0029 59/60 miss was a CPU-vs-CUDA checker mismatch. |
+| 30M production readiness | Accepted R0032 stamps `hybrid` / `HostStreamEdgeSampler` / `weighted_with_replacement` / `device_fp16` with the exact-family cap and zero updates. The graph input is qualified; matched training is still required to judge fuzzy sampling. |
 | 150M/405M readiness | Builder interchange path exists, but there is no streaming sharded trainer consumer. Current gather is sparse-page-I/O bound. Do not describe these paths as scale-ready. |
 
 Do not overwrite the exploratory file at
@@ -98,9 +99,10 @@ that path.
 The corrected V3 is deliberately CPU-bounded. It verifies the sibling manifest,
 all ordered input identities, graph/data pairing, full weight domain, and both
 host/device sampler CDF math on a deterministic edge sample without allocating a
-second 5.9 GB per-edge histogram. It records that the production GPU canary has
-not run. The release canary must use the real trainer admission path, perform no
-optimizer update, and capture the actual `train_accounting` pipeline stamp.
+second 5.9 GB per-edge histogram. R0029 passed that check for the canonical
+artifact. R0032 then used the real trainer admission path, performed no model
+allocation or optimizer update, and captured the actual pipeline stamp rather
+than inferring it from requested configuration.
 
 ## Validation status
 
@@ -124,9 +126,8 @@ production content validation.
 ### V2: topology honesty and Path-B candidate rerank
 
 Historical IVF-PQ recall@15 was 0.2536, 0.2568, and 0.2580 for nprobe 32, 64,
-and 128. This is strong evidence that increasing nprobe alone is not the answer,
-but the validator assumed a separate-base query's rank-0 result was self. Exact
-ties make that assumption false.
+and 128, but that validator assumed a separate-base query's rank-0 result was
+self. Exact ties make that assumption false.
 
 The corrected validator masks the explicit query row before top-k and also
 measures Path B:
@@ -136,26 +137,39 @@ measures Path B:
 - ANN, exact-reference, and rerank wall times;
 - p10 as well as mean recall.
 
-Do not repeat the earlier “top-64 should reach at least 0.9” estimate as a
-result. Candidate coverage has not yet been measured. This short diagnostic can
-run after the current GPU owner releases the card and need not block the matched
-Path-A training comparison.
+R0031 ran the corrected diagnostic at nprobe 64 on a deterministic 50,000-query
+sample. Only 50 queries had a top-k boundary tie, leaving 49,950 unambiguous
+queries. Direct recall@15 was 0.2568; exact fp32 top-64 and top-128 candidate
+coverage/reranked recall were 0.3117 and 0.3199, respectively. Both miss the
+registered 0.90 threshold by a wide margin. Do not prioritize the current
+Path-B candidate generator at 30M; a materially better candidate generator,
+not merely reranking these widths, would be required.
 
 ### V3: consumer contract
 
 The JSON under `docs/weighted_graph_validation/v3_30m.json` is retained as the
-historical isolated-device-sampler output. It is superseded as a production
-admission claim. Regenerate V3 against the clean artifact, then run the separate
-no-update GPU canary described above.
+historical isolated-device-sampler output and remains superseded as a production
+admission claim. Canonical R0029 V3 is
+`/data/latent-basemap/runs/round-0029/queue/artifacts/cpu-validation/v3-consumer-contract.json`,
+SHA-256 `084016f28b4b8279f7d26c20c46ec356c78d3dac8538d1de52c4b2b940596066`.
+It passes exact graph/data admission, device-vs-host CDF maximum difference
+`0.0`, and a 10,000,000-draw decile diagnostic with correlation `0.999999`.
 
 ### V4: physical spot check
 
 The historical check established monotone directed weights for 20/20 sampled
 nodes and the weak inequality `symmetrized >= forward` for 60/60 probes. It did
 not establish mutuality; independent inspection found only 29/60 reverse
-memberships. The corrected V4 recomputes the neighbor's directed row, labels
-actual mutual and one-way pairs separately, and compares the artifact to
-`w_ij + w_ji - w_ij*w_ji` within tolerance.
+memberships.
+
+R0029's corrected formula initially matched 59/60 because it recomputed on CPU
+while Phase A built the weights on CUDA. The lone pair `(8012582, 4516212)` had
+CPU expected weight `0.8768811822`, while the artifact and CUDA recomputation
+both give `0.8769071698`. R0032 retained the same seed-0 nodes, first three
+pairs per node, and absolute tolerance `2e-5`, but matched the builder backend
+and persisted every pair. It passed 60/60 (29 mutual, 31 one-way), with maximum
+absolute delta `2.682209e-6`; the formerly failing pair matched exactly. This
+qualifies the existing bytes without a tolerance change or rebuild.
 
 ## Scale and performance, corrected
 
@@ -189,24 +203,25 @@ topology before the 30M topology decision is made.
 
 ## Research sequence
 
-After the current GPU-owned round finishes:
+R0029/R0032 completed the clean build, full scan, V3, corrected V4, and real
+production handoff. R0031 completed the independent Path-B diagnostic and found
+that top-64/top-128 candidates are nowhere near adequate. The next sequence is:
 
-1. From a clean commit, rebuild the 30M weighted graph into a new artifact and
-   fresh work directory. Confirm full output scan, CPU V3 admission, and corrected
-   V4.
-2. Run the no-update real-trainer canary and require the actual pipeline stamp:
-   `hybrid`, `HostStreamEdgeSampler`, `weighted_with_replacement`,
-   `device_fp16`. Do not infer this from requested configuration.
-3. Run a matched 30M A/B on the same symmetrized 738,221,242-edge endpoint
-   universe: uniform-with-replacement versus fuzzy-proportional sampling. Use the
-   same accepted Round-0020 duplicate cap, model, seed, update horizon, scoring
-   panel, and accepted OOD rider. Comparing fuzzy only to the historical k15
-   graph would confound endpoint universe and sampler semantics.
-4. Use otherwise idle GPU time for the corrected 3M top-64/top-128 candidate and
-   exact-rerank benchmark. It does not gate step 3.
-5. If fuzzy sampling wins, or candidate reranking materially improves recall,
-   prioritize a higher-recall 30M topology build and repeat a controlled
-   comparison before attempting 150M/405M scale machinery.
+1. Run the registered matched 30M A/B on the same symmetrized
+   738,221,242-edge endpoint universe: uniform-with-replacement versus
+   fuzzy-proportional sampling. Use the same accepted R0020 duplicate cap,
+   model, seed, update horizon, scoring panel, and accepted OOD rider. Comparing
+   fuzzy only to the historical k15 graph would confound endpoint universe and
+   sampler semantics.
+2. Interpret the A/B against R0023's observed seed spread. A within-spread
+   result is inconclusive and warrants a paired replicate, not adoption.
+3. Do not spend a 30M build on the current Path-B generator. Revisit Path B
+   only after a bounded 3M diagnostic demonstrates materially better candidate
+   coverage than R0031.
+4. If fuzzy sampling wins, prioritize a higher-recall 30M topology and repeat
+   the controlled comparison before attempting 150M/405M scale machinery. If
+   it does not win, keep the simpler accepted uniform recipe and move the scale
+   ladder forward.
 
 Duplicate-family mass does not need to block the matched A/B when both arms use
 the accepted global cap. Before the cap, same-family edges are 0.253% of fuzzy
@@ -220,9 +235,10 @@ universe has variable source degree and selects the hybrid path. The host sample
 now supports a retained-node universe without materializing a 732M-element edge
 index: uniform draws use exact rejection conditioning over retained sources,
 weighted draws zero excluded-source CDF intervals, and negative endpoints are
-uniform over retained nodes. Focused distribution tests cover both arms. The
-follow-up round still needs to wire the accepted R0020 exclusion artifact into
-this path and record the resulting retained edge count and weight mass.
+uniform over retained nodes. Focused distribution tests cover both arms. R0032
+wired the accepted R0020 exclusion artifact through this path and measured
+5,617,916 excluded-source edges, leaving 732,603,326 effective retained-source
+edges. Both A/B arms must bind that exact endpoint universe and count.
 
 ## Release checklist
 
@@ -236,11 +252,12 @@ this path and record the resulting retained edge count and weight mass.
 - [x] Corrected CPU V3 scope and peak-RSS measurement point.
 - [x] Corrected V4 mutuality/t-conorm check.
 - [x] Variable-degree hybrid retained-node sampling for the matched duplicate cap.
-- [ ] Clean-commit 30M rebuild at a versioned path.
-- [ ] Corrected real-artifact V3/V4 results.
-- [ ] Real production-path no-update GPU canary and accounting stamp.
+- [x] Clean-commit 30M rebuild at a versioned path.
+- [x] Corrected real-artifact V3/V4 results.
+- [x] Real production-path no-update GPU canary and accounting stamp.
 - [ ] Matched uniform-versus-fuzzy training round.
 
-Merge the code after the CPU suite and synthetic end-to-end checks pass. Treat
-the clean artifact rebuild and GPU canary as experiment-input release gates, not
-as reasons to hold unrelated CPU implementation or the Path-B benchmark code.
+The code is merge-ready after the focused CPU suite and synthetic end-to-end
+checks pass. Accepted R0032 releases only the exact graph/V3/V4/canary tuple;
+the matched training round remains responsible for the scientific sampling
+decision.
