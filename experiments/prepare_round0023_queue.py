@@ -154,7 +154,7 @@ def prepare_round0023(release_sha: str) -> str:
     reference_inputs = _file_inputs(
         [
             os.path.join(LAB_ROOT, "round-0023-2026-07-19.md"),
-            os.path.join(LAB_ROOT, "review-0019-2026-07-20.md"),
+            os.path.join(LAB_ROOT, "review-0019-2026-07-19.md"),
             os.path.join(LAB_ROOT, "review-0021-2026-07-20.md"),
             R0019_QUEUE,
             os.path.join(R0019_TRAIN, "model.pt"),
