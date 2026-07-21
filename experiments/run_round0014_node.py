@@ -161,6 +161,23 @@ def configure_round0024(*, job: dict[str, Any] | None = None,
     NODES = program.NODES
 
 
+def configure_round0023(*, job: dict[str, Any] | None = None,
+                        manifest: dict[str, Any] | None = None) -> None:
+    """Select the Round 0023 seed-scoped R0019 local-cap treatment."""
+    global ROUND_ID, ROUND_LABEL, SCHEMA_PREFIX, RUNTIME_SCRIPT
+    global RoundMaterializedArray, TRAIN_CONFIG, TRAIN_CONFIG_SHA256, NODES
+    program = importlib.import_module("basemap.round0023_program")
+    seed_cell = program.seed_from_job(job or {})
+    ROUND_ID = "0023"
+    ROUND_LABEL = f"Round 0023 seed-{seed_cell['seed']}"
+    SCHEMA_PREFIX = f"round0023-seed{seed_cell['seed']}"
+    RUNTIME_SCRIPT = "experiments/run_round0014_node.py"
+    RoundMaterializedArray = program.Round0023MaterializedArray
+    TRAIN_CONFIG = seed_cell["train_config"]
+    TRAIN_CONFIG_SHA256 = seed_cell["train_config_sha256"]
+    NODES = program.NODES
+
+
 def _run_round0020_duplicate_census(active: dict[str, Any], job: dict[str, Any]) -> None:
     output = job["outputs"][0]
     configure_round0019()
@@ -217,6 +234,10 @@ def _multiplicity_treatment() -> dict[str, Any] | None:
 def _capacity_ladder_cell() -> dict[str, Any] | None:
     cell = TRAIN_CONFIG["execution"].get("round0024_capacity_ladder_cell")
     return cell if isinstance(cell, dict) else None
+
+
+def _configured_seed() -> int:
+    return int(TRAIN_CONFIG["optimizer"].get("seed", 42))
 
 
 def _node_job(active: dict[str, Any], node_id: str) -> dict[str, Any]:
@@ -341,8 +362,9 @@ def _run_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
 
     X = RoundMaterializedArray()
     pumap = _new_exact_model()
+    seed = _configured_seed()
     dataset, loader, edges = pumap._prepare_edge_list_training(
-        X, GRAPH_PATH, len(X), False, 42)
+        X, GRAPH_PATH, len(X), False, seed)
     src_batch, dst_batch, batch_targets = next(iter(loader))
     torch.cuda.synchronize("cuda")
     free_bytes, total_bytes = torch.cuda.mem_get_info("cuda")
@@ -471,7 +493,8 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
          "config": TRAIN_CONFIG, "config_sha256": TRAIN_CONFIG_SHA256},
         immutable=True)
     import torch
-    np.random.seed(42); torch.manual_seed(42); torch.cuda.manual_seed_all(42)
+    seed = _configured_seed()
+    np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
     X = RoundMaterializedArray()
     pumap = _new_exact_model()
     pumap._max_train_steps = 500_000
@@ -485,7 +508,7 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
     pumap._admission_artifact_path = os.path.join(output, "admission.json")
     started = time.monotonic()
     pumap.fit(
-        X, low_memory=False, verbose=False, n_processes=6, random_state=42,
+        X, low_memory=False, verbose=False, n_processes=6, random_state=seed,
         resample_negatives=False, precomputed_edges_path=GRAPH_PATH,
         use_wandb=False)
     wall = time.monotonic() - started
@@ -565,7 +588,7 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
         "accepted_capability_sha256": ACCEPTED_CAPABILITY_SHA256,
         "model": expected_input_signature(model_path),
         "train_stats": stats, "performance_profile": profiler,
-        "train_wall_seconds": wall, "seed": 42,
+        "train_wall_seconds": wall, "seed": seed,
         "retry_count": 0,
     }
     atomic_write_new_json(
@@ -984,7 +1007,8 @@ def _run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
         }, k=15)
     projection = score_query_bundle(
         X=X, Z=Z, Xq=queries, Zq=query_coords, cfg=cfg,
-        truth_cache=cache, label=f"{SCHEMA_PREFIX}-seed42", random_seed=123)
+        truth_cache=cache, label=f"{SCHEMA_PREFIX}-seed{_configured_seed()}",
+        random_seed=123)
     cache_telemetry = cache.telemetry()
     if (cache_telemetry["build_count"] != 1 or cache_telemetry["hit_count"] != 3 or
             cache_telemetry["maximum_k"] != 15):
@@ -1110,14 +1134,27 @@ def _run_semantic_renders(active: dict[str, Any], job: dict[str, Any]) -> None:
     transform = job.get("transform_output") or active["manifest"]["jobs"][2]["outputs"][0]
     panel_root = job.get("panel_output") or active["manifest"]["jobs"][4]["outputs"][0]
     Z = StreamedCoordinateArray(transform)
-    rng = np.random.RandomState(20260717)
-    sample_ids = np.sort(rng.choice(len(Z), 50_000, replace=False)).astype(np.int64)
+    sample_source = job.get("sample_semantic_ids")
+    if sample_source:
+        sample_ids = np.asarray(np.load(sample_source, allow_pickle=False), dtype=np.int64)
+        sample_policy = "reused-fixed-round0019-semantic-sample"
+    else:
+        rng = np.random.RandomState(20260717)
+        sample_ids = np.sort(rng.choice(len(Z), 50_000, replace=False)).astype(np.int64)
+        sample_policy = "deterministic-random-sample-seed-20260717"
+    if sample_ids.ndim != 1 or len(sample_ids) != 50_000:
+        raise RuntimeError(f"{ROUND_LABEL} semantic sample shape changed")
+    if not np.array_equal(sample_ids, np.unique(sample_ids)):
+        raise RuntimeError(f"{ROUND_LABEL} semantic sample IDs are not unique/sorted")
+    if sample_ids[0] < 0 or sample_ids[-1] >= len(Z):
+        raise RuntimeError(f"{ROUND_LABEL} semantic sample IDs are out of bounds")
     points = Z[sample_ids]
     if not np.isfinite(points).all():
         raise RuntimeError(f"{ROUND_LABEL} semantic render has non-finite points")
     sample_path = os.path.join(output, "sample-semantic-ids.npy")
     rows_path = os.path.join(output, "gathered-row-positions.npy")
-    image_path = os.path.join(output, "seed42-map.png")
+    seed = _configured_seed()
+    image_path = os.path.join(output, f"seed{seed}-map.png")
     atomic_save_new_npy(sample_path, sample_ids, immutable=True)
     atomic_save_new_npy(rows_path, sample_ids.copy(), immutable=True)
 
@@ -1129,7 +1166,7 @@ def _run_semantic_renders(active: dict[str, Any], job: dict[str, Any]) -> None:
         axis.scatter(points[:, 0], points[:, 1], s=0.15, alpha=0.35,
                      linewidths=0, rasterized=True)
         axis.set_aspect("equal", adjustable="box")
-        axis.set_title(f"{ROUND_LABEL} seed-42 30M MiniLM map")
+        axis.set_title(f"{ROUND_LABEL} seed-{seed} 30M MiniLM map")
         axis.set_xticks([]); axis.set_yticks([])
         figure.tight_layout()
         figure.savefig(path, format="png", dpi=180, bbox_inches="tight")
@@ -1156,6 +1193,10 @@ def _run_semantic_renders(active: dict[str, Any], job: dict[str, Any]) -> None:
         "schema": _schema("semantic-render"),
         "semantic_namespace": namespace,
         "sample_seed": 20260717, "sample_size": 50_000,
+        "sample_policy": sample_policy,
+        "source_sample_semantic_ids": (
+            expected_input_signature(sample_source) if sample_source else None
+        ),
         "sample_semantic_ids": expected_input_signature(sample_path),
         "sample_semantic_ids_sha256": ordered_array_sha256(sample_ids),
         "gathered_row_positions": expected_input_signature(rows_path),
@@ -1287,6 +1328,24 @@ def _run_round0024_width_decision(active: dict[str, Any], job: dict[str, Any]) -
         os.path.join(output, "capacity-ladder-v1.json"),
         _seal(body),
         immutable=True,
+    )
+
+
+def _run_layout_disparity(active: dict[str, Any], job: dict[str, Any]) -> None:
+    from experiments.layout_disparity import run_layout_disparity
+
+    run_layout_disparity(
+        output_root=job["outputs"][0],
+        coordinate_roots=job["coordinate_outputs"],
+        train_roots=job["train_outputs"],
+        panel_roots=job["panel_outputs"],
+        render_roots=job["render_outputs"],
+        release_sha=active["manifest"]["release_sha"],
+        implementation_base_commit=active["manifest"].get(
+            "implementation_base_commit",
+            active["manifest"].get("release_parent_sha", ""),
+        ),
+        sample_ids_path=job["sample_semantic_ids"],
     )
 
 
