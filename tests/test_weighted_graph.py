@@ -339,3 +339,22 @@ def test_weighted_canary_is_no_update_and_uses_real_admission_path():
     assignments = [node for node in ast.walk(tree) if isinstance(node, ast.Dict)]
     assert any(any(isinstance(key, ast.Constant) and key.value == "training_performed"
                    for key in item.keys) for item in assignments)
+
+
+def test_v4_uses_source_slices_not_a_full_edge_mask():
+    source_path = os.path.join(
+        os.path.dirname(__file__), "..", "experiments", "weighted_graph_validate.py")
+    tree = ast.parse(open(source_path, encoding="utf-8").read())
+    v4_node = next(
+        item for item in tree.body
+        if isinstance(item, ast.FunctionDef) and item.name == "v4"
+    )
+    calls = [item for item in ast.walk(v4_node) if isinstance(item, ast.Call)]
+    numpy_calls = [
+        item.func.attr for item in calls
+        if isinstance(item.func, ast.Attribute)
+        and isinstance(item.func.value, ast.Name)
+        and item.func.value.id == "np"
+    ]
+    assert "searchsorted" in numpy_calls
+    assert "isin" not in numpy_calls

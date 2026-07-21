@@ -189,6 +189,24 @@ def configure_round0028() -> None:
     _run_semantic_renders = _run_round0028_renders
 
 
+def configure_round0029(**_: Any) -> None:
+    """Select the bounded weighted-graph artifact qualification round."""
+    global ROUND_ID, ROUND_LABEL, SCHEMA_PREFIX, RUNTIME_SCRIPT
+    ROUND_ID = "0029"
+    ROUND_LABEL = "Round 0029"
+    SCHEMA_PREFIX = "round0029"
+    RUNTIME_SCRIPT = "experiments/round0029_program.py"
+
+
+def configure_round0031(**_: Any) -> None:
+    """Select the independent 3M Path-B candidate/rerank diagnostic."""
+    global ROUND_ID, ROUND_LABEL, SCHEMA_PREFIX, RUNTIME_SCRIPT
+    ROUND_ID = "0031"
+    ROUND_LABEL = "Round 0031"
+    SCHEMA_PREFIX = "round0031"
+    RUNTIME_SCRIPT = "experiments/weighted_graph_validate.py"
+
+
 def _run_round0020_duplicate_census(active: dict[str, Any], job: dict[str, Any]) -> None:
     output = job["outputs"][0]
     configure_round0019()
@@ -253,6 +271,68 @@ def _run_round0028_renders(active: dict[str, Any], job: dict[str, Any]) -> None:
         active["manifest"]["jobs"][1]["outputs"][0], "universality-panel-v1.json"
     )
     universality_panel.run_renders(panel_path=panel_path, output_root=job["outputs"][0])
+
+
+def _run_round0029_build(active: dict[str, Any], job: dict[str, Any]) -> None:
+    from experiments.round0029_program import run_build
+
+    run_build(output_root=job["outputs"][0], workdir=job["workdir"])
+
+
+def _run_round0029_validate(active: dict[str, Any], job: dict[str, Any]) -> None:
+    from experiments.round0029_program import run_cpu_validation
+
+    run_cpu_validation(
+        output_root=job["outputs"][0], build_root=job["build_root"])
+
+
+def _run_round0029_production_canary(
+        active: dict[str, Any], job: dict[str, Any]) -> None:
+    from experiments.round0029_program import run_production_canary
+
+    run_production_canary(
+        output_root=job["outputs"][0],
+        build_root=job["build_root"],
+        validation_root=job["validation_root"],
+    )
+
+
+def _run_round0031_path_b(active: dict[str, Any], job: dict[str, Any]) -> None:
+    from argparse import Namespace
+    from experiments.round0029_program import ordered_embedding_paths
+    from experiments.weighted_graph_validate import v2
+
+    output = create_fresh_directory(
+        job["outputs"][0], label="Round 0031 Path-B output")
+    result_path = os.path.join(output, "path-b-candidate-rerank.json")
+    result = v2(Namespace(
+        embeddings_list=ordered_embedding_paths()[:3],
+        embeddings_dir=None,
+        dim=384,
+        device="cuda",
+        target_neighbors=16,
+        json_out=result_path,
+        index="/data/checkpoints/pumap/faiss_ivf_pq_3m.index",
+        n_base=3_000_000,
+        n_sample=50_000,
+        nprobe=64,
+        candidate_k=128,
+        candidate_widths=[64, 128],
+        k=15,
+    ))
+    if result.get("PASS") is not True:
+        raise RuntimeError("Round 0031 Path-B measurement failed validity checks")
+    receipt = {
+        "schema": "round0031-path-b-receipt-v1",
+        "training_performed": False,
+        "optimizer_updates": 0,
+        "measurement": expected_input_signature(result_path),
+        "candidate_widths": result["candidate_widths"],
+        "path_b_by_candidate_width": result["path_b_by_candidate_width"],
+        "passed": True,
+    }
+    atomic_write_new_json(
+        os.path.join(output, "receipt.json"), receipt, immutable=True)
 
 
 def _schema(name: str) -> str:

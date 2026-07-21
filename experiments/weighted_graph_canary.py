@@ -24,6 +24,7 @@ from basemap.output_safety import atomic_write_new_json, refuse_existing
 
 
 def run_canary(args) -> dict:
+    duplicate_cap = getattr(args, "duplicate_cap", None)
     refuse_existing(args.json_out, label="weighted graph canary receipt")
     manifest_path = args.artifact + ".manifest.json"
     manifest_sha256 = sha256_file(manifest_path)
@@ -58,6 +59,11 @@ def run_canary(args) -> dict:
         required_input_pipeline="hybrid", require_graph_manifest=True,
         require_full_budget=False,
     )
+    if duplicate_cap:
+        trainer.duplicate_multiplicity_cap_path = duplicate_cap
+        trainer.duplicate_multiplicity_cap_sha256 = (
+            args.expected_duplicate_cap_sha256)
+        trainer.duplicate_multiplicity_fixed_k = args.fixed_edges_per_source
     dataset = loader = batch = None
     try:
         dataset, loader, effective_edges = trainer._prepare_edge_list_training(
@@ -71,8 +77,26 @@ def run_canary(args) -> dict:
             "x_residency": "device_fp16",
             "weighted_requested": True,
             "weighted_effective": True,
+            "uniform_with_replacement": False,
             "positive_with_replacement": True,
         }
+        if duplicate_cap:
+            expected.update({
+                "multiplicity_policy": "exact_duplicate_cap_one",
+                "multiplicity_cap_artifact_sha256": (
+                    args.expected_duplicate_cap_sha256),
+                "multiplicity_excluded_source_rows": args.expected_excluded_rows,
+                "multiplicity_retained_rows": args.expected_retained_rows,
+                "multiplicity_positive_edges_effective": int(effective_edges),
+                "multiplicity_positive_source_sampling": (
+                    "fuzzy_weight_proportional_over_retained_source_edges_with_replacement"
+                ),
+                "multiplicity_negative_sampling": "uniform_retained_rows_nonself",
+                "multiplicity_positive_destinations": "original_graph_rows",
+                "multiplicity_graph_degree": "variable_or_weighted_edge_universe",
+            })
+        else:
+            expected["multiplicity_policy"] = "row_multiplicity_uncapped"
         mismatches = {key: {"expected": value, "observed": pipeline.get(key)}
                       for key, value in expected.items()
                       if pipeline.get(key) != value}
@@ -83,6 +107,15 @@ def run_canary(args) -> dict:
             raise RuntimeError(
                 f"admitted graph SHA-256 {trusted_graph_sha256} != expected "
                 f"{args.expected_graph_sha256}")
+        if duplicate_cap:
+            retained = getattr(loader, "_retained_node_rows_t", None)
+            if (retained is None
+                    or len(retained) != args.expected_retained_rows
+                    or int(loader.n_pos) != int(effective_edges)
+                    or int(loader.source_n_pos - loader.excluded_positive_edges)
+                    != int(effective_edges)):
+                raise RuntimeError(
+                    "production duplicate-cap sampler universe does not match admission")
         batch = next(iter(loader))
         torch.cuda.synchronize()
         src, dst, labels = batch
@@ -114,6 +147,17 @@ def run_canary(args) -> dict:
             "pipeline": pipeline,
             "verified_hashes": trainer._pipeline_verified_hashes,
             "effective_edges": int(effective_edges),
+            "duplicate_cap": (
+                {
+                    "path": os.path.realpath(duplicate_cap),
+                    "sha256": args.expected_duplicate_cap_sha256,
+                    "fixed_edges_per_source": args.fixed_edges_per_source,
+                    "excluded_rows": args.expected_excluded_rows,
+                    "retained_rows": args.expected_retained_rows,
+                    "excluded_positive_edges": int(loader.excluded_positive_edges),
+                }
+                if duplicate_cap else None
+            ),
             "batch": {
                 "rows": int(args.batch_size),
                 "features": int(X.shape[1]),
@@ -146,7 +190,22 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=8192)
     parser.add_argument("--pos-ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--duplicate-cap")
+    parser.add_argument("--expected-duplicate-cap-sha256")
+    parser.add_argument("--fixed-edges-per-source", type=int, default=15)
+    parser.add_argument("--expected-excluded-rows", type=int)
+    parser.add_argument("--expected-retained-rows", type=int)
     args = parser.parse_args()
+    cap_fields = (
+        args.expected_duplicate_cap_sha256,
+        args.expected_excluded_rows,
+        args.expected_retained_rows,
+    )
+    if (bool(args.duplicate_cap) != all(value is not None for value in cap_fields)
+            or (any(value is not None for value in cap_fields)
+                and not all(value is not None for value in cap_fields))):
+        parser.error(
+            "--duplicate-cap requires its expected SHA, excluded rows, and retained rows")
     receipt = run_canary(args)
     print(json.dumps(receipt, indent=2, sort_keys=True))
     return 0

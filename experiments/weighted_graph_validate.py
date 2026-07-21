@@ -171,6 +171,10 @@ def v2(args):
     base = np.asarray(emb.gather(np.arange(n_base), out_dtype=np.float32))
 
     index = faiss.read_index(args.index)
+    if int(index.ntotal) != int(n_base):
+        raise ValueError(
+            f"index/base universe mismatch: index has {index.ntotal} rows, "
+            f"exact base has {n_base}")
     if args.nprobe:
         try:
             faiss.ParameterSpace().set_index_parameter(index, "nprobe", args.nprobe)
@@ -184,7 +188,11 @@ def v2(args):
     q = np.ascontiguousarray(base[sample].astype(np.float32))
 
     # IVF_PQ topology and the wider candidate set used by Path B exact rerank.
-    candidate_k = max(k, int(args.candidate_k))
+    requested_widths = getattr(args, "candidate_widths", None) or []
+    candidate_widths = sorted({int(args.candidate_k), *map(int, requested_widths)})
+    if any(width < k for width in candidate_widths):
+        raise ValueError("every Path-B candidate width must be at least k")
+    candidate_k = max(candidate_widths)
     t_ann = time.time()
     _, approx = index.search(q, candidate_k + 1)
     ann_seconds = time.time() - t_ann
@@ -206,15 +214,50 @@ def v2(args):
             f"of {n_base}; use a matching index/base universe")
     approx_clean = candidates[:, :k].copy()
 
-    # exact neighbors of the sample vs the base. Size the query tile so the
+    # Upload and normalize the base/query exactly once.  The earlier validator
+    # repeated this 4.6 GB upload for exact kNN, ANN-distance reconstruction,
+    # and Path-B reranking.  Reusing the tensors makes the diagnostic both
+    # faster and a cleaner comparison of the two candidate policies.
+    import torch
+    import torch.nn.functional as F
+    Bt = F.normalize(torch.from_numpy(base).to(args.device), dim=1)
+    Qn = F.normalize(torch.from_numpy(q).to(args.device), dim=1)
+
+    # Exact neighbors of the sample vs the base. Size the query tile so the
     # (tile, n_base) similarity block stays well under VRAM (~4 GB fp32).
     q_tile = max(64, int(4e9 / (4 * max(1, n_base))))
     t_exact = time.time()
-    exact_n, exact_d = build_exact_knn_gpu(
-        q, k, device=args.device, base=base, query_ids=sample, tile=q_tile)
+    exact_n = np.empty((m, k), dtype=np.int32)
+    exact_d = np.empty((m, k), dtype=np.float32)
+    exact_boundary_tie = np.zeros(m, dtype=bool)
+    with torch.no_grad():
+        for i0 in range(0, m, q_tile):
+            i1 = min(i0 + q_tile, m)
+            sim = Qn[i0:i1] @ Bt.T
+            rows = torch.arange(i1 - i0, device=sim.device)
+            cols = torch.as_tensor(sample[i0:i1], dtype=torch.long,
+                                   device=sim.device)
+            sim[rows, cols] = -torch.inf
+            # k+1 exposes exact-score ties at the evaluation boundary. Raw row
+            # recall is not identifiable for those queries (common with exact
+            # duplicate embeddings), so report them separately rather than
+            # treating an arbitrary tied row id as ground truth.
+            top = torch.topk(sim, k + 1, dim=1, largest=True)
+            exact_n[i0:i1] = top.indices[:, :k].cpu().numpy().astype(np.int32)
+            exact_d[i0:i1] = (
+                1.0 - top.values[:, :k]).cpu().numpy().astype(np.float32)
+            exact_boundary_tie[i0:i1] = (
+                torch.abs(top.values[:, k - 1] - top.values[:, k]) <= 1e-7
+            ).cpu().numpy()
     exact_seconds = time.time() - t_exact
 
-    recalls = [len(set(approx_clean[i]) & set(exact_n[i].tolist())) / k for i in range(m)]
+    recalls = np.asarray([
+        len(set(approx_clean[i]) & set(exact_n[i].tolist())) / k
+        for i in range(m)
+    ], dtype=np.float64)
+    unambiguous = ~exact_boundary_tie
+    if not np.any(unambiguous):
+        raise RuntimeError("every exact query has a tied top-k boundary")
     recall_at_k = float(np.mean(recalls))
     log.info("V2: recall@%d (IVF_PQ vs exact) = %.4f over %d nodes", k, recall_at_k, m)
 
@@ -222,9 +265,6 @@ def v2(args):
     def dist_of(neigh):
         width = int(neigh.shape[1])
         d = np.empty((m, width), dtype=np.float32)
-        import torch, torch.nn.functional as F
-        Bt = F.normalize(torch.from_numpy(base).to(args.device), dim=1)
-        Qn = F.normalize(torch.from_numpy(q).to(args.device), dim=1)
         for i0 in range(0, m, 4096):
             i1 = min(i0 + 4096, m)
             nb = torch.from_numpy(neigh[i0:i1].astype(np.int64)).to(args.device)
@@ -243,17 +283,37 @@ def v2(args):
     # set, followed by exact fp32 cosine reranking of those candidates.
     t_rerank = time.time()
     candidate_d = dist_of(candidates)
-    candidate_order = np.argsort(candidate_d, axis=1, kind="stable")
-    reranked = np.take_along_axis(candidates, candidate_order[:, :k], axis=1)
+    path_b = {}
+    for width in candidate_widths:
+        width_candidates = candidates[:, :width]
+        width_distances = candidate_d[:, :width]
+        width_order = np.argsort(width_distances, axis=1, kind="stable")
+        width_reranked = np.take_along_axis(
+            width_candidates, width_order[:, :k], axis=1)
+        candidate_recalls = np.asarray([
+            len(set(width_candidates[i].tolist()) & set(exact_n[i].tolist())) / k
+            for i in range(m)
+        ], dtype=np.float64)
+        rerank_recalls = np.asarray([
+            len(set(width_reranked[i].tolist()) & set(exact_n[i].tolist())) / k
+            for i in range(m)
+        ], dtype=np.float64)
+        path_b[str(width)] = {
+            "candidate_recall_at_k": round(float(np.mean(candidate_recalls)), 4),
+            "candidate_recall_p10": round(
+                float(np.percentile(candidate_recalls, 10)), 4),
+            "exact_rerank_recall_at_k": round(float(np.mean(rerank_recalls)), 4),
+            "exact_rerank_recall_p10": round(
+                float(np.percentile(rerank_recalls, 10)), 4),
+            "candidate_recall_at_k_unambiguous": round(
+                float(np.mean(candidate_recalls[unambiguous])), 4),
+            "exact_rerank_recall_at_k_unambiguous": round(
+                float(np.mean(rerank_recalls[unambiguous])), 4),
+        }
     rerank_seconds = time.time() - t_rerank
-    candidate_recalls = [
-        len(set(candidates[i].tolist()) & set(exact_n[i].tolist())) / k
-        for i in range(m)]
-    rerank_recalls = [
-        len(set(reranked[i].tolist()) & set(exact_n[i].tolist())) / k
-        for i in range(m)]
-    candidate_recall = float(np.mean(candidate_recalls))
-    reranked_recall = float(np.mean(rerank_recalls))
+    widest = path_b[str(candidate_k)]
+    candidate_recall = float(widest["candidate_recall_at_k"])
+    reranked_recall = float(widest["exact_rerank_recall_at_k"])
 
     n_neighbors = args.target_neighbors or (k + 1)
 
@@ -274,25 +334,41 @@ def v2(args):
     result = {
         "test": "V2_topology_honesty", "index": os.path.basename(args.index),
         "n_base": n_base, "n_sample": m, "k": k, "nprobe": args.nprobe,
-        "candidate_k": candidate_k,
+        "candidate_k": candidate_k, "candidate_widths": candidate_widths,
         "recall_at_k": round(recall_at_k, 4),
         "recall_p10": round(float(np.percentile(recalls, 10)), 4),
+        "recall_at_k_unambiguous": round(
+            float(np.mean(recalls[unambiguous])), 4),
+        "exact_boundary_tie_count": int(exact_boundary_tie.sum()),
+        "exact_boundary_tie_fraction": round(
+            float(exact_boundary_tie.mean()), 6),
+        "unambiguous_query_count": int(unambiguous.sum()),
         "weight_shared_edges": len(shared),
         "weight_mean_abs_diff_shared": float(np.mean(agree)) if agree else 0.0,
         "weight_median_exact": float(np.median(list(w_ex.values()))),
         "weight_median_approx": float(np.median(list(w_ap.values()))),
-        "path_a_trustworthy": recall_at_k >= 0.90,
+        "path_a_trustworthy": float(np.mean(recalls[unambiguous])) >= 0.90,
         "path_b_candidate_recall_at_k": round(candidate_recall, 4),
-        "path_b_candidate_recall_p10": round(
-            float(np.percentile(candidate_recalls, 10)), 4),
+        "path_b_candidate_recall_p10": widest["candidate_recall_p10"],
         "path_b_reranked_recall_at_k": round(reranked_recall, 4),
-        "path_b_reranked_recall_p10": round(
-            float(np.percentile(rerank_recalls, 10)), 4),
+        "path_b_reranked_recall_p10": widest["exact_rerank_recall_p10"],
+        "path_b_by_candidate_width": path_b,
         "ann_search_seconds": round(ann_seconds, 3),
         "exact_reference_seconds": round(exact_seconds, 3),
         "candidate_exact_rerank_seconds": round(rerank_seconds, 3),
         "path_b_measured": True,
+        "base_uploaded_and_normalized_once": True,
     }
+    result["PASS"] = bool(
+        np.isfinite([
+            result["recall_at_k"], result["path_b_candidate_recall_at_k"],
+            result["path_b_reranked_recall_at_k"],
+        ]).all()
+        and result["path_b_candidate_recall_at_k"] + 1e-4 >= result["recall_at_k"]
+        and result["path_b_reranked_recall_at_k"]
+        <= result["path_b_candidate_recall_at_k"] + 1e-4
+        and result["unambiguous_query_count"] > 0
+    )
     print(json.dumps(result, indent=2))
     _dump(args, result)
     return result
@@ -497,13 +573,17 @@ def v4(args):
               "actual_mutual_pairs": 0, "one_way_pairs": 0,
               "nodes": int(len(nodes))}
     details = []
-    # build a lookup for the sampled nodes' out-edges from the artifact
-    node_set = set(int(x) for x in nodes)
-    sel = np.isin(s, list(node_set))
-    sub_s, sub_t, sub_w = s[sel], t[sel], w[sel]
+    # The production artifact is source-sorted.  Use bounded source slices for
+    # the sampled nodes instead of allocating an E-length ``np.isin`` mask
+    # (about 738 MB at 30M) and scanning all 738M rows a second time.
+    left = np.searchsorted(s, nodes, side="left")
+    right = np.searchsorted(s, nodes, side="right")
     art = {}
-    for a, b, ww in zip(sub_s, sub_t, sub_w):
-        art[(int(a), int(b))] = float(ww)
+    for node, lo, hi in zip(nodes, left, right):
+        if hi > lo and not np.all(s[lo:hi] == node):
+            raise RuntimeError("weighted artifact source slices are not contiguous")
+        for b, ww in zip(t[lo:hi], w[lo:hi]):
+            art[(int(node), int(b))] = float(ww)
 
     for node in nodes:
         knn_i, knn_d = chunk_knn_with_self(emb, neighbors, int(node), int(node) + 1,
@@ -597,6 +677,8 @@ def register(sub):
     p2.add_argument("--nprobe", type=int, default=64)
     p2.add_argument("--candidate-k", type=int, default=64,
                     help="ANN candidate width for the Path-B exact-rerank diagnostic")
+    p2.add_argument("--candidate-widths", type=int, nargs="+", default=None,
+                    help="report multiple widths from one widest ANN/exact pass")
     p2.add_argument("--k", type=int, default=15); p2.set_defaults(func=v2)
 
     p3 = sub.add_parser("validate-v3", help="trainer weighted-sampler contract")

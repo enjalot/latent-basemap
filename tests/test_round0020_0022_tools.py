@@ -83,6 +83,19 @@ def test_round0020_0022_configure_existing_runner_node_names():
     assert node._run_semantic_renders.__name__ == "_run_round0028_renders"
 
 
+def test_round0029_and_0031_configure_bounded_followups():
+    node.configure_round0029()
+    assert node.ROUND_ID == "0029"
+    assert node.RUNTIME_SCRIPT == "experiments/round0029_program.py"
+    assert node._run_round0029_build.__name__ == "_run_round0029_build"
+    assert node._run_round0029_validate.__name__ == "_run_round0029_validate"
+    assert node._run_round0029_production_canary.__name__ == (
+        "_run_round0029_production_canary")
+    node.configure_round0031()
+    assert node.ROUND_ID == "0031"
+    assert node._run_round0031_path_b.__name__ == "_run_round0031_path_b"
+
+
 def test_round0021_configure_uses_global_cap_artifact():
     node.configure_round0021()
     treatment = node.TRAIN_CONFIG["execution"]["duplicate_multiplicity"]
