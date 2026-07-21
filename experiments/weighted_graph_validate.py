@@ -2,12 +2,13 @@
 
 V1  exactness at 100k  — my rho/sigma/membership/symmetrization vs
                           umap.fuzzy_simplicial_set on identical exact-kNN topology.
-V2  topology honesty   — IVF_PQ recall@k vs exact GPU kNN at 3M, and fuzzy-weight
-                          agreement approx-vs-exact topology.
-V3  consumer contract  — the trainer's weighted edge sampler on the 30M artifact:
-                          CDF builds, no constant-weights warning, draw ∝ weight.
-V4  spot physical check— per-node weight/distance monotonicity + mutual-pair
-                          symmetrized weight dominance.
+V2  topology honesty   — IVF_PQ recall@k vs exact GPU kNN at 3M, fuzzy-weight
+                          agreement, and measured top-C exact-rerank coverage.
+V3  CPU admission      — full graph/data manifest admission plus bounded host and
+                          device weighted-CDF equivalence. This is not the real
+                          production GPU canary.
+V4  spot physical check— per-node monotonicity and exact t-conorm recomputation,
+                          with true mutual and one-way pairs reported separately.
 """
 from __future__ import annotations
 
@@ -24,53 +25,44 @@ log = logging.getLogger("weighted_graph_validate")
 # --------------------------------------------------------------------------- #
 # Exact cosine kNN on GPU (tiled). Reference topology for V1/V2.
 # --------------------------------------------------------------------------- #
-def build_exact_knn_gpu(X, k, device="cuda", tile=4096, base=None):
+def build_exact_knn_gpu(X, k, device="cuda", tile=4096, base=None,
+                        query_ids=None):
     """Exact cosine kNN of the rows of ``X`` against ``base`` (default X itself).
     Returns (neighbors[n,k] int32, dists[n,k] float32 cosine distance), self
-    excluded, sorted ascending. Everything stays on GPU except the outputs."""
+    excluded, sorted ascending. For a separate base that contains the queries,
+    pass each query's explicit base-row id; rank position is not a safe self
+    test when exact-vector ties exist. Everything stays on GPU except outputs."""
     import torch
     import torch.nn.functional as F
     Xt = torch.from_numpy(np.asarray(X, dtype=np.float32)).to(device)
     Xt = F.normalize(Xt, dim=1)
     if base is None:
         Bt = Xt
-        self_present = True
+        query_ids = np.arange(len(X), dtype=np.int64)
     else:
         Bt = F.normalize(torch.from_numpy(np.asarray(base, dtype=np.float32)).to(device), dim=1)
-        self_present = False
+        if query_ids is not None:
+            query_ids = np.asarray(query_ids, dtype=np.int64)
+            if query_ids.shape != (len(X),):
+                raise ValueError("query_ids must have one base-row id per query")
+            if np.any(query_ids < 0) or np.any(query_ids >= len(base)):
+                raise ValueError("query_ids contain ids outside the base")
     n = Xt.shape[0]
     neighbors = np.empty((n, k), dtype=np.int32)
     dists = np.empty((n, k), dtype=np.float32)
-    # When querying against a separate base that CONTAINS the query rows (V2:
-    # q = base[sample]), the query's own row is the rank-0 hit (sim=1) — treat
-    # column 0 as self and fetch k+1 so k real neighbors survive.
-    drop_col0 = self_present or (base is not None)
-    kk = k + 1 if drop_col0 else k
+    if k > int(Bt.shape[0]) - (1 if query_ids is not None else 0):
+        raise ValueError("k exceeds the number of available non-self base rows")
     for s in range(0, n, tile):
         e = min(s + tile, n)
         sim = Xt[s:e] @ Bt.T                      # (tile, base)
-        top = torch.topk(sim, kk, dim=1, largest=True)
-        idx = top.indices.cpu().numpy()
-        val = top.values.cpu().numpy()
-        if self_present:
-            # drop the self column (its own index) from each row
-            qids = np.arange(s, e)[:, None]
-            keep = np.ones_like(idx, dtype=bool)
-            selfpos = idx == qids
-            # if self not found (shouldn't happen), drop the last column
-            no_self = ~selfpos.any(axis=1)
-            for r in np.flatnonzero(no_self):
-                selfpos[r, -1] = True
-            keep[selfpos] = False
-            idx_k = idx[keep].reshape(e - s, k)
-            val_k = val[keep].reshape(e - s, k)
-        elif base is not None:
-            # drop the rank-0 self hit (query is a base row)
-            idx_k = idx[:, 1:k + 1]
-            val_k = val[:, 1:k + 1]
-        else:
-            idx_k = idx[:, :k]
-            val_k = val[:, :k]
+        if query_ids is not None:
+            row = torch.arange(e - s, device=sim.device)
+            col = torch.as_tensor(query_ids[s:e], dtype=torch.long,
+                                  device=sim.device)
+            sim[row, col] = -torch.inf
+        top = torch.topk(sim, k, dim=1, largest=True)
+        idx_k = top.indices.cpu().numpy()
+        val_k = top.values.cpu().numpy()
         neighbors[s:e] = idx_k.astype(np.int32)
         dists[s:e] = (1.0 - val_k).astype(np.float32)
     # topk already descending by sim -> ascending by distance
@@ -191,28 +183,36 @@ def v2(args):
     sample = np.sort(rng.choice(n_base, m, replace=False))
     q = np.ascontiguousarray(base[sample].astype(np.float32))
 
-    # IVF_PQ (approximate) neighbors
-    _, approx = index.search(q, k + 1)
-    approx_clean = np.empty((m, k), dtype=np.int64)
+    # IVF_PQ topology and the wider candidate set used by Path B exact rerank.
+    candidate_k = max(k, int(args.candidate_k))
+    t_ann = time.time()
+    _, approx = index.search(q, candidate_k + 1)
+    ann_seconds = time.time() - t_ann
+    candidates = np.empty((m, candidate_k), dtype=np.int64)
     for i in range(m):
-        row = approx[i][approx[i] != sample[i]][:k]
-        if len(row) < k:
-            row = np.concatenate([row, np.full(k - len(row), row[-1] if len(row) else 0)])
-        approx_clean[i] = row
+        row = approx[i][(approx[i] >= 0) & (approx[i] != sample[i])]
+        # Stable unique is required: duplicate candidate ids otherwise inflate
+        # coverage and can occupy multiple reranked slots.
+        _, first = np.unique(row, return_index=True)
+        row = row[np.sort(first)][:candidate_k]
+        if len(row) != candidate_k:
+            raise RuntimeError(
+                f"ANN returned only {len(row)} distinct non-self candidates for "
+                f"query {int(sample[i])}; requested {candidate_k}")
+        candidates[i] = row
+    if int(candidates.max()) >= n_base:
+        raise ValueError(
+            f"ANN candidate id {int(candidates.max())} is outside the exact base "
+            f"of {n_base}; use a matching index/base universe")
+    approx_clean = candidates[:, :k].copy()
 
     # exact neighbors of the sample vs the base. Size the query tile so the
     # (tile, n_base) similarity block stays well under VRAM (~4 GB fp32).
     q_tile = max(64, int(4e9 / (4 * max(1, n_base))))
-    exact_n, exact_d = build_exact_knn_gpu(q, k, device=args.device, base=base,
-                                           tile=q_tile)
-    # drop self from exact (sample id) if present
-    for i in range(m):
-        if sample[i] in exact_n[i]:
-            keep = exact_n[i] != sample[i]
-            en = exact_n[i][keep]
-            if len(en) < k:  # pad
-                en = np.concatenate([en, [en[-1]]])
-            exact_n[i, :k] = en[:k]
+    t_exact = time.time()
+    exact_n, exact_d = build_exact_knn_gpu(
+        q, k, device=args.device, base=base, query_ids=sample, tile=q_tile)
+    exact_seconds = time.time() - t_exact
 
     recalls = [len(set(approx_clean[i]) & set(exact_n[i].tolist())) / k for i in range(m)]
     recall_at_k = float(np.mean(recalls))
@@ -220,14 +220,15 @@ def v2(args):
 
     # fuzzy weights on approx vs exact topology (need distances for both)
     def dist_of(neigh):
-        d = np.empty((m, k), dtype=np.float32)
+        width = int(neigh.shape[1])
+        d = np.empty((m, width), dtype=np.float32)
         import torch, torch.nn.functional as F
         Bt = F.normalize(torch.from_numpy(base).to(args.device), dim=1)
         Qn = F.normalize(torch.from_numpy(q).to(args.device), dim=1)
         for i0 in range(0, m, 4096):
             i1 = min(i0 + 4096, m)
             nb = torch.from_numpy(neigh[i0:i1].astype(np.int64)).to(args.device)
-            nv = Bt[nb.reshape(-1)].view(i1 - i0, k, -1)
+            nv = Bt[nb.reshape(-1)].view(i1 - i0, width, -1)
             cos = (Qn[i0:i1].unsqueeze(1) * nv).sum(2)
             d[i0:i1] = (1 - cos).clamp_(min=0).cpu().numpy()
         return d
@@ -237,6 +238,22 @@ def v2(args):
     ao = np.argsort(approx_d, axis=1)
     approx_sorted = np.take_along_axis(approx_clean, ao, 1)
     approx_d_sorted = np.take_along_axis(approx_d, ao, 1)
+
+    # Path B diagnostic: coverage of exact top-k within the wider ANN candidate
+    # set, followed by exact fp32 cosine reranking of those candidates.
+    t_rerank = time.time()
+    candidate_d = dist_of(candidates)
+    candidate_order = np.argsort(candidate_d, axis=1, kind="stable")
+    reranked = np.take_along_axis(candidates, candidate_order[:, :k], axis=1)
+    rerank_seconds = time.time() - t_rerank
+    candidate_recalls = [
+        len(set(candidates[i].tolist()) & set(exact_n[i].tolist())) / k
+        for i in range(m)]
+    rerank_recalls = [
+        len(set(reranked[i].tolist()) & set(exact_n[i].tolist())) / k
+        for i in range(m)]
+    candidate_recall = float(np.mean(candidate_recalls))
+    reranked_recall = float(np.mean(rerank_recalls))
 
     n_neighbors = args.target_neighbors or (k + 1)
 
@@ -257,6 +274,7 @@ def v2(args):
     result = {
         "test": "V2_topology_honesty", "index": os.path.basename(args.index),
         "n_base": n_base, "n_sample": m, "k": k, "nprobe": args.nprobe,
+        "candidate_k": candidate_k,
         "recall_at_k": round(recall_at_k, 4),
         "recall_p10": round(float(np.percentile(recalls, 10)), 4),
         "weight_shared_edges": len(shared),
@@ -264,6 +282,16 @@ def v2(args):
         "weight_median_exact": float(np.median(list(w_ex.values()))),
         "weight_median_approx": float(np.median(list(w_ap.values()))),
         "path_a_trustworthy": recall_at_k >= 0.90,
+        "path_b_candidate_recall_at_k": round(candidate_recall, 4),
+        "path_b_candidate_recall_p10": round(
+            float(np.percentile(candidate_recalls, 10)), 4),
+        "path_b_reranked_recall_at_k": round(reranked_recall, 4),
+        "path_b_reranked_recall_p10": round(
+            float(np.percentile(rerank_recalls, 10)), 4),
+        "ann_search_seconds": round(ann_seconds, 3),
+        "exact_reference_seconds": round(exact_seconds, 3),
+        "candidate_exact_rerank_seconds": round(rerank_seconds, 3),
+        "path_b_measured": True,
     }
     print(json.dumps(result, indent=2))
     _dump(args, result)
@@ -283,21 +311,62 @@ class _StubDataset:
 
 
 def v3(args):
+    import resource
     import torch
+    from basemap.graph_validation import (
+        validate_against_manifest, validate_graph_content,
+        validate_graph_data_pair)
     from basemap.pumap.parametric_umap.datasets.edge_list_dataset import (
-        load_edge_arrays, DeviceEdgeSampler)
+        load_edge_arrays, DeviceEdgeSampler, HostStreamEdgeSampler)
+    from experiments.build_weighted_graph import (
+        ShardedEmbeddings, resolve_shard_paths)
 
     t0 = time.time()
     if os.path.isdir(args.artifact):
-        from experiments.build_weighted_graph import load_sharded_edges
-        sources, targets, weights, n_nodes = load_sharded_edges(args.artifact)
-    else:
-        sources, targets, weights, n_nodes = load_edge_arrays(args.artifact)
-        sources = np.asarray(sources); targets = np.asarray(targets)
-        weights = np.asarray(weights)
+        raise RuntimeError(
+            "V3 production admission requires a single trainer-consumable graph; "
+            "the sharded format is validation-only until a streaming consumer exists")
+    sources, targets, weights, n_nodes = load_edge_arrays(args.artifact)
+    sources = np.asarray(sources); targets = np.asarray(targets)
+    weights = np.asarray(weights)
     load_s = time.time() - t0
-    import resource
-    rss_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6
+
+    manifest_path = args.artifact + ".manifest.json"
+    if not os.path.exists(manifest_path):
+        raise RuntimeError(f"V3 requires the sibling production manifest: {manifest_path}")
+    with open(manifest_path) as fh:
+        manifest = json.load(fh)
+    if not manifest.get("production_trainer_ready", False):
+        raise RuntimeError("weighted graph manifest does not claim production_trainer_ready")
+    if args.embeddings_list or args.embeddings_dir:
+        shard_paths = resolve_shard_paths(args.embeddings_list, args.embeddings_dir)
+    else:
+        records = manifest.get("data_shard_records") or []
+        shard_paths = [item["canonical_path"] for item in records]
+    if not shard_paths:
+        raise RuntimeError(
+            "V3 needs ordered embedding paths (manifest data_shard_records or CLI)")
+    emb = ShardedEmbeddings(shard_paths, expected_dim=args.dim)
+    validate_against_manifest(emb, manifest)
+    trusted = validate_graph_content(
+        args.artifact, manifest, shard_paths=shard_paths,
+        require_manifest_sha=True)
+    validate_graph_data_pair(sources, targets, n_nodes, len(emb))
+
+    if weights is None:
+        raise RuntimeError("weighted artifact did not load a weights array")
+    if (not np.all(np.isfinite(weights)) or np.any(weights < 0)
+            or not float(np.sum(weights, dtype=np.float64)) > 0):
+        raise RuntimeError("weighted artifact has invalid or unsamplable weights")
+
+    # Exercise both sampler implementations on a deterministic bounded slice.
+    # This verifies the host-hybrid CDF used at 30M without allocating a second
+    # full 738M-edge CDF during a CPU-side admission check.
+    sample_n = min(int(args.sampler_edges), len(weights))
+    sample_ids = np.unique(np.linspace(0, len(weights) - 1, sample_n).astype(np.int64))
+    sample_s = sources[sample_ids]
+    sample_t = targets[sample_ids]
+    sample_w = weights[sample_ids]
 
     # capture logging to detect the "constant weights" warning
     records = []
@@ -305,17 +374,23 @@ def v3(args):
     handler.emit = lambda r: records.append(r.getMessage())
     root = logging.getLogger()
     root.addHandler(handler)
-    device = "cuda" if torch.cuda.is_available() and args.device == "cuda" else "cpu"
     try:
-        sampler = DeviceEdgeSampler(
-            _StubDataset(device), sources, targets, weights, n_nodes,
-            weighted_edge_sampling=True, batch_size=4096, device=device)
+        device_sampler = DeviceEdgeSampler(
+            _StubDataset("cpu"), sample_s, sample_t, sample_w, n_nodes,
+            weighted_edge_sampling=True, batch_size=4096, device="cpu")
+        host_sampler = HostStreamEdgeSampler(
+            _StubDataset("cpu"), sample_s, sample_t, sample_w, n_nodes,
+            weighted_edge_sampling=True, batch_size=4096, device="cpu",
+            n_workers=0)
     finally:
         root.removeHandler(handler)
     constant_warning = any("constant weights" in m for m in records)
 
-    assert sampler.sample_cdf is not None, "CDF not built"
-    cdf = sampler.sample_cdf.cpu().numpy()
+    assert device_sampler.sample_cdf is not None, "device CDF not built"
+    assert host_sampler._cdf_h is not None, "host CDF not built"
+    cdf = host_sampler._cdf_h
+    device_cdf = device_sampler.sample_cdf.cpu().numpy()
+    cdf_impl_max_abs_diff = float(np.max(np.abs(cdf - device_cdf)))
     # GPU torch.cumsum uses a parallel scan whose float reassociation can make
     # the CDF non-monotone by ~1e-16 — harmless for searchsorted sampling. Assert
     # effective monotonicity (no drop beyond fp noise) and record the worst dip.
@@ -324,26 +399,32 @@ def v3(args):
     assert max_backstep < 1e-9, f"CDF not monotone (max backstep {max_backstep})"
     cdf_endpoint = float(cdf[-1])
 
-    # draw >=10M edge indices via the sampler's OWN routine, histogram by weight
+    # Draw from the host sampler's exact inverse-CDF rule and aggregate by weight
+    # decile. No per-edge histogram is allocated (which previously added 5.9 GB).
     n_draw = args.n_draw
-    drawn_counts = np.zeros(len(weights), dtype=np.int64)
-    per = 5_000_000
+    w = sample_w.astype(np.float64)
+    order = np.argsort(w, kind="stable")
+    bins = np.array_split(order, 10)
+    bin_of_edge = np.empty(len(w), dtype=np.int8)
+    expected_mass = []
+    bin_w = []
+    total_w = float(w.sum())
+    for bi, members in enumerate(bins):
+        bin_of_edge[members] = bi
+        expected_mass.append(float(w[members].sum() / total_w))
+        bin_w.append(float(w[members].mean()))
+    draw_by_bin = np.zeros(10, dtype=np.int64)
+    rng = np.random.default_rng(0)
+    per = 1_000_000
     got = 0
     while got < n_draw:
         m = min(per, n_draw - got)
-        idx = sampler._draw_idx(m).cpu().numpy()
-        np.add.at(drawn_counts, idx, 1)
+        idx = np.searchsorted(cdf, rng.random(m), side="left")
+        np.clip(idx, 0, len(w) - 1, out=idx)
+        draw_by_bin += np.bincount(bin_of_edge[idx], minlength=10)
         got += m
-    # correlation between draw frequency and weight (should be ~ linear)
-    w = weights.astype(np.float64)
-    freq = drawn_counts / drawn_counts.sum()
-    expected = w / w.sum()
-    # bin by weight decile to show monotone increase in draw rate
-    order = np.argsort(w)
-    bins = np.array_split(order, 10)
-    bin_w = [float(w[b].mean()) for b in bins]
-    bin_freq = [float(freq[b].sum()) for b in bins]
-    bin_exp = [float(expected[b].sum()) for b in bins]
+    bin_freq = (draw_by_bin / got).tolist()
+    bin_exp = expected_mass
     # Per-edge corr is Poisson-noise-limited (10M draws over ~1e9 edges → most
     # edges drawn 0×), so the meaningful test is that the AGGREGATE draw mass per
     # weight-decile matches the expected mass. corr on the decile aggregates and
@@ -351,16 +432,25 @@ def v3(args):
     decile_corr = float(np.corrcoef(bin_freq, bin_exp)[0, 1])
     decile_max_abs_diff = float(max(abs(a - b) for a, b in zip(bin_freq, bin_exp)))
 
-    ws = w
+    host_sampler.close()
+    rss_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6
     result = {
         "test": "V3_consumer_contract", "artifact": os.path.basename(args.artifact.rstrip("/")),
         "n_edges": int(len(weights)), "n_nodes": int(n_nodes),
         "load_seconds": round(load_s, 1), "peak_rss_gb": round(rss_gb, 2),
+        "peak_rss_measurement_point": "after_manifest_validation_and_bounded_samplers",
+        "manifest_admitted": True, "trusted_content": trusted,
+        "production_expected_pipeline": "hybrid",
+        "production_expected_sampler_class": "HostStreamEdgeSampler",
+        "production_gpu_canary_executed": False,
+        "sampler_test_scope_edges": int(len(sample_w)),
         "cdf_built": True, "cdf_max_backstep": max_backstep,
         "cdf_endpoint": cdf_endpoint,
+        "device_vs_host_cdf_max_abs_diff": cdf_impl_max_abs_diff,
         "constant_weights_warning": constant_warning,
-        "weight_median": float(np.median(ws)), "weight_mean": float(ws.mean()),
-        "weight_min": float(ws.min()), "weight_max": float(ws.max()),
+        "sample_weight_median": float(np.median(w)),
+        "full_weight_mean": float(np.mean(weights, dtype=np.float64)),
+        "full_weight_min": float(weights.min()), "full_weight_max": float(weights.max()),
         "n_drawn": int(got),
         "decile_draw_vs_expected_corr": round(decile_corr, 6),
         "decile_max_abs_diff": round(decile_max_abs_diff, 6),
@@ -369,7 +459,8 @@ def v3(args):
         "decile_expected_freq": [round(x, 5) for x in bin_exp],
         "PASS": (not constant_warning and decile_corr > 0.999
                  and decile_max_abs_diff < 0.005
-                 and float(np.median(ws)) < 0.9),
+                 and cdf_impl_max_abs_diff < 1e-9
+                 and float(np.median(w)) < 0.9),
     }
     print(json.dumps(result, indent=2))
     _dump(args, result)
@@ -395,14 +486,16 @@ def v4(args):
     # load the artifact's symmetrized weights, indexed by (src,dst)
     if os.path.isdir(args.artifact):
         from experiments.build_weighted_graph import load_sharded_edges
-        s, t, w, _ = load_sharded_edges(args.artifact)
+        s, t, w, _ = load_sharded_edges(args.artifact, allow_materialize=True)
     else:
         z = np.load(args.artifact)
         s, t, w = np.asarray(z["sources"]), np.asarray(z["targets"]), np.asarray(z["weights"])
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    checks = {"weight_matches_min_dist": 0, "weight_monotone_decay": 0,
-              "mutual_dominates": 0, "mutual_pairs_tested": 0, "nodes": int(len(nodes))}
+    checks = {"nearest_has_max_membership": 0, "weight_monotone_decay": 0,
+              "sym_weight_matches": 0, "pairs_tested": 0,
+              "actual_mutual_pairs": 0, "one_way_pairs": 0,
+              "nodes": int(len(nodes))}
     details = []
     # build a lookup for the sampled nodes' out-edges from the artifact
     node_set = set(int(x) for x in nodes)
@@ -426,33 +519,51 @@ def v4(args):
                    if int(nbr[j]) in memb and int(nbr[j]) != int(node)]
         if len(ordered) < 2:
             continue
-        # highest-weight neighbor == smallest-distance neighbor?
+        # rho can make several nearest memberships exactly 1.0; test the value,
+        # not an arbitrary neighbor id selected from a tie.
         best_w = max(ordered, key=lambda x: x[2])
         min_d = min(ordered, key=lambda x: x[1])
-        if best_w[0] == min_d[0]:
-            checks["weight_matches_min_dist"] += 1
+        if min_d[2] >= best_w[2] - 1e-6:
+            checks["nearest_has_max_membership"] += 1
         # weights decay with distance (Spearman-ish: sorted by dist -> nonincreasing w)
         ws = [o[2] for o in sorted(ordered, key=lambda x: x[1])]
         if all(ws[i] >= ws[i + 1] - 1e-6 for i in range(len(ws) - 1)):
             checks["weight_monotone_decay"] += 1
-        # mutual-pair dominance using the artifact's symmetrized weights
+        # Recompute the reverse directed membership. Only a pair with a positive
+        # reverse membership is mutual; compare the artifact to the exact
+        # t-conorm for both true-mutual and one-way cases.
         for (nb, dd, mw) in ordered[:3]:
             key_fwd = (int(node), int(nb))
             if key_fwd in art:
-                checks["mutual_pairs_tested"] += 1
-                if art[key_fwd] >= mw - 1e-6:
-                    checks["mutual_dominates"] += 1
+                rev_i, rev_d = chunk_knn_with_self(
+                    emb, neighbors, int(nb), int(nb) + 1, device, torch)
+                _, rev_c, rev_v, _, _, _ = fuzzy_directed_from_knn(
+                    rev_i, rev_d, n_neighbors)
+                reverse = {int(cc): float(vv) for cc, vv in zip(rev_c, rev_v)}
+                reverse_m = reverse.get(int(node), 0.0)
+                expected_sym = mw + reverse_m - mw * reverse_m
+                checks["pairs_tested"] += 1
+                if reverse_m > 0:
+                    checks["actual_mutual_pairs"] += 1
+                else:
+                    checks["one_way_pairs"] += 1
+                if abs(art[key_fwd] - expected_sym) <= 2e-5:
+                    checks["sym_weight_matches"] += 1
         details.append({"node": int(node), "best_w_nbr": best_w[0],
                         "min_d_nbr": min_d[0]})
 
     result = {
         "test": "V4_spot_physical", "n_nodes": checks["nodes"], "k": k,
-        "weight_matches_min_dist": checks["weight_matches_min_dist"],
+        "nearest_has_max_membership": checks["nearest_has_max_membership"],
         "weight_monotone_decay": checks["weight_monotone_decay"],
-        "mutual_pairs_tested": checks["mutual_pairs_tested"],
-        "mutual_dominates": checks["mutual_dominates"],
+        "pairs_tested": checks["pairs_tested"],
+        "actual_mutual_pairs": checks["actual_mutual_pairs"],
+        "one_way_pairs": checks["one_way_pairs"],
+        "sym_weight_matches": checks["sym_weight_matches"],
         "PASS": (checks["weight_monotone_decay"] >= 0.9 * checks["nodes"]
-                 and checks["mutual_dominates"] == checks["mutual_pairs_tested"]),
+                 and checks["nearest_has_max_membership"] >= 0.9 * checks["nodes"]
+                 and checks["pairs_tested"] > 0
+                 and checks["sym_weight_matches"] == checks["pairs_tested"]),
     }
     print(json.dumps(result, indent=2))
     _dump(args, result)
@@ -484,10 +595,14 @@ def register(sub):
     p2.add_argument("--n-base", type=int, default=None)
     p2.add_argument("--n-sample", type=int, default=50_000)
     p2.add_argument("--nprobe", type=int, default=64)
+    p2.add_argument("--candidate-k", type=int, default=64,
+                    help="ANN candidate width for the Path-B exact-rerank diagnostic")
     p2.add_argument("--k", type=int, default=15); p2.set_defaults(func=v2)
 
     p3 = sub.add_parser("validate-v3", help="trainer weighted-sampler contract")
     common(p3); p3.add_argument("--artifact", required=True)
+    p3.add_argument("--sampler-edges", type=int, default=1_000_000,
+                    help="bounded deterministic edge sample for CPU sampler checks")
     p3.add_argument("--n-draw", type=int, default=10_000_000); p3.set_defaults(func=v3)
 
     p4 = sub.add_parser("validate-v4", help="spot physical check")

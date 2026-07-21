@@ -1,264 +1,246 @@
-# Weighted (fuzzy) neighbor graphs at 30M–405M — build + validation
+# Weighted fuzzy graph build and validation
 
-**Status:** 2026-07-20. Implements `latent-labs/guides/spec-weighted-graph-build.md`
-(Path A: real UMAP fuzzy weights on the existing IVF_PQ topology). Tool:
-`experiments/build_weighted_graph.py` (+ `experiments/weighted_graph_validate.py`,
-tests in `tests/test_weighted_graph.py`). Honest write-up of what was built, the
-V1–V4 battery, the 405M / Path-B feasibility memo, and one blocker (the 150M
-artifact is blocked by upstream fineweb data corruption — see §150M).
+Status: corrected implementation prepared 2026-07-21. The artifact built on
+2026-07-20 is useful exploratory evidence, but it is not the canonical training
+input. A clean rebuild and production-path canary remain required before merge.
 
-This work does **not** claim weighted training helps at 30M — that is the research
-side's weighted-vs-uniform A/B. It produces the artifacts that make it possible.
+This work implements Path A from
+`latent-labs/guides/spec-weighted-graph-build.md`: recompute exact cosine
+distances on the existing IVF-PQ neighbor topology, calculate UMAP directed
+membership strengths, and apply the probabilistic t-conorm. It does not yet
+establish that weighted sampling improves a map; that requires the matched
+uniform-versus-fuzzy training experiment described below.
 
-## Headline
+## Decision summary
 
-| item | result |
+| Item | Current conclusion |
 | --- | --- |
-| `edges_30m_k15_fuzzy.npz` | **built + validated**, 738,221,242 directed edges, 5.66 GB, weight median 0.186 |
-| V1 exactness (100k) | **PASS** — edge sets identical to `fuzzy_simplicial_set`, weight max-abs-diff 1.2e-07, sigma/rho diff 0.0 |
-| V2 topology honesty (3M) | recall@15 **0.254–0.258** (nprobe 32/64/128) — IVF_PQ topology is PQ-quantization-limited, NOT nprobe-limited |
-| V3 consumer contract (30M) | **PASS** — CDF builds, no constant-weights warning, draws ∝ weight (decile corr 1.0) |
-| V4 spot physical (30M) | **PASS** — 20/20 monotone decay, 60/60 mutual-pair symmetrized dominance |
-| `edges_150m_k15_fuzzy` | **BLOCKED** — local fineweb-120 shard 37 is truncated; ~14M of 150M nodes are misaligned with the graph topology and unrecoverable locally (Modal wound down). Tool is ready; needs a clean fineweb re-pull/re-embed. |
-| 405M / Path-B | measured: distance-recompute is **disk-random-read bound** above RAM; Path-B (better-recall topology) recommended given V2. |
+| Fuzzy membership math | V1 passes against `fuzzy_simplicial_set` on an identical 100k topology. |
+| Existing 30M artifact | Full structural scan passes: 738,221,242 unique, sorted, in-range, non-self directed edges with finite positive weights. File size is 4,586,950,577 bytes (4.59 GB decimal / 4.27 GiB). |
+| Existing manifest | Not trainer-admissible: it lacks the production `graph_sha`/`graph_sha256` contract and full ordered embedding identities. Builder provenance is dirty and points at the parent commit. |
+| Existing V2 | Directionally shows poor IVF-PQ recall (~0.254–0.258), but used unsafe rank-0 self removal under exact-vector ties. Rerun with explicit query IDs. |
+| Existing V3 | Proves only isolated `DeviceEdgeSampler` CDF behavior. It bypasses admission and does not instantiate the 30M production hybrid path. Its 9.51 GB RSS was sampled before the CDF and draw histogram, not at peak. |
+| Existing V4 | Directed weight monotonicity passes. The old report called all 60 probes mutual; only 29 were mutual. The corrected validator recomputes reverse membership and exact t-conorm values. |
+| 30M production readiness | Pending a fresh, versioned rebuild from a clean commit, CPU admission, corrected V4, and one no-update GPU canary that stamps `hybrid` / `HostStreamEdgeSampler` / weighted sampling / device-fp16 X. |
+| 150M/405M readiness | Builder interchange path exists, but there is no streaming sharded trainer consumer. Current gather is sparse-page-I/O bound. Do not describe these paths as scale-ready. |
 
-## What the tool does
+Do not overwrite the exploratory file at
+`/data/checkpoints/pumap/edges_30m_k15_fuzzy.npz`. Publish the corrected build at
+a new versioned path and retain both receipts.
 
-The ship-scale graphs carry constant `1/k` weights — the trainer's
-`weighted_edge_sampling=True` path detects "constant weights → uniform-equivalent"
-and gains nothing. This tool rebuilds them with genuine UMAP fuzzy membership
-weights on the **same neighbor topology** (schema-identical output → trainer needs
-zero changes), on one RTX 5090, streamed and resumable.
+## Corrected builder contract
 
-| phase | device | what |
-| --- | --- | --- |
-| A | GPU | Per node's k neighbors (source-sorted, exactly k/node → reshape `(n,k)`), gather both endpoint vectors, recompute **exact cosine distances** on GPU, sort ascending, prepend self-column `(i, 0)`. Emit per-chunk forward directed membership edges (resumable `.done` markers). |
-| B | CPU | Partition forward edges by a splitmix64 hash of the canonical pair `{i,j}` into P disk buckets — both `(i,j)` and `(j,i)` land together. |
-| C | CPU (parallel) | Per bucket, probabilistic t-conorm `W = W + Wᵀ − W∘Wᵀ` (`set_op_mix_ratio=1.0`), emitting **both** directed edges per pair — exactly `fuzzy_simplicial_set(...).tocoo()`. |
-| D | CPU | Assemble single `.npz` (30M, globally `(src,dst)`-sorted) or sharded `part-*.npz`+`index.json` (150M) + provenance manifest. |
+`experiments/build_weighted_graph.py` has four stages:
 
-### Why the math is correct by construction
-sigma/rho come from umap-learn's own `smooth_knn_dist` (v0.5.12), applied per
-node-chunk — id-independent, so chunking is exact. Membership is emitted here
-(not via umap's `compute_membership_strengths`) because that function keys the
-source id and self-mask off the POSITIONAL row index, which only equals the
-global id for a chunk starting at node 0; we key off the real global id in the
-self-column so any chunk offset is correct. The per-value formula and edge-case
-order match umap exactly and are validated against `compute_membership_strengths`
-in the tests and against `fuzzy_simplicial_set` end-to-end in V1.
+1. Phase A validates every topology row, gathers stored embeddings without a
+   float32-to-float16 narrowing conversion, computes cosine distance in float32,
+   and emits directed membership chunks.
+2. Phase B partitions directed memberships by the unordered endpoint pair.
+3. Phase C coalesces duplicate directed keys with the same sum-before-t-conorm
+   semantics as scipy sparse matrices, then emits both directions.
+4. Phase D performs a full output scan, publishes a single sorted NPZ, and
+   writes a trainer-compatible content manifest.
 
-*(This positional-index coupling caused a first 30M build to be corrupt — every
-chunk emitted local 0-based source ids and failed self-detection, inflating
-hub-node degree and injecting self-loops. Caught by V4, fixed, regression-tested
-(`test_membership_matches_umap_full_and_offset`), and rebuilt. V1 alone did not
-catch it because it processes rows 0..n−1 where local index == global id.)*
+The work directory is admitted by `build-contract.json`. Its identity binds:
 
-### Neighbor-count convention (log2(16), not log2(15))
-The topology stores **k = 15 real neighbors** per node (self excluded; 0.043% of
-30M nodes carry a self-loop from the approximate index — handled by umap's
-self→0→eliminate_zeros). UMAP's convention is `n_neighbors` columns INCLUDING
-self, so faithful reproduction prepends a self-column and uses `n_neighbors =
-k+1 = 16`, target `log2(16) = 4.0` — matching how the k=50 reference artifact was
-built (`n_neighbors=50` → 49 real neighbors). `--target-neighbors` overrides it.
+- the full input topology SHA-256, byte count, node count, `k`, `nprobe`, and
+  full-scan topology result;
+- every ordered embedding member's canonical path, full SHA-256, bytes, dtype,
+  full row count, and consumed row count;
+- all result-affecting parameters, output path/mode, and distance precision;
+- the builder commit, dirty state, and builder-source SHA-256.
 
-### Chunk-mean edge case (quantified)
-`smooth_knn_dist`'s `mean_distances` is per-call and used only in the `rho==0`
-fallback (a node whose every neighbor is at distance 0). The builder counts
-`rho==0` rows; at 30M this count is **0**, so chunking is provably identical to a
-single call.
+Every phase-A chunk, phase-B bucket closure, and phase-C output has a write-once
+receipt binding the contract and full output hash. Resume rehashes the staged
+files. A changed input, shard order, parameter, builder byte, or staged byte
+requires a fresh work directory. Legacy `.done` markers are intentionally not
+accepted.
 
-## V1 — exactness at 100k
+The input topology is fully scanned, rather than sampled, for:
 
-Exact GPU cosine kNN (k=15) on the first 100k rows, full builder pipeline vs
-`fuzzy_simplicial_set` on the **identical** precomputed topology.
+- exact `source = row_id` repeated `k` times;
+- in-range integer targets;
+- distinct targets within each row;
+- self slots, reported with both the edge-slot and node denominators.
 
-| metric | value |
+The accepted 30M topology contains 192,940 self slots: 0.042876% of its 450M
+slots and, because targets are distinct per row, 0.643133% of nodes. These are
+removed by UMAP membership semantics. The earlier memo incorrectly described
+0.043% as a percentage of nodes.
+
+## Trainer admission and expected execution path
+
+The corrected single-file manifest uses the production graph-manifest schema and
+contains the output SHA-256/bytes, data fingerprint, and ordered canonical
+embedding records. Ordered records are necessary because the accepted 30M pack
+has thirty files all named `embeddings.npy`; a basename-keyed dictionary is
+ambiguous.
+
+`Round0014MaterializedArray` now admits its accepted feature pack independently
+of the graph treatment. The historical `device_uniform` capability remains
+restricted to its exact accepted uniform graph. Any new graph must pass its own
+sibling manifest and full ordered-shard checks. This avoids weakening the old
+seal while allowing a content-bound weighted treatment over the same rows.
+
+At 30M, the expected weighted training footprint is approximately:
+
+- device fp16 X: 23.04 GB;
+- host int32 sources and targets: 5.91 GB total;
+- host float64 weighted CDF: 5.91 GB;
+- weights and transient/prefetch allocations in host memory.
+
+The graph and CDF do not fit beside X on a 32 GB GPU. The expected production
+selection is therefore `hybrid`, sampler class `HostStreamEdgeSampler`, positive
+sampling `weighted_with_replacement`, and X residency `device_fp16`. A
+`DeviceEdgeSampler` test with a one-column stub is not execution evidence for
+that path.
+
+The corrected V3 is deliberately CPU-bounded. It verifies the sibling manifest,
+all ordered input identities, graph/data pairing, full weight domain, and both
+host/device sampler CDF math on a deterministic edge sample without allocating a
+second 5.9 GB per-edge histogram. It records that the production GPU canary has
+not run. The release canary must use the real trainer admission path, perform no
+optimizer update, and capture the actual `train_accounting` pipeline stamp.
+
+## Validation status
+
+### V1: membership and symmetrization oracle
+
+The historical 100k result remains valid:
+
+| Metric | Value |
 | --- | --- |
-| exact GPU kNN vs sklearn (mean Jaccard@15) | **1.0000** |
-| n_neighbors / target | 16 / 4.0 |
-| my edges / oracle edges | 2,130,704 / 2,130,704 |
-| edges only-mine / only-oracle | 0 / 0 (**identical**) |
-| weight max-abs-diff | **1.19e-07** (≤ 1e-4 ✓) |
-| sigma / rho max-abs-diff | **0.0 / 0.0** |
-| rho==0 rows | 0 |
+| GPU exact kNN vs sklearn mean Jaccard@15 | 1.0000 |
+| Builder / oracle directed edges | 2,130,704 / 2,130,704 |
+| Edge-set differences | 0 / 0 |
+| Maximum weight absolute difference | 1.19e-07 |
+| Maximum sigma / rho difference | 0 / 0 |
 
-**PASS.** (`docs/weighted_graph_validation/v1_100k.json`)
+The regression suite now additionally covers offset chunks, duplicate directed
+keys, full topology scans, fp32 preservation, explicit self IDs under tied
+vectors, content-bound resume, and a CPU end-to-end build whose manifest passes
+production content validation.
 
-## V2 — topology honesty at 3M
+### V2: topology honesty and Path-B candidate rerank
 
-`faiss_ivf_pq_3m.index` (IVFPQ, nlist=1732, PQ M=48×8-bit) vs exact GPU kNN,
-50k sampled nodes. Base = round-0010 rows [0:3M] = fineweb[:3M] (= the 3M index's
-rows; confirmed by the high edge/random cosine margin).
+Historical IVF-PQ recall@15 was 0.2536, 0.2568, and 0.2580 for nprobe 32, 64,
+and 128. This is strong evidence that increasing nprobe alone is not the answer,
+but the validator assumed a separate-base query's rank-0 result was self. Exact
+ties make that assumption false.
 
-| nprobe | recall@15 | recall p10 | weight-MAD (shared edges) | median wt exact / approx |
-| --- | --- | --- | --- | --- |
-| 32 (150M setting) | 0.2536 | 0.067 | 0.295 | 0.178 / 0.175 |
-| 64 (30M setting) | 0.2568 | 0.067 | 0.292 | 0.178 / 0.175 |
-| 128 | 0.2580 | 0.067 | 0.291 | 0.178 / 0.175 |
+The corrected validator masks the explicit query row before top-k and also
+measures Path B:
 
-**Reading.** Recall is flat (~0.254–0.258) as nprobe quadruples: the topology is
-**PQ-quantization-limited, not nprobe-limited**. The uniform *and* fuzzy 30M/150M
-graphs sit on a kNN that overlaps exact kNN by only ~1/4. Fuzzy-weight
-*distributions* are stable (median 0.178 vs 0.175), but per-shared-edge weights
-differ by ~0.29 because a changed neighbor set recalibrates rho/sigma.
+- exact top-15 coverage inside ANN top-64 (and a configurable candidate width);
+- recall after exact fp32 reranking of those candidates;
+- ANN, exact-reference, and rerank wall times;
+- p10 as well as mean recall.
 
-**Implication.** Path A faithfully upgrades the *shipped* topology to fuzzy
-weights (valid for a same-topology weighted-vs-uniform A/B), but the topology
-itself is lossy. Per the spec's `recall < 0.9` trigger, **Path B is warranted**
-(see memo). The lever is PQ compression, not nprobe.
-(`docs/weighted_graph_validation/v2_3m_nprobe{32,64,128}.json`)
+Do not repeat the earlier “top-64 should reach at least 0.9” estimate as a
+result. Candidate coverage has not yet been measured. This short diagnostic can
+run after the current GPU owner releases the card and need not block the matched
+Path-A training comparison.
 
-## V3 — consumer contract at 30M
+### V3: consumer contract
 
-Trainer's `DeviceEdgeSampler(weighted_edge_sampling=True)` on the 30M artifact.
+The JSON under `docs/weighted_graph_validation/v3_30m.json` is retained as the
+historical isolated-device-sampler output. It is superseded as a production
+admission claim. Regenerate V3 against the clean artifact, then run the separate
+no-update GPU canary described above.
 
-| metric | value |
-| --- | --- |
-| load time / peak RSS | 17.1 s / 9.5 GB |
-| CDF built / endpoint | yes / 0.99999999999 (max backstep 5.6e-16, GPU-cumsum fp noise) |
-| "constant weights" warning | **none** |
-| weight median / mean / max | 0.186 / 0.283 / 1.0 |
-| 10M draws: decile draw-freq vs expected | **corr 1.0, max abs diff 1.4e-4** |
+### V4: physical spot check
 
-**PASS.** Draws are proportional to fuzzy weight across all weight deciles; the
-per-edge `corrcoef` is Poisson-noise-limited at 10M draws over ~1e9 edges and is
-intentionally not the gate. (`docs/weighted_graph_validation/v3_30m.json`)
+The historical check established monotone directed weights for 20/20 sampled
+nodes and the weak inequality `symmetrized >= forward` for 60/60 probes. It did
+not establish mutuality; independent inspection found only 29/60 reverse
+memberships. The corrected V4 recomputes the neighbor's directed row, labels
+actual mutual and one-way pairs separately, and compares the artifact to
+`w_ij + w_ji - w_ij*w_ji` within tolerance.
 
-## V4 — spot physical check (30M)
+## Scale and performance, corrected
 
-20 random nodes, per-node membership recomputed from the topology vs the shipped
-artifact.
+Phase A is storage-bound above page-cache scale. A measured 2.4M-row random
+gather from the 84M-row RedPajama source took 71.1 seconds, or 0.0338M rows/s.
+`ShardedEmbeddings.gather` already sorts local row IDs within each shard; that
+measurement is the sorted implementation. Sorting sparse page requests does not
+turn them into sequential I/O.
 
-| check | result |
-| --- | --- |
-| highest-weight neighbor == smallest-distance neighbor | 20/20 |
-| weights monotonically decay with distance | 20/20 |
-| mutual-pair symmetrized weight ≥ either directed membership | 60/60 |
+Current-order estimates therefore remain approximately:
 
-**PASS.** (`docs/weighted_graph_validation/v4_30m.json`)
+- 150M: about 22 hours for Phase A;
+- 405M: about 60 hours for Phase A.
 
-## Artifacts
+The previous 1.4-hour 405M estimate from “a small sorting addition” was not
+supported. Reaching sequential bandwidth requires a different dataflow: an
+external reorder/join, topology traversal organized by embedding blocks, or a
+fused topology-and-weight build that consumes candidate vectors while resident.
+That is substantial implementation work and needs its own benchmark.
 
-- `gsv:/data/checkpoints/pumap/edges_30m_k15_fuzzy.npz` — 738,221,242 directed
-  edges (24.6/node), 5.66 GB, keys `sources`/`targets` (int32),
-  `weights` (float32, median 0.186, p10 0.050, p90 0.744, max 1.0),
-  `n_nodes=30000000`, `k=15`, `nprobe=64`. Globally `(src,dst)`-sorted.
-  Loads unchanged via the trainer's `load_edge_arrays`.
-- `gsv:/data/checkpoints/pumap/edges_30m_k15_fuzzy.npz.manifest.json` — input
-  edge-npz sha256, ordered shard list, params (k, metric, n_neighbors=16,
-  target=4.0, tol 1e-5, nprobe inherited 64), per-array sha256, weight summary,
-  build resources (wall 502 s, peak RSS 28.3 GB, peak VRAM 7.15 GB), commit.
-- Build: `uv run python experiments/build_weighted_graph.py build --edges
-  .../edges_30m_k15.npz --embeddings-dir <30 round-0010 chunk dirs> --workdir
-  .../_wg_30m --out .../edges_30m_k15_fuzzy.npz --chunk-size 150000
-  --partitions 64 --phase-c-workers 12`.
+The sharded output is also not yet a scale consumer. `load_sharded_edges`
+concatenates every part into memory and now requires an explicit
+`allow_materialize=True` acknowledgement for bounded validation. A 150M/405M
+claim requires a streaming trainer loader and its own admission/performance
+tests.
 
-## 150M — BLOCKED on upstream data integrity
+The local 150M FineWeb source remains unusable after roughly row 35.9M because
+its shard history is not aligned to the topology. Do not build a partially
+misaligned fuzzy graph, and do not re-embed FineWeb merely to rescue this lossy
+topology before the 30M topology decision is made.
 
-The 150M graph indexes `fineweb[:50M] + redpajama[:50M] + pile[:50M]` (dict order,
-first-N rows of each corpus's sorted `*.npy` shards; confirmed from
-`build_150m_index_modal.py`). Recomputing distances needs those embeddings.
+## Research sequence
 
-**Finding.** The local corpora at `/data/embeddings/*-chunked-120-all-MiniLM-L6-v2/train`
-are RAW headerless normalised **fp32** `(N,384)` buffers (not `.npy`). redpajama
-(84.1M rows) and pile (227.6M rows) are clean and byte-aligned. fineweb (99
-shards, 93.9M rows) has **shard `data-00037` truncated mid-float** (802 trailing
-bytes past a whole-row boundary). Alignment probe (edge-endpoint cosine vs random
-on the 150M graph):
+After the current GPU-owned round finishes:
 
-| node range | corpus | edge cos | rand cos | margin |
-| --- | --- | --- | --- | --- |
-| 10M–30M | fineweb pre-shard37 | 0.617 | 0.020 | **0.597 (aligned)** |
-| 40M–49M | fineweb post-shard37 | 0.099 | 0.020 | **0.080 (BROKEN)** |
-| 60M–90M | redpajama | 0.652 | 0.024 | 0.627 (aligned) |
-| 110M–140M | pile | 0.711 | 0.019 | 0.692 (aligned) |
+1. From a clean commit, rebuild the 30M weighted graph into a new artifact and
+   fresh work directory. Confirm full output scan, CPU V3 admission, and corrected
+   V4.
+2. Run the no-update real-trainer canary and require the actual pipeline stamp:
+   `hybrid`, `HostStreamEdgeSampler`, `weighted_with_replacement`,
+   `device_fp16`. Do not infer this from requested configuration.
+3. Run a matched 30M A/B on the same symmetrized 738,221,242-edge endpoint
+   universe: uniform-with-replacement versus fuzzy-proportional sampling. Use the
+   same accepted Round-0020 duplicate cap, model, seed, update horizon, scoring
+   panel, and accepted OOD rider. Comparing fuzzy only to the historical k15
+   graph would confound endpoint universe and sampler semantics.
+4. Use otherwise idle GPU time for the corrected 3M top-64/top-128 candidate and
+   exact-rerank benchmark. It does not gate step 3.
+5. If fuzzy sampling wins, or candidate reranking materially improves recall,
+   prioritize a higher-recall 30M topology build and repeat a controlled
+   comparison before attempting 150M/405M scale machinery.
 
-fineweb is aligned through shard 36 (node 34.97M); beyond the corrupt shard 37
-(~35.88M) the local rows no longer correspond to the graph's node ids. A
-single-offset repair does **not** realign shards 38+ (δ-search over
-35M–49M found no cosine peak; all δ ≈ 0.31 vs 0.6 aligned), which means the
-damage is not just shard 37's missing tail — other shards are likely truncated by
-whole rows (staying 1536-divisible, so undetectable without a size manifest).
+Duplicate-family mass does not need to block the matched A/B when both arms use
+the accepted global cap. Before the cap, same-family edges are 0.253% of fuzzy
+edges but 0.896% of fuzzy weight mass; after applying the retained-source cap,
+they are about 0.0277% of edges and 0.0986% of weight mass. The cap should be
+identical across arms and recorded in both execution receipts.
 
-**Consequence.** ~14M of the 150M nodes (fineweb ~35.9M–50M, 9.4%) cannot be
-given correct fuzzy weights from local data. No clean fineweb source covering
-rows 30M–50M exists locally (only the round-0010 fp16 pack = fineweb[:30M]), and
-Modal is wound down, so re-pulling the shard is not possible here. **I did not
-ship a knowingly-corrupt artifact.**
+The old cap sampler cannot be reused unchanged: it assumes exactly 15 edge slots
+per source and is restricted to `device_uniform`. The symmetrized fuzzy endpoint
+universe has variable source degree and selects the hybrid path. The host sampler
+now supports a retained-node universe without materializing a 732M-element edge
+index: uniform draws use exact rejection conditioning over retained sources,
+weighted draws zero excluded-source CDF intervals, and negative endpoints are
+uniform over retained nodes. Focused distribution tests cover both arms. The
+follow-up round still needs to wire the accepted R0020 exclusion artifact into
+this path and record the resulting retained edge count and weight mass.
 
-**To finish the 150M once fineweb is clean** (re-pull the Modal `embeddings`
-volume shards, or re-embed fineweb[:50M] chunks, verifying the alignment probe
-above returns margin > 0.5 for every corpus range):
+## Release checklist
 
-```
-uv run python experiments/build_weighted_graph.py build \
-  --edges /data/checkpoints/pumap/edges_150m_k15.npz \
-  --corpus "<fineweb-120>/train:50000000" "<redpajama-120>/train:50000000" \
-           "<pile-120>/train:50000000" \
-  --raw-dtype '<f4' --workdir /data/checkpoints/pumap/_wg_150m \
-  --out /data/checkpoints/pumap/edges_150m_k15_fuzzy \
-  --sharded --chunk-size 150000 --partitions 128 --phase-c-workers 12
-```
+- [x] Full topology validation and duplicate-target rejection.
+- [x] Float32-preserving exact-distance input path.
+- [x] Duplicate directed-key coalescing matches scipy.
+- [x] Content-bound, hash-verified resume receipts.
+- [x] Trainer-compatible manifest with duplicate-basename-safe ordered records.
+- [x] Accepted feature-pack reuse without broadening `device_uniform`.
+- [x] Corrected V2 self exclusion plus candidate/rerank metrics.
+- [x] Corrected CPU V3 scope and peak-RSS measurement point.
+- [x] Corrected V4 mutuality/t-conorm check.
+- [x] Variable-degree hybrid retained-node sampling for the matched duplicate cap.
+- [ ] Clean-commit 30M rebuild at a versioned path.
+- [ ] Corrected real-artifact V3/V4 results.
+- [ ] Real production-path no-update GPU canary and accounting stamp.
+- [ ] Matched uniform-versus-fuzzy training round.
 
-The tool's 150M path (corpus mix, raw-fp32 loader, sharded output + `index.json`
-+ `load_sharded_edges` glue, parallel join) is implemented and exercised; the
-sharded schema is format-identical to the 30M single file proven by V3.
-
-## 405M / Path-B feasibility memo (measured)
-
-**Distance-recompute cost is dominated by scattered reads, not GPU.** At 30M the
-embeddings (23 GB fp16) fit the page cache and Phase A ran at ~1.3 s per 150k-node
-chunk (whole 30M build: 502 s incl. symmetrization). Above RAM the picture
-inverts — measured random-gather throughput against the clean 84M-row (129 GB)
-redpajama corpus:
-
-| trial (cold→warming) | 2.4M random fp32 rows | rate |
-| --- | --- | --- |
-| 0 | 117.8 s | 0.02M rows/s |
-| 1–2 | 78–91 s | 0.03M rows/s |
-| 3 | 43.2 s | 0.06M rows/s |
-
-Each node-chunk gathers ~2.4M rows (self + 15 neighbors × 150k). Extrapolating at
-~0.03M rows/s (working set > 100 GB RAM never fully warms):
-
-- **150M**: 1000 chunks × ~80 s ≈ **~22 h** of gather-bound Phase A (GPU ~idle).
-- **405M**: ~2700 chunks × ~80 s ≈ **~60 h** as-is.
-
-**Levers (in order):**
-1. **Sequential reads.** The reads are random because neighbor ids scatter. Sort
-   each chunk's gather ids *within shard* (or external-sort the whole
-   `edge→target` list once) so the memmap is read near-sequentially — NVMe
-   sequential is ~100× random-4K. This is the single biggest win and is a small
-   addition to `ShardedEmbeddings.gather`. Estimated Phase A then bounded by
-   sequential bandwidth: 405M × 16 × 384 × 4 B ≈ 10 TB of reads / ~2 GB/s ≈ 1.4 h.
-2. **fp16 on disk.** Halves bytes (405M → 620 GB → 310 GB). Combine with (1).
-3. **Symmetrization already scales:** Phase B/C are partitioned and parallel;
-   30M join ran 64 buckets in ~4 min on 12 workers. 405M ≈ 6.75B forward edges →
-   ~80 GB partitions, P=256, 12–16 workers ≈ a few hours. RAM-safe (per-bucket).
-   Output ~8–9B directed edges → sharded (~110 GB) — within `/data`.
-
-**Path-B decision (topology).** V2 shows the shipped IVF_PQ is ~25% recall@15 and
-PQ-limited. If the research side wants maps trained on a *faithful* neighborhood
-(not just faithful weights on an approximate neighborhood), rebuild the topology:
-
-| option | fit in 32 GB VRAM? | expected recall@15 | note |
-| --- | --- | --- | --- |
-| IVF-**Flat** (no PQ), GPU, higher nprobe | 405M×384 fp16 = 310 GB ✗ VRAM; shardable | ≫0.9 achievable | reads dominated by full vectors; do in shards |
-| cuVS CAGRA (graph ANN) | 30M×384 fp16 (23 GB) + graph ✓; 150M/405M ✗ | ~0.95+ | must shard/stream above ~40M |
-| two-pass IVF + exact re-rank of top-64 | ✓ (re-rank is cheap on GPU) | ~0.9+ | cheapest upgrade; reuses existing IVF centroids |
-
-Recommendation: for a fresh 405M, **fuse** a higher-recall topology build with the
-weight computation in one sequential pass (rank candidates, exact re-rank top-64
-on GPU, then rho/sigma/membership on the re-ranked neighbors) — this both fixes
-V2's recall gap and sidesteps the random-read tax, since the candidate vectors
-are read once per shard rather than gathered randomly per edge.
-
-## Reproduce the battery
-
-```
-uv run python experiments/build_weighted_graph.py validate-v1 --embeddings-list <round0010 chunk-00000>/embeddings.npy --n 100000 --k 15
-uv run python experiments/build_weighted_graph.py validate-v2 --embeddings-list <round0010 chunk-0000{0,1,2}>/embeddings.npy --index .../faiss_ivf_pq_3m.index --n-base 3000000 --n-sample 50000 --nprobe 64
-uv run python experiments/build_weighted_graph.py validate-v3 --artifact .../edges_30m_k15_fuzzy.npz --n-draw 10000000
-uv run python experiments/build_weighted_graph.py validate-v4 --edges .../edges_30m_k15.npz --artifact .../edges_30m_k15_fuzzy.npz --embeddings-dir <30 round-0010 chunk dirs> --n-nodes 20
-uv run python -m pytest tests/test_weighted_graph.py
-```
+Merge the code after the CPU suite and synthetic end-to-end checks pass. Treat
+the clean artifact rebuild and GPU canary as experiment-input release gates, not
+as reasons to hold unrelated CPU implementation or the Path-B benchmark code.

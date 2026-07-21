@@ -471,7 +471,8 @@ class HostStreamEdgeSampler:
     def __init__(self, dataset, sources, targets, weights, n_nodes,
                  pos_ratio=0.2, batch_size=4096, random_state=0,
                  positive_target_mode="binary", weighted_edge_sampling=False,
-                 device="cuda", n_workers=2, queue_size=8):
+                 device="cuda", n_workers=2, queue_size=8,
+                 retained_node_rows=None):
         import threading, queue
         self.dataset = dataset            # DeviceArrayDataset (X resident)
         self.device = device
@@ -479,7 +480,8 @@ class HostStreamEdgeSampler:
         self.batch_size = batch_size
         self.positive_target_mode = positive_target_mode
         self.weighted_edge_sampling = weighted_edge_sampling
-        self.n_pos = int(len(sources))
+        self.source_n_pos = int(len(sources))
+        self.n_pos = self.source_n_pos
         self.num_pos = max(1, int(batch_size * pos_ratio))
         self.num_neg = batch_size - self.num_pos
         if self.n_nodes < 2:
@@ -488,11 +490,50 @@ class HostStreamEdgeSampler:
         # Host-resident edges (int32) + f64 CDF (precision-safe on host RAM).
         self._src_h = np.ascontiguousarray(np.asarray(sources), dtype=np.int32)
         self._dst_h = np.ascontiguousarray(np.asarray(targets), dtype=np.int32)
+        self._retained_node_mask_h = None
+        self._retained_node_rows_t = None
+        self.excluded_positive_edges = 0
+        if retained_node_rows is not None:
+            previous = None
+            for start in range(0, self.source_n_pos, 5_000_000):
+                block = self._src_h[start:start + 5_000_000]
+                if (len(block) and previous is not None and int(block[0]) < previous) or (
+                        len(block) > 1 and np.any(block[1:] < block[:-1])):
+                    raise ValueError(
+                        "retained-node sampling requires a source-sorted edge list")
+                if len(block):
+                    previous = int(block[-1])
+            retained = np.asarray(retained_node_rows, dtype=np.int64)
+            if (retained.ndim != 1 or len(retained) < 2
+                    or not np.array_equal(retained, np.unique(retained))
+                    or retained[0] < 0 or retained[-1] >= self.n_nodes):
+                raise ValueError(
+                    "retained_node_rows must be sorted, unique, in-range, and contain "
+                    "at least two rows")
+            allowed = np.zeros(self.n_nodes, dtype=bool)
+            allowed[retained] = True
+            excluded = np.flatnonzero(~allowed).astype(np.int64, copy=False)
+            left = np.searchsorted(self._src_h, excluded, side="left")
+            right = np.searchsorted(self._src_h, excluded, side="right")
+            self.excluded_positive_edges = int(np.sum(right - left, dtype=np.int64))
+            self.n_pos = self.source_n_pos - self.excluded_positive_edges
+            if self.n_pos <= 0:
+                raise ValueError("retained node cap excludes every positive source edge")
+            self._excluded_source_ranges = tuple(
+                (int(lo), int(hi)) for lo, hi in zip(left, right) if hi > lo)
+            self._retained_node_mask_h = allowed
+            self._retained_node_rows_t = torch.as_tensor(
+                retained, dtype=torch.int32, device=device)
+        else:
+            self._excluded_source_ranges = ()
         self._cdf_h = None
         if weighted_edge_sampling:
             if weights is None:
                 raise ValueError("weighted_edge_sampling=True requires edge weights (S0).")
-            w = np.asarray(weights, dtype=np.float64)
+            # One in-place f64 work array becomes the CDF. The prior
+            # np.cumsum(w) + cdf/total sequence transiently held two 5.9 GB
+            # arrays at 738M edges.
+            w = np.array(weights, dtype=np.float64, copy=True)
             # L0.5: HostStream degenerate-weight guards, matching DeviceEdgeSampler.
             # A non-finite/negative weight or a non-positive total must FAIL CLOSED,
             # not silently collapse every draw. Constant weights are uniform-equivalent.
@@ -500,14 +541,18 @@ class HostStreamEdgeSampler:
                 raise ValueError("weighted_edge_sampling: non-finite edge weights (S0).")
             if np.any(w < 0):
                 raise ValueError("weighted_edge_sampling: negative edge weights (S0).")
+            full_wmin, full_wmax = float(w.min()), float(w.max())
+            for lo, hi in self._excluded_source_ranges:
+                w[lo:hi] = 0.0
             total = float(w.sum())
             if not (total > 0):
                 raise ValueError(f"weighted_edge_sampling: non-positive weight total {total} — "
                                  f"all-zero/degenerate weights; refuse to sample (S0).")
-            if float(w.max()) == float(w.min()):
+            if full_wmax == full_wmin:
                 logging.info("weighted_edge_sampling: constant weights → uniform-equivalent (S0).")
-            cdf = np.cumsum(w)
-            self._cdf_h = cdf / total                 # f64 host, monotonic (0,1]
+            np.cumsum(w, out=w)
+            w /= total
+            self._cdf_h = w                           # f64 host, monotonic (0,1]
         # binary targets use a constant ones vector; probability mode gathers weights
         self._w_h = (np.asarray(weights, dtype=np.float32)
                      if positive_target_mode == "probability" else None)
@@ -525,6 +570,33 @@ class HostStreamEdgeSampler:
         self._gen = torch.Generator(device=device)
         self._gen.manual_seed(int(random_state))
 
+    def _draw_positive_indices(self, rng, count):
+        """Draw exact retained-source edge indices without a materialized index."""
+        count = int(count)
+        out = np.empty(count, dtype=np.int64)
+        filled = 0
+        while filled < count:
+            remaining = count - filled
+            if self.weighted_edge_sampling:
+                proposal = np.searchsorted(
+                    self._cdf_h, rng.random(remaining), side="right")
+                np.clip(proposal, 0, self.source_n_pos - 1, out=proposal)
+            else:
+                # A small oversample keeps the common cap-one case to one pass;
+                # rejection is exact uniform conditioning on retained sources.
+                keep_fraction = self.n_pos / self.source_n_pos
+                proposal_n = max(remaining, int(np.ceil(
+                    remaining / keep_fraction * 1.02)))
+                proposal = rng.integers(0, self.source_n_pos, size=proposal_n)
+            if self._retained_node_mask_h is not None:
+                proposal = proposal[
+                    self._retained_node_mask_h[self._src_h[proposal]]]
+            take = min(remaining, len(proposal))
+            if take:
+                out[filled:filled + take] = proposal[:take]
+                filled += take
+        return out
+
     def _produce(self, seed):
         """Background: draw positive-edge node batches, pin, enqueue. Captures
         any exception into ``self._worker_err`` so ``__next__`` can re-raise it
@@ -534,12 +606,7 @@ class HostStreamEdgeSampler:
         m = self.num_pos
         try:
             while not self._stop.is_set():
-                if self.weighted_edge_sampling:
-                    u = rng.random(m)                                   # GIL-free-ish
-                    idx = np.searchsorted(self._cdf_h, u)              # releases GIL
-                    np.clip(idx, 0, self.n_pos - 1, out=idx)
-                else:
-                    idx = rng.integers(0, self.n_pos, size=m)
+                idx = self._draw_positive_indices(rng, m)
                 ps = torch.from_numpy(self._src_h[idx].astype(np.int64))
                 pd = torch.from_numpy(self._dst_h[idx].astype(np.int64))
                 item = (ps.pin_memory(), pd.pin_memory())
@@ -561,6 +628,17 @@ class HostStreamEdgeSampler:
         return int(np.ceil(self.n_pos / self.num_pos))
 
     def _sample_negatives(self, n):
+        if self._retained_node_rows_t is not None:
+            universe = len(self._retained_node_rows_t)
+            src_pos = torch.randint(0, universe, (n,), generator=self._gen,
+                                    device=self.device)
+            offset = torch.randint(1, universe, (n,), generator=self._gen,
+                                   device=self.device)
+            dst_pos = (src_pos + offset) % universe
+            return (
+                self._retained_node_rows_t.index_select(0, src_pos).long(),
+                self._retained_node_rows_t.index_select(0, dst_pos).long(),
+            )
         neg_src = torch.randint(0, self.n_nodes, (n,), generator=self._gen,
                                 device=self.device)
         offset = torch.randint(1, self.n_nodes, (n,), generator=self._gen,

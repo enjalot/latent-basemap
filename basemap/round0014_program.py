@@ -399,16 +399,15 @@ def raw_source_map() -> RawSourceMap:
     return RawSourceMap(members, total_rows=TOTAL_ROWS, dimension=DIMENSION)
 
 
-def validate_device_uniform_pack(X: Any, edges_path: str) -> dict[str, Any]:
-    """Admit the accepted capability before model allocation in the trainer."""
+def validate_materialized_pack(X: Any) -> dict[str, Any]:
+    """Admit the accepted 30M feature matrix independently of graph treatment.
+
+    The original Round-0014 adapter sealed one exact uniform graph together with
+    X. Follow-up treatments may reuse the same accepted row universe, but must
+    separately prove their own graph through a sibling content manifest.
+    """
     if type(X) is not Round0014MaterializedArray:
-        raise PackError("device_uniform requires the exact Round0014MaterializedArray type")
-    canonical_graph = os.path.realpath(edges_path)
-    if canonical_graph != GRAPH_PATH or os.path.islink(edges_path):
-        raise PackError("device_uniform graph path differs from the accepted graph")
-    graph_sig = expected_input_signature(GRAPH_PATH)
-    if graph_sig["sha256"] != GRAPH_SHA256:
-        raise PackError("device_uniform graph bytes changed")
+        raise PackError("accepted 30M input requires the exact Round0014MaterializedArray type")
     accepted = _accepted_manifest()
     expected_members = accepted["capability_payload"]["materialized_fp16"]["ordered_members"]
     if list(X._members) != expected_members:
@@ -420,13 +419,32 @@ def validate_device_uniform_pack(X: Any, edges_path: str) -> dict[str, Any]:
             raise PackError(f"device_uniform shard header changed: {item['path']}")
         del array
     return {
-        "schema": "round0014-device-uniform-admission-v1",
+        "schema": "round0014-materialized-pack-admission-v1",
         "accepted_manifest_file_sha256": ACCEPTED_MANIFEST_FILE_SHA256,
         "manifest_receipt_sha256": ACCEPTED_MANIFEST_RECEIPT_SHA256,
         "capability_sha256": ACCEPTED_CAPABILITY_SHA256,
-        "graph": graph_sig,
         "materialized_members_sha256": X.round0014_pack_seal[
             "materialized_members_sha256"],
+    }
+
+
+def is_accepted_device_uniform_graph(edges_path: str) -> bool:
+    return (not os.path.islink(edges_path)
+            and os.path.realpath(edges_path) == GRAPH_PATH)
+
+
+def validate_device_uniform_pack(X: Any, edges_path: str) -> dict[str, Any]:
+    """Admit the exact accepted uniform capability before model allocation."""
+    trusted = validate_materialized_pack(X)
+    if not is_accepted_device_uniform_graph(edges_path):
+        raise PackError("device_uniform graph path differs from the accepted graph")
+    graph_sig = expected_input_signature(GRAPH_PATH)
+    if graph_sig["sha256"] != GRAPH_SHA256:
+        raise PackError("device_uniform graph bytes changed")
+    return {
+        **trusted,
+        "schema": "round0014-device-uniform-admission-v1",
+        "graph": graph_sig,
         "pipeline": "device_uniform",
         "sampling": "uniform-over-directed-edges",
         "with_replacement": True,

@@ -92,6 +92,49 @@ def test_l0_hoststream_degenerate_weights_fail_closed():
         mk([1, 1, np.inf, 1, 1, 1])
 
 
+@pytest.mark.parametrize("weighted", [False, True])
+def test_l0_hoststream_retained_nodes_apply_to_variable_degree_edges(weighted):
+    from basemap.pumap.parametric_umap.datasets.edge_list_dataset import (
+        HostStreamEdgeSampler, DeviceArrayDataset)
+    n = 5
+    X = np.random.RandomState(4).randn(n, 3).astype("float32")
+    ds = DeviceArrayDataset(X, "cpu")
+    sources = np.array([0, 0, 1, 2, 2, 2, 3, 4, 4], dtype="int32")
+    targets = np.array([1, 2, 0, 0, 3, 4, 2, 0, 3], dtype="int32")
+    weights = np.array([1, 2, 50, 3, 4, 5, 60, 6, 7], dtype="float32")
+    retained = np.array([0, 2, 4], dtype="int32")
+    sampler = HostStreamEdgeSampler(
+        ds, sources, targets, weights, n_nodes=n, batch_size=16,
+        pos_ratio=0.5, device="cpu", weighted_edge_sampling=weighted,
+        retained_node_rows=retained, n_workers=0)
+    assert sampler.n_pos == 7 and sampler.excluded_positive_edges == 2
+    draws = sampler._draw_positive_indices(np.random.default_rng(8), 200_000)
+    assert set(sources[draws].tolist()) <= set(retained.tolist())
+    observed = np.bincount(draws, minlength=len(sources)) / len(draws)
+    allowed = np.isin(sources, retained)
+    expected = (weights.astype("float64") * allowed if weighted
+                else allowed.astype("float64"))
+    expected /= expected.sum()
+    assert np.allclose(observed, expected, atol=0.006), (observed, expected)
+    neg_s, neg_t = sampler._sample_negatives(20_000)
+    assert set(neg_s.numpy().tolist()) <= set(retained.tolist())
+    assert set(neg_t.numpy().tolist()) <= set(retained.tolist())
+    assert np.all(neg_s.numpy() != neg_t.numpy())
+
+
+def test_l0_hoststream_retained_nodes_require_source_sorted_edges():
+    from basemap.pumap.parametric_umap.datasets.edge_list_dataset import (
+        HostStreamEdgeSampler, DeviceArrayDataset)
+    X = np.random.RandomState(5).randn(4, 3).astype("float32")
+    ds = DeviceArrayDataset(X, "cpu")
+    with pytest.raises(ValueError, match="source-sorted"):
+        HostStreamEdgeSampler(
+            ds, np.array([1, 0, 2], dtype="int32"),
+            np.array([0, 2, 1], dtype="int32"), np.ones(3, dtype="float32"),
+            n_nodes=4, device="cpu", retained_node_rows=np.array([0, 2, 3]),
+            n_workers=0)
+
+
 def test_l0_admission_precedes_model_allocation():
     from basemap.pumap.parametric_umap.core import ParametricUMAP
     m = ParametricUMAP(a=1., b=1., correlation_weight=0.0, n_epochs=1, batch_size=8,

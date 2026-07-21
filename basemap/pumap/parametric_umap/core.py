@@ -310,12 +310,21 @@ class ParametricUMAP:
         # historical graph.  Admit only the exact sealed adapter and graph here;
         # every other caller retains the generic sibling-manifest requirement.
         round0014_pack = getattr(X, "round0014_pack_seal", None)
+        accepted_device_uniform_graph = False
         if round0014_pack is not None:
-            from ...round0014_program import validate_device_uniform_pack
+            from ...round0014_program import (
+                is_accepted_device_uniform_graph, validate_device_uniform_pack,
+                validate_materialized_pack)
 
-            trusted = validate_device_uniform_pack(X, edges_path)
+            accepted_device_uniform_graph = is_accepted_device_uniform_graph(edges_path)
+            if accepted_device_uniform_graph:
+                trusted = validate_device_uniform_pack(X, edges_path)
+                man_found = "accepted-round0013-capability"
+            else:
+                # Reuse of the accepted feature rows is valid only when the new
+                # graph independently passes the required sibling-manifest gate.
+                trusted = validate_materialized_pack(X)
             self._pipeline_verified_hashes = trusted
-            man_found = "accepted-round0013-capability"
         for man_path in (edges_path + ".manifest.json",
                          edges_path.rsplit(".", 1)[0] + ".manifest.json"):
             if os.path.exists(man_path):
@@ -333,7 +342,10 @@ class ParametricUMAP:
                     edges_path, _man, shard_paths=_shards,
                     require_manifest_sha=getattr(self, "require_graph_manifest", True))
                 logging.info("S0: graph/shard content verified against manifest: %s", trusted)
-                self._pipeline_verified_hashes = trusted    # for the admission artifact
+                self._pipeline_verified_hashes = {
+                    **(getattr(self, "_pipeline_verified_hashes", None) or {}),
+                    **trusted,
+                }                                           # admission artifact
                 man_found = man_path
                 break
         # P0-2: manifests are MANDATORY by default — a graph without a matching
@@ -380,6 +392,9 @@ class ParametricUMAP:
                 "weighted_requested": bool(self.weighted_edge_sampling),
                 "weighted_effective": bool(self.weighted_edge_sampling and weighted_ok),
                 "uniform_with_replacement": bool(uniform_with_replacement),
+                "positive_with_replacement": bool(
+                    (self.weighted_edge_sampling and weighted_ok)
+                    or uniform_with_replacement),
                 "path_reason": reason}
             # weighted request must NEVER silently reach a uniform sampler.
             if self.weighted_edge_sampling and not weighted_ok:
@@ -403,14 +418,19 @@ class ParametricUMAP:
         if use_fast:
             logging.info("Edge-list mode: GPU-resident fast path (%s).", reason)
             exact_uniform = (
-                getattr(X, "round0014_pack_seal", None) is not None
+                accepted_device_uniform_graph
                 and self.positive_target_mode == "binary"
                 and self.weighted_edge_sampling is False
             )
+            per_batch_threshold = int(os.environ.get(
+                "PER_BATCH_EDGE_THRESHOLD", 400_000_000))
+            device_uniform_replacement = bool(
+                exact_uniform or (not self.weighted_edge_sampling
+                                  and n_pos_edges > per_batch_threshold))
             _stamp_pipeline(
                 "device_uniform" if exact_uniform else "device",
                 "DeviceEdgeSampler", weighted_ok=True, x_residency="device_fp16",
-                uniform_with_replacement=exact_uniform)
+                uniform_with_replacement=device_uniform_replacement)
             ddataset = DeviceArrayDataset(X, self.device)
             self._X_dev = ddataset
             self._fast_device_path = True
@@ -443,7 +463,8 @@ class ParametricUMAP:
                 logging.info("Edge-list mode: HYBRID (X resident %.1f GB + host-streamed "
                              "edges/CDF; %s).", x_bytes / 1e9, reason)
                 _stamp_pipeline("hybrid", "HostStreamEdgeSampler", weighted_ok=True,
-                                x_residency="device_fp16")
+                                x_residency="device_fp16",
+                                uniform_with_replacement=not self.weighted_edge_sampling)
                 ddataset = DeviceArrayDataset(X, self.device)
                 self._X_dev = ddataset
                 self._fast_device_path = True
