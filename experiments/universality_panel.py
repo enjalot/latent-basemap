@@ -30,6 +30,7 @@ from basemap.output_safety import (
 
 
 ROUND_ID = os.environ.get("BASEMAP_UNIVERSALITY_ROUND_ID", "0022")
+MAP_LABEL = "r0019"
 SEED = 20260722
 MODEL_PATH = "/data/latent-basemap/runs/round-0019/queue/artifacts/train/model.pt"
 MODEL_SHA256 = "2f5eb27582e26735491b4bed9417cf27992bb213ef942e433a5bcba97d481a32"
@@ -78,6 +79,26 @@ class Probe:
 def configure_round0028() -> None:
     global ROUND_ID
     ROUND_ID = "0028"
+
+
+def configure_map(
+    *,
+    round_id: str,
+    map_label: str,
+    model_path: str,
+    model_sha256: str,
+    coordinates_root: str,
+    coordinate_receipt_sha256: str,
+) -> None:
+    """Bind the unchanged OOD harness to a newly produced map."""
+    global ROUND_ID, MAP_LABEL, MODEL_PATH, MODEL_SHA256
+    global R0019_COORDINATES, R0019_COORDINATE_RECEIPT_SHA256
+    ROUND_ID = str(round_id)
+    MAP_LABEL = str(map_label)
+    MODEL_PATH = os.path.realpath(model_path)
+    MODEL_SHA256 = str(model_sha256)
+    R0019_COORDINATES = os.path.realpath(coordinates_root)
+    R0019_COORDINATE_RECEIPT_SHA256 = str(coordinate_receipt_sha256)
 
 
 def _round_label() -> str:
@@ -206,7 +227,7 @@ def _project(model: Any, vectors: np.ndarray, *, batch_size: int = 65536) -> np.
 def _load_model() -> Any:
     signature = expected_input_signature(MODEL_PATH)
     if signature["sha256"] != MODEL_SHA256:
-        raise RuntimeError("R0019 model bytes changed")
+        raise RuntimeError(f"{MAP_LABEL} model bytes changed")
     from basemap.pumap.parametric_umap import ParametricUMAP
 
     return ParametricUMAP.load(MODEL_PATH, device="cuda")
@@ -571,18 +592,20 @@ def run_canary(*, output_root: str) -> dict[str, Any]:
         "trec-covid": _trec_canary(),
         "scifact": _scifact_canary(),
     }
-    if ROUND_ID == "0028":
+    if ROUND_ID in {"0028", "0030"}:
         mismatches = {
             name: {"expected": expected, "observed": canaries[name].get("status")}
             for name, expected in R0028_EXPECTED_CANARY_STATUS.items()
             if canaries[name].get("status") != expected
         }
         if mismatches:
-            raise RuntimeError(f"R0028 canary status changed: {mismatches}")
+            raise RuntimeError(
+                f"{_round_label()} registered canary status changed: {mismatches}")
     included = sorted(name for name, item in canaries.items() if item.get("status") == "included")
     body = {
         "schema": f"round{ROUND_ID}-universality-canary-v1",
         "round_id": ROUND_ID,
+        "map_label": MAP_LABEL,
         "model": expected_input_signature(MODEL_PATH),
         "model_sha256_expected": MODEL_SHA256,
         "smoke_projection": {
@@ -702,6 +725,10 @@ def run_panel(*, canary_path: str, output_root: str) -> dict[str, Any]:
     canary_body = {key: canary[key] for key in canary if key != "identity_sha256"}
     if canary.get("identity_sha256") != sha256_bytes(canonical_json(canary_body)):
         raise RuntimeError("R0022 canary verdict seal is invalid")
+    coordinate_receipt = expected_input_signature(
+        os.path.join(R0019_COORDINATES, "actual-transform.json"))
+    if coordinate_receipt["sha256"] != R0019_COORDINATE_RECEIPT_SHA256:
+        raise RuntimeError(f"{MAP_LABEL} coordinate receipt bytes changed")
     model = _load_model()
     probes: dict[str, Any] = {}
     for name in ("scifact", "trec-covid", "dadabase"):
@@ -828,9 +855,18 @@ def run_panel(*, canary_path: str, output_root: str) -> dict[str, Any]:
     body = {
         "schema": "universality-panel-v1",
         "round_id": ROUND_ID,
-        "r0019_model": expected_input_signature(MODEL_PATH),
-        "r0019_coordinate_receipt": expected_input_signature(
-            os.path.join(R0019_COORDINATES, "actual-transform.json")
+        "map": {
+            "label": MAP_LABEL,
+            "model": expected_input_signature(MODEL_PATH),
+            "coordinate_receipt": coordinate_receipt,
+        },
+        **(
+            {
+                "r0019_model": expected_input_signature(MODEL_PATH),
+                "r0019_coordinate_receipt": coordinate_receipt,
+            }
+            if MAP_LABEL == "r0019"
+            else {}
         ),
         "canary": expected_input_signature(canary_path),
         "seed": SEED,

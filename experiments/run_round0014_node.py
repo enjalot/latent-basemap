@@ -216,6 +216,24 @@ def configure_round0032(**_: Any) -> None:
     RUNTIME_SCRIPT = "experiments/round0029_program.py"
 
 
+def configure_round0030(*, job: dict[str, Any] | None = None,
+                        manifest: dict[str, Any] | None = None) -> None:
+    """Select one arm of the matched R0030 sampling comparison."""
+    global ROUND_ID, ROUND_LABEL, SCHEMA_PREFIX, RUNTIME_SCRIPT, GRAPH_PATH
+    global RoundMaterializedArray, TRAIN_CONFIG, TRAIN_CONFIG_SHA256, NODES
+    program = importlib.import_module("basemap.round0030_program")
+    cell = program.arm_from_job(job or {})
+    ROUND_ID = "0030"
+    ROUND_LABEL = f"Round 0030 {cell['arm']}"
+    SCHEMA_PREFIX = f"round0030-{cell['arm']}"
+    RUNTIME_SCRIPT = "experiments/run_round0014_node.py"
+    GRAPH_PATH = program.GRAPH_PATH
+    RoundMaterializedArray = program.Round0030MaterializedArray
+    TRAIN_CONFIG = cell["train_config"]
+    TRAIN_CONFIG_SHA256 = cell["train_config_sha256"]
+    NODES = program.NODES
+
+
 def _run_round0020_duplicate_census(active: dict[str, Any], job: dict[str, Any]) -> None:
     output = job["outputs"][0]
     configure_round0019()
@@ -362,6 +380,82 @@ def _run_round0032_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
     )
 
 
+def _configure_round0030_ood_map(job: dict[str, Any]) -> None:
+    """Authenticate one completed R0030 map before the shared OOD harness."""
+    configure_round0030(job=job)
+    train_path = os.path.join(job["train_output"], "train-receipt.json")
+    transform_path = os.path.join(
+        job["transform_output"], "actual-transform.json")
+    with open(train_path, encoding="utf-8") as handle:
+        train = json.load(handle)
+    with open(transform_path, encoding="utf-8") as handle:
+        transform = json.load(handle)
+    train_body = {key: value for key, value in train.items()
+                  if key != "identity_sha256"}
+    transform_body = {key: value for key, value in transform.items()
+                      if key != "identity_sha256"}
+    model = train.get("model")
+    if (
+        train.get("schema") != _schema("train-receipt")
+        or train.get("identity_sha256") != sha256_bytes(canonical_json(train_body))
+        or train.get("production_config_sha256") != TRAIN_CONFIG_SHA256
+        or not isinstance(model, dict)
+        or expected_input_signature(model.get("canonical_path", "")) != model
+        or transform.get("schema") != _schema("transform-capability")
+        or transform.get("identity_sha256")
+        != sha256_bytes(canonical_json(transform_body))
+        or transform.get("actual_transform", {}).get(
+            "transform_config", {}).get(
+                "production_config_sha256") != TRAIN_CONFIG_SHA256
+        or transform.get("actual_transform", {}).get("model_signature") != model
+    ):
+        raise RuntimeError(f"{ROUND_LABEL} OOD input map is not sealed")
+    from experiments import universality_panel
+
+    coordinate_signature = expected_input_signature(transform_path)
+    universality_panel.configure_map(
+        round_id="0030",
+        map_label=f"round0030-{job['arm']}",
+        model_path=model["canonical_path"],
+        model_sha256=model["sha256"],
+        coordinates_root=job["transform_output"],
+        coordinate_receipt_sha256=coordinate_signature["sha256"],
+    )
+
+
+def _run_round0030_ood_canary(
+    active: dict[str, Any], job: dict[str, Any]
+) -> None:
+    _configure_round0030_ood_map(job)
+    from experiments.universality_panel import run_canary
+
+    run_canary(output_root=job["outputs"][0])
+
+
+def _run_round0030_ood_panel(
+    active: dict[str, Any], job: dict[str, Any]
+) -> None:
+    _configure_round0030_ood_map(job)
+    from experiments.universality_panel import run_panel
+
+    run_panel(
+        canary_path=os.path.join(job["ood_canary_output"], "verdict.json"),
+        output_root=job["outputs"][0],
+    )
+
+
+def _run_round0030_comparison(
+    active: dict[str, Any], job: dict[str, Any]
+) -> None:
+    from experiments.round0030_compare import run_comparison
+
+    run_comparison(
+        output_root=job["outputs"][0],
+        release_sha=active["manifest"]["release_sha"],
+        arm_outputs=job["arm_outputs"],
+    )
+
+
 def _schema(name: str) -> str:
     return f"{SCHEMA_PREFIX}-{name}-v1"
 
@@ -394,6 +488,7 @@ def _new_exact_model():
 
     model = TRAIN_CONFIG["model"]
     train = TRAIN_CONFIG["optimizer"]
+    execution = TRAIN_CONFIG["execution"]
     instance = ParametricUMAP(
         n_components=model["output_dimension"],
         hidden_dim=model["hidden_dimension"], n_layers=model["hidden_layers"],
@@ -409,11 +504,13 @@ def _new_exact_model():
         warmup_steps=train["warmup_successful_updates"],
         total_steps_estimate=train["successful_positive_lr_updates"],
         require_full_budget=True, require_graph_manifest=True,
-        required_input_pipeline="device_uniform", use_amp=train["use_amp"],
+        required_input_pipeline=execution.get("required_pipeline", "device_uniform"),
+        use_amp=train["use_amp"],
         positive_target_mode=train["positive_target_mode"],
         reject_neighbors=train["reject_neighbors"], anchored_init="none",
         anchor_hold_weight=0.0, midnear_enabled=False, mn_pairs_per_batch=0,
-        weighted_edge_sampling=False, gpu_resident_data="auto",
+        weighted_edge_sampling=bool(train["weighted_edge_sampling"]),
+        gpu_resident_data="auto",
         gpu_resident_vram_budget_gb=31.0)
     multiplicity = TRAIN_CONFIG["execution"].get("duplicate_multiplicity")
     if multiplicity:
@@ -630,6 +727,166 @@ def _run_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
     del loader, dataset, pumap, X
 
 
+def _run_round0030_sampler_canary(
+    active: dict[str, Any], job: dict[str, Any]
+) -> None:
+    """Exercise both real R0030 samplers without allocating a model/update."""
+    from basemap.round0030_program import (
+        ARMS,
+        CAP_EXCLUDED_ROWS,
+        CAP_RETAINED_ROWS,
+        CAP_SHA256,
+        GRAPH_EFFECTIVE_EDGES,
+        GRAPH_RESIDENT_EDGES,
+        GRAPH_SHA256,
+    )
+
+    output = create_fresh_directory(
+        job["outputs"][0], label="Round 0030 shared sampler canary output")
+    accepted_r0032_path = (
+        "/data/latent-basemap/runs/round-0032/queue/artifacts/"
+        "production-canary/production-canary.json"
+    )
+    accepted_r0032 = expected_input_signature(accepted_r0032_path)
+    if accepted_r0032["sha256"] != (
+        "18bd15f3979b167bc8a16009533c214beec6a668e44f15277c166ec0444bc2c6"
+    ):
+        raise RuntimeError("R0030 accepted R0032 sampler qualification changed")
+
+    import torch
+
+    X = RoundMaterializedArray()
+    arms: dict[str, Any] = {}
+    for arm in ARMS:
+        configure_round0030(job={"arm": arm})
+        pumap = _new_exact_model()
+        dataset = loader = batch = None
+        try:
+            dataset, loader, edges = pumap._prepare_edge_list_training(
+                X, GRAPH_PATH, len(X), low_memory=True, random_state=42)
+            batch = next(iter(loader))
+            torch.cuda.synchronize("cuda")
+            src, dst, labels = batch
+            pipeline = dict(pumap._pipeline_info)
+            expected = TRAIN_CONFIG["execution"]["expected_pipeline_stamp"]
+            expected = {
+                **expected,
+                "multiplicity_policy": "exact_duplicate_cap_one",
+                "multiplicity_cap_artifact_sha256": CAP_SHA256,
+                "multiplicity_excluded_source_rows": CAP_EXCLUDED_ROWS,
+                "multiplicity_retained_rows": CAP_RETAINED_ROWS,
+                "multiplicity_positive_edges_resident": GRAPH_RESIDENT_EDGES,
+                "multiplicity_positive_edges_effective": GRAPH_EFFECTIVE_EDGES,
+                "multiplicity_negative_sampling": "uniform_retained_rows_nonself",
+                "multiplicity_positive_destinations": "original_graph_rows",
+            }
+            mismatches = {
+                key: {"expected": value, "observed": pipeline.get(key)}
+                for key, value in expected.items()
+                if pipeline.get(key) != value
+            }
+            retained = getattr(loader, "_retained_node_rows_t", None)
+            positive_labels = int(torch.count_nonzero(labels == 1.0).item())
+            negative_labels = int(torch.count_nonzero(labels == 0.0).item())
+            graph_sha = pumap._pipeline_verified_hashes.get("graph_sha256")
+            if (
+                mismatches
+                or pumap.model is not None
+                or hasattr(pumap, "_train_stats")
+                or int(edges) != GRAPH_EFFECTIVE_EDGES
+                or int(loader.source_n_pos) != GRAPH_RESIDENT_EDGES
+                or int(loader.n_pos) != GRAPH_EFFECTIVE_EDGES
+                or int(loader.excluded_positive_edges)
+                != GRAPH_RESIDENT_EDGES - GRAPH_EFFECTIVE_EDGES
+                or retained is None
+                or len(retained) != CAP_RETAINED_ROWS
+                or graph_sha != GRAPH_SHA256
+                or tuple(src.shape) != (8192, 384)
+                or tuple(dst.shape) != (8192, 384)
+                or positive_labels != 409
+                or negative_labels != 7783
+                or not bool(torch.isfinite(src).all())
+                or not bool(torch.isfinite(dst).all())
+                or not bool(torch.isfinite(labels).all())
+            ):
+                raise RuntimeError(
+                    f"R0030 {arm} sampler canary failed: mismatches={mismatches}, "
+                    f"edges={edges}, graph={graph_sha}"
+                )
+            free_bytes, total_bytes = torch.cuda.mem_get_info("cuda")
+            arms[arm] = {
+                "passed": True,
+                "optimizer_updates": 0,
+                "model_unallocated": True,
+                "pipeline": pipeline,
+                "verified_hashes": pumap._pipeline_verified_hashes,
+                "effective_edges": int(edges),
+                "resident_edges": int(loader.source_n_pos),
+                "excluded_source_edges": int(loader.excluded_positive_edges),
+                "batch": {
+                    "rows": 8192,
+                    "features": 384,
+                    "positive_labels": positive_labels,
+                    "negative_labels": negative_labels,
+                    "finite": True,
+                },
+                "post_setup_memory": {
+                    "free_bytes": int(free_bytes),
+                    "total_bytes": int(total_bytes),
+                },
+            }
+        finally:
+            if loader is not None and hasattr(loader, "close"):
+                loader.close()
+            del batch, loader, dataset, pumap
+            torch.cuda.empty_cache()
+
+    if (
+        arms["uniform"]["effective_edges"] != arms["fuzzy"]["effective_edges"]
+        or arms["uniform"]["resident_edges"] != arms["fuzzy"]["resident_edges"]
+        or arms["uniform"]["verified_hashes"] != arms["fuzzy"]["verified_hashes"]
+    ):
+        raise RuntimeError("R0030 sampler arms do not share one admitted edge universe")
+    # The expensive registered scorer fixture and semantic-ID fixture run once,
+    # shared by both panels; they are not repeated between the two train cells.
+    scalar = _fixture_scalar_equivalence(output)
+    semantic = _fixture_semantic_render(output)
+    body = {
+        "schema": "round0030-shared-sampler-canary-evidence-v1",
+        "round_id": "0030",
+        "training_performed": False,
+        "optimizer_updates": 0,
+        "accepted_r0032_canary": accepted_r0032,
+        "arms": arms,
+        "same_resident_and_effective_edge_universe": True,
+        "scorer_scalar_equivalence": scalar,
+        "semantic_render_alignment": semantic,
+    }
+    evidence_path = os.path.join(output, "evidence.json")
+    atomic_write_new_json(evidence_path, _seal(body), immutable=True)
+    verdict = {
+        "schema": "round0030-shared-sampler-canary-verdict-v1",
+        "round_id": "0030",
+        "passed": True,
+        "training_performed": False,
+        "optimizer_updates": 0,
+        "arms": {
+            arm: {
+                "passed": True,
+                "pipeline": arms[arm]["pipeline"],
+                "effective_edges": arms[arm]["effective_edges"],
+                "resident_edges": arms[arm]["resident_edges"],
+            }
+            for arm in ARMS
+        },
+        "evidence": expected_input_signature(evidence_path),
+    }
+    atomic_write_new_json(
+        os.path.join(output, "verdict.json"), _seal(verdict), immutable=True)
+    del X
+    torch.cuda.empty_cache()
+
+
 def _publish_model(model, path: str) -> None:
     temporary = os.path.join(os.path.dirname(path), f".model.partial-{os.getpid()}")
     if os.path.lexists(temporary) or os.path.lexists(path):
@@ -655,13 +912,34 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
         verdict = json.load(handle)
     verdict_body = {key: verdict[key] for key in verdict if key != "identity_sha256"}
     evidence = verdict.get("evidence")
-    if (verdict.get("identity_sha256") != sha256_bytes(canonical_json(verdict_body)) or
-            verdict.get("passed") is not True or
-            verdict.get("optimizer_updates") != 0 or
-            verdict.get("pipeline") != "device_uniform" or
-            verdict.get("sampling") != TRAIN_CONFIG["graph"]["sampling"] or
-            not isinstance(evidence, dict) or
-            expected_input_signature(evidence.get("canonical_path", "")) != evidence):
+    canary_ok = bool(
+        verdict.get("identity_sha256") == sha256_bytes(canonical_json(verdict_body))
+        and verdict.get("passed") is True
+        and verdict.get("optimizer_updates") == 0
+        and isinstance(evidence, dict)
+        and expected_input_signature(evidence.get("canonical_path", "")) == evidence
+    )
+    if ROUND_ID == "0030":
+        arm = TRAIN_CONFIG["execution"]["round0030_sampling_arm"]
+        arm_canary = verdict.get("arms", {}).get(arm, {})
+        expected_stamp = TRAIN_CONFIG["execution"]["expected_pipeline_stamp"]
+        canary_ok = bool(
+            canary_ok
+            and arm_canary.get("passed") is True
+            and arm_canary.get("effective_edges")
+            == TRAIN_CONFIG["graph"]["directed_edges_effective"]
+            and all(
+                arm_canary.get("pipeline", {}).get(key) == value
+                for key, value in expected_stamp.items()
+            )
+        )
+    else:
+        canary_ok = bool(
+            canary_ok
+            and verdict.get("pipeline") == "device_uniform"
+            and verdict.get("sampling") == TRAIN_CONFIG["graph"]["sampling"]
+        )
+    if not canary_ok:
         raise RuntimeError(f"{ROUND_LABEL} training lacks its passing no-update canary")
     output = create_fresh_directory(job["outputs"][0], label=f"{ROUND_LABEL} train output")
     atomic_write_new_json(
@@ -677,14 +955,18 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
     pumap._bench_warmup = 200
     pumap._perf_profile = True
     cell = _capacity_ladder_cell() or {}
-    pumap._perf_floor = float(cell.get("minimum_train_upd_s", 45.0))
-    pumap._perf_warn_rate = float(cell.get("warn_train_upd_s", 55.0))
+    execution = TRAIN_CONFIG["execution"]
+    pumap._perf_floor = float(execution.get(
+        "minimum_train_upd_s", cell.get("minimum_train_upd_s", 45.0)))
+    pumap._perf_warn_rate = float(execution.get(
+        "warning_train_upd_s", cell.get("warn_train_upd_s", 55.0)))
     pumap._perf_subfloor_patience = 2
     pumap._abort_on_first_nonfinite = True
     pumap._admission_artifact_path = os.path.join(output, "admission.json")
     started = time.monotonic()
     pumap.fit(
-        X, low_memory=False, verbose=False, n_processes=6, random_state=42,
+        X, low_memory=bool(execution.get("low_memory", False)), verbose=False,
+        n_processes=6, random_state=42,
         resample_negatives=False, precomputed_edges_path=GRAPH_PATH,
         use_wandb=False)
     wall = time.monotonic() - started
@@ -694,7 +976,7 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
     # attempted/finite-loss batch counts; genuine non-finites stay at zero.
     amp_skips = int(stats.get("amp_overflow_skips") or 0)
     requested_amp = TRAIN_CONFIG["optimizer"]["use_amp"]
-    exact = {
+    exact: dict[str, Any] = {
         "amp_dtype": ("bfloat16" if requested_amp == "bf16" else
                       ("float16" if requested_amp else None)),
         "schedule_version": "cosine-v3-positive-budget",
@@ -713,6 +995,13 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
         "pipeline_weighted_requested": False,
         "pipeline_weighted_effective": False,
     }
+    expected_stamp = execution.get("expected_pipeline_stamp")
+    if isinstance(expected_stamp, dict):
+        for key in list(exact):
+            if key.startswith("pipeline_"):
+                exact.pop(key)
+        exact.update({f"pipeline_{key}": value
+                      for key, value in expected_stamp.items()})
     multiplicity = _multiplicity_treatment()
     if multiplicity:
         exact.update({
@@ -728,14 +1017,19 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
             "pipeline_multiplicity_positive_edges_effective": multiplicity[
                 "effective_positive_edges"
             ],
-            "pipeline_multiplicity_positive_source_sampling": (
-                "uniform_retained_rows_then_fixed_k_slot_with_replacement"
+            "pipeline_multiplicity_positive_source_sampling": multiplicity.get(
+                "positive_source_sampling",
+                "uniform_retained_rows_then_fixed_k_slot_with_replacement",
             ),
             "pipeline_multiplicity_negative_sampling": (
                 "uniform_retained_rows_nonself"
             ),
             "pipeline_multiplicity_positive_destinations": "original_graph_rows",
         })
+        if "resident_positive_edges" in multiplicity:
+            exact["pipeline_multiplicity_positive_edges_resident"] = multiplicity[
+                "resident_positive_edges"
+            ]
     mismatches = {key: {"expected": value, "observed": stats.get(key)}
                   for key, value in exact.items() if stats.get(key) != value}
     for key in ("nonfinite_loss_skips", "nonfinite_gradient_skips"):
@@ -751,6 +1045,13 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
         if not isinstance(stats.get(key), (int, float)) or stats[key] <= 0:
             mismatches[key] = {
                 "expected": "finite positive LR", "observed": stats.get(key)}
+    expected_graph_sha = TRAIN_CONFIG["graph"].get("sha256")
+    if ROUND_ID == "0030" and stats.get("verified_hashes", {}).get(
+            "graph_sha256") != expected_graph_sha:
+        mismatches["verified_graph_sha256"] = {
+            "expected": expected_graph_sha,
+            "observed": stats.get("verified_hashes", {}).get("graph_sha256"),
+        }
     if mismatches:
         raise RuntimeError(f"{ROUND_LABEL} exact train accounting failed: {mismatches}")
     model_path = os.path.join(output, "model.pt")
@@ -1444,14 +1745,20 @@ def _run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
             row_count=len(Z),
             fixed_edges_per_source=multiplicity["fixed_edges_per_source"],
         )
-        if multiplicity.get("diagnostic") == "global-top50-family-mahalanobis":
+        if multiplicity.get("diagnostic") in {
+            "global-top50-family-mahalanobis",
+            "global-top50-family-mahalanobis-diagnostic-only",
+        }:
             duplicate_diagnostics = _global_duplicate_family_diagnostics(
                 Z, cap=cap, treatment=multiplicity)
-            decision_checks["global_top50_family_offsets_reduced_50pct"] = (
-                duplicate_diagnostics["observed"][
-                    "all_top50_representatives_reduced_50pct"
-                ]
-            )
+            if multiplicity.get("diagnostic") == "global-top50-family-mahalanobis":
+                decision_checks["global_top50_family_offsets_reduced_50pct"] = (
+                    duplicate_diagnostics["observed"][
+                        "all_top50_representatives_reduced_50pct"
+                    ]
+                )
+            else:
+                duplicate_diagnostics["decision_role"] = "diagnostic-only"
         else:
             from basemap.duplicate_diagnostics import duplicate_component_diagnostics
 
