@@ -50,6 +50,26 @@ def test_s0_extra_shard_raises(tmp_path):
         validate_graph_content(gp, man, shard_paths=[shard, str(extra)])
 
 
+def test_s0_duplicate_basenames_use_ordered_canonical_records(tmp_path):
+    d0 = tmp_path / "chunk-00000"; d1 = tmp_path / "chunk-00001"
+    d0.mkdir(); d1.mkdir()
+    p0 = d0 / "embeddings.npy"; p1 = d1 / "embeddings.npy"
+    np.save(p0, np.zeros((5, 3), dtype="float16"))
+    np.save(p1, np.ones((5, 3), dtype="float16"))
+    s = np.arange(10, dtype="int32"); t = np.roll(s, -1)
+    gp = str(tmp_path / "duplicate-basenames.npz")
+    np.savez(gp, sources=s, targets=t, n_nodes=10, k=1)
+    X = np.concatenate([np.load(p0), np.load(p1)])
+    man = graph_manifest_v2(
+        s, t, 10, X=X, graph_path=gp,
+        data_paths=[str(p0), str(p1)], k=1)
+    assert "data_shard_records" in man and "data_shard_sha" not in man
+    trusted = validate_graph_content(gp, man, shard_paths=[str(p0), str(p1)])
+    assert [item["ordinal"] for item in trusted["data_shard_records"]] == [0, 1]
+    with pytest.raises(ValueError, match="reordered|substituted"):
+        validate_graph_content(gp, man, shard_paths=[str(p1), str(p0)])
+
+
 def test_s0_required_manifest_without_graph_sha_raises(tmp_path):
     from basemap.graph_validation import graph_manifest
     X = np.random.RandomState(0).randn(100, 8).astype('float32')

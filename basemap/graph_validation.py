@@ -9,6 +9,8 @@ negative indexing. Every graph/data pair must now be validated before training.
 from __future__ import annotations
 import os, json, hashlib, numpy as np
 
+from .artifact_identity import sha256_file
+
 
 def validate_edge_bounds(sources, targets, n_nodes: int) -> None:
     """Raise if any endpoint is outside ``[0, n_nodes)`` (rejects -1 sentinels
@@ -186,6 +188,31 @@ def _cached_stream_sha(path: str) -> str:
     return sha
 
 
+def _cached_sha256(path: str) -> str:
+    """Full SHA-256 with the same replacement-safe cache identity as SHA-1."""
+    st = os.stat(path)
+    ident = {"size": st.st_size, "mtime_ns": st.st_mtime_ns,
+             "ctime_ns": st.st_ctime_ns, "dev": st.st_dev, "inode": st.st_ino}
+    cache = path + ".sha256cache.json"
+    try:
+        c = json.load(open(cache))
+        if all(c.get(k) == v for k, v in ident.items()):
+            return c["sha256"]
+    except Exception:
+        pass
+    digest = sha256_file(path)
+    try:
+        tmp = f"{cache}.tmp.{os.getpid()}"
+        with open(tmp, "w") as f:
+            json.dump({**ident, "sha256": digest}, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, cache)
+    except Exception:
+        pass
+    return digest
+
+
 def validate_graph_content(edges_path: str, manifest: dict, shard_paths=None,
                            require_manifest_sha: bool = True) -> dict:
     """S0: verify the ACTUAL graph AND ordered data-shard content hashes against the
@@ -196,11 +223,13 @@ def validate_graph_content(edges_path: str, manifest: dict, shard_paths=None,
     Returns the ordered hashes it trusted (bound into the admission artifact)."""
     trusted = {}
     gsha = manifest.get("graph_sha")
+    graph_sha256 = manifest.get("graph_sha256")
     gbytes = manifest.get("graph_bytes")
-    if gsha is None and require_manifest_sha:
-        raise ValueError(f"graph manifest for {edges_path} has no graph_sha — a required "
-                         f"production manifest must carry a full content hash (S0). Rebuild "
-                         f"with graph_manifest_v2, or pass require_manifest_sha=False (test only).")
+    if gsha is None and graph_sha256 is None and require_manifest_sha:
+        raise ValueError(f"graph manifest for {edges_path} has no graph_sha or graph_sha256 "
+                         f"— a required production manifest must carry a full content hash "
+                         f"(S0). Rebuild with graph_manifest_v2, or pass "
+                         f"require_manifest_sha=False (test only).")
     if gbytes is not None and os.path.getsize(edges_path) != int(gbytes):
         raise ValueError(f"graph {edges_path} size {os.path.getsize(edges_path)} != manifest "
                          f"graph_bytes {gbytes} — graph changed since manifest (S0).")
@@ -210,7 +239,63 @@ def validate_graph_content(edges_path: str, manifest: dict, shard_paths=None,
             raise ValueError(f"graph_sha {got} != manifest {gsha}: the graph file changed since "
                              f"its manifest was built — refuse to train (S0).")
         trusted["graph_sha"] = got
+    if graph_sha256 is not None:
+        got = _cached_sha256(edges_path)
+        if got != graph_sha256:
+            raise ValueError(
+                f"graph_sha256 {got} != manifest {graph_sha256}: graph changed (S0).")
+        trusted["graph_sha256"] = got
+
+    # v2 ordered records support real-world shard layouts where every directory
+    # contains a file named embeddings.npy. Basename-keyed dicts cannot express
+    # those identities without collisions.
+    records = manifest.get("data_shard_records") or []
+    if records:
+        if not shard_paths:
+            raise ValueError(
+                "manifest records data_shard_records but the loader supplied NO shard "
+                "paths — cannot verify data integrity; refuse to train (S0).")
+        if len(shard_paths) != len(records):
+            raise ValueError(
+                f"loaded {len(shard_paths)} shards != manifest {len(records)} — "
+                "missing/extra data; refuse to train (S0).")
+        ordered_records = []
+        for ordinal, (record, supplied) in enumerate(zip(records, shard_paths)):
+            if int(record.get("ordinal", -1)) != ordinal:
+                raise ValueError(
+                    f"data_shard_records ordinal {record.get('ordinal')} at position "
+                    f"{ordinal} — malformed manifest (S0).")
+            loaded = os.path.realpath(supplied)
+            wanted = os.path.realpath(record.get("canonical_path", ""))
+            if os.path.islink(supplied) or loaded != wanted:
+                raise ValueError(
+                    f"loaded shard[{ordinal}] {loaded} != manifest {wanted} — "
+                    "reordered or substituted data; refuse to train (S0).")
+            got_bytes = os.path.getsize(loaded)
+            if got_bytes != int(record.get("bytes", -1)):
+                raise ValueError(
+                    f"shard[{ordinal}] bytes {got_bytes} != manifest "
+                    f"{record.get('bytes')} — data changed (S0).")
+            want_sha256 = record.get("sha256")
+            if not want_sha256:
+                raise ValueError(
+                    f"data_shard_records[{ordinal}] has no sha256 (S0).")
+            got_sha256 = _cached_sha256(loaded)
+            if got_sha256 != want_sha256:
+                raise ValueError(
+                    f"shard[{ordinal}] sha256 {got_sha256} != manifest "
+                    f"{want_sha256} — data changed (S0).")
+            ordered_records.append({
+                "ordinal": ordinal, "canonical_path": loaded,
+                "bytes": got_bytes, "sha256": got_sha256})
+        trusted["data_shard_records"] = ordered_records
+        trusted["data_shard_order"] = [item["canonical_path"]
+                                       for item in ordered_records]
     want_shards = manifest.get("data_shard_sha") or {}
+    if records and want_shards:
+        raise ValueError(
+            "manifest carries both data_shard_records and legacy data_shard_sha; "
+            "use one unambiguous identity scheme (S0).")
     if want_shards:
         if not shard_paths:
             raise ValueError(f"manifest records data_shard_sha for {sorted(want_shards)} but the "
@@ -277,8 +362,18 @@ def graph_manifest_v2(sources, targets, n_nodes, *, X=None, graph_path=None,
         man["graph_sha"] = stream_sha(graph_path)
         man["graph_bytes"] = int(os.path.getsize(graph_path))
     if data_paths:
-        man["data_shards"] = [os.path.basename(p) for p in data_paths]
-        man["data_shard_sha"] = {os.path.basename(p): stream_sha(p) for p in data_paths}
+        bases = [os.path.basename(p) for p in data_paths]
+        if len(set(bases)) == len(bases):
+            man["data_shards"] = bases
+            man["data_shard_sha"] = {
+                os.path.basename(p): stream_sha(p) for p in data_paths}
+        else:
+            man["data_shard_records"] = [{
+                "ordinal": i,
+                "canonical_path": os.path.realpath(p),
+                "bytes": int(os.path.getsize(p)),
+                "sha256": sha256_file(p),
+            } for i, p in enumerate(data_paths)]
     if sample_indices_path and os.path.exists(sample_indices_path):
         man["sample_indices_sha"] = stream_sha(sample_indices_path)
     if X is not None:

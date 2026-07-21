@@ -1,0 +1,15 @@
+{
+  "test": "V2_topology_honesty",
+  "index": "faiss_ivf_pq_3m.index",
+  "n_base": 3000000,
+  "n_sample": 50000,
+  "k": 15,
+  "nprobe": 32,
+  "recall_at_k": 0.2536,
+  "recall_p10": 0.0667,
+  "weight_shared_edges": 190196,
+  "weight_mean_abs_diff_shared": 0.2952683370934005,
+  "weight_median_exact": 0.17798659205436707,
+  "weight_median_approx": 0.17472386360168457,
+  "path_a_trustworthy": false
+}

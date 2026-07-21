@@ -1,0 +1,18 @@
+{
+  "test": "V1_exactness_100k",
+  "n": 100000,
+  "k": 15,
+  "n_neighbors_param": 16,
+  "target_log2": 4.0,
+  "knn_gpu_vs_sklearn_jaccard": 1.0,
+  "my_edges": 2130704,
+  "oracle_edges": 2130704,
+  "edges_only_mine": 0,
+  "edges_only_oracle": 0,
+  "edge_set_equal": true,
+  "weight_max_abs_diff": 1.1920928955078125e-07,
+  "sigma_max_abs_diff": 0.0,
+  "rho_max_abs_diff": 0.0,
+  "n_rho_zero": 0,
+  "PASS": true
+}

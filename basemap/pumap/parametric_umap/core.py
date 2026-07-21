@@ -273,7 +273,7 @@ class ParametricUMAP:
         from .datasets.edge_list_dataset import (
             EdgeListBalancedIterator, LazyArrayDataset,
             DeviceArrayDataset, DeviceEdgeSampler, HostStreamEdgeSampler,
-            load_edge_arrays, build_edge_key_set,
+            load_edge_arrays, build_edge_key_set, excluded_source_edge_ranges,
         )
         from .datasets.covariates_datasets import VariableDataset
 
@@ -312,12 +312,21 @@ class ParametricUMAP:
         # historical graph.  Admit only the exact sealed adapter and graph here;
         # every other caller retains the generic sibling-manifest requirement.
         round0014_pack = getattr(X, "round0014_pack_seal", None)
+        accepted_device_uniform_graph = False
         if round0014_pack is not None:
-            from ...round0014_program import validate_device_uniform_pack
+            from ...round0014_program import (
+                is_accepted_device_uniform_graph, validate_device_uniform_pack,
+                validate_materialized_pack)
 
-            trusted = validate_device_uniform_pack(X, edges_path)
+            accepted_device_uniform_graph = is_accepted_device_uniform_graph(edges_path)
+            if accepted_device_uniform_graph:
+                trusted = validate_device_uniform_pack(X, edges_path)
+                man_found = "accepted-round0013-capability"
+            else:
+                # Reuse of the accepted feature rows is valid only when the new
+                # graph independently passes the required sibling-manifest gate.
+                trusted = validate_materialized_pack(X)
             self._pipeline_verified_hashes = trusted
-            man_found = "accepted-round0013-capability"
         for man_path in (edges_path + ".manifest.json",
                          edges_path.rsplit(".", 1)[0] + ".manifest.json"):
             if os.path.exists(man_path):
@@ -335,7 +344,10 @@ class ParametricUMAP:
                     edges_path, _man, shard_paths=_shards,
                     require_manifest_sha=getattr(self, "require_graph_manifest", True))
                 logging.info("S0: graph/shard content verified against manifest: %s", trusted)
-                self._pipeline_verified_hashes = trusted    # for the admission artifact
+                self._pipeline_verified_hashes = {
+                    **(getattr(self, "_pipeline_verified_hashes", None) or {}),
+                    **trusted,
+                }                                           # admission artifact
                 man_found = man_path
                 break
         # P0-2: manifests are MANDATORY by default — a graph without a matching
@@ -365,6 +377,7 @@ class ParametricUMAP:
         n_pos_edges = resident_edge_count
         positive_source_rows = None
         fixed_edges_per_source = None
+        fixed_cap_device_compatible = False
         duplicate_cap_path = str(
             getattr(self, "duplicate_multiplicity_cap_path", "") or ""
         )
@@ -391,18 +404,35 @@ class ParametricUMAP:
             fixed_edges_per_source = int(
                 duplicate_cap["metadata"]["fixed_edges_per_source"]
             )
-            n_pos_edges = int(duplicate_cap["metadata"]["effective_positive_edges"])
+            fixed_cap_device_compatible = bool(
+                resident_edge_count == n_train * fixed_edges_per_source
+                and not self.weighted_edge_sampling)
+            if fixed_cap_device_compatible:
+                n_pos_edges = int(
+                    duplicate_cap["metadata"]["effective_positive_edges"])
+                source_sampling = (
+                    "uniform_retained_rows_then_fixed_k_slot_with_replacement")
+                graph_degree = "fixed_k"
+            else:
+                _, excluded_edge_count = excluded_source_edge_ranges(
+                    sources, excluded)
+                n_pos_edges = resident_edge_count - excluded_edge_count
+                source_sampling = (
+                    "fuzzy_weight_proportional_over_retained_source_edges_with_replacement"
+                    if self.weighted_edge_sampling else
+                    "uniform_over_retained_source_edges_with_replacement")
+                graph_degree = "variable_or_weighted_edge_universe"
             self._duplicate_multiplicity_info = {
                 "multiplicity_policy": "exact_duplicate_cap_one",
                 "multiplicity_cap_artifact_sha256": duplicate_cap["signature"]["sha256"],
                 "multiplicity_excluded_source_rows": int(len(excluded)),
                 "multiplicity_retained_rows": int(len(positive_source_rows)),
+                "multiplicity_positive_edges_resident": resident_edge_count,
                 "multiplicity_positive_edges_effective": n_pos_edges,
-                "multiplicity_positive_source_sampling": (
-                    "uniform_retained_rows_then_fixed_k_slot_with_replacement"
-                ),
+                "multiplicity_positive_source_sampling": source_sampling,
                 "multiplicity_negative_sampling": "uniform_retained_rows_nonself",
                 "multiplicity_positive_destinations": "original_graph_rows",
+                "multiplicity_graph_degree": graph_degree,
             }
         else:
             self._duplicate_multiplicity_info = {
@@ -428,6 +458,9 @@ class ParametricUMAP:
                 "weighted_requested": bool(self.weighted_edge_sampling),
                 "weighted_effective": bool(self.weighted_edge_sampling and weighted_ok),
                 "uniform_with_replacement": bool(uniform_with_replacement),
+                "positive_with_replacement": bool(
+                    (self.weighted_edge_sampling and weighted_ok)
+                    or uniform_with_replacement),
                 "path_reason": reason,
                 **self._duplicate_multiplicity_info}
             # weighted request must NEVER silently reach a uniform sampler.
@@ -449,17 +482,25 @@ class ParametricUMAP:
         n_features = int(X.shape[1])
         use_fast, reason = self._decide_gpu_resident(
             n_train, n_features, resident_edge_count, edge_set, low_memory)
+        if use_fast and positive_source_rows is not None and not fixed_cap_device_compatible:
+            use_fast = False
+            reason = "variable-degree/weighted retained-node cap requires hybrid path"
         if use_fast:
             logging.info("Edge-list mode: GPU-resident fast path (%s).", reason)
             exact_uniform = (
-                getattr(X, "round0014_pack_seal", None) is not None
+                accepted_device_uniform_graph
                 and self.positive_target_mode == "binary"
                 and self.weighted_edge_sampling is False
             )
+            per_batch_threshold = int(os.environ.get(
+                "PER_BATCH_EDGE_THRESHOLD", 400_000_000))
+            device_uniform_replacement = bool(
+                exact_uniform or (not self.weighted_edge_sampling
+                                  and n_pos_edges > per_batch_threshold))
             _stamp_pipeline(
                 "device_uniform" if exact_uniform else "device",
                 "DeviceEdgeSampler", weighted_ok=True, x_residency="device_fp16",
-                uniform_with_replacement=exact_uniform)
+                uniform_with_replacement=device_uniform_replacement)
             ddataset = DeviceArrayDataset(X, self.device)
             self._X_dev = ddataset
             self._fast_device_path = True
@@ -475,12 +516,6 @@ class ParametricUMAP:
                 device=self.device,
             )
             return ddataset, loader, n_pos_edges
-
-        if positive_source_rows is not None:
-            raise RuntimeError(
-                "duplicate multiplicity cap is implemented only on the required "
-                "device_uniform pipeline"
-            )
 
         # Hybrid path (B1): X alone fits resident but X+edges+CDF don't (the
         # k=50 fuzzy edge wall). Keep X on GPU; stream positive edges + weighted
@@ -500,7 +535,8 @@ class ParametricUMAP:
                 logging.info("Edge-list mode: HYBRID (X resident %.1f GB + host-streamed "
                              "edges/CDF; %s).", x_bytes / 1e9, reason)
                 _stamp_pipeline("hybrid", "HostStreamEdgeSampler", weighted_ok=True,
-                                x_residency="device_fp16")
+                                x_residency="device_fp16",
+                                uniform_with_replacement=not self.weighted_edge_sampling)
                 ddataset = DeviceArrayDataset(X, self.device)
                 self._X_dev = ddataset
                 self._fast_device_path = True
@@ -510,9 +546,20 @@ class ParametricUMAP:
                     random_state=random_state,
                     positive_target_mode=self.positive_target_mode,
                     weighted_edge_sampling=self.weighted_edge_sampling,
+                    retained_node_rows=positive_source_rows,
                     device=self.device,
                 )
+                if int(loader.n_pos) != n_pos_edges:
+                    loader.close()
+                    raise RuntimeError(
+                        f"hybrid retained-edge count {loader.n_pos} != admission "
+                        f"count {n_pos_edges}")
                 return ddataset, loader, n_pos_edges
+
+        if positive_source_rows is not None:
+            raise RuntimeError(
+                "duplicate multiplicity cap requires the device fixed-k path or "
+                "the hybrid variable-degree path")
 
         logging.info("Edge-list mode: legacy sampler path (%s).", reason)
         # P1: EdgeListBalancedIterator ignores weighted_edge_sampling → uniform.
