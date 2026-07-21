@@ -207,6 +207,15 @@ def configure_round0031(**_: Any) -> None:
     RUNTIME_SCRIPT = "experiments/weighted_graph_validate.py"
 
 
+def configure_round0032(**_: Any) -> None:
+    """Select the narrow R0029 V4/canary qualification successor."""
+    global ROUND_ID, ROUND_LABEL, SCHEMA_PREFIX, RUNTIME_SCRIPT
+    ROUND_ID = "0032"
+    ROUND_LABEL = "Round 0032"
+    SCHEMA_PREFIX = "round0032"
+    RUNTIME_SCRIPT = "experiments/round0029_program.py"
+
+
 def _run_round0020_duplicate_census(active: dict[str, Any], job: dict[str, Any]) -> None:
     output = job["outputs"][0]
     configure_round0019()
@@ -333,6 +342,24 @@ def _run_round0031_path_b(active: dict[str, Any], job: dict[str, Any]) -> None:
     }
     atomic_write_new_json(
         os.path.join(output, "receipt.json"), receipt, immutable=True)
+
+
+def _run_round0032_v4(active: dict[str, Any], job: dict[str, Any]) -> None:
+    from experiments.round0029_program import run_v4_requalification
+
+    run_v4_requalification(
+        output_root=job["outputs"][0], build_root=job["build_root"])
+
+
+def _run_round0032_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
+    from experiments.round0029_program import run_requalification_canary
+
+    run_requalification_canary(
+        output_root=job["outputs"][0],
+        v4_root=job["v4_root"],
+        build_root=job["build_root"],
+        v3_path=job["v3_path"],
+    )
 
 
 def _schema(name: str) -> str:

@@ -547,12 +547,38 @@ def v3(args):
 # V4 — spot physical check
 # --------------------------------------------------------------------------- #
 def v4(args):
+    import gc
     from experiments.build_weighted_graph import (
-        ShardedEmbeddings, resolve_shard_paths, load_topology,
+        ShardedEmbeddings, resolve_shard_paths,
         fuzzy_directed_from_knn, chunk_knn_with_self)
+    from basemap.artifact_identity import sha256_file
     import torch
 
-    neighbors, n_nodes, k, nprobe = load_topology(args.edges)
+    # The production manifest binds the complete topology and records the
+    # builder's full source/target scan. Reopening all 450M source ids here
+    # would duplicate that admission and adds ~1.8 GB only to establish
+    # ``source == row`` again. V4 needs the neighbor matrix plus the exact
+    # content binding, so authenticate the file and consume targets directly.
+    manifest_path = args.artifact + ".manifest.json"
+    with open(manifest_path, encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    topology_validation = manifest.get("input_topology_validation") or {}
+    if (manifest.get("input_edges_sha256") != sha256_file(args.edges)
+            or topology_validation.get("validation") != "full_scan"
+            or topology_validation.get("source_layout_valid") is not True
+            or topology_validation.get("target_bounds_valid") is not True
+            or topology_validation.get("duplicate_target_rows") != 0):
+        raise RuntimeError(
+            "V4 requires a manifest-bound topology with a passing full scan")
+    with np.load(args.edges, allow_pickle=False) as topology:
+        n_nodes = int(np.asarray(topology["n_nodes"]))
+        k = int(np.asarray(topology["k"]))
+        targets = np.asarray(topology["targets"])
+    if (targets.ndim != 1 or len(targets) != n_nodes * k
+            or targets.dtype.kind not in "iu"
+            or manifest.get("n_nodes") != n_nodes or manifest.get("k") != k):
+        raise RuntimeError("V4 topology geometry differs from its graph manifest")
+    neighbors = targets.reshape(n_nodes, k)
     shard_paths = resolve_shard_paths(args.embeddings_list, args.embeddings_dir)
     emb = ShardedEmbeddings(shard_paths, expected_dim=args.dim)
     n_neighbors = args.target_neighbors or (k + 1)
@@ -563,9 +589,38 @@ def v4(args):
     if os.path.isdir(args.artifact):
         from experiments.build_weighted_graph import load_sharded_edges
         s, t, w, _ = load_sharded_edges(args.artifact, allow_materialize=True)
+        left = np.searchsorted(s, nodes, side="left")
+        right = np.searchsorted(s, nodes, side="right")
+        if any(hi > lo and not np.all(s[lo:hi] == node)
+               for node, lo, hi in zip(nodes, left, right)):
+            raise RuntimeError("weighted artifact source slices are not contiguous")
+        target_slices = [np.array(t[lo:hi], copy=True) for lo, hi in zip(left, right)]
+        weight_slices = [np.array(w[lo:hi], copy=True) for lo, hi in zip(left, right)]
+        del s, t, w
     else:
-        z = np.load(args.artifact)
-        s, t, w = np.asarray(z["sources"]), np.asarray(z["targets"]), np.asarray(z["weights"])
+        # A compressed production NPZ cannot be memmapped. Load its three
+        # multi-gigabyte members one at a time and retain only the sampled
+        # source slices; V4 otherwise held ~8.9 GB of graph arrays at once for
+        # sixty scalar comparisons.
+        with np.load(args.artifact, allow_pickle=False) as z:
+            s = np.asarray(z["sources"])
+            left = np.searchsorted(s, nodes, side="left")
+            right = np.searchsorted(s, nodes, side="right")
+            if any(hi > lo and not np.all(s[lo:hi] == node)
+                   for node, lo, hi in zip(nodes, left, right)):
+                raise RuntimeError("weighted artifact source slices are not contiguous")
+            del s
+            gc.collect()
+            t = np.asarray(z["targets"])
+            target_slices = [
+                np.array(t[lo:hi], copy=True) for lo, hi in zip(left, right)]
+            del t
+            gc.collect()
+            w = np.asarray(z["weights"])
+            weight_slices = [
+                np.array(w[lo:hi], copy=True) for lo, hi in zip(left, right)]
+            del w
+        gc.collect()
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     checks = {"nearest_has_max_membership": 0, "weight_monotone_decay": 0,
@@ -573,16 +628,16 @@ def v4(args):
               "actual_mutual_pairs": 0, "one_way_pairs": 0,
               "nodes": int(len(nodes))}
     details = []
+    pair_details = []
+    missing_artifact_pairs = []
+    expected_pairs = 0
+    absolute_tolerance = 2e-5
     # The production artifact is source-sorted.  Use bounded source slices for
     # the sampled nodes instead of allocating an E-length ``np.isin`` mask
     # (about 738 MB at 30M) and scanning all 738M rows a second time.
-    left = np.searchsorted(s, nodes, side="left")
-    right = np.searchsorted(s, nodes, side="right")
     art = {}
-    for node, lo, hi in zip(nodes, left, right):
-        if hi > lo and not np.all(s[lo:hi] == node):
-            raise RuntimeError("weighted artifact source slices are not contiguous")
-        for b, ww in zip(t[lo:hi], w[lo:hi]):
+    for node, targets, weights in zip(nodes, target_slices, weight_slices):
+        for b, ww in zip(targets, weights):
             art[(int(node), int(b))] = float(ww)
 
     for node in nodes:
@@ -612,23 +667,43 @@ def v4(args):
         # Recompute the reverse directed membership. Only a pair with a positive
         # reverse membership is mutual; compare the artifact to the exact
         # t-conorm for both true-mutual and one-way cases.
+        expected_pairs += min(3, len(ordered))
         for (nb, dd, mw) in ordered[:3]:
             key_fwd = (int(node), int(nb))
-            if key_fwd in art:
-                rev_i, rev_d = chunk_knn_with_self(
-                    emb, neighbors, int(nb), int(nb) + 1, device, torch)
-                _, rev_c, rev_v, _, _, _ = fuzzy_directed_from_knn(
-                    rev_i, rev_d, n_neighbors)
-                reverse = {int(cc): float(vv) for cc, vv in zip(rev_c, rev_v)}
-                reverse_m = reverse.get(int(node), 0.0)
-                expected_sym = mw + reverse_m - mw * reverse_m
-                checks["pairs_tested"] += 1
-                if reverse_m > 0:
-                    checks["actual_mutual_pairs"] += 1
-                else:
-                    checks["one_way_pairs"] += 1
-                if abs(art[key_fwd] - expected_sym) <= 2e-5:
-                    checks["sym_weight_matches"] += 1
+            if key_fwd not in art:
+                missing_artifact_pairs.append({
+                    "source": int(node), "target": int(nb)})
+                continue
+            rev_i, rev_d = chunk_knn_with_self(
+                emb, neighbors, int(nb), int(nb) + 1, device, torch)
+            _, rev_c, rev_v, _, _, _ = fuzzy_directed_from_knn(
+                rev_i, rev_d, n_neighbors)
+            reverse = {int(cc): float(vv) for cc, vv in zip(rev_c, rev_v)}
+            reverse_m = reverse.get(int(node), 0.0)
+            expected_sym = mw + reverse_m - mw * reverse_m
+            observed_sym = art[key_fwd]
+            absolute_delta = abs(observed_sym - expected_sym)
+            relative_delta = absolute_delta / max(abs(expected_sym), 1e-45)
+            within_tolerance = absolute_delta <= absolute_tolerance
+            checks["pairs_tested"] += 1
+            if reverse_m > 0:
+                checks["actual_mutual_pairs"] += 1
+            else:
+                checks["one_way_pairs"] += 1
+            if within_tolerance:
+                checks["sym_weight_matches"] += 1
+            pair_details.append({
+                "source": int(node), "target": int(nb),
+                "distance": float(dd),
+                "forward_membership": float(mw),
+                "reverse_membership": float(reverse_m),
+                "mutual": bool(reverse_m > 0),
+                "artifact_weight": float(observed_sym),
+                "expected_tconorm": float(expected_sym),
+                "absolute_delta": float(absolute_delta),
+                "relative_delta": float(relative_delta),
+                "within_tolerance": bool(within_tolerance),
+            })
         details.append({"node": int(node), "best_w_nbr": best_w[0],
                         "min_d_nbr": min_d[0]})
 
@@ -640,9 +715,15 @@ def v4(args):
         "actual_mutual_pairs": checks["actual_mutual_pairs"],
         "one_way_pairs": checks["one_way_pairs"],
         "sym_weight_matches": checks["sym_weight_matches"],
+        "expected_pairs": int(expected_pairs),
+        "missing_artifact_pairs": missing_artifact_pairs,
+        "absolute_tolerance": absolute_tolerance,
+        "compute_device": str(device),
+        "pair_details": pair_details,
         "PASS": (checks["weight_monotone_decay"] >= 0.9 * checks["nodes"]
                  and checks["nearest_has_max_membership"] >= 0.9 * checks["nodes"]
-                 and checks["pairs_tested"] > 0
+                 and checks["pairs_tested"] == expected_pairs
+                 and not missing_artifact_pairs
                  and checks["sym_weight_matches"] == checks["pairs_tested"]),
     }
     print(json.dumps(result, indent=2))

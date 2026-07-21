@@ -27,6 +27,13 @@ DUPLICATE_CAP_SHA256 = (
 EXCLUDED_ROWS = 218_242
 RETAINED_ROWS = 29_781_758
 ARTIFACT_NAME = "edges_30m_k15_fuzzy-v2.npz"
+R0029_BUILD_ROOT = (
+    "/data/latent-basemap/runs/round-0029/queue/artifacts/weighted-graph-v2"
+)
+R0029_V3 = (
+    "/data/latent-basemap/runs/round-0029/queue/artifacts/"
+    "cpu-validation/v3-consumer-contract.json"
+)
 
 
 def ordered_embedding_paths() -> list[str]:
@@ -137,12 +144,12 @@ def run_cpu_validation(*, output_root: str, build_root: str) -> dict[str, Any]:
         "embeddings_list": ordered_embedding_paths(),
         "embeddings_dir": None,
         "dim": 384,
-        "device": "cpu",
         "target_neighbors": 16,
     }
     v3_path = os.path.join(output_root, "v3-consumer-contract.json")
     result_v3 = v3(Namespace(
         **common,
+        device="cpu",
         artifact=artifact,
         sampler_edges=1_000_000,
         n_draw=10_000_000,
@@ -152,6 +159,7 @@ def run_cpu_validation(*, output_root: str, build_root: str) -> dict[str, Any]:
     v4_path = os.path.join(output_root, "v4-physical-check.json")
     result_v4 = v4(Namespace(
         **common,
+        device="cuda",
         edges=UNIFORM_GRAPH,
         artifact=artifact,
         n_nodes=20,
@@ -206,4 +214,107 @@ def run_production_canary(*, output_root: str, build_root: str,
     result = run_canary(args)
     if result.get("training_performed") is not False:
         raise RuntimeError("Round 0029 canary unexpectedly trained")
+    return result
+
+
+def run_v4_requalification(*, output_root: str,
+                           build_root: str = R0029_BUILD_ROOT) -> dict[str, Any]:
+    """Re-run only V4 on the builder's CUDA numerical path.
+
+    R0029 forced the physical recomputation onto CPU even though Phase A used
+    CUDA.  This successor keeps the exact artifact and sample fixed, records
+    every checked pair, and changes only the compute backend to match the
+    builder.
+    """
+    from experiments.weighted_graph_validate import v4
+
+    output_root = create_fresh_directory(
+        output_root, label="Round 0032 V4 requalification output")
+    artifact, build = _require_build_receipt(build_root)
+    result_path = os.path.join(output_root, "v4-cuda-physical-check.json")
+    result = v4(Namespace(
+        embeddings_list=ordered_embedding_paths(),
+        embeddings_dir=None,
+        dim=384,
+        device="cuda",
+        target_neighbors=16,
+        json_out=result_path,
+        edges=UNIFORM_GRAPH,
+        artifact=artifact,
+        n_nodes=20,
+        k=15,
+        seed=0,
+    ))
+    if (result.get("PASS") is not True
+            or result.get("compute_device") != "cuda"
+            or result.get("pairs_tested") != result.get("expected_pairs")
+            or result.get("missing_artifact_pairs") != []
+            or len(result.get("pair_details") or []) != result.get("expected_pairs")):
+        raise RuntimeError("Round 0032 CUDA-matched V4 requalification failed")
+    receipt = {
+        "schema": "round0032-v4-requalification-v1",
+        "training_performed": False,
+        "optimizer_updates": 0,
+        "graph_sha256": build["graph_sha256"],
+        "manifest_sha256": build["manifest_sha256"],
+        "v4": expected_input_signature(result_path),
+        "compute_device": result["compute_device"],
+        "pairs_tested": result["pairs_tested"],
+        "maximum_absolute_delta": max(
+            item["absolute_delta"] for item in result["pair_details"]),
+        "passed": True,
+    }
+    atomic_write_new_json(
+        os.path.join(output_root, "v4-requalification-receipt.json"), receipt,
+        immutable=True)
+    return receipt
+
+
+def run_requalification_canary(
+    *, output_root: str,
+    v4_root: str,
+    build_root: str = R0029_BUILD_ROOT,
+    v3_path: str = R0029_V3,
+) -> dict[str, Any]:
+    """Run the skipped R0029 production handoff after corrected V4 passes."""
+    from experiments.weighted_graph_canary import run_canary
+
+    output_root = create_fresh_directory(
+        output_root, label="Round 0032 production canary output")
+    artifact, build = _require_build_receipt(build_root)
+    with open(v3_path, encoding="utf-8") as handle:
+        v3_result = json.load(handle)
+    v4_receipt_path = os.path.join(
+        v4_root, "v4-requalification-receipt.json")
+    with open(v4_receipt_path, encoding="utf-8") as handle:
+        v4_receipt = json.load(handle)
+    if (
+        v3_result.get("PASS") is not True
+        or v3_result.get("trusted_content", {}).get("graph_sha256")
+        != build["graph_sha256"]
+        or v4_receipt.get("passed") is not True
+        or v4_receipt.get("graph_sha256") != build["graph_sha256"]
+        or v4_receipt.get("manifest_sha256") != build["manifest_sha256"]
+        or v4_receipt.get("v4") != expected_input_signature(
+            os.path.join(v4_root, "v4-cuda-physical-check.json"))
+    ):
+        raise RuntimeError(
+            "Round 0032 canary requires exact passing R0029 V3 and R0032 V4")
+    result = run_canary(Namespace(
+        artifact=artifact,
+        expected_graph_sha256=build["graph_sha256"],
+        expected_manifest_sha256=build["manifest_sha256"],
+        json_out=os.path.join(output_root, "production-canary.json"),
+        batch_size=8192,
+        pos_ratio=0.2,
+        seed=42,
+        duplicate_cap=DUPLICATE_CAP,
+        expected_duplicate_cap_sha256=DUPLICATE_CAP_SHA256,
+        fixed_edges_per_source=15,
+        expected_excluded_rows=EXCLUDED_ROWS,
+        expected_retained_rows=RETAINED_ROWS,
+    ))
+    if (result.get("training_performed") is not False
+            or result.get("optimizer_updates") != 0):
+        raise RuntimeError("Round 0032 production canary unexpectedly trained")
     return result

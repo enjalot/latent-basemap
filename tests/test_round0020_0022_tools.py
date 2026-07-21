@@ -94,6 +94,11 @@ def test_round0029_and_0031_configure_bounded_followups():
     node.configure_round0031()
     assert node.ROUND_ID == "0031"
     assert node._run_round0031_path_b.__name__ == "_run_round0031_path_b"
+    node.configure_round0032()
+    assert node.ROUND_ID == "0032"
+    assert node.RUNTIME_SCRIPT == "experiments/round0029_program.py"
+    assert node._run_round0032_v4.__name__ == "_run_round0032_v4"
+    assert node._run_round0032_canary.__name__ == "_run_round0032_canary"
 
 
 def test_round0021_configure_uses_global_cap_artifact():

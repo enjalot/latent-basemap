@@ -326,6 +326,19 @@ def test_cpu_end_to_end_build_emits_admissible_content_manifest(tmp_path):
         str(out), manifest, shard_paths=[str(xp)], require_manifest_sha=True)
     assert trusted["graph_sha256"] == manifest["graph_sha256"]
 
+    from experiments.weighted_graph_validate import v4
+    physical = v4(Namespace(
+        embeddings_list=[str(xp)], embeddings_dir=None, dim=dim,
+        device="cpu", target_neighbors=k + 1, json_out=None,
+        edges=str(edges), artifact=str(out), n_nodes=10, k=k, seed=0,
+    ))
+    assert physical["PASS"] is True
+    assert physical["compute_device"] == "cpu"
+    assert physical["pairs_tested"] == physical["expected_pairs"]
+    assert physical["missing_artifact_pairs"] == []
+    assert len(physical["pair_details"]) == physical["expected_pairs"]
+    assert all(item["within_tolerance"] for item in physical["pair_details"])
+
 
 def test_weighted_canary_is_no_update_and_uses_real_admission_path():
     source_path = os.path.join(
