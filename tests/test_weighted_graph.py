@@ -7,6 +7,7 @@ gather is order-preserving.
 """
 import os
 import sys
+import ast
 from argparse import Namespace
 
 import numpy as np
@@ -324,3 +325,17 @@ def test_cpu_end_to_end_build_emits_admissible_content_manifest(tmp_path):
     trusted = validate_graph_content(
         str(out), manifest, shard_paths=[str(xp)], require_manifest_sha=True)
     assert trusted["graph_sha256"] == manifest["graph_sha256"]
+
+
+def test_weighted_canary_is_no_update_and_uses_real_admission_path():
+    source_path = os.path.join(
+        os.path.dirname(__file__), "..", "experiments", "weighted_graph_canary.py")
+    tree = ast.parse(open(source_path, encoding="utf-8").read())
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    attributes = [node.func.attr for node in calls
+                  if isinstance(node.func, ast.Attribute)]
+    assert "_prepare_edge_list_training" in attributes
+    assert "fit" not in attributes and "_init_model" not in attributes
+    assignments = [node for node in ast.walk(tree) if isinstance(node, ast.Dict)]
+    assert any(any(isinstance(key, ast.Constant) and key.value == "training_performed"
+                   for key in item.keys) for item in assignments)
