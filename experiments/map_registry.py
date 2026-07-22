@@ -13,6 +13,7 @@ never a fixed tree, because only rounds 0014+ share the modern layout.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import os
@@ -28,7 +29,7 @@ REGISTRY_PATH = Path("/data/latent-basemap/maps.json")
 SITE_DIR = Path.home() / ".agent/basemap-maps"
 SITE_URL = "http://gsv.local:8800/basemap-maps"
 
-SCHEMA = "basemap-map-registry-v1"
+SCHEMA = "basemap-map-registry-v2"
 
 
 # ---------------------------------------------------------------- ledger ----
@@ -92,6 +93,128 @@ def _load_json(path: Path):
 
 def _relpath(p: Path) -> str:
     return f"gsv:{p}"
+
+
+def _file_signature(path: Path) -> dict:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "kind": "file",
+        "canonical_path": str(path.resolve()),
+        "bytes": path.stat().st_size,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def _slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+
+
+def _projection_map_context(panel: dict, rid: str) -> tuple[str, dict | None, dict | None]:
+    current = panel.get("map") if isinstance(panel.get("map"), dict) else {}
+    label = current.get("label")
+    model = current.get("model") if isinstance(current.get("model"), dict) else None
+    coordinates = current.get("coordinate_receipt") \
+        if isinstance(current.get("coordinate_receipt"), dict) else None
+    if not label and isinstance(panel.get("r0019_model"), dict):
+        label = "r0019"
+        model = panel["r0019_model"]
+        coordinates = panel.get("r0019_coordinate_receipt")
+    return str(label or f"round{rid}"), model, coordinates
+
+
+def scan_projection_maps(round_dir: Path, ledger: dict) -> list[dict]:
+    """Discover immutable OOD coordinate archives beside registered panels."""
+    rid_m = re.match(r"round-(\d{4})", round_dir.name)
+    rid = rid_m.group(1) if rid_m else round_dir.name
+    artifacts = round_dir / "queue/artifacts"
+    panels = sorted({
+        *artifacts.glob("**/universality-panel-v1.json"),
+        *artifacts.glob("**/common-corpus-ood-panel-v1.json"),
+    }) if artifacts.is_dir() else []
+    entries: list[dict] = []
+    display_names = {
+        "dadabase": "Dadabase jokes",
+        "trec-covid": "TREC-COVID",
+        "code": "Common Corpus code",
+        "science": "Common Corpus science",
+        "latin": "Common Corpus Latin",
+    }
+    queue = _load_json(round_dir / "queue/queue.json") or {}
+    release_sha = queue.get("release_sha") or (queue.get("release") or {}).get("sha")
+    for panel_path in panels:
+        panel = _load_json(panel_path)
+        if not isinstance(panel, dict) or not isinstance(panel.get("probes"), dict):
+            continue
+        map_label, model, coordinate_receipt = _projection_map_context(panel, rid)
+        coordinate_path = Path(coordinate_receipt.get("canonical_path", "")) \
+            if isinstance(coordinate_receipt, dict) else None
+        base_dir = coordinate_path.parent if coordinate_path and coordinate_path.is_file() else None
+        sample_path = base_dir.parent / "semantic-renders/sample-semantic-ids.npy" \
+            if base_dir else None
+        for probe_name, probe in sorted(panel["probes"].items()):
+            if not isinstance(probe, dict) or probe.get("status") != "included":
+                continue
+            coordinate_info = probe.get("coordinates") \
+                if isinstance(probe.get("coordinates"), dict) else None
+            archive = Path(coordinate_info.get("canonical_path", "")) \
+                if coordinate_info else panel_path.parent / f"{probe_name}-coordinates.npz"
+            if not archive.is_file():
+                continue
+            signature = coordinate_info or _file_signature(archive)
+            metrics = probe.get("probe") if isinstance(probe.get("probe"), dict) else {}
+            control = probe.get("matched_control")
+            if not isinstance(control, dict):
+                control = probe.get("shape_matched_in_domain_control")
+            control = control if isinstance(control, dict) else {}
+            inputs = probe.get("inputs") if isinstance(probe.get("inputs"), dict) else {}
+            render_candidates = sorted(artifacts.glob(f"**/{probe_name}-overlay.png"))
+            renders = [
+                {"path": _relpath(path), "bytes": path.stat().st_size}
+                for path in render_candidates
+            ]
+            map_id = (
+                f"round-{rid}-{_slug(map_label)}-{_slug(probe_name)}-projection"
+            )
+            entries.append({
+                "map_id": map_id,
+                "round_id": rid,
+                "kind": "projection-map",
+                "date": datetime.fromtimestamp(
+                    panel_path.stat().st_mtime, tz=timezone.utc).isoformat(),
+                "evidence_status": evidence_status(rid, ledger),
+                "base_map": map_label,
+                "base_model": model,
+                "base_coordinates": {
+                    "dir": _relpath(base_dir),
+                    "receipt": coordinate_receipt,
+                } if base_dir else None,
+                "base_sample_ids": {
+                    "path": _relpath(sample_path),
+                } if sample_path and sample_path.is_file() else None,
+                "projection": {
+                    "probe": probe_name,
+                    "display_name": display_names.get(
+                        probe_name, probe_name.replace("-", " ").title()),
+                    "coordinates": _relpath(archive),
+                    "coordinate_signature": signature,
+                    "panel": _relpath(panel_path),
+                    "panel_sha256": _file_signature(panel_path)["sha256"],
+                    "corpus_rows": metrics.get("corpus_rows"),
+                    "query_rows": metrics.get("query_rows"),
+                    "ffr": metrics.get("ffr"),
+                    "control_ffr": control.get("ffr"),
+                    "retention": probe.get("retention"),
+                    "verdict": probe.get("verdict"),
+                    "inputs": inputs,
+                },
+                "renders": renders,
+                "release_sha": release_sha,
+                "run_dir": _relpath(round_dir),
+            })
+    return entries
 
 
 def scan_modern_round(round_dir: Path, ledger: dict) -> list[dict]:
@@ -226,6 +349,7 @@ def scan() -> dict:
         for round_dir in sorted(RUNS_DIR.glob("round-*")):
             if (round_dir / "queue/artifacts").is_dir():
                 maps += scan_modern_round(round_dir, ledger)
+                maps += scan_projection_maps(round_dir, ledger)
             elif (round_dir / "renders").is_dir():
                 maps += scan_legacy_renders(round_dir, ledger)
     maps += scan_checkpoints()
@@ -234,6 +358,7 @@ def scan() -> dict:
         "generated_utc": datetime.now(timezone.utc).isoformat(),
         "counts": {
             "round_maps": sum(1 for m in maps if m["kind"] == "round-map"),
+            "projection_maps": sum(1 for m in maps if m["kind"] == "projection-map"),
             "legacy_render_sets": sum(1 for m in maps if m["kind"] == "legacy-renders"),
             "pre_round_checkpoints": sum(1 for m in maps if m["kind"] == "pre-round-checkpoint"),
         },
@@ -287,6 +412,7 @@ def _fmt(v, digits=4):
 def publish(registry: dict) -> None:
     SITE_DIR.mkdir(parents=True, exist_ok=True)
     round_maps = [m for m in registry["maps"] if m["kind"] == "round-map"]
+    projections = [m for m in registry["maps"] if m["kind"] == "projection-map"]
     legacy = [m for m in registry["maps"] if m["kind"] == "legacy-renders"]
     checkpoints = [m for m in registry["maps"] if m["kind"] == "pre-round-checkpoint"]
 
@@ -311,6 +437,20 @@ def publish(registry: dict) -> None:
         f'<td>{_badge(m["evidence_status"])}</td></tr>'
         for m in legacy
     ]
+    projection_rows = []
+    for m in sorted(projections, key=lambda x: x.get("date") or "", reverse=True):
+        p = m["projection"]
+        page = f'projections/{m["map_id"]}/index.html'
+        projection_rows.append(
+            f'<tr><td><a href="{page}">{html.escape(m["map_id"])}</a></td>'
+            f'<td>{html.escape(str(m.get("base_map") or ""))}</td>'
+            f'<td class="num">{_fmt(p.get("corpus_rows"))}</td>'
+            f'<td class="num">{_fmt(p.get("ffr"))}</td>'
+            f'<td class="num">{_fmt(p.get("control_ffr"))}</td>'
+            f'<td class="num">{_fmt(p.get("retention"))}</td>'
+            f'<td>{html.escape(str(p.get("verdict") or "—"))}</td>'
+            f'<td>{_badge(m["evidence_status"])}</td></tr>'
+        )
     ckpt_rows = [
         f'<tr><td>{html.escape(m["map_id"])}</td><td>{(m.get("date") or "")[:10]}</td>'
         f'<td class="num">{m["model"]["bytes"]/1e6:.0f} MB</td>'
@@ -324,10 +464,17 @@ def publish(registry: dict) -> None:
 <h1>Basemap map registry</h1>
 <p class="muted">Generated {registry["generated_utc"][:19]}Z from
 <code>/data/latent-basemap/maps.json</code> · {registry["counts"]["round_maps"]} round maps ·
+{registry["counts"].get("projection_maps", 0)} projection maps ·
 {registry["counts"]["legacy_render_sets"]} legacy render sets ·
 {registry["counts"]["pre_round_checkpoints"]} pre-protocol checkpoints ·
 <a href="../basemap-gallery/">old gallery (2026-07-01)</a> ·
 <a href="http://gsv.local:8710/">roundwatch</a></p>
+<h2>Projection maps</h2>
+<p class="muted">Foreign-domain corpora and held-out queries projected through a registered basemap. Browser plots are deterministic samples; metrics use the complete registered panel.</p>
+<div class="scroll"><table>
+<tr><th>projection</th><th>base map</th><th>probe N</th><th>probe ffr</th><th>control ffr</th><th>retention</th><th>verdict</th><th>evidence</th></tr>
+{''.join(projection_rows) or '<tr><td colspan=8 class="muted">none</td></tr>'}
+</table></div>
 <h2>Round maps</h2>
 <div class="scroll"><table>
 <tr><th>map</th><th>date</th><th>N</th><th>net</th><th>ffr</th><th>density</th>
@@ -406,7 +553,20 @@ def publish(registry: dict) -> None:
 """
         (page_dir / "index.html").write_text(page)
 
-    print(f"published {len(round_maps)+len(legacy)} map pages -> {SITE_DIR}  ({SITE_URL}/)")
+    projection_count = 0
+    try:
+        try:
+            from experiments.projection_gallery import build_projection_explorers
+        except ModuleNotFoundError:  # direct script execution
+            from projection_gallery import build_projection_explorers
+        projection_count = len(build_projection_explorers(registry, SITE_DIR))
+    except Exception as exc:
+        print(f"projection explorer generation failed: {exc}")
+
+    print(
+        f"published {len(round_maps)+len(legacy)} map pages and "
+        f"{projection_count} projection explorers -> {SITE_DIR}  ({SITE_URL}/)"
+    )
 
 
 # ------------------------------------------------------------------ main ----
