@@ -106,6 +106,10 @@ def _run_canary(job: dict[str, Any]) -> dict[str, Any]:
                      if key != "identity_sha256"})
     path = os.path.join(output, "verdict.json")
     atomic_write_new_json(path, receipt, immutable=True)
+    if receipt.get("passed") is not True:
+        raise Round0034PipelineError(
+            "R0034 canary failed its registered admission thresholds"
+        )
     return {**receipt, "verdict": expected_input_signature(path)}
 
 

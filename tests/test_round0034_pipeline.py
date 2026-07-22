@@ -185,6 +185,49 @@ def test_host_int8_sampler_gathers_both_endpoints_and_exact_scales():
     assert stamp["endpoint_gather_calls"] == 1
     assert stamp["source_rows_gathered"] == 4
     assert stamp["destination_rows_gathered"] == 4
+    assert stamp["endpoint_forward"] == "fused-source-destination"
+
+
+def test_host_int8_prefetch_owns_slots_and_accounts_only_consumed_batches():
+    row_count = 7
+    encoded = np.arange(row_count * 4, dtype=np.int8).reshape(row_count, 4)
+    scales = np.ones(row_count, dtype="<f2")
+    dataset = HostInt8MaterializedArray(
+        encoded, scales, device="cpu", buffer_rows=4
+    )
+    targets = np.full((row_count, DEFAULT_K), -1, dtype=np.int32)
+    degrees = np.zeros(row_count, dtype=np.uint8)
+    for source, destination in ((1, 3), (3, 4), (4, 5), (5, 6), (6, 1)):
+        targets[source, 0] = destination
+        degrees[source] = 1
+    sampler = HostInt8CanonicalSampler(
+        dataset,
+        targets=targets,
+        degrees=degrees,
+        excluded_rows=np.asarray([0, 2], dtype=np.int64),
+        positive_source_count=5,
+        valid_edge_count=5,
+        batch_size=4,
+        pos_ratio=0.5,
+        random_state=34,
+        graph_signature={"sha256": "g" * 64},
+        eligibility_signature={"sha256": "e" * 64},
+    )
+    # Exercise the production ownership protocol without requiring CUDA in the
+    # unit test: host fill and CPU transfer use the same two-slot lifecycle.
+    sampler._prefetch_enabled = True
+    iterator = iter(sampler)
+    batches = [next(iterator) for _ in range(len(sampler))]
+    sampler.close()
+
+    assert len(batches) == 3
+    assert all(batch[0].shape == batch[1].shape == (4, 4) for batch in batches)
+    stamp = sampler.execution_stamp()
+    assert stamp["host_prefetch_consumer_batches"] == 3
+    assert stamp["endpoint_gather_calls"] == 3
+    assert stamp["source_rows_gathered"] == 12
+    assert stamp["destination_rows_gathered"] == 12
+    assert stamp["host_prefetch_batches_filled"] >= 3
 
 
 def test_training_input_dispatch_and_coverage_formula(tmp_path):
@@ -396,6 +439,45 @@ def test_round0034_slim_runner_handler_accepts_active_and_job(tmp_path):
     job = {"action": "unknown", "outputs": [str(tmp_path / "out")]}
     with pytest.raises(RuntimeError, match="unknown R0034 action"):
         run_job(active, job)
+
+
+def test_round0034_canary_node_persists_failed_verdict_then_fails(monkeypatch,
+                                                                  tmp_path):
+    import json
+    import experiments.run_round0034_node as node
+
+    config = {
+        "optimizer": {"batch_size": 4, "positive_ratio": 0.5, "seed": 42},
+        "execution": {
+            "minimum_canary_train_step_equivalents_per_second": 90.0,
+            "minimum_post_setup_headroom_gib": 1.5,
+        },
+    }
+    monkeypatch.setattr(
+        node,
+        "_load_pipeline",
+        lambda _job, device: (object(), {}, config, "c" * 64),
+    )
+    monkeypatch.setattr(
+        node,
+        "run_two_endpoint_no_update_canary",
+        lambda *_args, **_kwargs: {
+            "schema": "synthetic-canary",
+            "passed": False,
+            "optimizer_updates": 0,
+        },
+    )
+    output = tmp_path / "canary"
+    job = {
+        "outputs": [str(output)],
+        "canonical_graph_manifest": "/synthetic/graph.json",
+    }
+    with pytest.raises(Round0034PipelineError, match="admission thresholds"):
+        node._run_canary(job)
+    with open(output / "verdict.json", encoding="utf-8") as handle:
+        verdict = json.load(handle)
+    assert verdict["passed"] is False
+    assert len(verdict["identity_sha256"]) == 64
 
 
 def test_training_config_rejects_zero_degree_planning_alert():
