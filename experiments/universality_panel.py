@@ -9,7 +9,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -62,6 +62,7 @@ R0028_EXPECTED_CANARY_STATUS = {
     "scifact": "excluded",
 }
 _INPUT_PACK_MEMBERS_BY_PATH: dict[str, dict[str, Any]] | None = None
+_MODEL_LOADER: Callable[[], Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -89,16 +90,18 @@ def configure_map(
     model_sha256: str,
     coordinates_root: str,
     coordinate_receipt_sha256: str,
+    model_loader: Callable[[], Any] | None = None,
 ) -> None:
     """Bind the unchanged OOD harness to a newly produced map."""
     global ROUND_ID, MAP_LABEL, MODEL_PATH, MODEL_SHA256
-    global R0019_COORDINATES, R0019_COORDINATE_RECEIPT_SHA256
+    global R0019_COORDINATES, R0019_COORDINATE_RECEIPT_SHA256, _MODEL_LOADER
     ROUND_ID = str(round_id)
     MAP_LABEL = str(map_label)
     MODEL_PATH = os.path.realpath(model_path)
     MODEL_SHA256 = str(model_sha256)
     R0019_COORDINATES = os.path.realpath(coordinates_root)
     R0019_COORDINATE_RECEIPT_SHA256 = str(coordinate_receipt_sha256)
+    _MODEL_LOADER = model_loader
 
 
 def _round_label() -> str:
@@ -228,6 +231,8 @@ def _load_model() -> Any:
     signature = expected_input_signature(MODEL_PATH)
     if signature["sha256"] != MODEL_SHA256:
         raise RuntimeError(f"{MAP_LABEL} model bytes changed")
+    if _MODEL_LOADER is not None:
+        return _MODEL_LOADER()
     from basemap.pumap.parametric_umap import ParametricUMAP
 
     return ParametricUMAP.load(MODEL_PATH, device="cuda")

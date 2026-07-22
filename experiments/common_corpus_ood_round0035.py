@@ -15,7 +15,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -36,6 +36,7 @@ from basemap.output_safety import (
 
 
 ROUND_ID = "0035"
+MAP_LABEL = "r0019"
 BASE_SEED = 20260735
 PROBE_ROWS = 50_000
 QUERY_ROWS = 500
@@ -161,6 +162,32 @@ PROBES = {
     )
 }
 _VERIFIED_CONTROL_MEMBERS: dict[str, dict[str, Any]] = {}
+_MODEL_LOADER: Callable[[], Any] | None = None
+
+
+def configure_map(
+    *,
+    round_id: str,
+    map_label: str,
+    model_path: str,
+    model_sha256: str,
+    coordinate_receipt: str,
+    coordinate_receipt_sha256: str,
+    model_loader: Callable[[], Any] | None = None,
+) -> None:
+    """Reuse the accepted R0035 probe definitions on another reviewed map."""
+    global ROUND_ID, MAP_LABEL, MODEL_PATH, COORDINATE_RECEIPT, _MODEL_LOADER
+    previous_model = MODEL_PATH
+    previous_coordinates = COORDINATE_RECEIPT
+    ROUND_ID = str(round_id)
+    MAP_LABEL = str(map_label)
+    MODEL_PATH = os.path.realpath(model_path)
+    COORDINATE_RECEIPT = os.path.realpath(coordinate_receipt)
+    EXACT_SHA256.pop(previous_model, None)
+    EXACT_SHA256.pop(previous_coordinates, None)
+    EXACT_SHA256[MODEL_PATH] = str(model_sha256)
+    EXACT_SHA256[COORDINATE_RECEIPT] = str(coordinate_receipt_sha256)
+    _MODEL_LOADER = model_loader
 
 
 def _seal(body: dict[str, Any]) -> dict[str, Any]:
@@ -214,6 +241,25 @@ def _normalize_metadata(value: Any) -> Any:
 
 def _metadata_projection(row: dict[str, Any]) -> dict[str, Any]:
     return {key: _normalize_metadata(row.get(key)) for key in KEEP_METADATA}
+
+
+def _projection_row_id(metadata: dict[str, Any], row: int) -> str:
+    """Stable chunk-level ID for registry explorers.
+
+    ``identifier`` names the source document and is intentionally repeated for
+    every chunk.  Binding both ``chunk_index`` and the proved vector row keeps
+    labels unique without discarding the human-recognisable document identity.
+    """
+    return json.dumps(
+        {
+            "identifier": metadata.get("identifier"),
+            "chunk_index": metadata.get("chunk_index"),
+            "vector_row": int(row),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
 
 
 def verify_source_mapping(paths: ProbePaths) -> tuple[Any, list[dict[str, Any]], dict[str, Any]]:
@@ -341,7 +387,9 @@ def _cosine_agreement(left: np.ndarray, right: np.ndarray) -> dict[str, Any]:
 
 def _load_map() -> Any:
     if sha256_file(MODEL_PATH) != EXACT_SHA256[MODEL_PATH]:
-        raise RuntimeError("accepted R0019 model bytes changed")
+        raise RuntimeError(f"accepted {MAP_LABEL} model bytes changed")
+    if _MODEL_LOADER is not None:
+        return _MODEL_LOADER()
     from basemap.pumap.parametric_umap import ParametricUMAP
 
     return ParametricUMAP.load(MODEL_PATH, device="cuda")
@@ -413,7 +461,7 @@ def run_canary(*, output_root: str) -> dict[str, Any]:
     smoke_coords = _project(model, smoke, batch_size=1000)
     included = sorted(name for name, value in probes.items() if value["status"] == "included")
     body = {
-        "schema": "round0035-common-corpus-canary-v1",
+        "schema": f"round{ROUND_ID}-common-corpus-canary-v1",
         "round_id": ROUND_ID,
         "seed": BASE_SEED,
         "registered_probes": sorted(PROBES),
@@ -661,8 +709,8 @@ def run_panel(*, canary_path: str, output_root: str) -> dict[str, Any]:
     verify_exact_identities()
     canary = _read_json(canary_path)
     _validate_seal(canary, label="R0035 canary")
-    if canary.get("schema") != "round0035-common-corpus-canary-v1":
-        raise RuntimeError("R0035 canary schema changed")
+    if canary.get("schema") != f"round{ROUND_ID}-common-corpus-canary-v1":
+        raise RuntimeError(f"R{ROUND_ID} Common Corpus canary schema changed")
     if not canary.get("can_build_panel"):
         blockers = {
             name: value.get("blocker")
@@ -718,6 +766,14 @@ def run_panel(*, canary_path: str, output_root: str) -> dict[str, Any]:
             control_query_coords=control_query_coords,
             probe_corpus_rows=corpus_rows,
             probe_query_rows=query_rows,
+            probe_corpus_ids=np.asarray([
+                _projection_row_id(ids[index], index)
+                for index in corpus_rows.tolist()
+            ]),
+            probe_query_ids=np.asarray([
+                _projection_row_id(ids[index], index)
+                for index in query_rows.tolist()
+            ]),
             control_corpus_rows=control_rows,
             control_query_rows=control_query_rows,
         )
@@ -758,7 +814,7 @@ def run_panel(*, canary_path: str, output_root: str) -> dict[str, Any]:
         "schema": "common-corpus-ood-panel-v1",
         "round_id": ROUND_ID,
         "map": {
-            "label": "r0019",
+            "label": MAP_LABEL,
             "model": expected_input_signature(MODEL_PATH),
             "coordinate_receipt": expected_input_signature(COORDINATE_RECEIPT),
         },

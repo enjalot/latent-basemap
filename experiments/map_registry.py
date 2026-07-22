@@ -298,6 +298,94 @@ def scan_modern_round(round_dir: Path, ledger: dict) -> list[dict]:
     return entries
 
 
+def scan_evaluation_round(round_dir: Path, ledger: dict) -> list[dict]:
+    """Discover a map evaluated in a successor round to its training round.
+
+    R0034 stops at a reviewed model candidate and R0036 owns its transform and
+    quality claims.  Requiring a synthetic ``artifacts/train`` directory here
+    would misstate that provenance, so the registry consumes the sealed
+    transform's external model reference directly.
+    """
+    rid_m = re.match(r"round-(\d{4})", round_dir.name)
+    rid = rid_m.group(1) if rid_m else round_dir.name
+    art = round_dir / "queue/artifacts"
+    transform_path = art / "coordinates/actual-transform.json"
+    panel_path = art / "panel/panel.json"
+    render_path = art / "semantic-renders/render-manifest.json"
+    transform = _load_json(transform_path)
+    panel = _load_json(panel_path)
+    if (
+        not isinstance(transform, dict)
+        or transform.get("schema") != "round0036-transform-capability-v1"
+        or not isinstance(panel, dict)
+        or panel.get("schema") != "round0036-registered-panel-v1"
+    ):
+        return []
+    queue = _load_json(round_dir / "queue/queue.json") or {}
+    render = _load_json(render_path) or {}
+    scientific = panel.get("panel") if isinstance(panel.get("panel"), dict) else {}
+    projection = panel.get("projection") \
+        if isinstance(panel.get("projection"), dict) else {}
+    purity = scientific.get("purity") \
+        if isinstance(scientific.get("purity"), dict) else {}
+    model = transform.get("model") if isinstance(transform.get("model"), dict) else {}
+    chunks = sorted((art / "coordinates").glob("chunk-*/coordinates.npy"))
+    pngs = sorted((art / "semantic-renders").glob("*.png")) \
+        if (art / "semantic-renders").is_dir() else []
+    finished = None
+    for marker in sorted(art.glob("*.done.json")):
+        finished = (_load_json(marker) or {}).get("finished") or finished
+    checks = panel.get("decision_checks") or {}
+    accounting = transform.get("row_accounting") or {}
+    selector_passed = bool(checks) and all(bool(value) for value in checks.values())
+    return [{
+        "map_id": f"round-{rid}-r0034-seed42-150m",
+        "round_id": rid,
+        "kind": "round-map",
+        "date": finished,
+        "evidence_status": evidence_status(rid, ledger),
+        "n_rows": accounting.get("all_rows"),
+        "scientific_rows": accounting.get("retained_representatives"),
+        "dims": [384, 2],
+        "architecture": "residual_bottleneck",
+        "hidden_dim": 2048,
+        "kernel": "legacy_lp",
+        "pipeline": "R0034-host-int8-canonical/R0036-retained-evaluation",
+        "precision": "fp32-transform",
+        "scientific_status": (
+            "same-domain-selector-pass"
+            if selector_passed
+            else "same-domain-selector-failed-diagnostic"
+        ),
+        "capability_candidate": selector_passed,
+        "model": model,
+        "coordinates": {
+            "dir": _relpath(art / "coordinates"),
+            "chunks": len(chunks),
+            "receipt_sha256": _file_signature(transform_path)["sha256"],
+        },
+        "panel": {
+            "path": _relpath(panel_path),
+            "ffr": scientific.get("ffr"),
+            "density": scientific.get("density"),
+            "purity_k256": purity.get("k256"),
+            "purity_k1024": purity.get("k1024"),
+            "proj_ffr": projection.get("proj_ffr"),
+            "proj_knn_ffr": projection.get("proj_knn_regressor_ffr"),
+            "decision_checks_all_pass": selector_passed,
+            "formula_version": scientific.get("formula_version"),
+        },
+        "renders": [
+            {"path": _relpath(path), "bytes": path.stat().st_size}
+            for path in pngs
+        ],
+        "render_diagnostics": render.get("diagnostics"),
+        "release_sha": queue.get("release_sha") or (queue.get("release") or {}).get("sha"),
+        "run_dir": _relpath(round_dir),
+        "training_round": "0034",
+    }]
+
+
 def _sha_of(obj) -> str | None:
     if isinstance(obj, dict):
         return obj.get("sha256") or obj.get("identity_sha256")
@@ -349,6 +437,7 @@ def scan() -> dict:
         for round_dir in sorted(RUNS_DIR.glob("round-*")):
             if (round_dir / "queue/artifacts").is_dir():
                 maps += scan_modern_round(round_dir, ledger)
+                maps += scan_evaluation_round(round_dir, ledger)
                 maps += scan_projection_maps(round_dir, ledger)
             elif (round_dir / "renders").is_dir():
                 maps += scan_legacy_renders(round_dir, ledger)

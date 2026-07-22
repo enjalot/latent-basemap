@@ -99,6 +99,21 @@ def test_source_mapping_fails_on_one_permuted_identity(
         panel.verify_source_mapping(_fixture_paths(tmp_path, mismatch=True))
 
 
+def test_projection_ids_are_unique_at_chunk_granularity() -> None:
+    first = panel._projection_row_id(
+        {"identifier": "same-document", "chunk_index": 0}, 12
+    )
+    second = panel._projection_row_id(
+        {"identifier": "same-document", "chunk_index": 1}, 13
+    )
+    assert first != second
+    assert json.loads(first) == {
+        "identifier": "same-document",
+        "chunk_index": 0,
+        "vector_row": 12,
+    }
+
+
 def test_scoring_preserves_exact_topk_and_retention_thresholds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

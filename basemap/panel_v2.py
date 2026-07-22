@@ -20,8 +20,8 @@ high, never drops them), merge a running candidate pool, then gather the exact
 vectors and recompute fp32 distances to rerank and to report exact radii. This
 is exact modulo the overselect margin; a boundary guard reports the gap between
 the kept k-th candidate and the first dropped one so a too-small margin is
-visible, not silent. Low-D coords are scored in a single deterministic pass
-(no chunk-boundary tie perturbation).
+visible, not silent. Low-D coords use exact fp32 distances and a bounded
+corpus-chunk/global-top-k merge; the strategy is emitted in provenance.
 
 ID alignment (P0-C) is EXACT: when both ``x_ids`` and ``z_ids`` are given they
 must describe the same row universe and X is reordered to Z; alignment is never
@@ -376,18 +376,21 @@ def _self_knn(F, anchor_idx, k, cfg: PanelV2Config, hi_dim=True, want_dist=False
     pass (purity). Order inside the set is irrelevant to a label count; boundary
     membership is approximate and labelled so. want_dist REQUIRES exact.
 
-    low_dim: single deterministic exact pass over the (tiny) coord corpus."""
+    low_dim: exact fp32 distances with a globally merged top-k over bounded
+    corpus chunks.  Chunking is mathematically the same top-k operation and is
+    essential once the coordinate corpus is no longer tiny."""
     torch, dev = _torch_scoring_device()
     if want_dist and not exact:
         raise ValueError("radii (want_dist) require exact reranking (P2)")
     N = len(F); m = len(anchor_idx)
     kk = k + 1                                            # +1 for self
-    if hi_dim:
-        cand = (k + max(cfg.overselect, 1) + 1) if exact else kk
-        cchunk = min(N, max(1, int(cfg.corpus_chunk)))
-    else:
-        cand = kk
-        cchunk = N                                       # one deterministic pass
+    cand = (k + max(cfg.overselect, 1) + 1) if (hi_dim and exact) else kk
+    # The former low-D special case forced cchunk=N.  At 147M rows that reduced
+    # the anchor tile to three and reread the entire coordinate corpus ~3,334
+    # times.  The same bounded top-k merge already used by the high-D path is
+    # exact for low-D distances too, and keeps the tile at ~1,000 anchors under
+    # the registered 500M-element cap.
+    cchunk = min(N, max(1, int(cfg.corpus_chunk)))
     achunk = max(1, min(m, int(cfg.block_elems // max(1, cchunk))))
     if hi_dim and exact:
         # BYTE-CAP the exact-rerank tile: achunk × cand × D × 4 × scratch. This is
@@ -1398,6 +1401,33 @@ def _require_score_panel_scale_admission(X, scale_admission):
             }
     except ImportError:
         pass
+    # Round 0036 scores a compact, immutable view of the accepted R0025
+    # int8+scale pair under the accepted R0033 exclusion selector.  It cannot
+    # satisfy the legacy "one reopened float shard directory" shape check
+    # because its scientific rows are deliberately non-contiguous.  The view
+    # supplies a sealed identity over both inputs instead; validate that exact
+    # receipt rather than weakening the >=8M admission globally.
+    if getattr(X, "round0036_retained_view", False):
+        identity = X.scale_admission_identity()
+        body = {key: value for key, value in identity.items()
+                if key != "identity_sha256"}
+        selector = identity.get("selector") or {}
+        base = identity.get("base")
+        if (
+            identity.get("schema") != "round0036-retained-scale-input-v1"
+            or identity.get("identity_sha256") != sha256_bytes(canonical_json(body))
+            or identity.get("row_count") != rows
+            or selector.get("retained_count") != rows
+            or selector.get("selection")
+            != "compact-rank/select-over-sorted-R0033-exclusions"
+            or not isinstance(base, dict)
+            or base.get("kind") != "ordered_shards"
+        ):
+            raise RuntimeError("Round 0036 retained scale-input identity is invalid")
+        if scale_admission is not None:
+            raise RuntimeError(
+                "Round 0036 retained scale view carries its own exact identity")
+        return identity
     required = {"performance_gate", "release_sha", "row_derivation", "scale_policy"}
     if not isinstance(scale_admission, dict) or set(scale_admission) != required:
         raise RuntimeError(
@@ -1461,7 +1491,7 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
     #   hi_frac : APPROXIMATE fast-expansion top-k_frac MEMBERSHIP (purity; no rerank,
     #             so no 24 GB gather). Order inside the set is irrelevant to a label
     #             count; boundary membership is approximate and labelled so.
-    #   lo_kf   : exact low-D top-k_frac (single deterministic pass).
+    #   lo_kf   : exact low-D top-k_frac (bounded global top-k merge).
     # S2.5: hi_hit/hi_frac/labels/density-radii are MAP-INDEPENDENT — computed once
     # in a content-verified reference (identical to the inline path by construction),
     # so rescoring N maps of one corpus repeats only the low-D passes below.
@@ -1530,7 +1560,14 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
         # (validated ≥ tolerance vs fp64); hi k_frac membership (purity) is
         # approximate fast-expansion; density radii are exact; low-D is exact.
         "exactness": ("hi_k_hit:exact_rerank(byte_capped); hi_k_frac:approximate_membership; "
-                      "density:exact; lo:single_pass_exact"),
+                      "density:exact; lo:chunked_exact_global_topk_merge"),
+        "low_dim_search": {
+            "algorithm": "bounded-corpus-chunks-with-global-topk-merge",
+            "corpus_chunk": int(cfg.corpus_chunk),
+            "block_elems": int(cfg.block_elems),
+            "distance": "fp32-squared-l2",
+            "candidate_membership": "exact",
+        },
         "device": "cuda" if cuda_peak["available"] else "cpu",
         # Process-global values: the caller resets exactly once before any CUDA
         # allocation, so model loads and transforms between panel calls remain in
