@@ -285,6 +285,36 @@ class ParametricUMAP:
                                "(self.model already initialized) — pipeline/graph/weight "
                                "fail-closed checks would run after GPU commit (L0.5).")
         self._edges_path_used = edges_path
+
+        # R0034's 150M feature matrix cannot be resident on CUDA and its
+        # canonical graph deliberately has no redundant source/weight arrays.
+        # The explicit adapter supplies the same already-on-device batch
+        # contract as the fast samplers.  Dispatch before generic NPZ loading;
+        # otherwise the legacy path would decompress 18 GB of arrays that the
+        # canonical adapter has already proved and removed.
+        prepare_round0034 = getattr(X, "prepare_round0034_training", None)
+        if callable(prepare_round0034):
+            dataset, loader, n_pos_edges, pipeline_info, verified = (
+                prepare_round0034(
+                    edges_path=edges_path,
+                    batch_size=self.batch_size,
+                    pos_ratio=self.pos_ratio,
+                    random_state=random_state,
+                    positive_target_mode=self.positive_target_mode,
+                    weighted_edge_sampling=self.weighted_edge_sampling,
+                    reject_neighbors=self.reject_neighbors,
+                    required_input_pipeline=self.required_input_pipeline,
+                )
+            )
+            self._pipeline_info = pipeline_info
+            self._pipeline_verified_hashes = verified
+            self._fast_device_path = True
+            # Only disabled R0034 options (mid-near / anchor hold) currently
+            # call this directly, but retaining the adapter here preserves the
+            # fast-loader contract and keeps an accidental use explicit.
+            self._X_dev = X
+            return dataset, loader, n_pos_edges
+
         load_weights = (self.positive_target_mode == "probability"
                         or self.weighted_edge_sampling)
         sources, targets, weights, n_nodes = load_edge_arrays(
@@ -1907,6 +1937,13 @@ class ParametricUMAP:
                      s["lr_horizon"], s["executed_iters"], s["optimizer_steps_succeeded"],
                      s["amp_overflow_skips"], s["nonfinite_loss_skips"], s["nonfinite_gradient_skips"],
                      s["first_lr"] or 0.0, s["peak_lr"], s["final_lr"] or 0.0, s["updates_per_s"])
+        # Capture mutable endpoint accounting after the final batch.  Requested
+        # configuration and the pre-update stamp are not evidence that both
+        # endpoints actually traversed the intended host-int8 path.
+        if hasattr(loader, "execution_stamp"):
+            self._pipeline_runtime_info = loader.execution_stamp()
+            self._train_stats["pipeline_runtime"] = self._pipeline_runtime_info
+
         # Stop HostStreamEdgeSampler producer threads so they don't keep drawing
         # and discarding batches during the final transform / downstream scoring.
         if hasattr(loader, "close"):
