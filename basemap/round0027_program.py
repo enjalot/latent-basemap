@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 from typing import Any
 
@@ -315,7 +316,8 @@ def validate_job_cell(job: dict[str, Any]) -> dict[str, Any]:
         graph_manifest_path=manifest_path,
         graph_manifest_sha256=manifest_sha,
     )
-    if (job.get("production_config") != expected or
+    expected_json_payload = json.loads(canonical_json(expected))
+    if (job.get("production_config") != expected_json_payload or
             job.get("production_config_sha256") != digest):
         raise ValueError(f"Round 0027 {label} production config changed")
     dimension, seed = parse_cell(label)

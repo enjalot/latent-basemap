@@ -1,4 +1,5 @@
 import copy
+import json
 
 import numpy as np
 import pytest
@@ -218,4 +219,28 @@ def test_queue_is_one_canary_one_shared_reference_six_cells_and_cpu_decision(tmp
     assert all(
         validate_job_cell(job)["label"] == job["cell"]
         for job in jobs if "cell" in job
+    )
+
+
+def test_queue_cell_validation_survives_json_roundtrip(tmp_path):
+    from basemap.round0027_program import DIMENSIONS, validate_job_cell
+    from experiments.prepare_round0027_queue import _jobs
+
+    manifests = {
+        dimension: {
+            "path": f"/data/fixture/graph-manifest-d{dimension}.json",
+            "sha256": str(dimension).zfill(64),
+        }
+        for dimension in DIMENSIONS
+    }
+    jobs = _jobs(
+        artifacts=str(tmp_path / "artifacts"),
+        inputs=[],
+        manifests=manifests,
+        query_ids_path="/data/fixture/query-ids.npy",
+    )
+    roundtripped = json.loads(json.dumps(jobs, sort_keys=True))
+    assert all(
+        validate_job_cell(job)["label"] == job["cell"]
+        for job in roundtripped if "cell" in job
     )

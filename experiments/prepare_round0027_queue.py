@@ -10,7 +10,11 @@ from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from basemap.artifact_identity import expected_input_signature, sha256_file
+from basemap.artifact_identity import (
+    canonical_json,
+    expected_input_signature,
+    sha256_file,
+)
 from basemap.output_safety import (
     atomic_save_new_npy,
     atomic_write_new_json,
@@ -149,6 +153,9 @@ def _jobs(
             **extra,
         }
 
+    def json_payload(value: Any) -> Any:
+        return json.loads(canonical_json(value))
+
     control = "d768_s42"
     control_manifest = manifests[768]
     control_config, control_sha = train_config_for_cell(
@@ -162,7 +169,7 @@ def _jobs(
             300.0, training=True, cell=control,
             graph_manifest_path=control_manifest["path"],
             graph_manifest_sha256=control_manifest["sha256"],
-            production_config=control_config,
+            production_config=json_payload(control_config),
             production_config_sha256=control_sha,
         ),
         job(
@@ -184,7 +191,7 @@ def _jobs(
             "cell": label,
             "graph_manifest_path": graph_manifest["path"],
             "graph_manifest_sha256": graph_manifest["sha256"],
-            "production_config": config,
+            "production_config": json_payload(config),
             "production_config_sha256": config_sha,
         }
         train_id = f"train_{label}"
