@@ -255,10 +255,10 @@ def _run_train(job: dict[str, Any]) -> dict[str, Any]:
     return {**receipt, "receipt": expected_input_signature(receipt_path)}
 
 
-def run_job(active: dict[str, Any]) -> dict[str, Any]:
+def run_job(active: dict[str, Any], job: dict[str, Any] | None = None) -> dict[str, Any]:
     if active.get("manifest", {}).get("round_id") != "0034":
         raise RuntimeError("R0034 handler received another queue")
-    job = active.get("job") or {}
+    job = job if job is not None else active.get("job") or {}
     if len(job.get("outputs") or []) != 1:
         raise RuntimeError("R0034 job output contract changed")
     action = job.get("action")

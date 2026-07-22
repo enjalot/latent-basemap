@@ -389,6 +389,15 @@ def test_queue_builder_refuses_a_draft_round(tmp_path):
     _assert_issued_round(str(issued))
 
 
+def test_round0034_slim_runner_handler_accepts_active_and_job(tmp_path):
+    from experiments.run_round0034_node import run_job
+
+    active = {"manifest": {"round_id": "0034"}}
+    job = {"action": "unknown", "outputs": [str(tmp_path / "out")]}
+    with pytest.raises(RuntimeError, match="unknown R0034 action"):
+        run_job(active, job)
+
+
 def test_training_config_rejects_zero_degree_planning_alert():
     retained = 1_000_000
     zero_degree = 101
