@@ -2,6 +2,154 @@ import numpy as np
 import os
 import glob
 import logging
+import hashlib
+
+from .artifact_identity import canonical_json
+
+
+def prefix_l2_preprocessing_contract(*, source_dimension: int,
+                                     output_dimension: int,
+                                     normalize: bool) -> tuple[dict, dict]:
+    """Return the canonical preprocessing body and flat runtime stamp."""
+    if not isinstance(source_dimension, int) or source_dimension <= 0:
+        raise ValueError("source_dimension must be a positive integer")
+    if (not isinstance(output_dimension, int) or output_dimension <= 0 or
+            output_dimension > source_dimension):
+        raise ValueError("output_dimension must be in [1, source_dimension]")
+    if normalize is not True and normalize is not False:
+        raise ValueError("normalize must be an exact boolean")
+    if output_dimension < source_dimension and not normalize:
+        raise ValueError("a reduced prefix must be L2-renormalized explicitly")
+    schema = "prefix-l2-input-preprocessing-v1"
+    operation = (
+        "identity-fp32-cast"
+        if not normalize
+        else "first-dimensions-then-row-l2-normalize-fp32"
+    )
+    body = {
+        "schema": schema,
+        "operation": operation,
+        "source_dimension": int(source_dimension),
+        "effective_dimension": int(output_dimension),
+        "slice_start": 0,
+        "slice_stop": int(output_dimension),
+        "l2_renormalized": bool(normalize),
+        "compute_dtype": "<f4",
+        "zero_or_nonfinite_policy": (
+            "reject" if normalize else "preserve-for-downstream-guards"
+        ),
+    }
+    digest = hashlib.sha256(canonical_json(body)).hexdigest()
+    receipt = {**body, "identity_sha256": digest}
+    stamp = {
+        "input_preprocessing_schema": schema,
+        "input_preprocessing_operation": operation,
+        "input_source_dimension": int(source_dimension),
+        "input_effective_dimension": int(output_dimension),
+        "input_slice_start": 0,
+        "input_slice_stop": int(output_dimension),
+        "input_l2_renormalized": bool(normalize),
+        "input_preprocessing_compute_dtype": "<f4",
+        "input_preprocessing_sha256": digest,
+    }
+    return receipt, stamp
+
+
+class PrefixL2NormalizedArray:
+    """Lazy, receipt-bearing prefix projection of a two-dimensional array.
+
+    Matryoshka embeddings are useful to the projector only if the feature
+    prefix is selected *before* device residency and, for a reduced prefix,
+    L2-normalized row by row.  This wrapper keeps the source memmapped, applies
+    that operation to each requested row block, and exposes a flat execution
+    stamp that the trainer records before update zero.
+
+    ``normalize=False`` is the exact full-dimensional control: it casts the
+    source values to float32 but does not perturb them.  ``normalize=True``
+    fails closed on zero or non-finite rows instead of manufacturing values.
+    """
+
+    SCHEMA = "prefix-l2-input-preprocessing-v1"
+
+    def __init__(self, source, *, source_dimension: int, output_dimension: int,
+                 normalize: bool, source_paths=None):
+        receipt, stamp = prefix_l2_preprocessing_contract(
+            source_dimension=source_dimension,
+            output_dimension=output_dimension,
+            normalize=normalize)
+        shape = getattr(source, "shape", None)
+        if (not isinstance(shape, tuple) or len(shape) != 2 or
+                int(shape[1]) != source_dimension):
+            raise ValueError(
+                f"source shape {shape!r} does not match dimension "
+                f"{source_dimension}")
+        self.source = source
+        self.source_dimension = int(source_dimension)
+        self.output_dimension = int(output_dimension)
+        self.normalize = bool(normalize)
+        self.shape = (int(shape[0]), self.output_dimension)
+        self.dtype = np.dtype("float32")
+        paths = source_paths
+        if paths is None:
+            paths = (getattr(source, "loaded_shard_paths", None) or
+                     getattr(source, "shard_paths", None) or [])
+            filename = getattr(source, "filename", None)
+            if not paths and isinstance(filename, (str, os.PathLike)):
+                paths = [filename]
+        self.loaded_shard_paths = [os.path.realpath(os.fspath(p)) for p in paths]
+        self.shard_paths = list(self.loaded_shard_paths)
+
+        self.preprocessing = receipt
+        self.execution_preprocessing_stamp = stamp
+
+    def __len__(self):
+        return self.shape[0]
+
+    def astype(self, dtype):
+        if np.dtype(dtype) == np.dtype("float32"):
+            return self
+        raise NotImplementedError("PrefixL2NormalizedArray exposes float32 only")
+
+    def __array__(self, dtype=None, copy=None):
+        raise RuntimeError(
+            "refuse to materialize the full lazy preprocessed input")
+
+    def _preprocess(self, values):
+        array = np.asarray(values, dtype=np.float32)
+        result = np.array(
+            array[..., :self.output_dimension], dtype=np.float32, copy=True)
+        if self.normalize:
+            if not np.isfinite(result).all():
+                raise ValueError("input prefix contains non-finite values")
+            if result.ndim == 1:
+                norm = float(np.linalg.norm(result))
+                if not np.isfinite(norm) or norm <= 0.0:
+                    raise ValueError("input prefix has zero/non-finite L2 norm")
+                result /= np.float32(norm)
+            else:
+                norms = np.linalg.norm(result, axis=-1).astype(
+                    np.float32, copy=False)
+                if (not np.isfinite(norms).all() or
+                        np.any(norms <= np.float32(0.0))):
+                    raise ValueError(
+                        "input prefix has zero/non-finite L2 norm")
+                result /= norms[..., None]
+        return result
+
+    def __getitem__(self, key):
+        if isinstance(key, tuple):
+            if len(key) != 2:
+                raise IndexError("expected a two-dimensional index")
+            rows, columns = key
+            return self.__getitem__(rows)[..., columns]
+        if isinstance(key, slice):
+            start, stop, step = key.indices(len(self))
+            if isinstance(self.source, np.ndarray):
+                return self._preprocess(self.source[slice(start, stop, step)])
+            # Array-style row selection avoids the legacy memmap loader's
+            # scalar loop and keeps million-row device uploads tractable.
+            key = np.arange(start, stop, step, dtype=np.int64)
+        return self._preprocess(self.source[key])
 
 class MemmapArrayConcatenator:
     def __init__(self, directories, input_dim, testing: bool = False):

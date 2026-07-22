@@ -68,6 +68,8 @@ class ParametricUMAP:
         weighted_edge_sampling=False,
         gpu_resident_data="auto",
         gpu_resident_vram_budget_gb=10.0,
+        graph_manifest_path=None,
+        graph_manifest_sha256=None,
     ):
         if device is None:
             if torch.cuda.is_available():
@@ -135,6 +137,8 @@ class ParametricUMAP:
         self.mn_pairs_per_batch = mn_pairs_per_batch
         self.mn_weight_scale = mn_weight_scale
         self.weighted_edge_sampling = weighted_edge_sampling
+        self.graph_manifest_path = graph_manifest_path
+        self.graph_manifest_sha256 = graph_manifest_sha256
         # GPU-resident fast path (input-pipeline optimisation). "auto" enables it
         # when X fits in VRAM within the budget on CUDA; True forces it on any
         # device (fp16 storage on CUDA, fp32 on CPU); False keeps the legacy path.
@@ -327,10 +331,39 @@ class ParametricUMAP:
                 # graph independently passes the required sibling-manifest gate.
                 trusted = validate_materialized_pack(X)
             self._pipeline_verified_hashes = trusted
-        for man_path in (edges_path + ".manifest.json",
-                         edges_path.rsplit(".", 1)[0] + ".manifest.json"):
+        explicit_manifest = self.graph_manifest_path
+        if explicit_manifest:
+            if (not isinstance(explicit_manifest, str) or
+                    not os.path.isabs(explicit_manifest) or
+                    os.path.islink(explicit_manifest) or
+                    os.path.realpath(explicit_manifest) != explicit_manifest or
+                    not os.path.isfile(explicit_manifest)):
+                raise ValueError(
+                    "explicit graph manifest must be one canonical regular file")
+            from ...artifact_identity import sha256_file as _sha256_file
+            observed_manifest_sha256 = _sha256_file(explicit_manifest)
+            if (not self.graph_manifest_sha256 or
+                    observed_manifest_sha256 != self.graph_manifest_sha256):
+                raise ValueError(
+                    "explicit graph manifest SHA-256 does not match the "
+                    "declared execution contract")
+            manifest_candidates = (explicit_manifest,)
+        else:
+            observed_manifest_sha256 = None
+            manifest_candidates = (
+                edges_path + ".manifest.json",
+                edges_path.rsplit(".", 1)[0] + ".manifest.json",
+            )
+        for man_path in manifest_candidates:
             if os.path.exists(man_path):
                 _man = _json.load(open(man_path))
+                expected_preprocessing = _man.get("input_preprocessing")
+                actual_preprocessing = getattr(
+                    X, "execution_preprocessing_stamp", None)
+                if (expected_preprocessing is not None and
+                        expected_preprocessing != actual_preprocessing):
+                    raise ValueError(
+                        "graph manifest input preprocessing does not match X")
                 logging.info("P0-E: validating X identity against graph manifest %s", man_path)
                 validate_against_manifest(X, _man,
                                           allow_prefix=getattr(self, "allow_prefix_edge_filter", False))
@@ -347,6 +380,8 @@ class ParametricUMAP:
                 self._pipeline_verified_hashes = {
                     **(getattr(self, "_pipeline_verified_hashes", None) or {}),
                     **trusted,
+                    **({"graph_manifest_sha256": observed_manifest_sha256}
+                       if observed_manifest_sha256 else {}),
                 }                                           # admission artifact
                 man_found = man_path
                 break
@@ -462,6 +497,7 @@ class ParametricUMAP:
                     (self.weighted_edge_sampling and weighted_ok)
                     or uniform_with_replacement),
                 "path_reason": reason,
+                **dict(getattr(X, "execution_preprocessing_stamp", {}) or {}),
                 **self._duplicate_multiplicity_info}
             # weighted request must NEVER silently reach a uniform sampler.
             if self.weighted_edge_sampling and not weighted_ok:
