@@ -38,6 +38,7 @@ def test_encoded_census_excludes_all_zero_and_caps_exact_row_scale_families():
     assert arrays["family_counts"].tolist() == [2, 2]
     assert arrays["member_rows"].tolist() == [1, 2, 4, 6]
     assert arrays["duplicate_excluded_rows"].tolist() == [2, 6]
+    assert arrays["duplicate_representative_rows"].tolist() == [1, 4]
     assert arrays["excluded_rows"].tolist() == [0, 2, 5, 6]
     assert summary["retained_row_count"] == 3
     # Row 3 has identical int8 bytes to rows 1/2 but a different fp16 scale.
@@ -81,6 +82,7 @@ def test_round0033_artifact_round_trip_and_tamper_rejection(tmp_path):
     signature = expected_input_signature(cap)
     loaded = load_int8_eligibility(str(cap), expected_sha256=signature["sha256"], row_count=6)
     assert loaded["excluded_rows"].tolist() == [0, 2, 4]
+    assert loaded["duplicate_representative_rows"].tolist() == [1, 3]
     assert receipt["summary"]["retained_row_count"] == 3
     with pytest.raises(ValueError, match="SHA-256"):
         load_int8_eligibility(str(cap), expected_sha256="0" * 64, row_count=6)

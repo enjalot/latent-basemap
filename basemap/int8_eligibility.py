@@ -168,8 +168,21 @@ def find_exact_families(
         member_rows = np.concatenate(families).astype(np.int64, copy=False)
     else:
         member_rows = np.empty(0, dtype=np.int64)
-    duplicate_excluded = np.concatenate([rows[1:] for rows in families]) if families else np.empty(0, dtype=np.int64)
-    duplicate_excluded = np.sort(duplicate_excluded).astype(np.int64, copy=False)
+    if families:
+        duplicate_excluded = np.concatenate([rows[1:] for rows in families])
+        duplicate_representatives = np.concatenate([
+            np.full(len(rows) - 1, rows[0], dtype=np.int64) for rows in families
+        ])
+        duplicate_order = np.argsort(duplicate_excluded, kind="stable")
+        duplicate_excluded = duplicate_excluded[duplicate_order]
+        duplicate_representatives = duplicate_representatives[duplicate_order]
+    else:
+        duplicate_excluded = np.empty(0, dtype=np.int64)
+        duplicate_representatives = np.empty(0, dtype=np.int64)
+    duplicate_excluded = duplicate_excluded.astype(np.int64, copy=False)
+    duplicate_representatives = duplicate_representatives.astype(
+        np.int64, copy=False
+    )
     zero_rows = np.flatnonzero(zero_mask).astype(np.int64, copy=False)
     excluded_rows = np.sort(np.concatenate((zero_rows, duplicate_excluded))).astype(
         np.int64, copy=False
@@ -189,6 +202,7 @@ def find_exact_families(
         "zero_rows": zero_rows,
         "excluded_rows": excluded_rows,
         "duplicate_excluded_rows": duplicate_excluded,
+        "duplicate_representative_rows": duplicate_representatives,
         "representative_rows": representatives,
         "family_counts": counts,
         "family_offsets": offsets,
@@ -307,7 +321,11 @@ def build_int8_eligibility_census(
         "duplicate_policy": "retain lowest row id from every exact nonzero encoded family; exclude the rest",
         "positive_source_policy": "uniform-over-retained-source-rows-and-fixed-k-slots",
         "negative_node_policy": "uniform-over-retained-rows",
-        "positive_destination_policy": "successor-must-drop-edges-to-excluded-invalid-zero-destinations",
+        "positive_destination_policy": (
+            "successor-must-map-duplicate-destinations-to-the-parallel-"
+            "representative-row-array-then-drop-zero-self-and-repeated-"
+            "canonical-destinations-per-source"
+        ),
         "summary": summary,
         "array_sha256": {
             name: ordered_array_sha256(value) for name, value in arrays.items()
@@ -365,6 +383,7 @@ def load_int8_eligibility(
             "zero_rows",
             "excluded_rows",
             "duplicate_excluded_rows",
+            "duplicate_representative_rows",
             "representative_rows",
             "family_counts",
             "family_offsets",
@@ -386,6 +405,8 @@ def load_int8_eligibility(
     excluded = arrays["excluded_rows"]
     zero = arrays["zero_rows"]
     duplicate = arrays["duplicate_excluded_rows"]
+    duplicate_representatives = arrays["duplicate_representative_rows"]
+    representatives = arrays["representative_rows"]
     counts = arrays["family_counts"]
     offsets = arrays["family_offsets"]
     members = arrays["member_rows"]
@@ -397,6 +418,9 @@ def load_int8_eligibility(
         or not np.array_equal(excluded, np.unique(excluded))
         or not np.array_equal(zero, np.unique(zero))
         or not np.array_equal(duplicate, np.unique(duplicate))
+        or len(duplicate_representatives) != len(duplicate)
+        or np.any(duplicate_representatives < 0)
+        or np.any(duplicate_representatives >= row_count)
         or np.intersect1d(zero, duplicate).size
         or not np.array_equal(excluded, np.sort(np.concatenate((zero, duplicate))))
         or len(offsets) != len(counts) + 1
@@ -404,9 +428,28 @@ def load_int8_eligibility(
         or offsets[-1] != len(members)
         or not np.array_equal(np.diff(offsets), counts)
         or np.any(counts < 2)
+        or not np.array_equal(representatives, members[offsets[:-1]])
+        or not np.array_equal(representatives, np.unique(representatives))
+        or np.any(members < 0)
+        or np.any(members >= row_count)
+        or np.intersect1d(representatives, excluded).size
         or metadata.get("summary", {}).get("excluded_row_count") != len(excluded)
         or metadata.get("summary", {}).get("retained_row_count") != row_count - len(excluded)
         or (len(excluded) and (excluded[0] < 0 or excluded[-1] >= row_count))
     ):
         raise ValueError("int8 eligibility artifact content is invalid")
+    expected_duplicate = np.concatenate([
+        members[offsets[index] + 1:offsets[index + 1]]
+        for index in range(len(counts))
+    ]) if len(counts) else np.empty(0, dtype=np.int64)
+    expected_representatives = np.concatenate([
+        np.full(counts[index] - 1, representatives[index], dtype=np.int64)
+        for index in range(len(counts))
+    ]) if len(counts) else np.empty(0, dtype=np.int64)
+    order = np.argsort(expected_duplicate, kind="stable")
+    if (
+        not np.array_equal(duplicate, expected_duplicate[order])
+        or not np.array_equal(duplicate_representatives, expected_representatives[order])
+    ):
+        raise ValueError("int8 eligibility duplicate-to-representative map is invalid")
     return {"signature": signature, "metadata": metadata, **arrays}
