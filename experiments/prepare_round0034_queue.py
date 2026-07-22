@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Prepare the content-bound R0034 graph/canary/train core queue.
+"""Prepare the content-bound R0034 graph/canary/train queue.
 
 The canonical graph is deliberately a pre-issuance CPU artifact.  Its exact
 retained-positive-source count determines the immutable successful-update
 horizon, so a single immutable queue cannot both create that count and claim
 to have registered it beforehand.
 
-This builder covers the expensive core (canary + one train).  Transform and
+This builder covers the training round (canary + one train).  Transform and
 registered panels remain downstream finalization work and are not represented
 as completed by this queue.
 """
@@ -67,7 +67,7 @@ def prepare(
     eligibility_sha256: str,
     canonical_graph_manifest: str,
     canonical_graph_manifest_sha256: str,
-    queue_root: str = "/data/latent-basemap/runs/round-0034/queue-core",
+    queue_root: str = "/data/latent-basemap/runs/round-0034/queue",
 ) -> str:
     _assert_issued_round(ROUND_FILE)
     _eligibility = load_released_eligibility(
@@ -126,7 +126,7 @@ def prepare(
             "deps": [],
             "outputs": [canary_output],
             "done_marker": os.path.join(artifacts, "two_endpoint_canary.done.json"),
-            "p90_wall_s": 1800.0,
+            "p90_wall_s": 300.0,
             "canary_warmup_steps": 20,
             "canary_measured_steps": 100,
             "node_policy": {"gpu_required": True, "training_performed": False},
@@ -138,23 +138,23 @@ def prepare(
             "deps": ["two_endpoint_canary"],
             "outputs": [train_output],
             "done_marker": os.path.join(artifacts, "train_seed42_150m.done.json"),
-            "p90_wall_s": 43_200.0,
+            "p90_wall_s": 27_900.0,
             "canary_output": canary_output,
             "node_policy": {"gpu_required": True, "training_performed": True},
         },
     ]
     manifest = {
         "schema_version": 1,
-        "schema": "round0034-core-training-queue-v1",
+        "schema": "round0034-training-queue-v1",
         "program": "basemap-100m-round-0034",
         "round_id": "0034",
         "round_sha256": sha256_file(ROUND_FILE),
         "release_sha": release_sha,
         "execution_authority": "autonomous-gpu",
-        "gpu_hours_cap": 12.0,
+        "gpu_hours_cap": 8.0,
         "queue_class": "gpu-research",
         "deadline_utc": (
-            dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=16)
+            dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=10)
         ).isoformat(timespec="seconds"),
         "repo_root": RUN_ROOT,
         "lease_path": "/data/latent-basemap/.gpu_lease",
@@ -192,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--canonical-graph-manifest", required=True)
     parser.add_argument("--canonical-graph-manifest-sha256", required=True)
     parser.add_argument(
-        "--queue-root", default="/data/latent-basemap/runs/round-0034/queue-core"
+        "--queue-root", default="/data/latent-basemap/runs/round-0034/queue"
     )
     args = parser.parse_args(argv)
     print(prepare(

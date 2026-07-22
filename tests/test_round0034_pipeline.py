@@ -258,6 +258,9 @@ def test_dynamic_program_and_trainer_core_dispatch(tmp_path):
         "inputs": {"eligibility": {"sha256": "e" * 64}},
         "summary": {
             "retained_positive_source_count": 149_000_001,
+            "eligibility_retained_row_count": 149_000_001,
+            "zero_degree_retained_source_count": 0,
+            "zero_degree_retained_source_fraction": 0.0,
             "valid_canonical_edge_count": 2_100_000_000,
         },
     }
@@ -384,3 +387,28 @@ def test_queue_builder_refuses_a_draft_round(tmp_path):
     issued = tmp_path / "issued.md"
     issued.write_text("---\nstatus: issued\n---\n")
     _assert_issued_round(str(issued))
+
+
+def test_training_config_rejects_zero_degree_planning_alert():
+    retained = 1_000_000
+    zero_degree = 101
+    manifest = {
+        "schema": "minilm-canonical-source-major-k15-v1",
+        "row_count": 150_000_000,
+        "input_k": 15,
+        "inputs": {"eligibility": {"sha256": "e" * 64}},
+        "summary": {
+            "retained_positive_source_count": retained - zero_degree,
+            "eligibility_retained_row_count": retained,
+            "zero_degree_retained_source_count": zero_degree,
+            "zero_degree_retained_source_fraction": zero_degree / retained,
+            "valid_canonical_edge_count": retained,
+        },
+    }
+    with pytest.raises(ValueError, match="canonical graph capability"):
+        train_config_from_capabilities(
+            manifest,
+            canonical_graph_manifest_path="/data/synthetic/canonical.json",
+            canonical_graph_manifest_sha256="g" * 64,
+            eligibility_sha256="e" * 64,
+        )

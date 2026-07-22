@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from typing import Any, Mapping
 
 from .artifact_identity import canonical_json, sha256_bytes
@@ -39,6 +40,11 @@ def train_config_from_capabilities(
     summary = canonical_graph_manifest.get("summary") or {}
     sources = int(summary.get("retained_positive_source_count", 0))
     valid_edges = int(summary.get("valid_canonical_edge_count", 0))
+    retained = int(summary.get("eligibility_retained_row_count", 0))
+    zero_degree = int(summary.get("zero_degree_retained_source_count", -1))
+    zero_degree_fraction = float(
+        summary.get("zero_degree_retained_source_fraction", float("nan"))
+    )
     if (
         canonical_graph_manifest.get("schema") != GRAPH_SCHEMA
         or int(canonical_graph_manifest.get("row_count", -1)) != DEFAULT_ROWS
@@ -48,6 +54,14 @@ def train_config_from_capabilities(
         ) != eligibility_sha256
         or sources <= 0
         or valid_edges < sources
+        or retained <= 0
+        or zero_degree < 0
+        or sources + zero_degree != retained
+        or not math.isfinite(zero_degree_fraction)
+        or not math.isclose(
+            zero_degree_fraction, zero_degree / retained, rel_tol=0.0, abs_tol=1e-15
+        )
+        or zero_degree_fraction > 0.0001
     ):
         raise ValueError("R0034 canonical graph capability is incomplete or mismatched")
     successful_updates = coverage_aligned_successful_updates(sources)
