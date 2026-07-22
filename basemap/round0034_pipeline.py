@@ -8,17 +8,21 @@ row.  Duplicate destinations are mapped to the exact R0033 representative;
 zero, self, and repeated canonical destinations are removed.
 
 The training adapter keeps the R0025 int8 matrix and fp16 scales in host RAM.
-Every batch gathers *both* endpoint matrices and applies the exact per-row
-scale on the selected torch device.  It is intentionally compatible with the
-existing fast-loader training loop, but it never uploads the full feature
-matrix to CUDA.
+One producer thread fills two owned pinned slots ahead of CUDA while every
+consumed batch gathers *both* endpoint matrices and applies the exact per-row
+scale on device. Source and destination rows share one model call because the
+registered model has neither batch normalization nor dropout. The adapter is
+compatible with the existing fast-loader loop but never uploads the full
+feature matrix to CUDA.
 """
 from __future__ import annotations
 
 import contextlib
+import concurrent.futures
 import json
 import math
 import os
+import threading
 import time
 import zipfile
 from collections import Counter
@@ -752,6 +756,10 @@ class HostInt8MaterializedArray:
         self.endpoint_gather_calls = 0
         self.source_rows_gathered = 0
         self.destination_rows_gathered = 0
+        self.host_prefetch_batches_filled = 0
+        self.host_prefetch_source_rows_filled = 0
+        self.host_prefetch_destination_rows_filled = 0
+        self._accounting_lock = threading.Lock()
         pin = "cuda" in self.device
         self._slots: list[dict[str, Any]] = []
         for _ in range(2):
@@ -815,9 +823,11 @@ class HostInt8MaterializedArray:
         if event is not None:
             event.synchronize()
 
-    def gather_pairs(self, source_rows: np.ndarray, destination_rows: np.ndarray):
-        import torch
-
+    def _validated_pair_rows(
+        self,
+        source_rows: np.ndarray,
+        destination_rows: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
         source_rows = np.asarray(source_rows, dtype=np.int64)
         destination_rows = np.asarray(destination_rows, dtype=np.int64)
         if (
@@ -830,14 +840,45 @@ class HostInt8MaterializedArray:
             or np.any(destination_rows >= len(self))
         ):
             raise Round0034PipelineError("endpoint gather row IDs are invalid")
-        slot = self._slots[self._slot_index]
-        self._slot_index = (self._slot_index + 1) % len(self._slots)
+        return source_rows, destination_rows
+
+    def fill_pair_slot(
+        self,
+        slot_index: int,
+        source_rows: np.ndarray,
+        destination_rows: np.ndarray,
+    ) -> int:
+        """Fill one pinned slot on the host without issuing CUDA work."""
+        source_rows, destination_rows = self._validated_pair_rows(
+            source_rows, destination_rows
+        )
+        if slot_index < 0 or slot_index >= len(self._slots):
+            raise Round0034PipelineError("endpoint gather slot is invalid")
+        slot = self._slots[slot_index]
         self._wait_slot(slot)
         count = len(source_rows)
         slot["source_i8"].numpy()[:count] = self.encoded[source_rows]
         slot["destination_i8"].numpy()[:count] = self.encoded[destination_rows]
         slot["source_scale"].numpy()[:count] = self.scales[source_rows]
         slot["destination_scale"].numpy()[:count] = self.scales[destination_rows]
+        with self._accounting_lock:
+            self.host_prefetch_batches_filled += 1
+            self.host_prefetch_source_rows_filled += count
+            self.host_prefetch_destination_rows_filled += count
+        return count
+
+    def transfer_pair_slot(self, slot_index: int, count: int):
+        """Transfer and dequantize a previously filled host slot."""
+        import torch
+
+        if (
+            slot_index < 0
+            or slot_index >= len(self._slots)
+            or count < 0
+            or count > self.buffer_rows
+        ):
+            raise Round0034PipelineError("endpoint transfer slot/count is invalid")
+        slot = self._slots[slot_index]
 
         source_i8 = slot["source_i8"][:count].to(
             self.device, non_blocking="cuda" in self.device
@@ -859,10 +900,17 @@ class HostInt8MaterializedArray:
             event = torch.cuda.Event()
             event.record(torch.cuda.current_stream(self.device))
             slot["event"] = event
-        self.endpoint_gather_calls += 1
-        self.source_rows_gathered += count
-        self.destination_rows_gathered += count
+        with self._accounting_lock:
+            self.endpoint_gather_calls += 1
+            self.source_rows_gathered += count
+            self.destination_rows_gathered += count
         return source, destination
+
+    def gather_pairs(self, source_rows: np.ndarray, destination_rows: np.ndarray):
+        slot_index = self._slot_index
+        self._slot_index = (self._slot_index + 1) % len(self._slots)
+        count = self.fill_pair_slot(slot_index, source_rows, destination_rows)
+        return self.transfer_pair_slot(slot_index, count)
 
     def index_select(self, rows: Any):
         if hasattr(rows, "detach"):
@@ -880,6 +928,11 @@ class HostInt8MaterializedArray:
             "endpoint_gather_calls": self.endpoint_gather_calls,
             "source_rows_gathered": self.source_rows_gathered,
             "destination_rows_gathered": self.destination_rows_gathered,
+            "host_prefetch_batches_filled": self.host_prefetch_batches_filled,
+            "host_prefetch_source_rows_filled": self.host_prefetch_source_rows_filled,
+            "host_prefetch_destination_rows_filled": (
+                self.host_prefetch_destination_rows_filled
+            ),
         }
 
 
@@ -919,6 +972,7 @@ class HostInt8CanonicalSampler:
         self.eligibility_signature = dict(eligibility_signature)
         self.device = dataset.device
         self.batch_no = 0
+        self.fused_endpoint_forward = True
         if (
             targets.shape != (self.n_nodes, DEFAULT_K)
             or targets.dtype != np.dtype("<i4")
@@ -931,13 +985,32 @@ class HostInt8CanonicalSampler:
         ):
             raise Round0034PipelineError("canonical sampler geometry is invalid")
         self._label_device = torch.device(self.device)
+        self._labels = torch.cat((
+            torch.ones(self.num_pos, dtype=torch.float32, device=self._label_device),
+            torch.zeros(self.num_neg, dtype=torch.float32, device=self._label_device),
+        ))
+        self._prefetch_enabled = "cuda" in str(self.device)
+        self._prefetch_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._prefetch_future: concurrent.futures.Future[tuple[int, int]] | None = None
+        self._producer_batches = 0
+        self._consumer_batches = 0
 
     def __len__(self) -> int:
         return int(math.ceil(self.n_pos / self.num_pos))
 
     def __iter__(self) -> "HostInt8CanonicalSampler":
         self.batch_no = 0
+        if self._prefetch_enabled and self._prefetch_executor is None:
+            self._start_prefetch()
         return self
+
+    def _start_prefetch(self) -> None:
+        self._prefetch_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="r0034-host-int8-prefetch"
+        )
+        self._prefetch_future = self._prefetch_executor.submit(
+            self._prefetch_one, 0
+        )
 
     def _draw_conditioned(self, count: int, predicate) -> np.ndarray:
         output = np.empty(count, dtype=np.int64)
@@ -988,28 +1061,75 @@ class HostInt8CanonicalSampler:
             same = source == destination
         return source, destination
 
-    def __next__(self):
-        import torch
-
-        if self.batch_no >= len(self):
-            raise StopIteration
-        self.batch_no += 1
+    def _draw_batch_rows(self) -> tuple[np.ndarray, np.ndarray]:
         positive_source, positive_destination = self._draw_positive_pairs(
             self.num_pos
         )
         negative_source, negative_destination = self._draw_negative_pairs(
             self.num_neg
         )
-        source = np.concatenate((positive_source, negative_source))
-        destination = np.concatenate((positive_destination, negative_destination))
-        source_values, destination_values = self.dataset.gather_pairs(
-            source, destination
+        return (
+            np.concatenate((positive_source, negative_source)),
+            np.concatenate((positive_destination, negative_destination)),
         )
-        labels = torch.cat((
-            torch.ones(self.num_pos, dtype=torch.float32, device=self._label_device),
-            torch.zeros(self.num_neg, dtype=torch.float32, device=self._label_device),
-        ))
-        return source_values, destination_values, labels
+
+    def _prefetch_one(self, slot_index: int) -> tuple[int, int]:
+        source, destination = self._draw_batch_rows()
+        count = self.dataset.fill_pair_slot(slot_index, source, destination)
+        self._producer_batches += 1
+        return slot_index, count
+
+    def _next_prefetched(self):
+        assert self._prefetch_executor is not None
+        assert self._prefetch_future is not None
+        try:
+            slot_index, count = self._prefetch_future.result()
+        except BaseException as error:
+            raise Round0034PipelineError(
+                "R0034 host-int8 prefetch producer failed"
+            ) from error
+        values = self.dataset.transfer_pair_slot(slot_index, count)
+        self._consumer_batches += 1
+        if self.batch_no < len(self):
+            # transfer_pair_slot records the CUDA event before the alternate
+            # slot is submitted. Reusing this slot two batches later waits that
+            # event, while the one pending host fill overlaps current GPU work.
+            self._prefetch_future = self._prefetch_executor.submit(
+                self._prefetch_one, (slot_index + 1) % len(self.dataset._slots)
+            )
+        else:
+            self._prefetch_future = None
+        return values
+
+    def __next__(self):
+        if self.batch_no >= len(self):
+            raise StopIteration
+        self.batch_no += 1
+        if self._prefetch_enabled:
+            source_values, destination_values = self._next_prefetched()
+        else:
+            source, destination = self._draw_batch_rows()
+            source_values, destination_values = self.dataset.gather_pairs(
+                source, destination
+            )
+            self._consumer_batches += 1
+        return source_values, destination_values, self._labels
+
+    def close(self) -> None:
+        pending_error: BaseException | None = None
+        if self._prefetch_future is not None:
+            try:
+                self._prefetch_future.result()
+            except BaseException as error:
+                pending_error = error
+        if self._prefetch_executor is not None:
+            self._prefetch_executor.shutdown(wait=True, cancel_futures=True)
+            self._prefetch_executor = None
+        self._prefetch_future = None
+        if pending_error is not None:
+            raise Round0034PipelineError(
+                "R0034 host-int8 prefetch producer failed"
+            ) from pending_error
 
     def execution_stamp(self) -> dict[str, Any]:
         return {
@@ -1026,6 +1146,13 @@ class HostInt8CanonicalSampler:
             "negative_sampling": "uniform-R0033-retained-rows-nonself",
             "graph_degree": "variable-1-through-15;zero-degree-sources-excluded",
             "x_residency": "host_int8_materialized",
+            "host_prefetch": (
+                "single-producer-two-pinned-slot"
+                if self._prefetch_enabled else "disabled-noncuda"
+            ),
+            "host_prefetch_producer_batches": self._producer_batches,
+            "host_prefetch_consumer_batches": self._consumer_batches,
+            "endpoint_forward": "fused-source-destination",
             "graph_manifest": self.graph_signature,
             "eligibility": self.eligibility_signature,
             "positive_source_count": self.positive_source_count,
@@ -1196,8 +1323,10 @@ def run_two_endpoint_no_update_canary(
         model.zero_grad(set_to_none=True)
         source, destination, labels = next(iterator)
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            source_xy = model(source)
-            destination_xy = model(destination)
+            endpoint_count = len(source)
+            both_xy = model(torch.cat((source, destination), dim=0))
+            source_xy = both_xy[:endpoint_count]
+            destination_xy = both_xy[endpoint_count:]
         # Match ParametricUMAP._low_dim_qs: the shipped legacy radial and BCE
         # inputs are explicitly fp32 even when the model forward uses bf16.
         radius = torch.norm(source_xy.float() - destination_xy.float(), dim=1)
@@ -1219,6 +1348,7 @@ def run_two_endpoint_no_update_canary(
             step()
         torch.cuda.synchronize(device)
         rates.append(count / (time.perf_counter() - started))
+    sampler.close()
     free_bytes, total_bytes = torch.cuda.mem_get_info(device)
     median_rate = float(statistics.median(rates))
     headroom_gib = float(free_bytes) / (1024 ** 3)
@@ -1247,8 +1377,8 @@ def run_two_endpoint_no_update_canary(
             "warmup_train_step_equivalents": warmup_steps,
             "measured_train_step_equivalents": measured_steps,
             "operation": (
-                "real-sampler-two-endpoint-gather-dequant-forward-bce-backward-"
-                "clip-no-optimizer"
+                "real-sampler-prefetched-two-endpoint-gather-dequant-fused-forward-"
+                "bce-backward-clip-no-optimizer"
             ),
         },
         "pipeline_at_setup": stamp,

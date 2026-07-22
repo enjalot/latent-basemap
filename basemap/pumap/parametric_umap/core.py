@@ -1485,8 +1485,19 @@ class ParametricUMAP:
                 _fwd_ph.__enter__()
                 with torch.autocast(device_type='cuda' if use_amp else 'cpu', enabled=bool(use_amp), dtype=amp_dtype):
                     # Forward pass
-                    src_embeddings = self.model(src_values)
-                    dst_embeddings = self.model(dst_values)
+                    if getattr(loader, "fused_endpoint_forward", False):
+                        if self.use_batchnorm or self.use_dropout:
+                            raise RuntimeError(
+                                "fused endpoint forward requires batchnorm/dropout disabled")
+                        endpoint_count = len(src_values)
+                        both_embeddings = self.model(
+                            torch.cat((src_values, dst_values), dim=0)
+                        )
+                        src_embeddings = both_embeddings[:endpoint_count]
+                        dst_embeddings = both_embeddings[endpoint_count:]
+                    else:
+                        src_embeddings = self.model(src_values)
+                        dst_embeddings = self.model(dst_values)
 
                     # Low-D similarity kernel (P0.1 switch). `dists` is the
                     # kernel's radial term (‖Δ‖_{2b} legacy / ‖Δ‖²^b umap), used
@@ -1940,14 +1951,13 @@ class ParametricUMAP:
         # Capture mutable endpoint accounting after the final batch.  Requested
         # configuration and the pre-update stamp are not evidence that both
         # endpoints actually traversed the intended host-int8 path.
-        if hasattr(loader, "execution_stamp"):
-            self._pipeline_runtime_info = loader.execution_stamp()
-            self._train_stats["pipeline_runtime"] = self._pipeline_runtime_info
-
         # Stop HostStreamEdgeSampler producer threads so they don't keep drawing
         # and discarding batches during the final transform / downstream scoring.
         if hasattr(loader, "close"):
             loader.close()
+        if hasattr(loader, "execution_stamp"):
+            self._pipeline_runtime_info = loader.execution_stamp()
+            self._train_stats["pipeline_runtime"] = self._pipeline_runtime_info
         if use_wandb:
             wandb.finish()
         return self
