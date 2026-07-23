@@ -398,59 +398,161 @@ def _self_knn(F, anchor_idx, k, cfg: PanelV2Config, hi_dim=True, want_dist=False
         D = int(np.asarray(F[anchor_idx[:1]]).shape[1])
         cap_rows = max(1, int(cfg.rerank_byte_cap // (cand * D * 4 * cfg.rerank_scratch)))
         achunk = max(1, min(achunk, cap_rows))
+    # Keep the registered distance-matrix tile unchanged, but traverse corpus
+    # chunks outside anchor tiles.  The former anchor-outer order reread and
+    # dequantized the complete corpus once per anchor tile (10 full passes at
+    # R0036 scale), starving the GPU on one CPU core.  Candidate state is cheap
+    # for small k and bounded into anchor groups for k_frac, so one loaded corpus
+    # chunk can serve several identically shaped anchor tiles without changing
+    # their arithmetic or merge order.
+    dimensions = int(F.shape[1])
+    candidate_row_bytes = max(1, cand * (4 + 8))
+    distance_tile_bytes = achunk * cchunk * 4
+    corpus_tile_bytes = cchunk * dimensions * 4
+    # Conservative allowance for local top-k, concatenation, selection and
+    # gather temporaries.  Spend at most half of the remaining registered peak
+    # envelope on persistent group candidate state.
+    candidate_work_bytes = achunk * cand * 40
+    remaining = max(
+        candidate_row_bytes * achunk,
+        int(cfg.peak_byte_cap)
+        - distance_tile_bytes
+        - corpus_tile_bytes
+        - candidate_work_bytes,
+    )
+    persistent_budget = max(
+        candidate_row_bytes * achunk,
+        remaining // 2,
+    )
+    anchor_group = max(
+        achunk,
+        min(m, persistent_budget // candidate_row_bytes),
+    )
+    if anchor_group > achunk:
+        anchor_group = max(achunk, (anchor_group // achunk) * achunk)
+    anchor_group = min(m, anchor_group)
+
     out_i = np.empty((m, k), dtype=np.int64)
     out_d = np.empty((m, k), dtype=np.float64) if want_dist else None
     min_gap = float("inf")
-    for a0 in range(0, m, achunk):
-        aids = anchor_idx[a0:a0 + achunk]
-        Q = torch.from_numpy(np.asarray(F[aids], dtype=np.float32)).to(dev)
-        ma, D = Q.shape
-        qn = (Q * Q).sum(1, keepdim=True) if hi_dim else None
-        best_d = torch.full((ma, cand), float("inf"), device=dev)
-        best_i = torch.full((ma, cand), -1, dtype=torch.long, device=dev)
+    for group_start in range(0, m, anchor_group):
+        group_stop = min(group_start + anchor_group, m)
+        group_aids = anchor_idx[group_start:group_stop]
+        group_q = torch.from_numpy(
+            np.asarray(F[group_aids], dtype=np.float32)
+        ).to(dev)
+        group_rows = len(group_aids)
+        group_best_d = torch.full(
+            (group_rows, cand), float("inf"), device=dev
+        )
+        group_best_i = torch.full(
+            (group_rows, cand), -1, dtype=torch.long, device=dev
+        )
         for j in range(0, N, cchunk):
-            Xc = torch.from_numpy(np.asarray(F[j:j + cchunk], dtype=np.float32)).to(dev)
-            if hi_dim:
-                d2 = qn - 2.0 * (Q @ Xc.T) + (Xc * Xc).sum(1)     # fast expansion (rank only)
-            else:
-                d2 = torch.zeros((ma, len(Xc)), device=dev)
-                for c in range(D):
-                    diff = Q[:, c:c + 1] - Xc[:, c]
-                    d2.addcmul_(diff, diff)
+            Xc = torch.from_numpy(
+                np.asarray(F[j:j + cchunk], dtype=np.float32)
+            ).to(dev)
+            xnorm = (Xc * Xc).sum(1) if hi_dim else None
             kloc = min(cand, len(Xc))
-            ld, li = torch.topk(d2, kloc, dim=1, largest=False)
-            li = li + j
-            best_d = torch.cat([best_d, ld], 1)
-            best_i = torch.cat([best_i, li], 1)
-            best_d, sel = torch.topk(best_d, cand, dim=1, largest=False)
-            best_i = torch.gather(best_i, 1, sel)
-            del Xc, d2
-        if hi_dim and exact:
-            # EXACT rerank (byte-capped achunk): gather candidate vectors, recompute
-            # fp32 distances. Used for the top-k_hit TRUTH (FFR) and density radii —
-            # both small k, so the gather is tiny. NOT used for k_frac membership.
-            flat = best_i.reshape(-1).cpu().numpy()
-            nb = torch.from_numpy(np.asarray(F[flat], dtype=np.float32)).to(dev).reshape(ma, cand, -1)
-            ex = (nb - Q[:, None, :]).float().pow(2).sum(2)      # (ma, cand) squared L2
-            ex = torch.where(best_i >= 0, ex, torch.full_like(ex, float("inf")))
-            ed, es = torch.sort(ex, dim=1)
-            best_i = torch.gather(best_i, 1, es)
-            best_d = ed
-            del nb, ex
-        ids = best_i.cpu().numpy()
-        dist = best_d.clamp_min(0).sqrt().cpu().numpy() if want_dist else None
-        for r in range(ma):
-            keep = ids[r] != aids[r]
-            row = ids[r][keep]
-            drow = dist[r][keep] if dist is not None else None
-            out_i[a0 + r] = row[:k] if len(row) >= k else ids[r][:k]
-            if want_dist:
-                out_d[a0 + r] = drow[:k] if (drow is not None and len(drow) >= k) else dist[r][:k]
-            if hi_dim and drow is not None and len(drow) > k:
-                min_gap = min(min_gap, float(drow[k] - drow[k - 1]))   # boundary safety
-        del Q, best_d, best_i
-    guard = {"boundary_min_gap": None if min_gap == float("inf") else round(min_gap, 6),
-             "overselect": cfg.overselect} if hi_dim else {}
+            for tile_start in range(0, group_rows, achunk):
+                tile_stop = min(tile_start + achunk, group_rows)
+                Q = group_q[tile_start:tile_stop]
+                ma, D = Q.shape
+                if hi_dim:
+                    qn = (Q * Q).sum(1, keepdim=True)
+                    d2 = qn - 2.0 * (Q @ Xc.T) + xnorm
+                else:
+                    d2 = torch.zeros((ma, len(Xc)), device=dev)
+                    for c in range(D):
+                        diff = Q[:, c:c + 1] - Xc[:, c]
+                        d2.addcmul_(diff, diff)
+                local_d, local_i = torch.topk(
+                    d2, kloc, dim=1, largest=False
+                )
+                local_i = local_i + j
+                merged_d = torch.cat(
+                    (group_best_d[tile_start:tile_stop], local_d), 1
+                )
+                merged_i = torch.cat(
+                    (group_best_i[tile_start:tile_stop], local_i), 1
+                )
+                next_d, selected = torch.topk(
+                    merged_d, cand, dim=1, largest=False
+                )
+                next_i = torch.gather(merged_i, 1, selected)
+                group_best_d[tile_start:tile_stop].copy_(next_d)
+                group_best_i[tile_start:tile_stop].copy_(next_i)
+                del (
+                    Q,
+                    d2,
+                    local_d,
+                    local_i,
+                    merged_d,
+                    merged_i,
+                    next_d,
+                    next_i,
+                    selected,
+                )
+            del Xc, xnorm
+
+        # Exact rerank and host emission remain bounded to the original achunk.
+        for tile_start in range(0, group_rows, achunk):
+            tile_stop = min(tile_start + achunk, group_rows)
+            aids = group_aids[tile_start:tile_stop]
+            Q = group_q[tile_start:tile_stop]
+            best_i = group_best_i[tile_start:tile_stop]
+            best_d = group_best_d[tile_start:tile_stop]
+            ma = len(aids)
+            if hi_dim and exact:
+                flat = best_i.reshape(-1).cpu().numpy()
+                nb = torch.from_numpy(
+                    np.asarray(F[flat], dtype=np.float32)
+                ).to(dev).reshape(ma, cand, -1)
+                ex = (nb - Q[:, None, :]).float().pow(2).sum(2)
+                ex = torch.where(
+                    best_i >= 0, ex, torch.full_like(ex, float("inf"))
+                )
+                reranked_d, order = torch.sort(ex, dim=1)
+                reranked_i = torch.gather(best_i, 1, order)
+                best_d = reranked_d
+                best_i = reranked_i
+                del nb, ex, reranked_d, reranked_i, order
+            ids = best_i.cpu().numpy()
+            dist = (
+                best_d.clamp_min(0).sqrt().cpu().numpy()
+                if want_dist
+                else None
+            )
+            for row_position in range(ma):
+                keep = ids[row_position] != aids[row_position]
+                row = ids[row_position][keep]
+                drow = (
+                    dist[row_position][keep]
+                    if dist is not None
+                    else None
+                )
+                output_position = group_start + tile_start + row_position
+                out_i[output_position] = (
+                    row[:k] if len(row) >= k else ids[row_position][:k]
+                )
+                if want_dist:
+                    out_d[output_position] = (
+                        drow[:k]
+                        if drow is not None and len(drow) >= k
+                        else dist[row_position][:k]
+                    )
+                if hi_dim and drow is not None and len(drow) > k:
+                    min_gap = min(
+                        min_gap, float(drow[k] - drow[k - 1])
+                    )
+            del Q, best_d, best_i, ids, dist
+        del group_q, group_best_d, group_best_i
+    guard = ({
+        "boundary_min_gap": (
+            None if min_gap == float("inf") else round(min_gap, 6)
+        ),
+        "overselect": cfg.overselect,
+    } if hi_dim else {})
     return out_i, out_d, guard
 
 
@@ -588,27 +690,114 @@ def cross_knn(Q, corpus, k, cfg: PanelV2Config, hi_dim=True, q_tile=4096, exact=
     if hi_dim and exact:
         D = int(np.asarray(Q[:1]).shape[1])
         q_tile = max(1, min(q_tile, int(cfg.rerank_byte_cap // (cand * D * 4 * cfg.rerank_scratch))))
-    out = np.empty((len(Q), k), dtype=np.int64)
-    for q0 in range(0, len(Q), q_tile):
-        Qt = torch.from_numpy(np.asarray(Q[q0:q0 + q_tile], dtype=np.float32)).to(dev)
-        qn = (Qt * Qt).sum(1, keepdim=True)
-        best_d = torch.full((len(Qt), cand), float("inf"), device=dev)
-        best_i = torch.full((len(Qt), cand), -1, dtype=torch.long, device=dev)
+    query_rows = len(Q)
+    out = np.empty((query_rows, k), dtype=np.int64)
+    if query_rows == 0:
+        return out
+
+    dimensions = int(Q.shape[1])
+    candidate_row_bytes = max(1, cand * (4 + 8))
+    distance_tile_bytes = q_tile * cc * 4
+    corpus_tile_bytes = cc * dimensions * 4
+    candidate_work_bytes = q_tile * cand * 40
+    remaining = max(
+        candidate_row_bytes * q_tile,
+        int(cfg.peak_byte_cap)
+        - distance_tile_bytes
+        - corpus_tile_bytes
+        - candidate_work_bytes,
+    )
+    persistent_budget = max(
+        candidate_row_bytes * q_tile,
+        remaining // 2,
+    )
+    query_group = max(
+        q_tile,
+        min(query_rows, persistent_budget // candidate_row_bytes),
+    )
+    if query_group > q_tile:
+        query_group = max(q_tile, (query_group // q_tile) * q_tile)
+    query_group = min(query_rows, query_group)
+
+    # As in _self_knn, retain the registered query×corpus distance tile but
+    # reuse each expensive lazy corpus block across a bounded query group.
+    for group_start in range(0, query_rows, query_group):
+        group_stop = min(group_start + query_group, query_rows)
+        group_q = torch.from_numpy(
+            np.asarray(Q[group_start:group_stop], dtype=np.float32)
+        ).to(dev)
+        group_rows = len(group_q)
+        group_best_d = torch.full(
+            (group_rows, cand), float("inf"), device=dev
+        )
+        group_best_i = torch.full(
+            (group_rows, cand), -1, dtype=torch.long, device=dev
+        )
         for j in range(0, len(corpus), cc):
-            Xc = torch.from_numpy(np.asarray(corpus[j:j + cc], dtype=np.float32)).to(dev)
-            d2 = (qn - 2.0 * (Qt @ Xc.T) + (Xc * Xc).sum(1)) if hi_dim else (torch.cdist(Qt, Xc) ** 2)
+            Xc = torch.from_numpy(
+                np.asarray(corpus[j:j + cc], dtype=np.float32)
+            ).to(dev)
+            xnorm = (Xc * Xc).sum(1) if hi_dim else None
             kloc = min(cand, len(Xc))
-            ld, li = torch.topk(d2, kloc, dim=1, largest=False)
-            best_d = torch.cat([best_d, ld], 1); best_i = torch.cat([best_i, li + j], 1)
-            best_d, sel = torch.topk(best_d, cand, dim=1, largest=False)
-            best_i = torch.gather(best_i, 1, sel); del Xc, d2
-        if hi_dim and exact:            # exact fp32 rerank of the candidate pool
-            flat = best_i.reshape(-1).cpu().numpy()
-            nb = torch.from_numpy(np.asarray(corpus[flat], dtype=np.float32)).to(dev).reshape(len(Qt), cand, -1)
-            ex = (nb - Qt[:, None, :]).float().pow(2).sum(2)
-            ex = torch.where(best_i >= 0, ex, torch.full_like(ex, float("inf")))
-            best_i = torch.gather(best_i, 1, torch.sort(ex, dim=1).indices); del nb, ex
-        out[q0:q0 + len(Qt)] = best_i[:, :k].cpu().numpy(); del Qt, best_d, best_i
+            for tile_start in range(0, group_rows, q_tile):
+                tile_stop = min(tile_start + q_tile, group_rows)
+                Qt = group_q[tile_start:tile_stop]
+                if hi_dim:
+                    qn = (Qt * Qt).sum(1, keepdim=True)
+                    d2 = qn - 2.0 * (Qt @ Xc.T) + xnorm
+                else:
+                    d2 = torch.cdist(Qt, Xc) ** 2
+                local_d, local_i = torch.topk(
+                    d2, kloc, dim=1, largest=False
+                )
+                local_i = local_i + j
+                merged_d = torch.cat(
+                    (group_best_d[tile_start:tile_stop], local_d), 1
+                )
+                merged_i = torch.cat(
+                    (group_best_i[tile_start:tile_stop], local_i), 1
+                )
+                next_d, selected = torch.topk(
+                    merged_d, cand, dim=1, largest=False
+                )
+                next_i = torch.gather(merged_i, 1, selected)
+                group_best_d[tile_start:tile_stop].copy_(next_d)
+                group_best_i[tile_start:tile_stop].copy_(next_i)
+                del (
+                    Qt,
+                    d2,
+                    local_d,
+                    local_i,
+                    merged_d,
+                    merged_i,
+                    next_d,
+                    next_i,
+                    selected,
+                )
+            del Xc, xnorm
+
+        for tile_start in range(0, group_rows, q_tile):
+            tile_stop = min(tile_start + q_tile, group_rows)
+            Qt = group_q[tile_start:tile_stop]
+            best_i = group_best_i[tile_start:tile_stop]
+            if hi_dim and exact:
+                flat = best_i.reshape(-1).cpu().numpy()
+                nb = torch.from_numpy(
+                    np.asarray(corpus[flat], dtype=np.float32)
+                ).to(dev).reshape(len(Qt), cand, -1)
+                ex = (nb - Qt[:, None, :]).float().pow(2).sum(2)
+                ex = torch.where(
+                    best_i >= 0, ex, torch.full_like(ex, float("inf"))
+                )
+                order = torch.sort(ex, dim=1).indices
+                best_i = torch.gather(best_i, 1, order)
+                del nb, ex, order
+            output_start = group_start + tile_start
+            out[output_start:output_start + len(Qt)] = (
+                best_i[:, :k].cpu().numpy()
+            )
+            del Qt, best_i
+        del group_q, group_best_d, group_best_i
     return out
 
 
@@ -1588,14 +1777,27 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
 
 def _label_by_centroids(Xa, centroids_by_k):
     torch, dev = _torch_scoring_device()
-    n = len(Xa); out = {}
-    for kc, C in centroids_by_k.items():
-        Ct = torch.from_numpy(np.asarray(C, dtype=np.float32)).to(dev)
-        lab = np.empty(n, dtype=np.int32)
-        for i in range(0, n, 65536):
-            xb = torch.from_numpy(np.asarray(Xa[i:i + 65536], dtype=np.float32)).to(dev)
-            lab[i:i + 65536] = torch.cdist(xb, Ct).argmin(1).cpu().numpy()
-        out[kc] = lab; del Ct
+    n = len(Xa)
+    tensors = {
+        kc: torch.from_numpy(np.asarray(C, dtype=np.float32)).to(dev)
+        for kc, C in centroids_by_k.items()
+    }
+    out = {
+        kc: np.empty(n, dtype=np.int32)
+        for kc in centroids_by_k
+    }
+    # Corpus blocks are expensive lazy int8 dequantizations at R0036 scale.
+    # Load each block once and apply every registered centroid vocabulary while
+    # it is resident instead of rereading the 150M corpus once per vocabulary.
+    for i in range(0, n, 65536):
+        xb = torch.from_numpy(
+            np.asarray(Xa[i:i + 65536], dtype=np.float32)
+        ).to(dev)
+        stop = i + len(xb)
+        for kc, Ct in tensors.items():
+            out[kc][i:stop] = torch.cdist(xb, Ct).argmin(1).cpu().numpy()
+        del xb
+    del tensors
     return out
 
 

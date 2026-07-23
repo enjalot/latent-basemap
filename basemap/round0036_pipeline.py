@@ -253,6 +253,37 @@ class RetainedRowSelector:
         self.excluded_rows = excluded
         self.row_count = int(row_count)
         self.retained_count = int(row_count - len(excluded))
+        self._compact_to_global_cache: np.ndarray | None = None
+
+    def _materialize_compact_to_global(self) -> np.ndarray:
+        """Materialize the exact retained-row order once for repeated scans.
+
+        The vectorised rank/select below is appropriate for sparse random
+        gathers, but a scale scorer asks for the same 500k compact slices many
+        times.  Repeating its binary search for every slice starves the GPU on
+        one CPU core.  A 150M-row boolean mask plus the retained int64 result
+        peaks below 1.4 GiB and the durable cache is about 1.1 GiB, well inside
+        R0036's host-memory envelope.
+        """
+        cached = self._compact_to_global_cache
+        if cached is None:
+            retained = np.ones(self.row_count, dtype=np.bool_)
+            retained[self.excluded_rows] = False
+            cached = np.flatnonzero(retained)
+            if (
+                cached.dtype != np.dtype(np.int64)
+                or len(cached) != self.retained_count
+                or (len(cached) and (
+                    cached[0] < 0
+                    or cached[-1] >= self.row_count
+                ))
+            ):
+                raise Round0036Error(
+                    "materialized retained rank/select cache is malformed"
+                )
+            cached.flags.writeable = False
+            self._compact_to_global_cache = cached
+        return cached
 
     def is_retained(self, global_rows: Any) -> np.ndarray:
         rows = np.asarray(global_rows, dtype=np.int64)
@@ -273,6 +304,15 @@ class RetainedRowSelector:
         compact = np.asarray(compact_rows, dtype=np.int64)
         if np.any(compact < 0) or np.any(compact >= self.retained_count):
             raise IndexError("compact retained-row position is out of range")
+        # Large sequential scorer tiles recur for every anchor group.  Pay the
+        # O(row_count) construction once rather than an O(log exclusions)
+        # vector search for every recurrence.  Small/random canary gathers keep
+        # the allocation-free rank/select path.
+        if (
+            self._compact_to_global_cache is not None
+            or (compact.size >= 100_000 and self.row_count >= 1_000_000)
+        ):
+            return self._materialize_compact_to_global()[compact]
         flat = compact.reshape(-1)
         low = flat.copy()
         high = flat + len(self.excluded_rows)

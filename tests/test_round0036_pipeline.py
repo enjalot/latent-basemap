@@ -326,6 +326,26 @@ def test_retained_2d_canary_never_admits_excluded_rows() -> None:
     assert result["self_excluded"] is True
 
 
+def test_large_retained_scan_materializes_exact_reusable_rank_select() -> None:
+    excluded = np.array([1, 17, 500_000, 999_999], dtype=np.int64)
+    selector = RetainedRowSelector(excluded, row_count=1_000_004)
+    compact = np.arange(100_000, 200_000, dtype=np.int64)
+
+    observed = selector.compact_to_global(compact)
+    cached = selector._compact_to_global_cache
+
+    assert cached is not None
+    assert cached.dtype == np.dtype("int64")
+    assert cached.flags.writeable is False
+    assert len(cached) == selector.retained_count
+    assert np.array_equal(observed, cached[compact])
+    assert np.all(selector.is_retained(observed))
+    assert np.array_equal(
+        selector.global_to_compact(observed),
+        compact,
+    )
+
+
 def test_retained_prefix_identity_passes_strict_hid_reference_validation() -> None:
     from basemap.panel_v2 import (
         PanelV2Config,
