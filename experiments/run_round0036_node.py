@@ -229,6 +229,41 @@ def _exact_retained_2d_slice_search(
     }
 
 
+def _retained_prefix_reference_identity(
+    retained: RetainedArrayView,
+    *,
+    global_row_interval: tuple[int, int],
+    source_identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build a strict matrix identity plus R0036 selection convention.
+
+    Panel v2 intentionally accepts only ``ordered_array`` or
+    ``ordered_shards`` as the data identity.  The selected prefix is a logical
+    array, so bind every dequantized retained value there; bind how that array
+    was derived (full source signatures, interval and selector) separately in
+    the convention that participates in the same content-addressed key.
+    """
+    start, stop = (int(value) for value in global_row_interval)
+    if start != 0 or stop - start != retained.selector.row_count:
+        raise Round0036Error("retained-prefix global interval/selector mismatch")
+    data_identity = {
+        "kind": "ordered_array",
+        "shape": [len(retained), int(retained.shape[1])],
+        "dtype": np.dtype(retained.dtype).str,
+        "sha256": ordered_array_sha256(retained),
+    }
+    convention = {
+        "row_order": "compact ascending retained rows inside global prefix",
+        "global_row_interval": [start, stop],
+        "source": dict(source_identity),
+        "selector": retained.selector.identity(),
+        "distance": "squared L2 on fp32 dequantized R0025 int8 rows",
+        "self_exclusion": True,
+        "anchor_namespace": "compact retained-row positions",
+    }
+    return {"data_identity": data_identity, "convention": convention}
+
+
 def _run_2m_scorer_parity(
     *,
     model: Any,
@@ -270,24 +305,13 @@ def _run_2m_scorer_parity(
         for key, path in CENTROIDS.items()
     }
     anchors = sample_anchors(len(retained), config).astype(np.int64)
-    data_identity = {
-        "kind": "round0036-production-prefix-selection",
-        "source": encoded.scientific_identity(),
-        "global_row_interval": [0, SCORER_CANARY_ROWS],
-        "shape": [len(retained), DIMENSION],
-        "dtype": "<f4",
-        "selector": local_selector.identity(),
-    }
-    convention = {
-        "row_order": "compact ascending retained rows inside global [0, 2M)",
-        "distance": "squared L2 on fp32 dequantized R0025 int8 rows",
-        "self_exclusion": True,
-        "anchor_namespace": "compact retained-row positions",
-    }
-    reference_identity = {
-        "data_identity": data_identity,
-        "convention": convention,
-    }
+    reference_identity = _retained_prefix_reference_identity(
+        retained,
+        global_row_interval=(0, SCORER_CANARY_ROWS),
+        source_identity=encoded.scientific_identity(),
+    )
+    data_identity = reference_identity["data_identity"]
+    convention = reference_identity["convention"]
     stage_started = time.monotonic()
     reference = build_hiD_reference(
         retained,

@@ -7,7 +7,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from basemap.artifact_identity import canonical_json, expected_input_signature, sha256_bytes
+from basemap.artifact_identity import (
+    canonical_json,
+    expected_input_signature,
+    ordered_array_sha256,
+    sha256_bytes,
+)
 from basemap.round0019_program import TRAIN_CONFIG as R0019_CONFIG
 from basemap.round0034_program import INT8_SHA256, SCALES_SHA256
 from basemap.round0036_pipeline import (
@@ -319,6 +324,58 @@ def test_retained_2d_canary_never_admits_excluded_rows() -> None:
     assert result["passed"] is True
     assert result["all_candidates_retained"] is True
     assert result["self_excluded"] is True
+
+
+def test_retained_prefix_identity_passes_strict_hid_reference_validation() -> None:
+    from basemap.panel_v2 import (
+        PanelV2Config,
+        build_hiD_reference,
+        sample_anchors,
+        validate_hiD_reference,
+    )
+
+    rng = np.random.RandomState(36)
+    base = rng.normal(size=(12, 3)).astype(np.float32)
+    selector = RetainedRowSelector(np.array([2, 7]), row_count=len(base))
+    retained = RetainedArrayView(base, selector)
+    source_identity = {
+        "kind": "ordered_array",
+        "shape": [12, 3],
+        "dtype": "<f4",
+        "sha256": ordered_array_sha256(base),
+    }
+    identity = node._retained_prefix_reference_identity(
+        retained,
+        global_row_interval=(0, 12),
+        source_identity=source_identity,
+    )
+    assert set(identity["data_identity"]) == {"kind", "shape", "dtype", "sha256"}
+    assert identity["data_identity"]["kind"] == "ordered_array"
+    assert identity["convention"]["global_row_interval"] == [0, 12]
+    assert identity["convention"]["selector"] == selector.identity()
+    assert identity["convention"]["source"] == source_identity
+
+    config = PanelV2Config(
+        frac=0.3,
+        k_hit=2,
+        k_density=2,
+        n_anchors=4,
+        anchor_seed=3,
+        corpus_chunk=5,
+        block_elems=20,
+        overselect=2,
+    )
+    anchors = sample_anchors(len(retained), config).astype(np.int64)
+    reference = build_hiD_reference(
+        retained,
+        anchors,
+        config,
+        data_identity=identity["data_identity"],
+        convention=identity["convention"],
+    )
+    assert validate_hiD_reference(reference)["key_parts"]["convention"] == (
+        identity["convention"]
+    )
 
 
 def test_production_canary_persists_failure_before_raising(
