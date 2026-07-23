@@ -260,10 +260,14 @@ def test_low_dim_work_model_removes_thousands_of_full_corpus_passes() -> None:
     work = low_dim_search_work_model()
     assert work["anchor_tile"] == 1_000
     assert work["anchor_tiles"] == 10
+    assert work["anchor_group"] == 5_000
+    assert work["corpus_passes"] == 2
+    assert work["k_fraction"] == 147_222
+    assert work["candidate_width"] == 147_223
     assert work["corpus_chunks_per_anchor_tile"] == 295
     assert work["legacy_full_corpus_anchor_tile"] == 3
     assert work["legacy_full_corpus_passes"] == 3_334
-    assert work["coordinate_bytes_total"] == 11_777_740_560
+    assert work["coordinate_bytes_total"] == 2_355_548_112
     assert work["legacy_coordinate_bytes_total"] == 3_926_698_702_704
 
 

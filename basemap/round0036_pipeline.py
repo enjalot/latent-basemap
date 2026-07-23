@@ -793,6 +793,35 @@ def low_dim_search_work_model(
     anchor_tile = max(1, min(int(anchors), int(block_elems) // chunk))
     anchor_tiles = math.ceil(int(anchors) / anchor_tile)
     corpus_chunks = math.ceil(int(rows) / chunk)
+    k_fraction = max(10, math.ceil(0.001 * int(rows)))
+    candidate_width = k_fraction + 1
+    candidate_row_bytes = candidate_width * (4 + 8)
+    distance_tile_bytes = anchor_tile * chunk * 4
+    corpus_tile_bytes = chunk * int(dimensions) * 4
+    candidate_work_bytes = anchor_tile * candidate_width * 40
+    peak_byte_cap = 26_000_000_000
+    remaining = max(
+        candidate_row_bytes * anchor_tile,
+        peak_byte_cap
+        - distance_tile_bytes
+        - corpus_tile_bytes
+        - candidate_work_bytes,
+    )
+    persistent_budget = max(
+        candidate_row_bytes * anchor_tile,
+        remaining // 2,
+    )
+    anchor_group = max(
+        anchor_tile,
+        min(int(anchors), persistent_budget // candidate_row_bytes),
+    )
+    if anchor_group > anchor_tile:
+        anchor_group = max(
+            anchor_tile,
+            (anchor_group // anchor_tile) * anchor_tile,
+        )
+    anchor_group = min(int(anchors), anchor_group)
+    corpus_passes = math.ceil(int(anchors) / anchor_group)
     coordinate_bytes_per_pass = int(rows) * int(dimensions) * 4
     legacy_anchor_tile = max(1, min(int(anchors), int(block_elems) // int(rows)))
     legacy_passes = math.ceil(int(anchors) / legacy_anchor_tile)
@@ -804,10 +833,14 @@ def low_dim_search_work_model(
         "corpus_chunk": chunk,
         "anchor_tile": anchor_tile,
         "anchor_tiles": anchor_tiles,
+        "anchor_group": anchor_group,
+        "corpus_passes": corpus_passes,
+        "k_fraction": k_fraction,
+        "candidate_width": candidate_width,
         "corpus_chunks_per_anchor_tile": corpus_chunks,
         "distance_elements": int(rows) * int(anchors),
         "coordinate_bytes_per_pass": coordinate_bytes_per_pass,
-        "coordinate_bytes_total": coordinate_bytes_per_pass * anchor_tiles,
+        "coordinate_bytes_total": coordinate_bytes_per_pass * corpus_passes,
         "legacy_full_corpus_anchor_tile": legacy_anchor_tile,
         "legacy_full_corpus_passes": legacy_passes,
         "legacy_coordinate_bytes_total": coordinate_bytes_per_pass * legacy_passes,
