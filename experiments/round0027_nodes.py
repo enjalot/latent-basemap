@@ -58,6 +58,11 @@ def _seal(body: dict[str, Any]) -> dict[str, Any]:
     return {**body, "identity_sha256": sha256_bytes(canonical_json(body))}
 
 
+def _schema(active: dict[str, Any], stem: str) -> str:
+    round_id = str(active["manifest"]["round_id"])
+    return f"round{round_id}-{stem}-v1"
+
+
 def _read_sealed(path: str) -> dict[str, Any]:
     with open(path, encoding="utf-8") as handle:
         value = json.load(handle)
@@ -196,12 +201,17 @@ def _pipeline_mismatches(stats: dict[str, Any], config: dict[str, Any]) \
     }
 
 
-def _configure_runtime(model, *, output: str, floor: float) -> None:
+def _configure_runtime(
+    model, *, output: str, floor: float, warning_rate: float | None = None
+) -> None:
     model._max_train_steps = SUCCESSFUL_UPDATES
     model._bench_warmup = 200
     model._perf_profile = True
     model._perf_floor = float(floor)
-    model._perf_warn_rate = max(float(floor), 200.0)
+    model._perf_warn_rate = max(
+        float(floor),
+        float(warning_rate if warning_rate is not None else 200.0),
+    )
     model._perf_subfloor_patience = 2
     model._abort_on_first_nonfinite = True
     model._admission_artifact_path = os.path.join(output, "admission.json")
@@ -227,8 +237,9 @@ def run_sampler_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
     model._max_train_steps = CANARY_UPDATES
     model._bench_warmup = 50
     model._perf_profile = True
-    model._perf_floor = 200.0
-    model._perf_warn_rate = 200.0
+    minimum_rate = float(job.get("minimum_updates_per_s", 200.0))
+    model._perf_floor = minimum_rate
+    model._perf_warn_rate = minimum_rate
     model._perf_subfloor_patience = 2
     model._abort_on_first_nonfinite = True
     model._admission_artifact_path = os.path.join(output, "admission.json")
@@ -292,9 +303,9 @@ def run_sampler_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
             "expected": ">=5",
             "observed": profiler.get("n_windows"),
         }
-    if rate < 200.0:
+    if rate < minimum_rate:
         mismatches["steady_updates_per_s"] = {
-            "expected": ">=200.0", "observed": rate}
+            "expected": f">={minimum_rate}", "observed": rate}
     peak_allocated = int(torch.cuda.max_memory_allocated("cuda"))
     peak_reserved = int(torch.cuda.max_memory_reserved("cuda"))
     minimum_headroom = int(1.5 * 1024 ** 3)
@@ -308,8 +319,8 @@ def run_sampler_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
     if mismatches:
         raise RuntimeError(f"Round 0027 sampler canary failed: {mismatches}")
     evidence = {
-        "schema": "round0027-mrl-sampler-canary-v1",
-        "round_id": "0027",
+        "schema": _schema(active, "mrl-sampler-canary"),
+        "round_id": str(active["manifest"]["round_id"]),
         "cell": cell["label"],
         "production_config_sha256": cell["train_config_sha256"],
         "training_performed": True,
@@ -342,12 +353,12 @@ def run_sampler_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
     evidence_path = os.path.join(output, "evidence.json")
     atomic_write_new_json(evidence_path, _seal(evidence), immutable=True)
     verdict = {
-        "schema": "round0027-mrl-sampler-canary-verdict-v1",
-        "round_id": "0027",
+        "schema": _schema(active, "mrl-sampler-canary-verdict"),
+        "round_id": str(active["manifest"]["round_id"]),
         "passed": True,
         "cell": cell["label"],
         "throwaway_optimizer_updates": CANARY_UPDATES,
-        "minimum_updates_per_s": 200.0,
+        "minimum_updates_per_s": minimum_rate,
         "observed_steady_updates_per_s": rate,
         "minimum_free_bytes": minimum_headroom,
         "observed_conservative_peak_headroom_bytes": conservative_headroom,
@@ -383,7 +394,7 @@ def run_shared_reference(active: dict[str, Any], job: dict[str, Any]) -> None:
             right_proof["payload_sha256"] != PREFIX_PAYLOAD_SHA256):
         raise RuntimeError("Round 0027 2M/4M literal-prefix identity failed")
     prefix_body = {
-        "schema": "round0027-literal-prefix-proof-v1",
+        "schema": _schema(active, "literal-prefix-proof"),
         "byte_identical": True,
         "shared_payload_sha256": PREFIX_PAYLOAD_SHA256,
         "two_million_file": left_proof,
@@ -454,8 +465,8 @@ def run_shared_reference(active: dict[str, Any], job: dict[str, Any]) -> None:
     truth_path = os.path.join(output, "oos-query-truth-k10.npz")
     save_query_truth(truth, truth_path)
     receipt = {
-        "schema": "round0027-shared-score-reference-v1",
-        "round_id": "0027",
+        "schema": _schema(active, "shared-score-reference"),
+        "round_id": str(active["manifest"]["round_id"]),
         "release_sha": active["manifest"]["release_sha"],
         "train": train_signature,
         "source_4m": source_signature,
@@ -471,7 +482,8 @@ def run_shared_reference(active: dict[str, Any], job: dict[str, Any]) -> None:
         "query_truth_key": truth["key"],
         "query_truth_payload_sha256": truth["payload_sha256"],
         "query_truth_exactness": truth["key_parts"]["policy"],
-        "shared_across_all_six_cells": True,
+        "shared_across_registered_cells": list(
+            active["manifest"]["scientific_contract"]["cells"]),
     }
     atomic_write_new_json(
         os.path.join(output, "receipt.json"), _seal(receipt), immutable=True)
@@ -502,7 +514,7 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
     atomic_write_new_json(
         os.path.join(output, "production-config.json"),
         {
-            "schema": "round0027-production-config-receipt-v1",
+            "schema": _schema(active, "production-config-receipt"),
             "cell": cell["label"],
             "config": config,
             "config_sha256": cell["train_config_sha256"],
@@ -521,7 +533,9 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
     model = _new_model(config)
     _configure_runtime(
         model, output=output,
-        floor=config["execution"]["minimum_train_upd_s"])
+        floor=config["execution"]["minimum_train_upd_s"],
+        warning_rate=config["execution"]["warning_train_upd_s"],
+    )
     started = time.monotonic()
     model.fit(
         X,
@@ -597,8 +611,8 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
     _publish_model(model, model_path)
     free_bytes, total_bytes = torch.cuda.mem_get_info("cuda")
     receipt = {
-        "schema": "round0027-train-receipt-v1",
-        "round_id": "0027",
+        "schema": _schema(active, "train-receipt"),
+        "round_id": str(active["manifest"]["round_id"]),
         "cell": cell["label"],
         "dimension": cell["dimension"],
         "seed": cell["seed"],
@@ -707,8 +721,8 @@ def run_transform(active: dict[str, Any], job: dict[str, Any]) -> None:
     atomic_save_new_npy(coordinates_path, Z, immutable=True)
     atomic_save_new_npy(queries_path, Zq, immutable=True)
     receipt = {
-        "schema": "round0027-transform-receipt-v1",
-        "round_id": "0027",
+        "schema": _schema(active, "transform-receipt"),
+        "round_id": str(active["manifest"]["round_id"]),
         "cell": cell["label"],
         "release_sha": active["manifest"]["release_sha"],
         "production_config_sha256": cell["train_config_sha256"],
@@ -788,7 +802,7 @@ def run_score(active: dict[str, Any], job: dict[str, Any]) -> None:
         hiD_reference=reference,
         scale_admission=None,
         provenance={
-            "round_id": "0027",
+            "round_id": str(active["manifest"]["round_id"]),
             "cell": cell["label"],
             "release_sha": active["manifest"]["release_sha"],
             "train_receipt": expected_input_signature(train_path),
@@ -821,8 +835,8 @@ def run_score(active: dict[str, Any], job: dict[str, Any]) -> None:
         raise RuntimeError(
             f"Round 0027 {cell['label']} numerical guards failed: {guards}")
     report = {
-        "schema": "round0027-cell-score-v1",
-        "round_id": "0027",
+        "schema": _schema(active, "cell-score"),
+        "round_id": str(active["manifest"]["round_id"]),
         "cell": cell["label"],
         "dimension": cell["dimension"],
         "seed": cell["seed"],
@@ -841,7 +855,10 @@ def run_score(active: dict[str, Any], job: dict[str, Any]) -> None:
 
 
 def _fixed_axis_render(
-    path: str, cell_outputs: dict[str, dict[str, str]]
+    path: str,
+    cell_outputs: dict[str, dict[str, str]],
+    *,
+    round_id: str = "0027",
 ) -> dict[str, Any]:
     rng = np.random.RandomState(20_260_727)
     sample_ids = np.sort(rng.choice(ROWS, 20_000, replace=False)).astype(
@@ -867,8 +884,10 @@ def _fixed_axis_render(
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        figure, axes = plt.subplots(3, 2, figsize=(10, 14))
-        for axis, label in zip(axes.flat, CELL_LABELS):
+        rows = int(np.ceil(len(CELL_LABELS) / 2))
+        figure, axes = plt.subplots(rows, 2, figsize=(10, 4.7 * rows))
+        flat_axes = list(np.atleast_1d(axes).flat)
+        for axis, label in zip(flat_axes, CELL_LABELS):
             points = samples[label]
             axis.scatter(
                 points[:, 0], points[:, 1], s=0.2, alpha=0.3,
@@ -879,7 +898,9 @@ def _fixed_axis_render(
             axis.set_aspect("equal", adjustable="box")
             axis.set_xticks([])
             axis.set_yticks([])
-        figure.suptitle("R0027 — shared sample and fixed axes")
+        for axis in flat_axes[len(CELL_LABELS):]:
+            axis.set_axis_off()
+        figure.suptitle(f"R{round_id} — shared sample and fixed axes")
         figure.tight_layout()
         figure.savefig(destination, format="png", dpi=180)
         plt.close(figure)
@@ -940,7 +961,7 @@ def run_decision(active: dict[str, Any], job: dict[str, Any]) -> None:
         for dimension in DIMENSIONS
     }
     body = {
-        "schema": "round0027-mrl-input-decision-v1",
+        "schema": _schema(active, "mrl-input-decision"),
         "round_id": "0027",
         "release_sha": active["manifest"]["release_sha"],
         "cells": cells,
