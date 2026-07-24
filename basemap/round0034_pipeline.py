@@ -102,6 +102,7 @@ def validate_eligibility_view(
     eligibility: Mapping[str, Any],
     *,
     row_count: int,
+    expected_schema: str = ELIGIBILITY_SCHEMA,
 ) -> dict[str, Any]:
     """Validate the generic result returned by R0033's released loader.
 
@@ -115,7 +116,7 @@ def validate_eligibility_view(
     if not isinstance(metadata, Mapping) or not isinstance(signature, Mapping):
         raise Round0034PipelineError("eligibility view lacks metadata/signature")
     if (
-        metadata.get("schema") != ELIGIBILITY_SCHEMA
+        metadata.get("schema") != expected_schema
         or int(metadata.get("row_count", -1)) != row_count
         or not isinstance(signature.get("sha256"), str)
         or len(signature["sha256"]) != 64
@@ -461,22 +462,29 @@ def build_canonical_graph(
     row_count: int = DEFAULT_ROWS,
     k: int = DEFAULT_K,
     block_rows: int = 131_072,
+    round_id: str = "0034",
+    eligibility_schema: str = ELIGIBILITY_SCHEMA,
+    output_label: str = "R0034 canonical graph output",
 ) -> dict[str, Any]:
-    """Stream-validate and canonicalize the historical 150M uniform graph."""
+    """Stream-validate and canonicalize a source-major uniform kNN graph."""
     if row_count <= 1 or k <= 0 or not (1 <= block_rows):
         raise ValueError("invalid canonical graph geometry")
     graph_path = os.path.realpath(graph_path)
     graph_signature = expected_input_signature(graph_path)
     if graph_signature["sha256"] != expected_graph_sha256:
-        raise Round0034PipelineError("150M graph SHA-256 changed")
-    view = validate_eligibility_view(eligibility, row_count=row_count)
+        raise Round0034PipelineError("input graph SHA-256 changed")
+    view = validate_eligibility_view(
+        eligibility,
+        row_count=row_count,
+        expected_schema=eligibility_schema,
+    )
     if _scalar_member(graph_path, "n_nodes.npy", np.dtype("<i8")) != row_count:
         raise Round0034PipelineError("graph n_nodes is not the requested universe")
     if _scalar_member(graph_path, "k.npy", np.dtype("<i8")) != k:
         raise Round0034PipelineError("graph k is not the requested fixed degree")
 
     output_root = create_fresh_directory(
-        output_root, label="R0034 canonical graph output"
+        output_root, label=output_label
     )
     target_path = os.path.join(output_root, "canonical-targets.i32")
     degree_path = os.path.join(output_root, "valid-degrees.u8")
@@ -566,7 +574,7 @@ def build_canonical_graph(
     degree_signature = expected_input_signature(degree_path)
     body = {
         "schema": GRAPH_SCHEMA,
-        "round_id": "0034",
+        "round_id": str(round_id),
         "row_count": row_count,
         "input_k": k,
         "target_dtype": np.dtype("<i4").str,
