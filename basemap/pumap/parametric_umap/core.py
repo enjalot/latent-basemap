@@ -290,6 +290,30 @@ class ParametricUMAP:
                                "fail-closed checks would run after GPU commit (L0.5).")
         self._edges_path_used = edges_path
 
+        # R0042's 30M canonical graph has no redundant source/weight arrays and
+        # needs its exact source-normalized sampler rather than generic NPZ
+        # edge sampling. Dispatch before the historical R0034 adapter and
+        # generic loading so the selected semantics remain receipt-visible.
+        prepare_round0042 = getattr(X, "prepare_round0042_training", None)
+        if callable(prepare_round0042):
+            dataset, loader, n_pos_edges, pipeline_info, verified = (
+                prepare_round0042(
+                    edges_path=edges_path,
+                    batch_size=self.batch_size,
+                    pos_ratio=self.pos_ratio,
+                    random_state=random_state,
+                    positive_target_mode=self.positive_target_mode,
+                    weighted_edge_sampling=self.weighted_edge_sampling,
+                    reject_neighbors=self.reject_neighbors,
+                    required_input_pipeline=self.required_input_pipeline,
+                )
+            )
+            self._pipeline_info = pipeline_info
+            self._pipeline_verified_hashes = verified
+            self._fast_device_path = True
+            self._X_dev = X
+            return dataset, loader, n_pos_edges
+
         # R0034's 150M feature matrix cannot be resident on CUDA and its
         # canonical graph deliberately has no redundant source/weight arrays.
         # The explicit adapter supplies the same already-on-device batch
@@ -1480,7 +1504,8 @@ class ParametricUMAP:
                 floor=float(getattr(self, "_perf_floor", 200.0)),
                 warn_rate=getattr(self, "_perf_warn_rate", None),
                 subfloor_patience=int(getattr(self, "_perf_subfloor_patience", 3)),
-                device=self.device, baseline_key=bkey)
+                device=self.device, baseline_key=bkey,
+                n_windows=int(getattr(self, "_perf_n_windows", 6)))
             self._canary_profiler = prof
         def _ph(name):
             return prof.phase(name, global_step) if prof is not None else _perf_null
