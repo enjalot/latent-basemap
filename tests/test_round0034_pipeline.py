@@ -114,6 +114,9 @@ def test_canonical_graph_streams_source_weight_validation_and_destination_policy
     assert result["summary"]["retained_positive_source_count"] == int(
         np.count_nonzero(degrees)
     )
+    assert result["negative_policy"] == (
+        "uniform-eligibility-retained-rows-nonself"
+    )
     for name in ("canonical-targets.i32", "valid-degrees.u8",
                  "canonical-graph-v1.json"):
         assert os.stat(tmp_path / "canonical" / name).st_mode & 0o222 == 0

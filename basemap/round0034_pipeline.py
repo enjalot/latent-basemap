@@ -592,7 +592,7 @@ def build_canonical_graph(
             "map exact duplicate copies to representative; drop zero/self/repeated "
             "canonical target per source"
         ),
-        "negative_policy": "uniform-R0033-retained-rows-nonself",
+        "negative_policy": "uniform-eligibility-retained-rows-nonself",
         "inputs": {
             "graph": graph_signature,
             "eligibility": view["signature"],
