@@ -53,6 +53,10 @@ from basemap.round0027_program import (
     x_only_row_ceiling,
 )
 
+# Successors can reuse this reviewed handler while explicitly selecting their
+# own largest-input control cell.  The R0027 default remains unchanged.
+CANARY_CELL_LABEL = "d768_s42"
+
 
 def _seal(body: dict[str, Any]) -> dict[str, Any]:
     return {**body, "identity_sha256": sha256_bytes(canonical_json(body))}
@@ -219,7 +223,7 @@ def _configure_runtime(
 
 def run_sampler_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
     cell = validate_job_cell(job)
-    if cell["label"] != "d768_s42":
+    if cell["label"] != CANARY_CELL_LABEL:
         raise RuntimeError("Round 0027 canary must use the largest control input")
     output = create_fresh_directory(
         job["outputs"][0], label="Round 0027 canary output")

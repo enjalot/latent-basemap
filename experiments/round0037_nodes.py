@@ -22,6 +22,7 @@ def _configure_inherited_handlers() -> None:
     inherited.CELL_LABELS = CELL_LABELS
     inherited.validate_job_cell = validate_job_cell
     inherited.parse_cell = parse_cell
+    inherited.CANARY_CELL_LABEL = "d768_s42"
 
 
 def run_sampler_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
