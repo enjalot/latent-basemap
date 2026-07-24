@@ -77,9 +77,10 @@ def prepare_round0041(release_sha: str) -> str:
         execution_authority="autonomous-cpu",
         gpu=False,
     )
-    manifest["required_reviews"] = ["0020", "0021", "0030"]
+    manifest["required_reviews"] = ["0020", "0021", "0030", "0040"]
     manifest["capability_dependencies"] = [
         "30m-duplicate-census-v1",
+        "duplicate-controlled-panel-v1",
     ]
     manifest["capabilities_produced"] = [
         "30m-canonical-source-major-graph-v1",
