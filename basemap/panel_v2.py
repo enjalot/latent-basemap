@@ -1617,6 +1617,62 @@ def _require_score_panel_scale_admission(X, scale_admission):
             raise RuntimeError(
                 "Round 0036 retained scale view carries its own exact identity")
         return identity
+    # Generic representative-only scoring keeps one exact vector per family
+    # while preserving a sealed selector back to the full row-aligned source.
+    # This is a different scientific universe from the R0033-specific 150M
+    # adapter above, so validate its own schema rather than borrowing that
+    # round's selection label.
+    if getattr(X, "representative_row_view", False):
+        identity = X.scale_admission_identity()
+        body = {
+            key: value for key, value in identity.items()
+            if key != "identity_sha256"
+        }
+        selector = identity.get("selector") or {}
+        base = identity.get("base")
+        source = selector.get("source")
+        selector_rows = selector.get("row_count")
+        representative_rows = selector.get("representative_count")
+        excluded_rows = selector.get("excluded_count")
+        if (
+            identity.get("schema") != "representative-row-scale-input-v1"
+            or identity.get("identity_sha256")
+            != sha256_bytes(canonical_json(body))
+            or identity.get("row_count") != rows
+            or selector.get("schema") != "representative-row-selector-v1"
+            or not isinstance(selector_rows, int)
+            or isinstance(selector_rows, bool)
+            or not isinstance(representative_rows, int)
+            or isinstance(representative_rows, bool)
+            or not isinstance(excluded_rows, int)
+            or isinstance(excluded_rows, bool)
+            or representative_rows != rows
+            or selector_rows - excluded_rows != rows
+            or not _valid_sha256(selector.get("excluded_rows_sha256"))
+            or not isinstance(selector.get("policy"), str)
+            or not selector["policy"]
+            or not isinstance(source, dict)
+            or source.get("kind") != "file"
+            or not isinstance(source.get("bytes"), int)
+            or isinstance(source.get("bytes"), bool)
+            or source["bytes"] <= 0
+            or not _valid_sha256(source.get("sha256"))
+            or not isinstance(base, dict)
+            or base.get("kind") != "ordered_shards"
+            or base.get("shape") != [
+                selector_rows, identity.get("dimensions")
+            ]
+            or not isinstance(base.get("shards"), list)
+            or not base["shards"]
+        ):
+            raise RuntimeError(
+                "representative-row scale-input identity is invalid"
+            )
+        if scale_admission is not None:
+            raise RuntimeError(
+                "representative-row scale view carries its own exact identity"
+            )
+        return identity
     required = {"performance_gate", "release_sha", "row_derivation", "scale_policy"}
     if not isinstance(scale_admission, dict) or set(scale_admission) != required:
         raise RuntimeError(
