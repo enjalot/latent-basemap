@@ -293,6 +293,10 @@ def _tail_receipt(
     contributing.sort(
         key=lambda item: (-item["outside_rows"], item["representative_row"])
     )
+    excluded_outside = int(np.count_nonzero(~retained))
+    excluded_fraction = (
+        excluded_outside / len(outside) if len(outside) else 0.0
+    )
     return {
         "registered_fixed_axis_bounds": {
             "xlim": [float(value) for value in xlim],
@@ -301,8 +305,12 @@ def _tail_receipt(
         "full_rows_outside": int(len(outside)),
         "full_outside_row_ids_sha256": ordered_array_sha256(outside),
         "representatives_outside": int(np.count_nonzero(retained)),
-        "excluded_duplicate_or_invalid_rows_outside": int(
-            np.count_nonzero(~retained)
+        "excluded_duplicate_or_invalid_rows_outside": excluded_outside,
+        "excluded_fraction_of_outside": excluded_fraction,
+        "classification": (
+            "duplicate-dominated"
+            if len(outside) and excluded_fraction >= 0.90
+            else "mixed-or-representative"
         ),
         "unique_exact_vectors_outside": unique_vectors,
         "contributing_exact_families": contributing,
