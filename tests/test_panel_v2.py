@@ -102,6 +102,87 @@ def test_hi_knn_candidate_recall_vs_fp64_measured():
     assert mean_recall >= 0.98, f"measured top-15 recall vs fp64 = {mean_recall}"
 
 
+def test_self_knn_reuses_each_corpus_chunk_across_anchor_tiles():
+    class CountingArray:
+        def __init__(self, values):
+            self.values = values
+            self.shape = values.shape
+            self.dtype = values.dtype
+            self.corpus_slices = []
+
+        def __len__(self):
+            return len(self.values)
+
+        def __getitem__(self, key):
+            if isinstance(key, slice):
+                self.corpus_slices.append((key.start, key.stop, key.step))
+            return self.values[key]
+
+    rng = np.random.RandomState(81)
+    values = rng.normal(size=(60, 8)).astype(np.float32)
+    counted = CountingArray(values)
+    anchors = np.array([0, 7, 13, 28, 44, 59], dtype=np.int64)
+    # cchunk=10 and block_elems=20 make the registered distance tile two
+    # anchors wide. Corpus-outer traversal should still read six corpus chunks
+    # once, rather than once for each of the three anchor tiles.
+    cfg = pv.PanelV2Config(
+        corpus_chunk=10,
+        block_elems=20,
+        peak_byte_cap=1_000_000,
+    )
+
+    observed, _, _ = pv._self_knn(
+        counted, anchors, 3, cfg, hi_dim=True, exact=False
+    )
+    expected, _, _ = pv._self_knn(
+        values, anchors, 3, cfg, hi_dim=True, exact=False
+    )
+
+    assert np.array_equal(observed, expected)
+    assert counted.corpus_slices == [
+        (start, start + 10, None) for start in range(0, 60, 10)
+    ]
+
+
+def test_cross_knn_reuses_each_corpus_chunk_across_query_tiles():
+    class CountingArray:
+        def __init__(self, values):
+            self.values = values
+            self.shape = values.shape
+            self.dtype = values.dtype
+            self.corpus_slices = []
+
+        def __len__(self):
+            return len(self.values)
+
+        def __getitem__(self, key):
+            if isinstance(key, slice):
+                self.corpus_slices.append((key.start, key.stop, key.step))
+            return self.values[key]
+
+    rng = np.random.RandomState(82)
+    values = rng.normal(size=(60, 8)).astype(np.float32)
+    queries = rng.normal(size=(6, 8)).astype(np.float32)
+    counted = CountingArray(values)
+    cfg = pv.PanelV2Config(
+        corpus_chunk=10,
+        block_elems=20,
+        peak_byte_cap=1_000_000,
+    )
+
+    observed = pv.cross_knn(
+        queries, counted, 3, cfg, hi_dim=True, q_tile=6, exact=False
+    )
+    expected = pv.cross_knn(
+        queries, values, 3, cfg, hi_dim=True, q_tile=6, exact=False
+    )
+
+    assert np.array_equal(observed, expected)
+    assert counted.corpus_slices == [
+        (start, start + 10, None) for start in range(0, 60, 10)
+    ]
+
+
 def test_p2_ffr_id_path_exact_beats_fast_at_boundary():
     # P2: the FFR high-D truth path (exact=True) must match fp64 top-k_hit even
     # at a near-duplicate top-10 boundary where the fast expansion (exact=False)
