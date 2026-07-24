@@ -234,6 +234,24 @@ def configure_round0030(*, job: dict[str, Any] | None = None,
     NODES = program.NODES
 
 
+def configure_round0039(*, job: dict[str, Any] | None = None,
+                        manifest: dict[str, Any] | None = None) -> None:
+    """Select one uniform 30M update-budget arm for the R0039 diagnostic."""
+    global ROUND_ID, ROUND_LABEL, SCHEMA_PREFIX, RUNTIME_SCRIPT, GRAPH_PATH
+    global RoundMaterializedArray, TRAIN_CONFIG, TRAIN_CONFIG_SHA256, NODES
+    program = importlib.import_module("basemap.round0039_program")
+    cell = program.arm_from_job(job or {})
+    ROUND_ID = "0039"
+    ROUND_LABEL = f"Round 0039 {cell['arm']}"
+    SCHEMA_PREFIX = f"round0039-{cell['arm']}"
+    RUNTIME_SCRIPT = "experiments/run_round0014_node.py"
+    GRAPH_PATH = program.GRAPH_PATH
+    RoundMaterializedArray = program.Round0039MaterializedArray
+    TRAIN_CONFIG = cell["train_config"]
+    TRAIN_CONFIG_SHA256 = cell["train_config_sha256"]
+    NODES = program.NODES
+
+
 def _run_round0020_duplicate_census(active: dict[str, Any], job: dict[str, Any]) -> None:
     output = job["outputs"][0]
     configure_round0019()
@@ -906,6 +924,13 @@ def _publish_model(model, path: str) -> None:
         os.unlink(temporary)
 
 
+def _successful_update_horizon() -> int:
+    horizon = int(TRAIN_CONFIG["optimizer"]["successful_positive_lr_updates"])
+    if horizon <= 0:
+        raise RuntimeError(f"{ROUND_LABEL} update horizon must be positive")
+    return horizon
+
+
 def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
     canary = job.get("canary_output") or active["manifest"]["jobs"][0]["outputs"][0]
     with open(os.path.join(canary, "verdict.json"), encoding="utf-8") as handle:
@@ -919,8 +944,11 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
         and isinstance(evidence, dict)
         and expected_input_signature(evidence.get("canonical_path", "")) == evidence
     )
-    if ROUND_ID == "0030":
-        arm = TRAIN_CONFIG["execution"]["round0030_sampling_arm"]
+    if ROUND_ID in {"0030", "0039"}:
+        arm = TRAIN_CONFIG["execution"].get(
+            "round0039_budget_arm",
+            TRAIN_CONFIG["execution"].get("round0030_sampling_arm"),
+        )
         arm_canary = verdict.get("arms", {}).get(arm, {})
         expected_stamp = TRAIN_CONFIG["execution"]["expected_pipeline_stamp"]
         canary_ok = bool(
@@ -951,7 +979,8 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
     np.random.seed(42); torch.manual_seed(42); torch.cuda.manual_seed_all(42)
     X = RoundMaterializedArray()
     pumap = _new_exact_model()
-    pumap._max_train_steps = 500_000
+    update_horizon = _successful_update_horizon()
+    pumap._max_train_steps = update_horizon
     pumap._bench_warmup = 200
     pumap._perf_profile = True
     cell = _capacity_ladder_cell() or {}
@@ -980,12 +1009,12 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
         "amp_dtype": ("bfloat16" if requested_amp == "bf16" else
                       ("float16" if requested_amp else None)),
         "schedule_version": "cosine-v3-positive-budget",
-        "lr_horizon": 500_000,
-        "positive_lr_optimizer_steps": 500_000,
-        "scheduler_steps": 500_000,
-        "attempted_batches": 500_000 + amp_skips,
-        "finite_loss_batches": 500_000 + amp_skips,
-        "optimizer_steps_succeeded": 500_000,
+        "lr_horizon": update_horizon,
+        "positive_lr_optimizer_steps": update_horizon,
+        "scheduler_steps": update_horizon,
+        "attempted_batches": update_horizon + amp_skips,
+        "finite_loss_batches": update_horizon + amp_skips,
+        "optimizer_steps_succeeded": update_horizon,
         "stop_reason": "lr_horizon",
         "budget_satisfied": True,
         "pipeline_pipeline": "device_uniform",
@@ -1037,16 +1066,16 @@ def _run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
             mismatches[key] = {"expected": 0, "observed": stats.get(key)}
     attempted_steps = stats.get("optimizer_steps_attempted")
     if (not isinstance(attempted_steps, int) or
-            not 500_000 <= attempted_steps <= 500_000 + amp_skips):
+            not update_horizon <= attempted_steps <= update_horizon + amp_skips):
         mismatches["optimizer_steps_attempted"] = {
-            "expected": f"500000..{500_000 + amp_skips}",
+            "expected": f"{update_horizon}..{update_horizon + amp_skips}",
             "observed": attempted_steps}
     for key in ("lr_used_first", "lr_used_last", "first_lr", "final_lr"):
         if not isinstance(stats.get(key), (int, float)) or stats[key] <= 0:
             mismatches[key] = {
                 "expected": "finite positive LR", "observed": stats.get(key)}
     expected_graph_sha = TRAIN_CONFIG["graph"].get("sha256")
-    if ROUND_ID == "0030" and stats.get("verified_hashes", {}).get(
+    if ROUND_ID in {"0030", "0039"} and stats.get("verified_hashes", {}).get(
             "graph_sha256") != expected_graph_sha:
         mismatches["verified_graph_sha256"] = {
             "expected": expected_graph_sha,
