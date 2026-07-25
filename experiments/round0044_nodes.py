@@ -1,4 +1,4 @@
-"""Fresh-process handler for the R0044/R0045 graph-candidate quality sweep."""
+"""Fresh-process handler for the R0044/R0045/R0047 candidate sweeps."""
 from __future__ import annotations
 
 import json
@@ -24,6 +24,8 @@ from experiments.round0029_program import ordered_embedding_paths
 
 ROUND_ID = "0044"
 FOLLOWUP_ROUND_ID = "0045"
+CORRECTION_ROUND_ID = "0047"
+CORRECTED_MEMBER_INDICES = (0, 10, 20)
 INDEX_PATH = "/data/checkpoints/pumap/faiss_ivf_pq_3m.index"
 INDEX_SHA256 = (
     "72be184fd0720c6749204820f661affdbac62a69f4332a1ece2fec6bb2ab7590"
@@ -47,6 +49,18 @@ MEAN_RECALL_FLOOR = 0.90
 
 class Round0044Error(RuntimeError):
     """R0044 contract or execution failure."""
+
+
+def _embedding_member_indices(round_id: str) -> tuple[int, ...]:
+    """Return the historical or corrected compact 3M row layout.
+
+    The 30M input pack is ordered as ten 1M shards for each of FineWeb,
+    RedPajama, and Pile.  The 3M IVF-PQ index is the balanced first-million
+    layout, not the first three contiguous FineWeb shards used by R0031/44/45.
+    """
+    if str(round_id) == CORRECTION_ROUND_ID:
+        return CORRECTED_MEMBER_INDICES
+    return (0, 1, 2)
 
 
 def _seal(body: dict[str, Any]) -> dict[str, Any]:
@@ -539,6 +553,8 @@ def run_candidate_sweep(
         ),
     )
     total_started = time.monotonic()
+    round_id = str(active["manifest"]["round_id"])
+    corrected_layout = round_id == CORRECTION_ROUND_ID
     signatures = {
         "index": expected_input_signature(INDEX_PATH),
         "r0031_measurement": expected_input_signature(R0031_MEASUREMENT),
@@ -561,7 +577,9 @@ def run_candidate_sweep(
         raise Round0044Error("R0031 comparison contract changed")
 
     load_started = time.monotonic()
-    paths = ordered_embedding_paths()[:3]
+    all_paths = ordered_embedding_paths()
+    member_indices = _embedding_member_indices(round_id)
+    paths = [all_paths[index] for index in member_indices]
     embeddings = ShardedEmbeddings(paths, expected_dim=384)
     if len(embeddings) != N_BASE:
         raise Round0044Error("candidate-quality embedding universe is not 3M")
@@ -588,6 +606,18 @@ def run_candidate_sweep(
         or int(index.pq.nbits) != 8
     ):
         raise Round0044Error("accepted IVF-PQ index geometry changed")
+    index.nprobe = 64
+    self_started = time.monotonic()
+    _, self_candidates = index.search(queries, 2)
+    self_search_seconds = time.monotonic() - self_started
+    self_top1_fraction = float(
+        np.mean(self_candidates[:, 0] == sample)
+    )
+    self_top2_fraction = float(
+        np.mean(
+            np.any(self_candidates == sample[:, None], axis=1)
+        )
+    )
     assignment_started = time.monotonic()
     assignments, list_sizes = _extract_list_assignments(index)
     assignment_seconds = time.monotonic() - assignment_started
@@ -677,7 +707,6 @@ def run_candidate_sweep(
         ),
     }
     checks = {
-        "r0031_reproduced": all(reproduction.values()),
         "all_rows_have_one_ivf_list": True,
         "query_own_list_is_top_two_centroids_at_least_0_99": (
             float(np.mean(own_ranks <= 1)) >= 0.99
@@ -695,13 +724,28 @@ def run_candidate_sweep(
         ),
         "no_training_performed": True,
     }
+    if corrected_layout:
+        checks.update({
+            "balanced_member_layout_is_0_10_20": (
+                member_indices == CORRECTED_MEMBER_INDICES
+            ),
+            "query_self_is_ivfpq_top_two_at_least_0_99": (
+                self_top2_fraction >= 0.99
+            ),
+        })
+    else:
+        checks["r0031_reproduced"] = all(reproduction.values())
     failed_checks = sorted(
         key for key, value in checks.items() if value is not True
     )
 
     body = {
-        "schema": "round0044-candidate-quality-sweep-v1",
-        "round_id": active["manifest"]["round_id"],
+        "schema": (
+            "round0047-balanced-candidate-quality-sweep-v1"
+            if corrected_layout
+            else "round0044-candidate-quality-sweep-v1"
+        ),
+        "round_id": round_id,
         "release_sha": active["manifest"]["release_sha"],
         "scientific_status": (
             "valid" if not failed_checks else "validity-check-failed"
@@ -712,6 +756,7 @@ def run_candidate_sweep(
         "optimizer_updates": 0,
         "inputs": {
             **signatures,
+            "embedding_member_indices": list(member_indices),
             "embedding_members": [
                 expected_input_signature(path) for path in paths
             ],
@@ -728,6 +773,11 @@ def run_candidate_sweep(
                 8,
             ),
             "unambiguous_queries": int((~ties).sum()),
+            "compact_row_layout": (
+                "fineweb[0:1m]|redpajama[0:1m]|pile[0:1m]"
+                if corrected_layout
+                else "historical-first-three-30m-members"
+            ),
         },
         "index": {
             "type": type(index).__name__,
@@ -746,6 +796,14 @@ def run_candidate_sweep(
                 float(np.mean(own_ranks <= 1)),
                 8,
             ),
+            "query_self_ivfpq_top1_fraction": round(
+                self_top1_fraction,
+                8,
+            ),
+            "query_self_ivfpq_top2_fraction": round(
+                self_top2_fraction,
+                8,
+            ),
         },
         "coarse_cell_oracle": coarse,
         "ivfpq_shortlist_coverage": pq,
@@ -753,6 +811,9 @@ def run_candidate_sweep(
         "decision": _choose_candidate_policy(coarse, pq),
         "r0031_reproduction": reproduction,
         "r0031_reproduction_observed": r0031_observed,
+        "r0031_reproduction_is_historical_comparator_only": (
+            corrected_layout
+        ),
         "checks": checks,
         "performance": {
             "load_seconds": round(load_seconds, 4),
@@ -761,6 +822,10 @@ def run_candidate_sweep(
             "coarse_oracle_seconds": round(coarse_seconds, 4),
             "r0031_reproduction_search_seconds": round(
                 r0031_search_seconds,
+                4,
+            ),
+            "self_alignment_search_seconds": round(
+                self_search_seconds,
                 4,
             ),
             "pq_search_seconds_by_nprobe": {
@@ -795,7 +860,10 @@ def run_job(
     if active.get("manifest", {}).get("round_id") not in {
         ROUND_ID,
         FOLLOWUP_ROUND_ID,
+        CORRECTION_ROUND_ID,
     }:
+        # Retain the historical message because R0045's sealed regression
+        # fixture asserts it; the allowlist above is the execution authority.
         raise Round0044Error("R0044/R0045 handler received another queue")
     selected = job if job is not None else active.get("job") or {}
     if (
