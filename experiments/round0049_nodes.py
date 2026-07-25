@@ -54,8 +54,14 @@ SUBSTRATE_SCHEMA = "round0049-balanced-60m-substrate-v1"
 GRAPH_RECEIPT_SCHEMA = "round0049-balanced-60m-graph-receipt-v1"
 QUALITY_RECEIPT_SCHEMA = "round0049-balanced-60m-candidate-quality-v1"
 DEFAULT_NPROBE = 16
-SEARCH_WIDTH = 32
+# R0047 established the smallest accepted policy as an nprobe-64 IVF-PQ
+# shortlist of 128 retained, nonself rows followed by exact-vector reranking.
+# Request one extra index row because the query itself is eligible at search
+# time and is returned for almost every query.
+SEARCH_WIDTH = 128
+INDEX_SEARCH_WIDTH = SEARCH_WIDTH + 1
 SEARCH_BATCH_ROWS = 10_000
+RERANK_BATCH_ROWS = 512
 SHARD_ROWS = 100_000
 DEFAULT_THREADS = 24
 QUALITY_SAMPLE_ROWS = 1_024
@@ -266,6 +272,7 @@ def _clean_search(
     raw: np.ndarray,
     *,
     global_sources: np.ndarray,
+    candidate_count: int = K,
     source_rows: int = SOURCE_ROWS,
     global_to_compact_fn=global_to_compact,
 ) -> tuple[np.ndarray, int]:
@@ -278,16 +285,21 @@ def _clean_search(
         & (candidates < source_rows)
         & (candidates != sources[:, None])
     )
+    if candidate_count < K or candidate_count > candidates.shape[1]:
+        raise Round0049Error("requested clean candidate width is invalid")
     counts = valid.sum(axis=1)
-    if np.any(counts < K):
-        row = int(np.flatnonzero(counts < K)[0])
+    if np.any(counts < candidate_count):
+        row = int(np.flatnonzero(counts < candidate_count)[0])
         raise Round0049Error(
             f"query {int(sources[row])} returned only "
             f"{int(counts[row])} eligible nonself candidates"
         )
     ranks = np.cumsum(valid, axis=1)
-    selected = valid & (ranks <= K)
-    cleaned = candidates[selected].reshape(len(sources), K)
+    selected = valid & (ranks <= candidate_count)
+    cleaned = candidates[selected].reshape(
+        len(sources),
+        candidate_count,
+    )
     compact = global_to_compact_fn(cleaned)
     if (
         np.any(compact < 0)
@@ -305,6 +317,117 @@ def _clean_search(
         )
     )
     return compact.astype(np.int32, copy=False), self_seen
+
+
+def _exact_rerank_shortlist(
+    *,
+    queries: np.ndarray,
+    shortlist: np.ndarray,
+    encoded: np.ndarray,
+    scales: np.ndarray,
+    k: int = K,
+    batch_rows: int = RERANK_BATCH_ROWS,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Rerank compact candidate IDs by exact dequantized cosine.
+
+    Each row's fp16 scale is a positive scalar, so it cancels exactly during
+    cosine normalization.  We still validate those registered scales and
+    score the underlying int8 vector in float32.  Stable sorting makes equal
+    scores deterministic in the IVF-PQ shortlist order.
+    """
+    query = np.asarray(queries, dtype=np.float32)
+    candidates = np.asarray(shortlist, dtype=np.int64)
+    if (
+        query.ndim != 2
+        or candidates.ndim != 2
+        or len(query) != len(candidates)
+        or query.shape[1] != DIMENSION
+        or candidates.shape[1] < k
+        or k <= 0
+        or batch_rows <= 0
+        or np.any(candidates < 0)
+        or np.any(
+            np.diff(np.sort(candidates, axis=1), axis=1) == 0
+        )
+    ):
+        raise Round0049Error("exact-rerank inputs have invalid geometry")
+    query_norms = np.linalg.norm(query, axis=1)
+    if (
+        not np.isfinite(query).all()
+        or not np.isfinite(query_norms).all()
+        or np.any(np.abs(query_norms - 1.0) > 2e-4)
+    ):
+        raise Round0049Error("exact-rerank queries are not unit vectors")
+
+    output = np.empty((len(query), k), dtype="<i4")
+    started = time.monotonic()
+    for start in range(0, len(query), batch_rows):
+        stop = min(start + batch_rows, len(query))
+        ids = candidates[start:stop]
+        candidate_scales = np.asarray(scales[ids], dtype=np.float32)
+        vectors = np.asarray(encoded[ids], dtype=np.float32)
+        norms = np.linalg.norm(vectors, axis=2)
+        if (
+            not np.isfinite(candidate_scales).all()
+            or np.any(candidate_scales <= 0)
+            or not np.isfinite(vectors).all()
+            or not np.isfinite(norms).all()
+            or np.any(norms <= 0)
+        ):
+            raise Round0049Error(
+                "exact-rerank candidate vectors are invalid"
+            )
+        scores = np.einsum(
+            "bd,bkd->bk",
+            query[start:stop],
+            vectors,
+            optimize=True,
+        )
+        scores /= norms
+        order = np.argsort(
+            -scores,
+            axis=1,
+            kind="stable",
+        )[:, :k]
+        output[start:stop] = np.take_along_axis(
+            ids,
+            order,
+            axis=1,
+        )
+    if (
+        np.any(output < 0)
+        or np.any(np.diff(np.sort(output, axis=1), axis=1) == 0)
+    ):
+        raise Round0049Error("exact-rerank output is malformed")
+    return output, {
+        "wall_seconds": time.monotonic() - started,
+        "shortlist_width": int(candidates.shape[1]),
+        "selected_neighbors": int(k),
+        "batch_rows": int(batch_rows),
+        "score_dtype": "float32",
+        "vector_source": "int8-plus-fp16-scale;scale-cancels-in-cosine",
+        "tie_policy": "stable-ivfpq-shortlist-order",
+    }
+
+
+def _warm_page_cache(path: str) -> dict[str, Any]:
+    """Synchronously populate the page cache before random rerank gathers."""
+    started = time.monotonic()
+    buffer = bytearray(64 * 1024 * 1024)
+    observed = 0
+    with open(path, "rb", buffering=0) as handle:
+        while True:
+            count = handle.readinto(buffer)
+            if not count:
+                break
+            observed += count
+    signature = expected_input_signature(path)
+    if observed != signature["bytes"]:
+        raise Round0049Error("short read while warming rerank substrate")
+    return {
+        "bytes": observed,
+        "wall_seconds": time.monotonic() - started,
+    }
 
 
 def _shard_paths(root: str, shard: int) -> tuple[str, str]:
@@ -335,7 +458,7 @@ def _validate_shard(
     }
     signature = expected_input_signature(target_path)
     if (
-        receipt.get("schema") != "round0049-graph-shard-v1"
+        receipt.get("schema") != "round0049-exact-rerank-graph-shard-v2"
         or receipt.get("identity_sha256")
         != sha256_bytes(canonical_json(body))
         or receipt.get("round_id") != round_id
@@ -384,6 +507,7 @@ def _write_shard(
     ]
     self_seen = 0
     search_seconds = 0.0
+    rerank_seconds = 0.0
     for batch_start in range(0, len(retained), SEARCH_BATCH_ROWS):
         batch_rows = retained[
             batch_start:batch_start + SEARCH_BATCH_ROWS
@@ -404,16 +528,24 @@ def _write_shard(
         search_started = time.monotonic()
         _distances, raw = index.search(
             np.ascontiguousarray(query),
-            SEARCH_WIDTH,
+            INDEX_SEARCH_WIDTH,
             params=parameters,
         )
         search_seconds += time.monotonic() - search_started
-        cleaned, seen = _clean_search(
+        shortlist, seen = _clean_search(
             raw,
             global_sources=global_rows,
+            candidate_count=SEARCH_WIDTH,
         )
+        selected, rerank = _exact_rerank_shortlist(
+            queries=query,
+            shortlist=shortlist,
+            encoded=encoded,
+            scales=scales,
+        )
+        rerank_seconds += float(rerank["wall_seconds"])
         self_seen += seen
-        targets[batch_rows - start] = cleaned
+        targets[batch_rows - start] = selected
     if (
         np.any(targets[~_membership(
             excluded,
@@ -426,7 +558,7 @@ def _write_shard(
         raise Round0049Error("graph shard retained/excluded rows disagree")
     atomic_save_new_npy(target_path, targets, immutable=True)
     body = {
-        "schema": "round0049-graph-shard-v1",
+        "schema": "round0049-exact-rerank-graph-shard-v2",
         "round_id": round_id,
         "shard": shard,
         "start": start,
@@ -436,8 +568,12 @@ def _write_shard(
         "valid_edges": len(retained) * K,
         "nprobe": nprobe,
         "search_width": SEARCH_WIDTH,
+        "index_search_width": INDEX_SEARCH_WIDTH,
+        "selected_neighbors": K,
+        "exact_rerank": True,
         "self_returned": self_seen,
         "search_seconds": search_seconds,
+        "rerank_seconds": rerank_seconds,
         "wall_seconds": time.monotonic() - started,
         "targets": expected_input_signature(target_path),
     }
@@ -711,16 +847,23 @@ def run_validate_candidate_quality(
     search_started = time.monotonic()
     _distances, raw = index.search(
         np.ascontiguousarray(queries),
-        SEARCH_WIDTH,
+        INDEX_SEARCH_WIDTH,
         params=parameters,
     )
     search_seconds = time.monotonic() - search_started
-    approximate, self_seen = _clean_search(
+    shortlist, self_seen = _clean_search(
         raw,
         global_sources=compact_to_global(sample),
+        candidate_count=SEARCH_WIDTH,
+    )
+    selected, rerank_performance = _exact_rerank_shortlist(
+        queries=queries,
+        shortlist=shortlist,
+        encoded=encoded,
+        scales=scales,
     )
     overlap = (
-        approximate[:, :, None] == exact[:, None, :]
+        selected[:, :, None] == exact[:, None, :]
     ).any(axis=2).sum(axis=1) / K
     unambiguous = ~ties
     if not np.any(unambiguous):
@@ -739,8 +882,11 @@ def run_validate_candidate_quality(
         "mean_recall_at_15_unambiguous_at_least_0_90": (
             clear_mean >= MEAN_RECALL_FLOOR
         ),
-        "all_approximate_candidates_are_representatives": (
-            not np.any(_membership(excluded, approximate))
+        "all_shortlist_candidates_are_representatives": (
+            not np.any(_membership(excluded, shortlist))
+        ),
+        "all_selected_candidates_are_representatives": (
+            not np.any(_membership(excluded, selected))
         ),
         "no_training_performed": True,
     }
@@ -773,8 +919,12 @@ def run_validate_candidate_quality(
             "pq_nbits": 8,
             "nprobe": nprobe,
             "search_width": SEARCH_WIDTH,
+            "index_search_width": INDEX_SEARCH_WIDTH,
             "selected_neighbors": K,
-            "exact_rerank": False,
+            "exact_rerank": True,
+            "rerank_vector_source": (
+                "balanced-subset int8-plus-fp16-scale exact cosine"
+            ),
             "native_representative_selector": True,
         },
         "recall": {
@@ -789,6 +939,7 @@ def run_validate_candidate_quality(
         "performance": {
             "exact_truth": exact_performance,
             "ivfpq_search_seconds": search_seconds,
+            "exact_rerank": rerank_performance,
             "peak_rss_gib": (
                 resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
                 / (1024 ** 2)
@@ -1014,6 +1165,17 @@ def run_build_graph(
             )
         )
         != nprobe
+        or int(
+            quality.get("candidate_generator", {}).get(
+                "search_width",
+                -1,
+            )
+        )
+        != SEARCH_WIDTH
+        or quality.get("candidate_generator", {}).get(
+            "exact_rerank"
+        )
+        is not True
         or float(
             quality.get("recall", {}).get(
                 "mean_recall_at_15_unambiguous",
@@ -1035,10 +1197,15 @@ def run_build_graph(
         "quality_validation_receipt": quality_signature,
         "nprobe": nprobe,
         "search_width": SEARCH_WIDTH,
+        "index_search_width": INDEX_SEARCH_WIDTH,
+        "exact_rerank": True,
         "k": K,
         "shard_rows": SHARD_ROWS,
         "search_batch_rows": SEARCH_BATCH_ROWS,
         "cpu_threads": threads,
+        "rerank_page_cache_policy": (
+            "synchronous-sequential-read-before-random-gathers"
+        ),
         "candidate_universe": (
             "balanced intervals AND NOT within-subset zero/duplicate copies"
         ),
@@ -1047,6 +1214,15 @@ def run_build_graph(
         output,
         contract=contract,
     )
+    started = time.monotonic()
+    page_cache_warm = {
+        "int8": _warm_page_cache(
+            outputs["int8"]["canonical_path"]
+        ),
+        "scales": _warm_page_cache(
+            outputs["scales"]["canonical_path"]
+        ),
+    }
     encoded = np.memmap(
         outputs["int8"]["canonical_path"],
         dtype=np.int8,
@@ -1079,7 +1255,6 @@ def run_build_graph(
         or int(index.pq.nbits) != 8
     ):
         raise Round0049Error("registered 150M IVF-PQ geometry changed")
-    started = time.monotonic()
     resumed = 0
     shard_receipts: list[dict[str, Any]] = []
     for shard, start in enumerate(range(0, ROW_COUNT, SHARD_ROWS)):
@@ -1119,6 +1294,10 @@ def run_build_graph(
     retained = ROW_COUNT - len(excluded)
     search_seconds = sum(
         float(value["search_seconds"])
+        for value in shard_receipts
+    )
+    rerank_seconds = sum(
+        float(value["rerank_seconds"])
         for value in shard_receipts
     )
     self_seen = sum(
@@ -1183,15 +1362,21 @@ def run_build_graph(
             "pq_nbits": 8,
             "nprobe": nprobe,
             "search_width": SEARCH_WIDTH,
+            "index_search_width": INDEX_SEARCH_WIDTH,
             "selected_neighbors": K,
-            "exact_rerank": False,
+            "exact_rerank": True,
+            "rerank_vector_source": (
+                "balanced-subset int8-plus-fp16-scale exact cosine"
+            ),
             "candidate_universe": (
                 "first 20M rows per corpus, exact zero/copy exclusions applied "
                 "inside IVF scanning"
             ),
         },
         "timing": {
+            "page_cache_warm": page_cache_warm,
             "search_seconds": search_seconds,
+            "rerank_seconds": rerank_seconds,
             "total_seconds": time.monotonic() - started,
             "shard_count": len(shard_receipts),
             "resumed_shards": resumed,
