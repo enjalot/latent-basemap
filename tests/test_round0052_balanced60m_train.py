@@ -169,6 +169,8 @@ def test_queue_uses_live_train_profiler_without_standalone_canary() -> None:
     from experiments import prepare_round0052_queue as queue_prep
 
     source = inspect.getsource(queue_prep.prepare_round0052)
+    assert "review-0049-2026-07-26.md" in source
+    assert "review-0049-2026-07-25.md" not in source
     assert "gpu_hours_cap=3.5" in source
     assert '"total": 10_500.0' in source
     assert '"standalone_canary": False' in source
