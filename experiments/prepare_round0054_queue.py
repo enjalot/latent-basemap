@@ -165,8 +165,9 @@ def prepare_round0054(
             quality["recall"]["mean_recall_at_15_unambiguous"]
         ),
         "nprobe": nprobe,
-        "search_width": 32,
+        "search_width": 128,
         "selected_neighbors": 15,
+        "exact_rerank": True,
         "shard_rows": 100_000,
         "resumable_shards": True,
         "cpu_threads": cpu_threads,
@@ -189,7 +190,7 @@ def prepare_round0054(
             "build_native_representative_graph_balanced_30m.done.json",
         ),
         "expected_inputs": inputs,
-        "p90_wall_s": 15_000.0,
+        "p90_wall_s": 21_600.0,
         "substrate_manifest": SUBSTRATE_MANIFEST,
         "substrate_manifest_sha256": substrate_manifest_sha256,
         "quality_validation_receipt": QUALITY_RECEIPT,
@@ -206,8 +207,8 @@ def prepare_round0054(
         },
     }]
     manifest["p90_cpu_seconds"] = {
-        "build_native_representative_graph_balanced_30m": 15_000.0,
-        "total": 15_000.0,
+        "build_native_representative_graph_balanced_30m": 21_600.0,
+        "total": 21_600.0,
     }
     path = os.path.join(queue_root, "queue.json")
     atomic_write_new_json(path, manifest, immutable=True)

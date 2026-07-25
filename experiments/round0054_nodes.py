@@ -37,6 +37,7 @@ from basemap.round0053_program import (
     validate_control_substrate,
 )
 from experiments.round0049_nodes import (
+    INDEX_SEARCH_WIDTH,
     MEAN_RECALL_FLOOR,
     SEARCH_BATCH_ROWS,
     SEARCH_WIDTH,
@@ -44,6 +45,7 @@ from experiments.round0049_nodes import (
     _assemble_graph,
     _eligible_selector,
     _initialize_graph_output,
+    _warm_page_cache,
     _write_shard,
 )
 from experiments.round0053_nodes import QUALITY_RECEIPT_SCHEMA
@@ -78,6 +80,17 @@ def _validate_quality(
             quality.get("candidate_generator", {}).get("nprobe", -1)
         )
         != nprobe
+        or int(
+            quality.get("candidate_generator", {}).get(
+                "search_width",
+                -1,
+            )
+        )
+        != SEARCH_WIDTH
+        or quality.get("candidate_generator", {}).get(
+            "exact_rerank"
+        )
+        is not True
         or float(
             quality.get("recall", {}).get(
                 "mean_recall_at_15_unambiguous",
@@ -152,10 +165,15 @@ def run_build_graph(
         "quality_validation_receipt": quality_signature,
         "nprobe": nprobe,
         "search_width": SEARCH_WIDTH,
+        "index_search_width": INDEX_SEARCH_WIDTH,
+        "exact_rerank": True,
         "k": K,
         "shard_rows": SHARD_ROWS,
         "search_batch_rows": SEARCH_BATCH_ROWS,
         "cpu_threads": threads,
+        "rerank_page_cache_policy": (
+            "synchronous-sequential-read-before-random-gathers"
+        ),
         "candidate_universe": (
             "first 10M rows per corpus AND NOT within-subset zero/copies"
         ),
@@ -165,6 +183,15 @@ def run_build_graph(
         output,
         contract=contract,
     )
+    started = time.monotonic()
+    page_cache_warm = {
+        "int8": _warm_page_cache(
+            outputs["int8"]["canonical_path"]
+        ),
+        "scales": _warm_page_cache(
+            outputs["scales"]["canonical_path"]
+        ),
+    }
     encoded = np.memmap(
         outputs["int8"]["canonical_path"],
         dtype=np.int8,
@@ -201,7 +228,6 @@ def run_build_graph(
         or int(index.pq.nbits) != 8
     ):
         raise Round0053Error("registered IVF-PQ geometry changed")
-    started = time.monotonic()
     resumed = 0
     shard_receipts: list[dict[str, Any]] = []
     for shard, start in enumerate(range(0, ROW_COUNT, SHARD_ROWS)):
@@ -244,6 +270,10 @@ def run_build_graph(
     )
     search_seconds = sum(
         float(value["search_seconds"])
+        for value in shard_receipts
+    )
+    rerank_seconds = sum(
+        float(value["rerank_seconds"])
         for value in shard_receipts
     )
     self_seen = sum(
@@ -309,8 +339,12 @@ def run_build_graph(
             "pq_nbits": 8,
             "nprobe": nprobe,
             "search_width": SEARCH_WIDTH,
+            "index_search_width": INDEX_SEARCH_WIDTH,
             "selected_neighbors": K,
-            "exact_rerank": False,
+            "exact_rerank": True,
+            "rerank_vector_source": (
+                "balanced-subset int8-plus-fp16-scale exact cosine"
+            ),
             "candidate_universe": "first 10M rows per corpus, retained",
         },
         "quality": {
@@ -322,7 +356,9 @@ def run_build_graph(
             "floor": MEAN_RECALL_FLOOR,
         },
         "timing": {
+            "page_cache_warm": page_cache_warm,
             "search_seconds": search_seconds,
+            "rerank_seconds": rerank_seconds,
             "total_seconds": time.monotonic() - started,
             "shard_count": len(shard_receipts),
             "resumed_shards": resumed,
