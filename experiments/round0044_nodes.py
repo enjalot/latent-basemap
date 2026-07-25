@@ -1,4 +1,4 @@
-"""Fresh-process handler for the R0044 graph-candidate quality sweep."""
+"""Fresh-process handler for the R0044/R0045 graph-candidate quality sweep."""
 from __future__ import annotations
 
 import json
@@ -23,6 +23,7 @@ from experiments.round0029_program import ordered_embedding_paths
 
 
 ROUND_ID = "0044"
+FOLLOWUP_ROUND_ID = "0045"
 INDEX_PATH = "/data/checkpoints/pumap/faiss_ivf_pq_3m.index"
 INDEX_SHA256 = (
     "72be184fd0720c6749204820f661affdbac62a69f4332a1ece2fec6bb2ab7590"
@@ -52,6 +53,38 @@ def _seal(body: dict[str, Any]) -> dict[str, Any]:
     return {
         **body,
         "identity_sha256": sha256_bytes(canonical_json(body)),
+    }
+
+
+def _publish_candidate_receipt(
+    *,
+    active: dict[str, Any],
+    output: str,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist the complete diagnostic before enforcing R0044's old guard.
+
+    R0044 raised before writing the check vector.  R0045 explicitly treats a
+    failed scientific validity check as a publishable diagnostic outcome, so
+    it can be reviewed and acted upon without another opaque terminal failure.
+    """
+    receipt = _seal(body)
+    path = os.path.join(output, "candidate-quality-sweep-v1.json")
+    atomic_write_new_json(path, receipt, immutable=True)
+    checks = body.get("checks") or {}
+    validity_passed = bool(checks) and all(
+        value is True for value in checks.values()
+    )
+    if (
+        not validity_passed
+        and active.get("manifest", {}).get("round_id") == ROUND_ID
+    ):
+        raise Round0044Error(
+            "R0044 validity guard failed; diagnostic receipt persisted"
+        )
+    return {
+        **receipt,
+        "receipt": expected_input_signature(path),
     }
 
 
@@ -500,7 +533,10 @@ def run_candidate_sweep(
 
     output = create_fresh_directory(
         job["outputs"][0],
-        label="Round 0044 candidate-quality output",
+        label=(
+            f"Round {active['manifest']['round_id']} "
+            "candidate-quality output"
+        ),
     )
     total_started = time.monotonic()
     signatures = {
@@ -528,7 +564,7 @@ def run_candidate_sweep(
     paths = ordered_embedding_paths()[:3]
     embeddings = ShardedEmbeddings(paths, expected_dim=384)
     if len(embeddings) != N_BASE:
-        raise Round0044Error("R0044 embedding universe is not 3M")
+        raise Round0044Error("candidate-quality embedding universe is not 3M")
     base = np.ascontiguousarray(
         embeddings.gather(
             np.arange(N_BASE, dtype=np.int64),
@@ -659,13 +695,19 @@ def run_candidate_sweep(
         ),
         "no_training_performed": True,
     }
-    if not all(checks.values()):
-        raise Round0044Error("R0044 validity guard failed")
+    failed_checks = sorted(
+        key for key, value in checks.items() if value is not True
+    )
 
     body = {
         "schema": "round0044-candidate-quality-sweep-v1",
-        "round_id": ROUND_ID,
+        "round_id": active["manifest"]["round_id"],
         "release_sha": active["manifest"]["release_sha"],
+        "scientific_status": (
+            "valid" if not failed_checks else "validity-check-failed"
+        ),
+        "validity_passed": not failed_checks,
+        "failed_checks": failed_checks,
         "training_performed": False,
         "optimizer_updates": 0,
         "inputs": {
@@ -739,21 +781,22 @@ def run_candidate_sweep(
             ),
         },
     }
-    receipt = _seal(body)
-    path = os.path.join(output, "candidate-quality-sweep-v1.json")
-    atomic_write_new_json(path, receipt, immutable=True)
-    return {
-        **receipt,
-        "receipt": expected_input_signature(path),
-    }
+    return _publish_candidate_receipt(
+        active=active,
+        output=output,
+        body=body,
+    )
 
 
 def run_job(
     active: dict[str, Any],
     job: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if active.get("manifest", {}).get("round_id") != ROUND_ID:
-        raise Round0044Error("R0044 handler received another queue")
+    if active.get("manifest", {}).get("round_id") not in {
+        ROUND_ID,
+        FOLLOWUP_ROUND_ID,
+    }:
+        raise Round0044Error("R0044/R0045 handler received another queue")
     selected = job if job is not None else active.get("job") or {}
     if (
         selected.get("action") != "candidate_quality_sweep"
