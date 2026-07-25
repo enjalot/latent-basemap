@@ -19,11 +19,7 @@ from basemap.round0014_transform import build_transform_template
 from basemap.round0034_pipeline import load_canonical_graph
 from basemap.round0048_program import (
     ARMS,
-    CENTROIDS_K1024_PATH,
-    CENTROIDS_K256_PATH,
     ELIGIBILITY_SHA256,
-    QUERIES_PATH,
-    QUERY_PROVENANCE_PATH,
     REFERENCE_RECEIPT,
     ROUND_ID,
     ROW_COUNT,
@@ -128,10 +124,6 @@ def prepare_round0048(
         reference_receipt["reference"]["canonical_path"],
         reference_receipt["query_truth"]["canonical_path"],
         SELECTOR_PATH,
-        QUERIES_PATH,
-        QUERY_PROVENANCE_PATH,
-        CENTROIDS_K256_PATH,
-        CENTROIDS_K1024_PATH,
     ]
     graph_paths = [
         canonical_graph_manifest,
