@@ -317,6 +317,9 @@ def write_subset_eligibility(
     source_sha256: str = SOURCE_ELIGIBILITY_SHA256,
     intervals: Sequence[tuple[int, int]] = CORPUS_INTERVALS,
     source_rows: int = SOURCE_ROWS,
+    round_id: str = ROUND_ID,
+    universe: str = "minilm-int8-balanced-60m",
+    source_input_key: str = "r0033_eligibility",
 ) -> dict[str, Any]:
     """Publish one loader-compatible compact eligibility capability."""
     _metadata, source_arrays, source_signature = _validate_source_eligibility(
@@ -357,8 +360,8 @@ def write_subset_eligibility(
     }
     body = {
         "schema": ELIGIBILITY_SCHEMA,
-        "round_id": ROUND_ID,
-        "universe": "minilm-int8-balanced-60m",
+        "round_id": round_id,
+        "universe": universe,
         "row_count": rows,
         "dimension": DIMENSION,
         "encoded_row_contract": (
@@ -380,7 +383,7 @@ def write_subset_eligibility(
             for name, value in arrays.items()
         },
         "inputs": {
-            "r0033_eligibility": source_signature,
+            source_input_key: source_signature,
         },
         "global_to_compact": {
             "source_rows": source_rows,

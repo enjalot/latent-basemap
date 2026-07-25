@@ -232,17 +232,20 @@ def _membership(sorted_rows: np.ndarray, values: np.ndarray) -> np.ndarray:
 
 def _eligible_selector(
     excluded_compact: np.ndarray,
+    *,
+    intervals: tuple[tuple[int, int], ...] = CORPUS_INTERVALS,
+    compact_to_global_fn=compact_to_global,
 ) -> tuple[Any, list[Any], np.ndarray]:
     """Build a native representative-only selector in 150M ID space."""
     import faiss
 
     excluded_global = np.ascontiguousarray(
-        compact_to_global(excluded_compact),
+        compact_to_global_fn(excluded_compact),
         dtype=np.int64,
     )
     ranges = [
         faiss.IDSelectorRange(start, stop)
-        for start, stop in CORPUS_INTERVALS
+        for start, stop in intervals
     ]
     union = ranges[0]
     keepalive: list[Any] = list(ranges)
@@ -263,6 +266,8 @@ def _clean_search(
     raw: np.ndarray,
     *,
     global_sources: np.ndarray,
+    source_rows: int = SOURCE_ROWS,
+    global_to_compact_fn=global_to_compact,
 ) -> tuple[np.ndarray, int]:
     candidates = np.asarray(raw, dtype=np.int64)
     sources = np.asarray(global_sources, dtype=np.int64)
@@ -270,7 +275,7 @@ def _clean_search(
         raise Round0049Error("IVF-PQ output has wrong geometry")
     valid = (
         (candidates >= 0)
-        & (candidates < SOURCE_ROWS)
+        & (candidates < source_rows)
         & (candidates != sources[:, None])
     )
     counts = valid.sum(axis=1)
@@ -283,10 +288,12 @@ def _clean_search(
     ranks = np.cumsum(valid, axis=1)
     selected = valid & (ranks <= K)
     cleaned = candidates[selected].reshape(len(sources), K)
-    compact = global_to_compact(cleaned)
+    compact = global_to_compact_fn(cleaned)
     if (
         np.any(compact < 0)
-        or np.any(compact == global_to_compact(sources)[:, None])
+        or np.any(
+            compact == global_to_compact_fn(sources)[:, None]
+        )
         or np.any(np.diff(np.sort(compact, axis=1), axis=1) == 0)
     ):
         raise Round0049Error(
@@ -444,6 +451,7 @@ def _sample_retained_rows(
     *,
     count: int = QUALITY_SAMPLE_ROWS,
     seed: int = QUALITY_SEED,
+    row_count: int = ROW_COUNT,
 ) -> np.ndarray:
     rng = np.random.RandomState(seed)
     selected: list[np.ndarray] = []
@@ -451,7 +459,7 @@ def _sample_retained_rows(
     while have < count:
         proposed = rng.randint(
             0,
-            ROW_COUNT,
+            row_count,
             size=max(2 * (count - have), 1_024),
             dtype=np.int64,
         )
@@ -464,7 +472,7 @@ def _sample_retained_rows(
     while len(rows) < count:
         proposed = rng.randint(
             0,
-            ROW_COUNT,
+            row_count,
             size=count,
             dtype=np.int64,
         )
@@ -481,6 +489,7 @@ def _exact_representative_truth(
     scales: np.ndarray,
     excluded: np.ndarray,
     sample: np.ndarray,
+    row_count: int = ROW_COUNT,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     import torch
     import torch.nn.functional as functional
@@ -524,8 +533,8 @@ def _exact_representative_truth(
     blocks = 0
     try:
         with torch.inference_mode():
-            for start in range(0, ROW_COUNT, EXACT_BLOCK_ROWS):
-                stop = min(start + EXACT_BLOCK_ROWS, ROW_COUNT)
+            for start in range(0, row_count, EXACT_BLOCK_ROWS):
+                stop = min(start + EXACT_BLOCK_ROWS, row_count)
                 candidate_ids = np.arange(start, stop, dtype=np.int64)
                 candidate_ids = candidate_ids[
                     ~_membership(excluded, candidate_ids)
