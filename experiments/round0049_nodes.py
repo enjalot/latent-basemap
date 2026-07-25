@@ -314,6 +314,7 @@ def _validate_shard(
     start: int,
     stop: int,
     nprobe: int,
+    round_id: str = ROUND_ID,
 ) -> dict[str, Any] | None:
     if not os.path.exists(target_path) and not os.path.exists(receipt_path):
         return None
@@ -330,6 +331,7 @@ def _validate_shard(
         receipt.get("schema") != "round0049-graph-shard-v1"
         or receipt.get("identity_sha256")
         != sha256_bytes(canonical_json(body))
+        or receipt.get("round_id") != round_id
         or receipt.get("start") != start
         or receipt.get("stop") != stop
         or receipt.get("nprobe") != nprobe
@@ -354,6 +356,7 @@ def _write_shard(
     start: int,
     stop: int,
     nprobe: int,
+    round_id: str = ROUND_ID,
 ) -> dict[str, Any]:
     target_path, receipt_path = _shard_paths(shard_root, shard)
     previous = _validate_shard(
@@ -362,6 +365,7 @@ def _write_shard(
         start=start,
         stop=stop,
         nprobe=nprobe,
+        round_id=round_id,
     )
     if previous is not None:
         return {**previous, "resumed": True}
@@ -416,7 +420,7 @@ def _write_shard(
     atomic_save_new_npy(target_path, targets, immutable=True)
     body = {
         "schema": "round0049-graph-shard-v1",
-        "round_id": ROUND_ID,
+        "round_id": round_id,
         "shard": shard,
         "start": start,
         "stop": stop,
@@ -819,6 +823,7 @@ def _assemble_graph(
     shard_root: str,
     excluded: np.ndarray,
     nprobe: int,
+    round_id: str = ROUND_ID,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     target_path = os.path.join(output, "canonical-targets.i32")
     degree_path = os.path.join(output, "valid-degrees.u8")
@@ -841,6 +846,7 @@ def _assemble_graph(
                 start=start,
                 stop=stop,
                 nprobe=nprobe,
+                round_id=round_id,
             ) is None:
                 raise Round0049Error("graph assembly found a missing shard")
             values = np.load(
@@ -934,6 +940,11 @@ def run_build_graph(
 ) -> dict[str, Any]:
     import faiss
 
+    round_id = str(active.get("manifest", {}).get("round_id"))
+    if round_id not in {ROUND_ID, "0050"}:
+        raise Round0049Error(
+            "balanced-60M graph builder received an unauthorized round"
+        )
     output = str(job["outputs"][0])
     nprobe = int(job["nprobe"])
     threads = int(job.get("cpu_threads", DEFAULT_THREADS))
@@ -1075,6 +1086,7 @@ def run_build_graph(
             start=start,
             stop=stop,
             nprobe=nprobe,
+            round_id=round_id,
         )
         resumed += int(receipt["resumed"])
         shard_receipts.append(receipt)
@@ -1093,6 +1105,7 @@ def run_build_graph(
         shard_root=shard_root,
         excluded=excluded,
         nprobe=nprobe,
+        round_id=round_id,
     )
     retained = ROW_COUNT - len(excluded)
     search_seconds = sum(
@@ -1105,7 +1118,7 @@ def run_build_graph(
     )
     graph_body = {
         "schema": GRAPH_SCHEMA,
-        "round_id": ROUND_ID,
+        "round_id": round_id,
         "row_count": ROW_COUNT,
         "input_k": K,
         "source_semantics": (
@@ -1184,7 +1197,7 @@ def run_build_graph(
     )
     receipt_body = {
         "schema": GRAPH_RECEIPT_SCHEMA,
-        "round_id": ROUND_ID,
+        "round_id": round_id,
         "release_sha": active["manifest"]["release_sha"],
         "training_performed": False,
         "optimizer_updates": 0,
