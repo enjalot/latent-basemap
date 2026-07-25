@@ -113,7 +113,7 @@ def prepare_round0053(
             R0047_QUALITY,
             R0049_QUALITY,
             os.path.join(LAB_ROOT, "review-0047-2026-07-25.md"),
-            os.path.join(LAB_ROOT, "review-0049-2026-07-25.md"),
+            os.path.join(LAB_ROOT, "review-0049-2026-07-26.md"),
         ]),
     ])
     by_path = {

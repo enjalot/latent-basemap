@@ -93,6 +93,8 @@ def test_r0053_is_quality_only_and_bounded() -> None:
     from experiments import prepare_round0053_queue as queue_prep
 
     source = inspect.getsource(queue_prep.prepare_round0053)
+    assert "review-0049-2026-07-26.md" in source
+    assert "review-0049-2026-07-25.md" not in source
     assert "gpu_hours_cap=0.5" in source
     assert '"total": 1_200.0' in source
     assert '"action": "validate_candidate_quality"' in source
