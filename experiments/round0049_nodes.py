@@ -364,6 +364,9 @@ def _write_shard(
     stop: int,
     nprobe: int,
     round_id: str = ROUND_ID,
+    compact_to_global_fn=compact_to_global,
+    global_to_compact_fn=global_to_compact,
+    source_rows: int = SOURCE_ROWS,
 ) -> dict[str, Any]:
     target_path, receipt_path = _shard_paths(shard_root, shard)
     previous = _validate_shard(
@@ -400,7 +403,7 @@ def _write_shard(
         ):
             raise Round0049Error("balanced-60M query block is nonfinite")
         query /= norms
-        global_rows = compact_to_global(batch_rows)
+        global_rows = compact_to_global_fn(batch_rows)
         search_started = time.monotonic()
         _distances, raw = index.search(
             np.ascontiguousarray(query),
@@ -411,6 +414,8 @@ def _write_shard(
         cleaned, seen = _clean_search(
             raw,
             global_sources=global_rows,
+            source_rows=source_rows,
+            global_to_compact_fn=global_to_compact_fn,
         )
         self_seen += seen
         targets[batch_rows - start] = cleaned
@@ -833,18 +838,19 @@ def _assemble_graph(
     excluded: np.ndarray,
     nprobe: int,
     round_id: str = ROUND_ID,
+    row_count: int = ROW_COUNT,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     target_path = os.path.join(output, "canonical-targets.i32")
     degree_path = os.path.join(output, "valid-degrees.u8")
     target_fd, _ = _fresh_raw_file(
         target_path,
-        bytes_count=ROW_COUNT * K * 4,
+        bytes_count=row_count * K * 4,
     )
     degree_fd = -1
     try:
         offset = 0
-        for shard, start in enumerate(range(0, ROW_COUNT, SHARD_ROWS)):
-            stop = min(start + SHARD_ROWS, ROW_COUNT)
+        for shard, start in enumerate(range(0, row_count, SHARD_ROWS)):
+            stop = min(start + SHARD_ROWS, row_count)
             shard_path, receipt_path = _shard_paths(
                 shard_root,
                 shard,
@@ -875,7 +881,7 @@ def _assemble_graph(
                     raise Round0049Error("short graph target assembly write")
                 written += count
             offset += len(payload)
-        if offset != ROW_COUNT * K * 4:
+        if offset != row_count * K * 4:
             raise Round0049Error("assembled target bytes do not close")
         os.fsync(target_fd)
         os.fchmod(target_fd, 0o444)
@@ -884,13 +890,13 @@ def _assemble_graph(
 
         degree_fd, _ = _fresh_raw_file(
             degree_path,
-            bytes_count=ROW_COUNT,
+            bytes_count=row_count,
         )
         degrees = np.memmap(
             degree_path,
             dtype="u1",
             mode="r+",
-            shape=(ROW_COUNT,),
+            shape=(row_count,),
         )
         degrees[:] = K
         degrees[excluded] = 0
