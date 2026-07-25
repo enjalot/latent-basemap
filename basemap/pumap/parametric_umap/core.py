@@ -1838,6 +1838,18 @@ class ParametricUMAP:
                 global_step += 1
                 st["executed_iters"] = global_step
 
+                # Close performance windows on the update that reaches their
+                # boundary.  This must precede the LR-horizon break: otherwise
+                # an exact-budget run exits before recording its final window
+                # (R0042 recorded 199 of 200).  Placing the boundary here also
+                # avoids drawing an unused next batch merely to finalize timing.
+                if prof is not None and prof.on_update(
+                        global_step, st["positive_lr_optimizer_steps"]):
+                    logging.error("S2 canary abort: %s", prof.abort_reason)
+                    st["stop_reason"] = "canary_subfloor_abort"
+                    stop_training = True
+                    break
+
                 # P0-B: stop when the cosine update budget is spent — i.e. the
                 # schedule has taken `lr_horizon` successful steps (progress=1,
                 # LR≈0). Counting scheduler_steps is exact; testing current_lr<=0
@@ -1912,13 +1924,6 @@ class ParametricUMAP:
                 with _ph("sample"):        # S2: sampler draw + gather + H2D
                     batch = _get_next()
                 pbar.update(1)
-                # S2: advance canary rate windows; abort on repeated sub-floor.
-                if prof is not None and prof.on_update(
-                        global_step, self._train_stats["positive_lr_optimizer_steps"]):
-                    logging.error("S2 canary abort: %s", prof.abort_reason)
-                    self._train_stats["stop_reason"] = "canary_subfloor_abort"
-                    stop_training = True
-                    break
                 if verbose:
                     pbar.set_postfix({
                         'loss': f'{loss.item():.4f}',

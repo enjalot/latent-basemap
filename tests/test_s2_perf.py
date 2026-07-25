@@ -5,9 +5,11 @@ slowdown ABORTS automatically, and the canary artifact DIAGNOSES which phase
 regressed. These run on CPU with a fake clock — no GPU needed.
 """
 import types
+import inspect
 import pytest
 
 from basemap.pumap.parametric_umap import perf as perfmod
+from basemap.pumap.parametric_umap.core import ParametricUMAP
 from basemap.pumap.parametric_umap.perf import CanaryProfiler, build_baseline_key
 
 
@@ -39,6 +41,28 @@ def test_healthy_rate_does_not_abort(fake_clock):
     assert out["n_windows"] >= 5
     assert out["rate_median"] > 100
     assert out["aborted"] is False
+
+
+def test_terminal_update_closes_every_requested_window(fake_clock):
+    prof = CanaryProfiler(
+        warmup=2,
+        max_steps=102,
+        floor=1.0,
+        device="cpu",
+        n_windows=20,
+    )
+    _run(prof, 0.001, fake_clock, n=102)
+    out = prof.finalize()
+    assert out["n_windows"] == 20
+    assert out["rate_windows"][-1]["idx"] == 19
+
+
+def test_training_closes_profiler_before_lr_horizon_break() -> None:
+    source = inspect.getsource(ParametricUMAP.fit)
+    profiler_call = source.index("prof.on_update(")
+    horizon_check = source.index("horizon_done =")
+    next_batch = source.index('with _ph("sample")', profiler_call)
+    assert profiler_call < horizon_check < next_batch
 
 
 def test_seven_x_slowdown_aborts(fake_clock):

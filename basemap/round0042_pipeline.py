@@ -10,6 +10,29 @@ class Round0042PipelineError(RuntimeError):
     """The registered 30M canonical training contract was violated."""
 
 
+def edge_ranks_to_source_slots(offsets, edge_ranks):
+    """Map uniform flat-edge ranks to source rows and canonical slots."""
+    import torch
+
+    if (
+        offsets.ndim != 1
+        or edge_ranks.ndim != 1
+        or offsets.dtype != torch.int64
+        or edge_ranks.dtype != torch.int64
+        or len(offsets) < 2
+    ):
+        raise Round0042PipelineError(
+            "edge-rank lookup requires int64 vectors"
+        )
+    sources = torch.searchsorted(
+        offsets[1:],
+        edge_ranks,
+        right=True,
+    )
+    slots = edge_ranks - offsets.index_select(0, sources)
+    return sources, slots
+
+
 class DeviceCanonicalSampler:
     """Uniform positive-source, uniform valid canonical-destination sampler.
 
@@ -250,6 +273,74 @@ class DeviceCanonicalSampler:
         }
 
 
+class DeviceEdgeUniformCanonicalSampler(DeviceCanonicalSampler):
+    """Sample every valid canonical edge with equal probability.
+
+    This keeps R0042's exact graph, destinations, negatives, features, and
+    replacement policy fixed while changing positive source exposure from
+    uniform-over-sources to degree-proportional (uniform-over-valid-edges).
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        import torch
+
+        super().__init__(*args, **kwargs)
+        self.edge_offsets_t = torch.empty(
+            self.n_nodes + 1,
+            dtype=torch.int64,
+            device=self.device,
+        )
+        self.edge_offsets_t[0] = 0
+        torch.cumsum(
+            self.degrees_t,
+            dim=0,
+            dtype=torch.int64,
+            out=self.edge_offsets_t[1:],
+        )
+        if int(self.edge_offsets_t[-1].item()) != self.n_pos:
+            raise Round0042PipelineError(
+                "canonical edge offsets do not close"
+            )
+        # The source-uniform sampler's compact row vector is not used here.
+        self.positive_source_rows_t = None
+
+    def _draw_positive_pairs(self, count: int):
+        import torch
+
+        edge_ranks = torch.randint(
+            0,
+            self.n_pos,
+            (int(count),),
+            generator=self.gen,
+            device=self.device,
+            dtype=torch.int64,
+        )
+        source, slots = edge_ranks_to_source_slots(
+            self.edge_offsets_t,
+            edge_ranks,
+        )
+        destination = self.targets_t[source, slots].long()
+        return source.long(), destination
+
+    def execution_stamp(self) -> dict[str, Any]:
+        stamp = super().execution_stamp()
+        stamp.update({
+            "schema": "round0046-device-fp16-canonical-edge-uniform-v1",
+            "pipeline": "device_fp16_canonical_edge_uniform",
+            "sampler_class": type(self).__name__,
+            "positive_sampling": (
+                "uniform-valid-canonical-edge-with-replacement"
+            ),
+            "positive_source_sampling": (
+                "degree-proportional-over-positive-sources"
+            ),
+            "flat_edge_rank_mapping": (
+                "int64-degree-prefix-searchsorted-right"
+            ),
+        })
+        return stamp
+
+
 class Round0042TrainingInput:
     """Explicit adapter from the accepted 30M pack to the canonical sampler."""
 
@@ -263,11 +354,13 @@ class Round0042TrainingInput:
         graph: Mapping[str, Any],
         excluded_rows: np.ndarray,
         feature_signature: Mapping[str, Any],
+        positive_source_law: str = "uniform-source",
     ) -> None:
         self.dataset = dataset
         self.graph = dict(graph)
         self.excluded_rows = np.asarray(excluded_rows, dtype=np.int64)
         self.feature_signature = dict(feature_signature)
+        self.positive_source_law = str(positive_source_law)
         self.shape = dataset.tensor.shape
         self._last_sampler: DeviceCanonicalSampler | None = None
         manifest = self.graph.get("manifest") or {}
@@ -286,6 +379,10 @@ class Round0042TrainingInput:
             != len(self.excluded_rows)
             or int(summary.get("eligibility_retained_row_count", -1))
             != int(self.expected_shape[0]) - len(self.excluded_rows)
+            or self.positive_source_law not in {
+                "uniform-source",
+                "uniform-edge",
+            }
         ):
             raise Round0042PipelineError(
                 "canonical graph, feature matrix, and eligibility differ"
@@ -321,17 +418,28 @@ class Round0042TrainingInput:
         signature = self.graph["signature"]
         manifest = self.graph["manifest"]
         summary = manifest["summary"]
+        edge_uniform = self.positive_source_law == "uniform-edge"
+        expected_pipeline = (
+            "device_fp16_canonical_edge_uniform"
+            if edge_uniform
+            else "device_fp16_canonical"
+        )
         if (
             edges_path != signature["canonical_path"]
             or positive_target_mode != "binary"
             or weighted_edge_sampling
             or reject_neighbors
-            or required_input_pipeline != "device_fp16_canonical"
+            or required_input_pipeline != expected_pipeline
         ):
             raise Round0042PipelineError(
-                "R0042 requires the exact binary device-fp16 canonical path"
+                "canonical adapter requires its exact binary device-fp16 path"
             )
-        sampler = DeviceCanonicalSampler(
+        sampler_class = (
+            DeviceEdgeUniformCanonicalSampler
+            if edge_uniform
+            else DeviceCanonicalSampler
+        )
+        sampler = sampler_class(
             self.dataset,
             targets=self.graph["targets"],
             degrees=self.graph["degrees"],
