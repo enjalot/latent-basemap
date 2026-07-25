@@ -45,7 +45,7 @@ RELEASE_ROOT = (
 )
 ROUND_FILE = os.path.join(
     LAB_ROOT,
-    "round-0050-2026-07-25.md",
+    "round-0050-2026-07-26.md",
 )
 SUBSTRATE_MANIFEST = (
     "/data/latent-basemap/runs/round-0049/queue/artifacts/"
@@ -182,7 +182,7 @@ def prepare_round0050(
             R0047_QUALITY_RECEIPT,
             INDEX_PATH,
             os.path.join(LAB_ROOT, "review-0047-2026-07-25.md"),
-            os.path.join(LAB_ROOT, "review-0049-2026-07-25.md"),
+            os.path.join(LAB_ROOT, "review-0049-2026-07-26.md"),
         ]),
     ])
     manifest = _base_manifest(

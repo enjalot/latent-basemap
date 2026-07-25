@@ -7,7 +7,7 @@ import pytest
 
 from basemap.artifact_identity import expected_input_signature
 from basemap.round0049_program import Round0049Error
-from experiments import round0050_nodes
+from experiments import prepare_round0050_queue, round0050_nodes
 from experiments.round0049_nodes import (
     _seal,
     _validate_shard,
@@ -89,3 +89,14 @@ def test_resumed_graph_shard_is_bound_to_successor_round(tmp_path):
             nprobe=16,
             round_id="0049",
         )
+
+
+def test_round0050_binds_post_r0049_protocol_dates():
+    assert prepare_round0050_queue.ROUND_FILE.endswith(
+        "round-0050-2026-07-26.md"
+    )
+    source = __import__("inspect").getsource(
+        prepare_round0050_queue.prepare_round0050
+    )
+    assert "review-0049-2026-07-26.md" in source
+    assert "review-0049-2026-07-25.md" not in source
