@@ -42,11 +42,13 @@ from basemap.round0053_program import (
     validate_control_substrate,
 )
 from experiments.round0049_nodes import (
+    INDEX_SEARCH_WIDTH,
     MEAN_RECALL_FLOOR,
     SEARCH_WIDTH,
     _clean_search,
     _copy_intervals,
     _eligible_selector,
+    _exact_rerank_shortlist,
     _exact_representative_truth,
     _membership,
     _sample_retained_rows,
@@ -263,17 +265,24 @@ def run_validate_candidate_quality(
     search_started = time.monotonic()
     _distances, raw = index.search(
         np.ascontiguousarray(queries),
-        SEARCH_WIDTH,
+        INDEX_SEARCH_WIDTH,
         params=parameters,
     )
     search_seconds = time.monotonic() - search_started
-    approximate, self_seen = _clean_search(
+    shortlist, self_seen = _clean_search(
         raw,
         global_sources=compact30_to_global150(sample),
+        candidate_count=SEARCH_WIDTH,
         global_to_compact_fn=global150_to_compact30,
     )
+    selected, rerank_performance = _exact_rerank_shortlist(
+        queries=queries,
+        shortlist=shortlist,
+        encoded=encoded,
+        scales=scales,
+    )
     overlap = (
-        approximate[:, :, None] == exact[:, None, :]
+        selected[:, :, None] == exact[:, None, :]
     ).any(axis=2).sum(axis=1) / K
     unambiguous = ~ties
     if not np.any(unambiguous):
@@ -292,8 +301,11 @@ def run_validate_candidate_quality(
         "mean_recall_at_15_unambiguous_at_least_0_90": (
             clear_mean >= MEAN_RECALL_FLOOR
         ),
-        "all_candidates_are_subset_representatives": (
-            not np.any(_membership(excluded, approximate))
+        "all_shortlist_candidates_are_subset_representatives": (
+            not np.any(_membership(excluded, shortlist))
+        ),
+        "all_selected_candidates_are_subset_representatives": (
+            not np.any(_membership(excluded, selected))
         ),
         "no_training_performed": True,
     }
@@ -323,8 +335,12 @@ def run_validate_candidate_quality(
             "index_type": "IndexIVFPQ",
             "nprobe": nprobe,
             "search_width": SEARCH_WIDTH,
+            "index_search_width": INDEX_SEARCH_WIDTH,
             "selected_neighbors": K,
-            "exact_rerank": False,
+            "exact_rerank": True,
+            "rerank_vector_source": (
+                "balanced-subset int8-plus-fp16-scale exact cosine"
+            ),
             "native_representative_selector": True,
         },
         "recall": {
@@ -339,6 +355,7 @@ def run_validate_candidate_quality(
         "performance": {
             "exact_truth": exact_performance,
             "ivfpq_search_seconds": search_seconds,
+            "exact_rerank": rerank_performance,
             "peak_rss_gib": (
                 resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
                 / (1024 ** 2)

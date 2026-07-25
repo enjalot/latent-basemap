@@ -20,7 +20,7 @@ def test_r0054_is_resumable_cpu_only_graph_work() -> None:
 
     source = inspect.getsource(queue_prep.prepare_round0054)
     assert "gpu_hours_cap=0.0" in source
-    assert '"total": 15_000.0' in source
+    assert '"total": 21_600.0' in source
     assert '"action": "build_graph"' in source
     assert '"gpu_required": False' in source
     assert '"resumable_shards": True' in source

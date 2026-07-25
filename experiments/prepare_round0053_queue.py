@@ -29,6 +29,7 @@ from experiments.prepare_round0020_0022_queues import (
     _dedupe,
     _file_inputs,
 )
+from experiments.round0049_nodes import SEARCH_WIDTH
 
 
 ROUND_ROOT = "/data/latent-basemap/runs/round-0053"
@@ -164,8 +165,9 @@ def prepare_round0053(
         "candidate_generator": {
             "same_index_and_policy_as_r0049": True,
             "nprobe": nprobe,
-            "search_width": 32,
+            "search_width": SEARCH_WIDTH,
             "selected_neighbors": 15,
+            "exact_rerank": True,
         },
         "quality_validation": {
             "sample_rows": 1_024,
