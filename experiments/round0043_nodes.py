@@ -75,6 +75,24 @@ def _short_anchor_hash(compact_rows: np.ndarray) -> str:
     ).hexdigest()[:12]
 
 
+def _rung_guards(
+    *,
+    core_anchors_are_members: bool,
+    rung_anchors_are_members: bool,
+    coordinates_and_embeddings_row_aligned: bool,
+    training_performed: bool,
+) -> dict[str, bool]:
+    """Return affirmative predicates only, so all(values) is meaningful."""
+    return {
+        "core_anchors_are_members": core_anchors_are_members,
+        "rung_anchors_are_members": rung_anchors_are_members,
+        "coordinates_and_embeddings_row_aligned": (
+            coordinates_and_embeddings_row_aligned
+        ),
+        "no_training_performed": not training_performed,
+    }
+
+
 def _score_anchor_view(
     *,
     embeddings: BalancedRungView,
@@ -344,16 +362,16 @@ def run_score_rung(
             },
         },
         "r0036_full_rung_reproduction": reproduction,
-        "guards": {
-            "core_anchors_are_members": True,
-            "rung_anchors_are_members": bool(
+        "guards": _rung_guards(
+            core_anchors_are_members=True,
+            rung_anchors_are_members=bool(
                 np.all(rung_selector.is_member(rung_global))
             ),
-            "coordinates_and_embeddings_row_aligned": (
+            coordinates_and_embeddings_row_aligned=(
                 len(embeddings) == len(coordinates)
             ),
-            "training_performed": False,
-        },
+            training_performed=False,
+        ),
         "gpu_peak": cuda_peak,
         "wall_seconds": time.monotonic() - started,
         "training_performed": False,

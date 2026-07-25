@@ -106,9 +106,12 @@ def prepare_round0043(
     *,
     release_sha: str,
     queue_root: str = os.path.join(ROUND_ROOT, "queue"),
+    gpu_hours_cap: float = 3.0,
 ) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0043 release SHA must be one full commit")
+    if not 0.0 < gpu_hours_cap <= 3.0:
+        raise ValueError("R0043 GPU-hour cap must be in (0, 3.0]")
     _require_issued_round()
     queue_root = create_fresh_directory(
         queue_root, label="Round 0043 queue"
@@ -134,7 +137,7 @@ def prepare_round0043(
         release_sha=release_sha,
         round_file=ROUND_FILE,
         queue_root=queue_root,
-        gpu_hours_cap=3.0,
+        gpu_hours_cap=gpu_hours_cap,
         execution_authority="autonomous-gpu",
         gpu=True,
     )
@@ -241,11 +244,18 @@ def main(argv: list[str] | None = None) -> int:
         "--queue-root",
         default=os.path.join(ROUND_ROOT, "queue"),
     )
+    parser.add_argument(
+        "--gpu-hours-cap",
+        type=float,
+        default=3.0,
+        help="Per-attempt cap; lower this on retry to preserve the round cap.",
+    )
     args = parser.parse_args(argv)
     print(json.dumps({
         "queue_manifest": prepare_round0043(
             release_sha=args.release_sha,
             queue_root=args.queue_root,
+            gpu_hours_cap=args.gpu_hours_cap,
         )
     }, indent=2, sort_keys=True))
     return 0

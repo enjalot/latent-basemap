@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import os
 
 import numpy as np
+import pytest
 
 from basemap.panel_v2 import PanelV2Config
 from basemap.round0043_program import (
@@ -11,6 +13,7 @@ from basemap.round0043_program import (
     BalancedRungView,
 )
 from experiments import round0043_nodes as node
+from experiments import prepare_round0043_queue as queue_prep
 
 
 def _selector(width: int) -> BalancedRungSelector:
@@ -159,11 +162,33 @@ def test_r0036_reproduction_check_is_exact_and_fail_closed(
         raise AssertionError("R0036 reproduction drift was accepted")
 
 
+def test_no_training_is_an_affirmative_rung_guard() -> None:
+    guards = node._rung_guards(
+        core_anchors_are_members=True,
+        rung_anchors_are_members=True,
+        coordinates_and_embeddings_row_aligned=True,
+        training_performed=False,
+    )
+    assert guards["no_training_performed"] is True
+    assert "training_performed" not in guards
+    assert all(guards.values())
+
+
 def test_round0043_queue_source_registers_no_training() -> None:
     path = os.path.join(
         os.path.dirname(node.__file__), "prepare_round0043_queue.py"
     )
     text = open(path, encoding="utf-8").read()
     assert '"training_performed": False' in text
-    assert "gpu_hours_cap=3.0" in text
+    assert (
+        inspect.signature(queue_prep.prepare_round0043)
+        .parameters["gpu_hours_cap"]
+        .default
+        == 3.0
+    )
+    with pytest.raises(ValueError, match="GPU-hour cap"):
+        queue_prep.prepare_round0043(
+            release_sha="a" * 40,
+            gpu_hours_cap=3.01,
+        )
     assert "score_nested_030m" not in text
