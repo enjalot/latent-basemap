@@ -104,6 +104,17 @@ def _load_quality(
             )
         )
         != nprobe
+        or int(
+            receipt.get("candidate_generator", {}).get(
+                "search_width",
+                -1,
+            )
+        )
+        != SEARCH_WIDTH
+        or receipt.get("candidate_generator", {}).get(
+            "exact_rerank"
+        )
+        is not True
         or float(
             receipt.get("recall", {}).get(
                 "mean_recall_at_15_unambiguous",
@@ -211,7 +222,10 @@ def prepare_round0050(
             "search_width": SEARCH_WIDTH,
             "selected_neighbors": K,
             "native_representative_selector": True,
-            "exact_rerank": False,
+            "exact_rerank": True,
+            "rerank_vector_source": (
+                "balanced-subset int8-plus-fp16-scale exact cosine"
+            ),
         },
         "shard_rows": 100_000,
         "resumable_shards": True,
@@ -231,7 +245,7 @@ def prepare_round0050(
             "build_native_representative_graph_60m.done.json",
         ),
         "expected_inputs": inputs,
-        "p90_wall_s": 30_000.0,
+        "p90_wall_s": 39_600.0,
         "substrate_manifest": SUBSTRATE_MANIFEST,
         "substrate_manifest_sha256": substrate_manifest_sha256,
         "candidate_quality_receipt": R0047_QUALITY_RECEIPT,
@@ -247,8 +261,8 @@ def prepare_round0050(
         },
     }]
     manifest["p90_cpu_seconds"] = {
-        "build_native_representative_graph_60m": 30_000.0,
-        "total": 30_000.0,
+        "build_native_representative_graph_60m": 39_600.0,
+        "total": 39_600.0,
     }
     path = os.path.join(queue_root, "queue.json")
     atomic_write_new_json(path, manifest, immutable=True)

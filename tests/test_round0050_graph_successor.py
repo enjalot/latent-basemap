@@ -47,7 +47,7 @@ def test_resumed_graph_shard_is_bound_to_successor_round(tmp_path):
     np.save(target, value, allow_pickle=False)
     target.chmod(0o444)
     body = {
-        "schema": "round0049-graph-shard-v1",
+        "schema": "round0049-exact-rerank-graph-shard-v2",
         "round_id": "0050",
         "shard": 0,
         "start": 0,
@@ -56,9 +56,13 @@ def test_resumed_graph_shard_is_bound_to_successor_round(tmp_path):
         "excluded_sources": 0,
         "valid_edges": 30,
         "nprobe": 16,
-        "search_width": 32,
+        "search_width": 128,
+        "index_search_width": 129,
+        "selected_neighbors": 15,
+        "exact_rerank": True,
         "self_returned": 2,
         "search_seconds": 0.1,
+        "rerank_seconds": 0.05,
         "wall_seconds": 0.2,
         "targets": expected_input_signature(str(target)),
     }
@@ -85,4 +89,3 @@ def test_resumed_graph_shard_is_bound_to_successor_round(tmp_path):
             nprobe=16,
             round_id="0049",
         )
-
