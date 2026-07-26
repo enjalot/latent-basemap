@@ -112,6 +112,13 @@ def prepare_round0068(
         expected_eligibility_sha256=outputs["eligibility"]["sha256"],
         row_count=row_count,
     )
+    if (
+        graph["manifest"].get("inputs", {}).get("scale_decision")
+        != decision["signature"]
+    ):
+        raise RuntimeError(
+            "R0068 graph does not bind the exact R0064 decision"
+        )
     config, config_sha256 = train_config_from_capabilities(
         tier=tier,
         graph_manifest=graph["manifest"],

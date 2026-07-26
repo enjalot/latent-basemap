@@ -193,6 +193,13 @@ def _load_pipeline(
         expected_eligibility_sha256=outputs["eligibility"]["sha256"],
         row_count=row_count,
     )
+    if (
+        graph["manifest"].get("inputs", {}).get("scale_decision")
+        != decision["signature"]
+    ):
+        raise Round0034PipelineError(
+            "R0068 graph does not bind the exact R0064 decision"
+        )
     dataset = HostInt8MaterializedArray.from_files(
         int8_path=outputs["int8"]["canonical_path"],
         int8_sha256=outputs["int8"]["sha256"],

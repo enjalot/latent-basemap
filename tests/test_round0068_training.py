@@ -128,6 +128,12 @@ def test_round0068_receipts_exact_training_accounting() -> None:
         "host_prefetch_consumer_batches",
     ):
         assert field in source
+    loader = inspect.getsource(round0068_nodes._load_pipeline)
+    assert (
+        'graph["manifest"].get("inputs", {}).get("scale_decision")'
+        in loader
+    )
+    assert '!= decision["signature"]' in loader
 
 
 def test_round0068_modules_do_not_mutate_cuda_visibility(
