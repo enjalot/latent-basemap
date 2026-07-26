@@ -29,6 +29,7 @@ from experiments.prepare_round0020_0022_queues import (
 )
 from experiments.round0049_nodes import (
     NPROBE_SWEEP_RECEIPT_SCHEMA,
+    SEARCH_WIDTH,
     _quality_authority_mean_recall,
 )
 

@@ -103,6 +103,7 @@ def test_round0050_binds_post_r0049_protocol_dates():
     )
     assert "review-0049-2026-07-26.md" in source
     assert "review-0049-2026-07-25.md" not in source
+    assert prepare_round0050_queue.SEARCH_WIDTH == 128
 
 
 def test_round0050_accepts_r0049_quality_authority():
