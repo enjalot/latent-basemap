@@ -128,20 +128,6 @@ def _runtime_stamp(spec_path: str, expected_sha256: str) -> dict[str, Any]:
         ),
         "torch._C": expected_input_signature(torch._C.__file__),
     }
-    projected_rerank_hours = (
-        ROW_COUNT
-        / (
-            len(benchmark_rows)
-            / float(gpu_performance["exact_rerank"]["wall_seconds"])
-        )
-        / 3600.0
-    )
-    projected_graph_hours = (
-        clone_seconds / 3600.0
-        + projected_search_hours
-        + projected_rerank_hours
-        + (10.0 / 60.0)
-    )
     checks = {
         "python": platform.python_version() == spec["python"],
         "modules": modules == spec["modules"],
@@ -334,6 +320,42 @@ def _overlap(left: np.ndarray, right: np.ndarray) -> dict[str, float]:
     }
 
 
+def _project_full_graph_hours(
+    *,
+    row_count: int,
+    benchmark_rows: int,
+    gpu_search_seconds: float,
+    gpu_rerank_seconds: float,
+    clone_seconds: float,
+    fixed_seconds: float = 600.0,
+) -> dict[str, float]:
+    """Scale measured search and rerank walls to one complete graph build."""
+    values = {
+        "row_count": float(row_count),
+        "benchmark_rows": float(benchmark_rows),
+        "gpu_search_seconds": float(gpu_search_seconds),
+        "gpu_rerank_seconds": float(gpu_rerank_seconds),
+        "clone_seconds": float(clone_seconds),
+        "fixed_seconds": float(fixed_seconds),
+    }
+    if any(value <= 0.0 for value in values.values()):
+        raise Round0059Error("graph projection inputs must be positive")
+    scale = values["row_count"] / values["benchmark_rows"]
+    search_hours = values["gpu_search_seconds"] * scale / 3600.0
+    rerank_hours = values["gpu_rerank_seconds"] * scale / 3600.0
+    total_hours = (
+        search_hours
+        + rerank_hours
+        + values["clone_seconds"] / 3600.0
+        + values["fixed_seconds"] / 3600.0
+    )
+    return {
+        "search_hours": search_hours,
+        "rerank_hours": rerank_hours,
+        "total_hours": total_hours,
+    }
+
+
 class _GpuSearchAdapter:
     """Expose the CPU helper's search signature without GPU filter params."""
 
@@ -516,11 +538,18 @@ def run_qualification(
         float(gpu_performance["queries_per_second"])
         / float(cpu_performance["queries_per_second"])
     )
-    projected_search_hours = (
-        ROW_COUNT
-        / float(gpu_performance["queries_per_second"])
-        / 3600.0
+    projection = _project_full_graph_hours(
+        row_count=ROW_COUNT,
+        benchmark_rows=len(benchmark_rows),
+        gpu_search_seconds=float(gpu_performance["search_seconds"]),
+        gpu_rerank_seconds=float(
+            gpu_performance["exact_rerank"]["wall_seconds"]
+        ),
+        clone_seconds=clone_seconds,
     )
+    projected_search_hours = projection["search_hours"]
+    projected_rerank_hours = projection["rerank_hours"]
+    projected_graph_hours = projection["total_hours"]
     checks = {
         "runtime_matches": all(
             value is True

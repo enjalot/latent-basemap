@@ -7,6 +7,7 @@ from experiments.round0059_nodes import (
     MEAN_RECALL_FLOOR,
     Round0059Error,
     _overlap,
+    _project_full_graph_hours,
     _selected_nprobe,
 )
 
@@ -48,6 +49,30 @@ def test_engine_overlap_rejects_mismatched_geometry() -> None:
         _overlap(
             np.zeros((2, 3), dtype=np.int32),
             np.zeros((2, 4), dtype=np.int32),
+        )
+
+
+def test_full_graph_projection_scales_search_and_rerank_separately() -> None:
+    observed = _project_full_graph_hours(
+        row_count=60_000_000,
+        benchmark_rows=10_000,
+        gpu_search_seconds=2.0,
+        gpu_rerank_seconds=1.0,
+        clone_seconds=120.0,
+    )
+    assert observed["search_hours"] == pytest.approx(10 / 3)
+    assert observed["rerank_hours"] == pytest.approx(5 / 3)
+    assert observed["total_hours"] == pytest.approx(5.2)
+
+
+def test_full_graph_projection_rejects_nonpositive_measurements() -> None:
+    with pytest.raises(Round0059Error, match="positive"):
+        _project_full_graph_hours(
+            row_count=60_000_000,
+            benchmark_rows=10_000,
+            gpu_search_seconds=0.0,
+            gpu_rerank_seconds=1.0,
+            clone_seconds=120.0,
         )
 
 
