@@ -23,6 +23,7 @@ from experiments.prepare_round0020_0022_queues import (
     _file_inputs,
 )
 from experiments.round0059_nodes import (
+    FAISS_WHEEL,
     MAX_PROJECTED_SEARCH_HOURS,
     MIN_ENGINE_OVERLAP,
     MIN_SEARCH_SPEEDUP,
@@ -112,6 +113,7 @@ def prepare_round0059(
             INDEX_PATH,
             NPROBE_RECEIPT,
             RUNTIME_SPEC,
+            FAISS_WHEEL,
             os.path.join(LAB_ROOT, "review-0049-2026-07-26.md"),
             os.path.join(LAB_ROOT, "review-0058-2026-07-26.md"),
         ]),

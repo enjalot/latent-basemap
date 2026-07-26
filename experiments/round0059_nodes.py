@@ -57,6 +57,10 @@ QUALIFICATION_SHARD_ROWS = 100_000
 MIN_ENGINE_OVERLAP = 0.98
 MIN_SEARCH_SPEEDUP = 3.0
 MAX_PROJECTED_SEARCH_HOURS = 8.0
+FAISS_WHEEL = (
+    "/data/latent-basemap/toolchains/faiss-v1.14.3-sm120/build/"
+    "faiss/python/dist/faiss-1.14.3-py3-none-any.whl"
+)
 
 
 class Round0059Error(RuntimeError):
@@ -122,30 +126,42 @@ def _runtime_stamp(spec_path: str, expected_sha256: str) -> dict[str, Any]:
         name: importlib.metadata.version(name)
         for name in spec["distributions"]
     }
+    faiss_module = getattr(faiss, "_swigfaiss_avx2", None)
+    if faiss_module is None:
+        raise Round0059Error(
+            "registered AVX2/SM120 Faiss module was not loaded"
+        )
     binaries = {
-        "faiss._swigfaiss": expected_input_signature(
-            faiss._swigfaiss.__file__
+        "faiss._swigfaiss_avx2": expected_input_signature(
+            faiss_module.__file__
         ),
         "torch._C": expected_input_signature(torch._C.__file__),
     }
+    wheel = expected_input_signature(FAISS_WHEEL)
+    compile_options = set(str(faiss.get_compile_options()).split())
     checks = {
         "python": platform.python_version() == spec["python"],
         "modules": modules == spec["modules"],
         "distributions": distributions == spec["distributions"],
         "faiss_gpu_compiled": (
             hasattr(faiss, "StandardGpuResources")
-            and "GPU" in str(faiss.get_compile_options()).split()
+            and {"AVX2", "GPU"}.issubset(compile_options)
         ),
         "faiss_binary": (
-            binaries["faiss._swigfaiss"]["sha256"]
-            == spec["binary_sha256"]["faiss._swigfaiss"]
+            binaries["faiss._swigfaiss_avx2"]["sha256"]
+            == spec["binary_sha256"]["faiss._swigfaiss_avx2"]
         ),
+        "faiss_wheel": wheel == spec["faiss_build"]["wheel"],
         "torch_binary": (
             binaries["torch._C"]["sha256"]
             == spec["binary_sha256"]["torch._C"]
         ),
         "cuda_available": bool(torch.cuda.is_available()),
         "one_visible_gpu": int(torch.cuda.device_count()) == 1,
+        "gpu_compute_capability": (
+            list(torch.cuda.get_device_capability())
+            == spec["gpu_compute_capability"]
+        ),
     }
     if not all(value is True for value in checks.values()):
         raise Round0059Error(
@@ -174,8 +190,9 @@ def _runtime_stamp(spec_path: str, expected_sha256: str) -> dict[str, Any]:
         "modules": modules,
         "distributions": distributions,
         "binaries": binaries,
+        "faiss_wheel": wheel,
         "checks": checks,
-        "faiss_compile_options": str(faiss.get_compile_options()),
+        "faiss_compile_options": sorted(compile_options),
         "nvidia_smi": smi,
         "python_executable": os.path.realpath(sys.executable),
     }
