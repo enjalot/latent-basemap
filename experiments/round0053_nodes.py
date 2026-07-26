@@ -126,6 +126,8 @@ def run_build_substrate(
         "schema": SUBSTRATE_SCHEMA,
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
+        "training_performed": False,
+        "optimizer_updates": 0,
         "row_count": ROW_COUNT,
         "dimension": DIMENSION,
         "corpus_order": ["fineweb", "redpajama", "pile"],

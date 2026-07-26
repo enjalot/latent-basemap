@@ -91,6 +91,7 @@ def test_round0053_modules_do_not_mutate_cuda_visibility(
 
 def test_r0053_is_quality_only_and_bounded() -> None:
     from experiments import prepare_round0053_queue as queue_prep
+    from experiments import round0053_nodes
 
     source = inspect.getsource(queue_prep.prepare_round0053)
     assert "review-0049-2026-07-26.md" in source
@@ -99,3 +100,11 @@ def test_r0053_is_quality_only_and_bounded() -> None:
     assert '"total": 1_200.0' in source
     assert '"action": "validate_candidate_quality"' in source
     assert '"training_performed"] = False' in source
+    assert queue_prep.RELEASE_ROOT == (
+        "/home/enjalot/code/latent-basemap-run"
+    )
+    substrate_source = inspect.getsource(
+        round0053_nodes.run_build_substrate
+    )
+    assert '"training_performed": False' in substrate_source
+    assert '"optimizer_updates": 0' in substrate_source
