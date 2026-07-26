@@ -33,6 +33,16 @@ def test_round0067_uses_the_r0066_selected_nprobe() -> None:
     assert 'nprobe = int(receipt["selected_nprobe"])' in source
     assert "nprobe=nprobe" in source
     assert '"exact_rerank": True' in source
+    validator = inspect.getsource(
+        __import__(
+            "basemap.round0067_graph",
+            fromlist=["load_gpu_qualification"],
+        ).load_gpu_qualification
+    )
+    assert (
+        'receipt.get("scale_decision") != scale_decision_signature'
+        in validator
+    )
 
 
 def test_round0067_modules_do_not_mutate_cuda_visibility(
