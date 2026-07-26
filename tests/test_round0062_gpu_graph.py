@@ -82,6 +82,8 @@ def test_r0062_is_one_bounded_no_training_gpu_graph() -> None:
     assert '"action": "build_gpu_graph"' in prep
     assert "training_performed" in prep
     assert '"action": "train"' not in prep
+    assert "review-0049-2026-07-26.md" in prep
+    assert "review-0049-2026-07-25.md" not in prep
     assert "index_cpu_to_gpu" in node
     assert "_write_shard" in node
     assert "_assemble_graph" in node

@@ -126,7 +126,7 @@ def prepare_round0062(
             FILTERED_INDEX,
             RUNTIME_SPEC,
             FAISS_WHEEL,
-            os.path.join(LAB_ROOT, "review-0049-2026-07-25.md"),
+            os.path.join(LAB_ROOT, "review-0049-2026-07-26.md"),
             os.path.join(LAB_ROOT, "review-0059-2026-07-26.md"),
         ]),
     ])
