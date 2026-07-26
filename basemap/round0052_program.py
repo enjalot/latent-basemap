@@ -53,7 +53,7 @@ def train_config_from_capabilities(
     degree_histogram = summary.get("degree_histogram")
     if (
         graph_manifest.get("schema") != GRAPH_SCHEMA
-        or graph_manifest.get("round_id") != "0050"
+        or graph_manifest.get("round_id") not in {"0050", "0062"}
         or int(graph_manifest.get("row_count", -1)) != ROW_COUNT
         or int(graph_manifest.get("input_k", -1)) != K
         or graph_manifest.get("inputs", {}).get("eligibility")
