@@ -1,0 +1,25 @@
+{
+  "schema": "round0059-gpu-faiss-runtime-v1",
+  "python": "3.12.3",
+  "distributions": {
+    "faiss-gpu-cu12": "1.14.1.post1",
+    "numpy": "2.4.4",
+    "nvidia-cublas-cu12": "12.9.2.10",
+    "nvidia-cuda-runtime-cu12": "12.9.79",
+    "torch": "2.11.0+cu128"
+  },
+  "modules": {
+    "faiss": "1.14.1",
+    "numpy": "2.4.4",
+    "torch": "2.11.0+cu128"
+  },
+  "binary_sha256": {
+    "faiss._swigfaiss": "097a66d15516347fe8ee613c553768c30dcfdfbc91d25641315cb801c4be35a7",
+    "torch._C": "fc945c4168eb823fba967804a4243111a3824ef9eda1a443c252244fa6c623a5"
+  },
+  "environment_policy": {
+    "faiss_runtime": "dedicated-round0059-venv",
+    "torch_runtime": "read-only-canonical-shared-venv",
+    "venv_mutation_after_queue_materialization": false
+  }
+}
