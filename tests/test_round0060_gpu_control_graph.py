@@ -25,6 +25,12 @@ def test_r0060_is_two_stage_no_training_gpu_graph() -> None:
     assert '"optimizer_updates": 0' in node
     assert "GpuIndexIVFPQ" in node
     assert "exact_rerank" in node
+    assert prepare_round0060_queue.RELEASE_ROOT == (
+        "/home/enjalot/code/latent-basemap-run"
+    )
+    assert round0060_nodes.RUNTIME_SPEC.endswith(
+        "round0060_runtime.json"
+    )
 
 
 def test_r0060_keeps_registered_30m_geometry() -> None:

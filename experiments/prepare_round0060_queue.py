@@ -42,7 +42,7 @@ from experiments.round0060_nodes import (
 ROUND_ID = "0060"
 ROUND_ROOT = "/data/latent-basemap/runs/round-0060"
 RELEASE_ROOT = (
-    "/home/enjalot/code/latent-basemap-worktrees/round-0060"
+    "/home/enjalot/code/latent-basemap-run"
 )
 ROUND_FILE = os.path.join(
     LAB_ROOT,

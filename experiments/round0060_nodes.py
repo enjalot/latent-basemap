@@ -77,7 +77,7 @@ BENCHMARK_ROWS = 10_000
 MAX_PROJECTED_GRAPH_HOURS = 2.0
 RUNTIME_SPEC = os.path.join(
     os.path.dirname(__file__),
-    "round0059_runtime.json",
+    "round0060_runtime.json",
 )
 
 
