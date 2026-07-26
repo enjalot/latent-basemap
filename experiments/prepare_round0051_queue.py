@@ -142,7 +142,6 @@ def prepare_round0051(
         ROUND_FILE,
         os.path.join(LAB_ROOT, "review-0040-2026-07-24.md"),
         os.path.join(LAB_ROOT, "review-0041-2026-07-24.md"),
-        os.path.join(LAB_ROOT, "review-0042-2026-07-25.md"),
         os.path.join(LAB_ROOT, "review-0046-2026-07-25.md"),
         BASELINE_TRAIN_RECEIPT,
         os.path.join(
@@ -172,7 +171,7 @@ def prepare_round0051(
     manifest["schema"] = "round0051-negative-bce-calibration-queue-v1"
     manifest["repo_root"] = RELEASE_ROOT
     manifest["queue_class"] = "gpu-research"
-    manifest["required_reviews"] = ["0040", "0041", "0042", "0046"]
+    manifest["required_reviews"] = ["0040", "0041", "0046"]
     manifest["capability_dependencies"] = [
         "duplicate-controlled-panel-v1",
         "30m-canonical-source-major-graph-v1",

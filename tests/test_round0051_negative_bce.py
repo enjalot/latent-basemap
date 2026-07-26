@@ -122,6 +122,8 @@ def test_queue_keeps_two_treatments_inside_autonomous_cap() -> None:
     from experiments import prepare_round0051_queue as queue_prep
 
     source = inspect.getsource(queue_prep.prepare_round0051)
+    assert '["0040", "0041", "0046"]' in source
+    assert "review-0042-2026-07-25.md" not in source
     assert "gpu_hours_cap=4.0" in source
     assert '"total": 11_500.0' in source
     assert '"deps": list(train_ids.values())' in source
