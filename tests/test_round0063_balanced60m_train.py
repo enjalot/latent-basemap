@@ -45,6 +45,9 @@ def test_r0063_queue_is_canonical_and_has_no_extra_canary() -> None:
     assert '"action": "canary"' not in source
     assert '"round0063-train-receipt-v1"' in source
     assert '"total": 10_500.0' in source
+    module_source = inspect.getsource(prepare_round0063_queue)
+    assert "review-0049-2026-07-26.md" in module_source
+    assert "review-0049-2026-07-25.md" not in module_source
 
 
 def test_shared_trainer_accepts_only_registered_rounds() -> None:

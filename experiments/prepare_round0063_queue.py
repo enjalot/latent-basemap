@@ -107,7 +107,7 @@ def prepare_round0063(
         *_file_inputs([
             ROUND_FILE,
             os.path.join(LAB_ROOT, "review-0046-2026-07-25.md"),
-            os.path.join(LAB_ROOT, "review-0049-2026-07-25.md"),
+            os.path.join(LAB_ROOT, "review-0049-2026-07-26.md"),
             os.path.join(LAB_ROOT, "review-0062-2026-07-26.md"),
             SUBSTRATE_MANIFEST,
             outputs["int8"]["canonical_path"],
