@@ -29,6 +29,7 @@ def load_gpu_qualification(
     *,
     expected_sha256: str,
     tier: str,
+    scale_decision_signature: Mapping[str, Any],
     substrate_signature: Mapping[str, Any],
     eligibility_signature: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -57,6 +58,7 @@ def load_gpu_qualification(
         or receipt.get("training_performed") is not False
         or int(receipt.get("optimizer_updates", -1)) != 0
         or receipt.get("tier") != tier
+        or receipt.get("scale_decision") != scale_decision_signature
         or receipt.get("substrate") != substrate_signature
         or receipt.get("eligibility") != eligibility_signature
         or nprobe not in NPROBE_GRID

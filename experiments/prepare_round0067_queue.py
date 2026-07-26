@@ -112,6 +112,7 @@ def prepare_round0067(
         gpu_qualification_path,
         expected_sha256=gpu_qualification_sha256,
         tier=tier,
+        scale_decision_signature=decision["signature"],
         substrate_signature=substrate["signature"],
         eligibility_signature=outputs["eligibility"],
     )

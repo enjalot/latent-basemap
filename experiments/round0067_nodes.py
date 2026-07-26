@@ -106,6 +106,7 @@ def run_build_graph(
         str(job["gpu_qualification_receipt"]),
         expected_sha256=str(job["gpu_qualification_receipt_sha256"]),
         tier=tier,
+        scale_decision_signature=decision["signature"],
         substrate_signature=substrate["signature"],
         eligibility_signature=outputs["eligibility"],
     )
