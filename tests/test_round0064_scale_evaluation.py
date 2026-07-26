@@ -14,8 +14,10 @@ from basemap.round0064_evaluation import (
     validate_train_bundle,
 )
 from experiments import map_registry
+from experiments import prepare_round0064_queue
 from experiments.round0064_nodes import (
     MATCHED_NONINFERIORITY_MARGINS,
+    run_comparison,
 )
 
 
@@ -137,6 +139,119 @@ def test_scale_margins_are_bounded_and_predeclared() -> None:
     }
     assert all(0 < value <= 0.05 for value in
                MATCHED_NONINFERIORITY_MARGINS.values())
+
+
+def _panel_fixture(
+    *,
+    key: str,
+    reference: str = "reference-30m",
+    delta: float = 0.0,
+) -> dict:
+    body = {
+        "schema": "round0064-registered-panel-v1",
+        "round_id": "0064",
+        "map_key": key,
+        "eligibility": {"sha256": "e" * 64},
+        "scientific_universe": {
+            "rows": 29_781_754,
+            "substrate": "balanced-30m",
+        },
+        "panel": {
+            "n": 29_781_754,
+            "anchor_hash": "anchors",
+            "ffr": 0.50 + delta,
+            "density": 0.70 + delta,
+            "purity": {
+                "k256": 0.90 + delta,
+                "k1024": 0.85 + delta,
+            },
+            "recall@k": 0.03,
+            "provenance": {"hiD_reference_key": reference},
+        },
+        "recall_at_10": 0.03,
+        "recall_at_50": 0.08,
+        "projection": {"proj_ffr": 0.45 + delta},
+        "absolute_selector_passed": True,
+    }
+    return seal(body)
+
+
+def test_scale_comparison_requires_one_exact_matched_reference(
+    tmp_path: Path,
+) -> None:
+    roots = {
+        "matched_control_panel": tmp_path / "control",
+        "scaled_matched_panel": tmp_path / "matched",
+        "scaled_full_panel": tmp_path / "full",
+    }
+    for root in roots.values():
+        root.mkdir()
+    (roots["matched_control_panel"] / "panel.json").write_text(json.dumps(
+        _panel_fixture(key="r0061-30m-on-30m")
+    ))
+    (roots["scaled_matched_panel"] / "panel.json").write_text(json.dumps(
+        _panel_fixture(key="r0063-60m-on-30m", delta=-0.01)
+    ))
+    full = _panel_fixture(
+        key="r0063-60m-on-60m",
+        reference="reference-60m",
+    )
+    full_body = {
+        key: value
+        for key, value in full.items()
+        if key != "identity_sha256"
+    }
+    full_body["scientific_universe"] = {
+        "rows": 59_399_288,
+        "substrate": "balanced-60m",
+    }
+    full_body["panel"]["n"] = 59_399_288
+    (roots["scaled_full_panel"] / "panel.json").write_text(
+        json.dumps(seal(full_body))
+    )
+    output = tmp_path / "comparison"
+    receipt = run_comparison(
+        {},
+        {
+            "outputs": [str(output)],
+            **{key: str(value) for key, value in roots.items()},
+        },
+    )
+    assert receipt["decision"]["advance_to_120m_scale_rung"] is True
+
+    mismatched = _panel_fixture(
+        key="r0063-60m-on-30m",
+        reference="different-reference",
+    )
+    (roots["scaled_matched_panel"] / "panel.json").write_text(
+        json.dumps(mismatched)
+    )
+    with pytest.raises(
+        Round0064Error,
+        match="one exact row universe/reference",
+    ):
+        run_comparison(
+            {},
+            {
+                "outputs": [str(tmp_path / "comparison-mismatch")],
+                **{key: str(value) for key, value in roots.items()},
+            },
+        )
+
+
+def test_round0064_queue_is_bounded_and_has_no_training() -> None:
+    import inspect
+
+    source = inspect.getsource(
+        prepare_round0064_queue.prepare_round0064
+    )
+    assert "gpu_hours_cap=2.5" in source
+    assert source.count('action="transform"') == 3
+    assert source.count('action="panel"') == 3
+    assert '"training_performed"] = False' in source
+    assert 'action="train"' not in source
+    assert "review-0061" not in source
+    assert "review-0063" not in source
 
 
 def test_registry_discovers_two_r0064_base_maps(
