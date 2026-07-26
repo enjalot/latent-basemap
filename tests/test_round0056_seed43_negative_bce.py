@@ -95,6 +95,9 @@ def test_round0056_is_one_train_with_direct_live_profiler() -> None:
     assert '"total": 5_900.0' in source
     assert source.count('"action": "train"') == 1
     assert '"action": "canary"' not in source
+    assert queue_prep.RELEASE_ROOT == (
+        "/home/enjalot/code/latent-basemap-run"
+    )
 
 
 def test_round0056_modules_do_not_mutate_cuda_visibility(

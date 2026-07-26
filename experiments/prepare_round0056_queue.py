@@ -43,9 +43,7 @@ from experiments.round0046_nodes import _read_sealed
 
 
 ROUND_ROOT = "/data/latent-basemap/runs/round-0056"
-RELEASE_ROOT = (
-    "/home/enjalot/code/latent-basemap-worktrees/round-0056"
-)
+RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE = os.path.join(
     LAB_ROOT,
     "round-0056-2026-07-26.md",
