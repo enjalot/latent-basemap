@@ -39,6 +39,31 @@ from basemap.round0068_training import (
     train_config_from_capabilities,
 )
 
+_DYNAMIC_PIPELINE_COUNTERS = (
+    "endpoint_gather_calls",
+    "source_rows_gathered",
+    "destination_rows_gathered",
+    "host_prefetch_batches_filled",
+    "host_prefetch_producer_batches",
+    "host_prefetch_consumer_batches",
+    "host_prefetch_source_rows_filled",
+    "host_prefetch_destination_rows_filled",
+)
+
+
+def _synchronize_flattened_runtime_counters(
+    accounting: dict[str, Any],
+    runtime: Mapping[str, Any],
+) -> None:
+    """Make legacy flattened counters agree with the sealed runtime stamp."""
+    for key in _DYNAMIC_PIPELINE_COUNTERS:
+        flattened = f"pipeline_{key}"
+        if key not in runtime or flattened not in accounting:
+            raise Round0034PipelineError(
+                f"R0068 missing runtime accounting field {key}"
+            )
+        accounting[flattened] = runtime[key]
+
 
 class HostInt8SelectedCanonicalSampler(HostInt8CanonicalSampler):
     """Generic host-int8 sampling with the exact selected-tier semantics."""
@@ -350,6 +375,7 @@ def run_train(
             "R0068 runtime endpoint/pipeline accounting changed: "
             f"{runtime_mismatches}"
         )
+    _synchronize_flattened_runtime_counters(accounting, runtime)
     profiler = instance._canary_profiler.finalize(
         bench_seconds=instance._bench_seconds,
         setup_seconds=getattr(instance, "_setup_seconds", None),

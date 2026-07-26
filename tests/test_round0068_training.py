@@ -136,6 +136,29 @@ def test_round0068_receipts_exact_training_accounting() -> None:
     assert '!= decision["signature"]' in loader
 
 
+def test_round0068_flattens_actual_runtime_counters() -> None:
+    from experiments import round0068_nodes
+
+    runtime = {
+        key: index + 1
+        for index, key in enumerate(
+            round0068_nodes._DYNAMIC_PIPELINE_COUNTERS
+        )
+    }
+    accounting = {
+        f"pipeline_{key}": 0
+        for key in round0068_nodes._DYNAMIC_PIPELINE_COUNTERS
+    }
+    round0068_nodes._synchronize_flattened_runtime_counters(
+        accounting,
+        runtime,
+    )
+    assert accounting == {
+        f"pipeline_{key}": value
+        for key, value in runtime.items()
+    }
+
+
 def test_round0068_modules_do_not_mutate_cuda_visibility(
     monkeypatch,
 ) -> None:
