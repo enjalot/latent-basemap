@@ -51,7 +51,7 @@ def train_config_from_capabilities(
     eligibility = outputs.get("eligibility") or {}
     if (
         graph_manifest.get("schema") != GRAPH_SCHEMA
-        or graph_manifest.get("round_id") != "0054"
+        or graph_manifest.get("round_id") not in {"0054", "0060"}
         or int(graph_manifest.get("row_count", -1)) != ROW_COUNT
         or int(graph_manifest.get("input_k", -1)) != K
         or graph_manifest.get("inputs", {}).get("eligibility")

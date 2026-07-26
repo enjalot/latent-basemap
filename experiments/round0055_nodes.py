@@ -199,17 +199,21 @@ def run_train(
     active: dict[str, Any],
     job: dict[str, Any],
 ) -> dict[str, Any]:
+    round_id = str(active.get("manifest", {}).get("round_id"))
     wrapper, graph, config, config_sha256, substrate = (
         _load_pipeline(job)
     )
     output = create_fresh_directory(
         job["outputs"][0],
-        label="Round 0055 train output",
+        label=f"Round {round_id} train output",
     )
     atomic_write_new_json(
         os.path.join(output, "production-config.json"),
         {
-            "schema": "round0055-production-config-receipt-v1",
+            "schema": str(job.get(
+                "production_config_receipt_schema",
+                "round0055-production-config-receipt-v1",
+            )),
             "config": config,
             "config_sha256": config_sha256,
         },
@@ -345,8 +349,11 @@ def run_train(
 
     atomic_build_new_file(model_path, write_model, immutable=True)
     body = {
-        "schema": "round0055-train-receipt-v1",
-        "round_id": ROUND_ID,
+        "schema": str(job.get(
+            "train_receipt_schema",
+            "round0055-train-receipt-v1",
+        )),
+        "round_id": round_id,
         "release_sha": active["manifest"]["release_sha"],
         "model": expected_input_signature(model_path),
         "production_config": config,
@@ -374,8 +381,9 @@ def run_job(
     active: dict[str, Any],
     job: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if active.get("manifest", {}).get("round_id") != ROUND_ID:
-        raise RuntimeError("R0055 handler received another queue")
+    round_id = active.get("manifest", {}).get("round_id")
+    if round_id not in {ROUND_ID, "0061"}:
+        raise RuntimeError("matched-30M trainer received another queue")
     selected = job if job is not None else active.get("job") or {}
     if (
         selected.get("action") != "train"
