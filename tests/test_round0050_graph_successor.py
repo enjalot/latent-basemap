@@ -9,7 +9,10 @@ from basemap.artifact_identity import expected_input_signature
 from basemap.round0049_program import Round0049Error
 from experiments import prepare_round0050_queue, round0050_nodes
 from experiments.round0049_nodes import (
+    NPROBE_SWEEP_RECEIPT_SCHEMA,
+    QUALITY_RECEIPT_SCHEMA,
     _seal,
+    _quality_authority_mean_recall,
     _validate_shard,
 )
 
@@ -100,3 +103,57 @@ def test_round0050_binds_post_r0049_protocol_dates():
     )
     assert "review-0049-2026-07-26.md" in source
     assert "review-0049-2026-07-25.md" not in source
+
+
+def test_round0050_accepts_r0049_quality_authority():
+    receipt = _seal({
+        "schema": QUALITY_RECEIPT_SCHEMA,
+        "validity_passed": True,
+        "candidate_generator": {
+            "nprobe": 64,
+            "search_width": 128,
+            "exact_rerank": True,
+        },
+        "recall": {
+            "mean_recall_at_15_unambiguous": 0.9185546875,
+        },
+    })
+    assert _quality_authority_mean_recall(
+        receipt,
+        nprobe=64,
+    ) == 0.9185546875
+    with pytest.raises(Round0049Error):
+        _quality_authority_mean_recall(receipt, nprobe=40)
+
+
+def test_round0050_accepts_r0058_selected_nprobe_authority():
+    receipt = _seal({
+        "schema": NPROBE_SWEEP_RECEIPT_SCHEMA,
+        "validity_passed": True,
+        "training_performed": False,
+        "optimizer_updates": 0,
+        "selected_nprobe": 40,
+        "candidate_generator": {
+            "search_width": 128,
+            "index_search_width": 129,
+            "selected_neighbors": 15,
+            "native_representative_selector": True,
+            "exact_rerank": True,
+        },
+        "rows_by_nprobe": {
+            "32": {
+                "mean_recall_at_15_unambiguous": 0.89140625,
+                "passes_mean_floor": False,
+            },
+            "40": {
+                "mean_recall_at_15_unambiguous": 0.901953125,
+                "passes_mean_floor": True,
+            },
+        },
+    })
+    assert _quality_authority_mean_recall(
+        receipt,
+        nprobe=40,
+    ) == 0.901953125
+    with pytest.raises(Round0049Error):
+        _quality_authority_mean_recall(receipt, nprobe=32)

@@ -53,6 +53,7 @@ from basemap.round0049_program import (
 SUBSTRATE_SCHEMA = "round0049-balanced-60m-substrate-v1"
 GRAPH_RECEIPT_SCHEMA = "round0049-balanced-60m-graph-receipt-v1"
 QUALITY_RECEIPT_SCHEMA = "round0049-balanced-60m-candidate-quality-v1"
+NPROBE_SWEEP_RECEIPT_SCHEMA = "round0058-balanced-60m-nprobe-sweep-v1"
 DEFAULT_NPROBE = 16
 # R0047 established the smallest accepted policy as an nprobe-64 IVF-PQ
 # shortlist of 128 retained, nonself rows followed by exact-vector reranking.
@@ -68,6 +69,84 @@ QUALITY_SAMPLE_ROWS = 1_024
 QUALITY_SEED = 49
 EXACT_BLOCK_ROWS = 262_144
 MEAN_RECALL_FLOOR = 0.90
+
+
+def _receipt_body(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: value for key, value in receipt.items()
+        if key != "identity_sha256"
+    }
+
+
+def _quality_authority_mean_recall(
+    receipt: Mapping[str, Any],
+    *,
+    nprobe: int,
+) -> float:
+    if receipt.get("identity_sha256") != sha256_bytes(
+        canonical_json(_receipt_body(receipt))
+    ):
+        raise Round0049Error("balanced-60M quality authority seal is invalid")
+    schema = receipt.get("schema")
+    if schema == QUALITY_RECEIPT_SCHEMA:
+        mean = float(
+            receipt.get("recall", {}).get(
+                "mean_recall_at_15_unambiguous",
+                -1,
+            )
+        )
+        if (
+            receipt.get("validity_passed") is not True
+            or int(
+                receipt.get("candidate_generator", {}).get(
+                    "nprobe",
+                    -1,
+                )
+            )
+            != nprobe
+            or int(
+                receipt.get("candidate_generator", {}).get(
+                    "search_width",
+                    -1,
+                )
+            )
+            != SEARCH_WIDTH
+            or receipt.get("candidate_generator", {}).get(
+                "exact_rerank"
+            )
+            is not True
+            or mean < MEAN_RECALL_FLOOR
+        ):
+            raise Round0049Error(
+                "R0049 candidate-quality receipt is not a passing policy"
+            )
+        return mean
+    if schema == NPROBE_SWEEP_RECEIPT_SCHEMA:
+        row = (receipt.get("rows_by_nprobe") or {}).get(str(nprobe))
+        generator = receipt.get("candidate_generator") or {}
+        mean = float(
+            (row or {}).get("mean_recall_at_15_unambiguous", -1)
+        )
+        if (
+            receipt.get("validity_passed") is not True
+            or receipt.get("training_performed") is not False
+            or int(receipt.get("optimizer_updates", -1)) != 0
+            or int(receipt.get("selected_nprobe", -1)) != nprobe
+            or row is None
+            or row.get("passes_mean_floor") is not True
+            or mean < MEAN_RECALL_FLOOR
+            or int(generator.get("search_width", -1)) != SEARCH_WIDTH
+            or int(generator.get("index_search_width", -1))
+            != INDEX_SEARCH_WIDTH
+            or int(generator.get("selected_neighbors", -1)) != K
+            or generator.get("native_representative_selector") is not True
+            or generator.get("exact_rerank") is not True
+        ):
+            raise Round0049Error(
+                "R0058 nprobe sweep does not authorize this graph policy"
+            )
+        return mean
+    raise Round0049Error("unknown balanced-60M quality authority schema")
 
 
 def _copy_intervals(
@@ -1140,44 +1219,10 @@ def run_build_graph(
     quality_signature = expected_input_signature(quality_path)
     with open(quality_path, encoding="utf-8") as handle:
         quality = json.load(handle)
-    quality_body = {
-        key: value for key, value in quality.items()
-        if key != "identity_sha256"
-    }
-    if (
-        quality.get("schema") != QUALITY_RECEIPT_SCHEMA
-        or quality.get("identity_sha256")
-        != sha256_bytes(canonical_json(quality_body))
-        or quality.get("validity_passed") is not True
-        or int(
-            quality.get("candidate_generator", {}).get(
-                "nprobe",
-                -1,
-            )
-        )
-        != nprobe
-        or int(
-            quality.get("candidate_generator", {}).get(
-                "search_width",
-                -1,
-            )
-        )
-        != SEARCH_WIDTH
-        or quality.get("candidate_generator", {}).get(
-            "exact_rerank"
-        )
-        is not True
-        or float(
-            quality.get("recall", {}).get(
-                "mean_recall_at_15_unambiguous",
-                -1,
-            )
-        )
-        < MEAN_RECALL_FLOOR
-    ):
-        raise Round0049Error(
-            "R0049 graph lacks a passing matched candidate-quality receipt"
-        )
+    quality_mean = _quality_authority_mean_recall(
+        quality,
+        nprobe=nprobe,
+    )
     contract = {
         "schema": "round0049-balanced-60m-graph-build-contract-v1",
         "release_sha": active["manifest"]["release_sha"],
@@ -1186,6 +1231,7 @@ def run_build_graph(
         "index": index_signature,
         "r0047_candidate_quality_receipt": r0047_quality_receipt,
         "quality_validation_receipt": quality_signature,
+        "quality_mean_recall_at_15_unambiguous": quality_mean,
         "nprobe": nprobe,
         "search_width": SEARCH_WIDTH,
         "index_search_width": INDEX_SEARCH_WIDTH,

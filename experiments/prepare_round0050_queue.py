@@ -9,11 +9,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from basemap.artifact_identity import (
-    canonical_json,
-    expected_input_signature,
-    sha256_bytes,
-)
+from basemap.artifact_identity import expected_input_signature
 from basemap.output_safety import (
     atomic_write_new_json,
     create_fresh_directory,
@@ -32,16 +28,15 @@ from experiments.prepare_round0020_0022_queues import (
     _file_inputs,
 )
 from experiments.round0049_nodes import (
-    MEAN_RECALL_FLOOR,
-    QUALITY_RECEIPT_SCHEMA,
-    SEARCH_WIDTH,
+    NPROBE_SWEEP_RECEIPT_SCHEMA,
+    _quality_authority_mean_recall,
 )
 
 
 ROUND_ID = "0050"
 ROUND_ROOT = "/data/latent-basemap/runs/round-0050"
 RELEASE_ROOT = (
-    "/home/enjalot/code/latent-basemap-worktrees/round-0050"
+    "/home/enjalot/code/latent-basemap-worktrees/round-0050-correction"
 )
 ROUND_FILE = os.path.join(
     LAB_ROOT,
@@ -54,6 +49,10 @@ SUBSTRATE_MANIFEST = (
 QUALITY_RECEIPT = (
     "/data/latent-basemap/runs/round-0049/queue/artifacts/"
     "candidate-quality-60m/balanced-60m-candidate-quality-v1.json"
+)
+NPROBE_CALIBRATION_RECEIPT = (
+    "/data/latent-basemap/runs/round-0058/queue/artifacts/"
+    "nprobe-sweep-60m/balanced-60m-nprobe-sweep-v1.json"
 )
 R0047_QUALITY_RECEIPT = (
     "/data/latent-basemap/runs/round-0047/queue/artifacts/"
@@ -88,44 +87,7 @@ def _load_quality(
         raise RuntimeError("R0049 candidate-quality receipt changed")
     with open(path, encoding="utf-8") as handle:
         receipt = json.load(handle)
-    body = {
-        key: value for key, value in receipt.items()
-        if key != "identity_sha256"
-    }
-    if (
-        receipt.get("schema") != QUALITY_RECEIPT_SCHEMA
-        or receipt.get("identity_sha256")
-        != sha256_bytes(canonical_json(body))
-        or receipt.get("validity_passed") is not True
-        or int(
-            receipt.get("candidate_generator", {}).get(
-                "nprobe",
-                -1,
-            )
-        )
-        != nprobe
-        or int(
-            receipt.get("candidate_generator", {}).get(
-                "search_width",
-                -1,
-            )
-        )
-        != SEARCH_WIDTH
-        or receipt.get("candidate_generator", {}).get(
-            "exact_rerank"
-        )
-        is not True
-        or float(
-            receipt.get("recall", {}).get(
-                "mean_recall_at_15_unambiguous",
-                -1,
-            )
-        )
-        < MEAN_RECALL_FLOOR
-    ):
-        raise RuntimeError(
-            "R0049 did not release this exact candidate policy"
-        )
+    _quality_authority_mean_recall(receipt, nprobe=nprobe)
     return receipt, signature
 
 
@@ -136,6 +98,7 @@ def prepare_round0050(
     quality_receipt_sha256: str,
     r0047_quality_receipt_sha256: str,
     nprobe: int,
+    quality_receipt: str = QUALITY_RECEIPT,
     cpu_threads: int = 24,
     queue_root: str = os.path.join(ROUND_ROOT, "queue"),
 ) -> str:
@@ -151,9 +114,16 @@ def prepare_round0050(
         expected_sha256=substrate_manifest_sha256,
     )
     quality, quality_signature = _load_quality(
-        QUALITY_RECEIPT,
+        quality_receipt,
         expected_sha256=quality_receipt_sha256,
         nprobe=nprobe,
+    )
+    quality_mean = _quality_authority_mean_recall(
+        quality,
+        nprobe=nprobe,
+    )
+    uses_nprobe_calibration = (
+        quality.get("schema") == NPROBE_SWEEP_RECEIPT_SCHEMA
     )
     r0047_signature = expected_input_signature(
         R0047_QUALITY_RECEIPT
@@ -178,11 +148,16 @@ def prepare_round0050(
             outputs["int8"]["canonical_path"],
             outputs["scales"]["canonical_path"],
             outputs["eligibility"]["canonical_path"],
-            QUALITY_RECEIPT,
+            quality_signature["canonical_path"],
             R0047_QUALITY_RECEIPT,
             INDEX_PATH,
             os.path.join(LAB_ROOT, "review-0047-2026-07-25.md"),
             os.path.join(LAB_ROOT, "review-0049-2026-07-26.md"),
+            *(
+                [os.path.join(LAB_ROOT, "review-0058-2026-07-26.md")]
+                if uses_nprobe_calibration
+                else []
+            ),
         ]),
     ])
     manifest = _base_manifest(
@@ -197,12 +172,20 @@ def prepare_round0050(
     manifest["schema"] = "round0050-balanced-60m-graph-queue-v1"
     manifest["repo_root"] = RELEASE_ROOT
     manifest["queue_class"] = "cpu-research-parallel"
-    manifest["required_reviews"] = ["0047", "0049"]
+    manifest["required_reviews"] = (
+        ["0047", "0049", "0058"]
+        if uses_nprobe_calibration
+        else ["0047", "0049"]
+    )
     manifest["capability_dependencies"] = [
         "minilm-balanced-60m-input-v1",
         "minilm-balanced-60m-candidate-quality-v1",
         "path-b-balanced-3m-candidate-quality-v2",
     ]
+    if uses_nprobe_calibration:
+        manifest["capability_dependencies"].append(
+            "minilm-balanced-60m-nprobe-calibration-v1"
+        )
     manifest["capabilities_produced"] = [
         "minilm-balanced-60m-native-graph-v1",
     ]
@@ -212,9 +195,7 @@ def prepare_round0050(
         "k": K,
         "substrate": substrate["signature"],
         "quality_validation": quality_signature,
-        "quality_mean_recall_at_15_unambiguous": (
-            quality["recall"]["mean_recall_at_15_unambiguous"]
-        ),
+        "quality_mean_recall_at_15_unambiguous": quality_mean,
         "candidate_generator": {
             "index": index_signature,
             "r0047_quality_receipt": r0047_signature,
@@ -252,7 +233,8 @@ def prepare_round0050(
         "candidate_quality_receipt_sha256": (
             r0047_quality_receipt_sha256
         ),
-        "quality_validation_receipt": QUALITY_RECEIPT,
+        "quality_validation_receipt": quality_signature["canonical_path"],
+        "quality_validation_receipt_sha256": quality_signature["sha256"],
         "nprobe": nprobe,
         "cpu_threads": cpu_threads,
         "node_policy": {
@@ -274,6 +256,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--release-sha", required=True)
     parser.add_argument("--substrate-manifest-sha256", required=True)
     parser.add_argument("--quality-receipt-sha256", required=True)
+    parser.add_argument("--quality-receipt", default=QUALITY_RECEIPT)
     parser.add_argument(
         "--r0047-quality-receipt-sha256",
         required=True,
@@ -295,6 +278,7 @@ def main(argv: list[str] | None = None) -> int:
             r0047_quality_receipt_sha256=(
                 args.r0047_quality_receipt_sha256
             ),
+            quality_receipt=args.quality_receipt,
             nprobe=args.nprobe,
             cpu_threads=args.cpu_threads,
             queue_root=args.queue_root,
