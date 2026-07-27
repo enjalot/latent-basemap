@@ -30,6 +30,7 @@ from basemap.round0082_quality import (
 )
 from experiments.round0049_nodes import (
     _exact_representative_truth,
+    _membership,
     _sample_retained_rows,
 )
 from experiments.round0059_nodes import _GpuSearchAdapter, _runtime_stamp
@@ -227,6 +228,11 @@ def run_confirmation(
             QUALITY_SEED != SOURCE_SAMPLE_SEED
             and sha256_bytes(sample.tobytes())
             != str(qualification["quality"]["sample_sha256"])
+        ),
+        "fresh_sample_geometry": (
+            len(sample) == QUALITY_SAMPLE_ROWS
+            and len(np.unique(sample)) == QUALITY_SAMPLE_ROWS
+            and not np.any(_membership(excluded, sample))
         ),
         "unambiguous_fraction_at_least_0_90": (
             float(unambiguous.mean()) >= 0.90
