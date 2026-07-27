@@ -79,6 +79,20 @@ class Round0064Error(Round0036Error):
     """The matched-scale evaluation contract was violated."""
 
 
+def expected_retained_rows_for_scale(row_count: int) -> int:
+    """Return the one registered representative count for a scale universe."""
+    matches = {
+        int(spec["retained_rows"])
+        for spec in MODEL_SPECS.values()
+        if int(spec["rows"]) == int(row_count)
+    }
+    if len(matches) != 1:
+        raise Round0064Error(
+            f"scale substrate row count {row_count} is not registered exactly"
+        )
+    return next(iter(matches))
+
+
 def seal(body: Mapping[str, Any]) -> dict[str, Any]:
     value = dict(body)
     return {
@@ -283,15 +297,8 @@ def load_substrate(
             "family member is the retained representative"
         ),
     )
-    expected_retained = {
-        30_000_000: 29_781_754,
-        45_000_000: 44_598_360,
-        60_000_000: 59_399_288,
-    }.get(row_count)
-    if (
-        expected_retained is None
-        or selector.retained_count != expected_retained
-    ):
+    expected_retained = expected_retained_rows_for_scale(row_count)
+    if selector.retained_count != expected_retained:
         raise Round0064Error("scale substrate retained-row accounting changed")
     return (
         encoded,
