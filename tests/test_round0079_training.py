@@ -93,6 +93,7 @@ def test_balanced_120m_updates_are_coverage_aligned() -> None:
         substrate_manifest_sha256=substrate_signature["sha256"],
         scale_geometry_signature={"sha256": "1" * 64},
         anchor_leverage_signature={"sha256": "2" * 64},
+        policy_confirmation_signature={"sha256": "3" * 64},
     )
     assert len(config_sha) == 64
     assert (
@@ -108,6 +109,9 @@ def test_balanced_120m_updates_are_coverage_aligned() -> None:
         "matched retained-90M scale comparison"
     )
     assert config["graph"]["weights_consumed"] is False
+    assert config["graph"]["independent_policy_confirmation"] == {
+        "sha256": "3" * 64
+    }
     assert config["decision_thresholds"][
         "geometry_claim_requires_downstream_evaluation"
     ] is True
@@ -167,9 +171,10 @@ def test_round0079_is_one_bounded_training_job() -> None:
     assert '"training_wall_only": True' in source
     assert '"geometry_claim_requires_successor_evaluation": True' in source
     assert (
-        'manifest["required_reviews"] = ["0065", "0076", "0078"]'
+        'manifest["required_reviews"] = ["0065", "0076", "0078", "0082"]'
         in source
     )
+    assert "minilm-balanced-120m-gpu-ivfpq-search-confirmed-v1" in source
 
 
 def test_round0079_receipts_exact_training_accounting() -> None:
@@ -185,10 +190,12 @@ def test_round0079_receipts_exact_training_accounting() -> None:
         "host_prefetch_consumer_batches",
         "scale_geometry",
         "anchor_leverage",
+        "policy_confirmation",
     ):
         assert field in source
     loader = inspect.getsource(round0079_nodes._load_pipeline)
     assert 'graph["manifest"].get("round_id") != "0078"' in loader
+    assert "load_policy_confirmation" in loader
     handler = inspect.getsource(round0079_nodes.run_job)
     assert 'active.get("manifest", {}).get("round_id")' in handler
 

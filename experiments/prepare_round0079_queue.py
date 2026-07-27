@@ -19,6 +19,7 @@ from basemap.output_safety import (
 )
 from basemap.round0034_pipeline import load_canonical_graph
 from basemap.round0065_substrates import validate_scale_substrate
+from basemap.round0082_quality import load_policy_confirmation
 from basemap.round0079_training import (
     ELIGIBILITY_SUMMARY,
     ROUND_ID,
@@ -82,12 +83,16 @@ def prepare_round0079(
     substrate_manifest_sha256: str,
     canonical_graph_manifest_path: str,
     canonical_graph_manifest_sha256: str,
+    policy_confirmation_path: str,
+    policy_confirmation_sha256: str,
     r0065_review_path: str,
     r0065_review_sha256: str,
     r0076_review_path: str,
     r0076_review_sha256: str,
     r0078_review_path: str,
     r0078_review_sha256: str,
+    r0082_review_path: str,
+    r0082_review_sha256: str,
     queue_root: str = os.path.join(ROUND_ROOT, "queue"),
 ) -> str:
     _require_issued_round()
@@ -119,6 +124,18 @@ def prepare_round0079(
         raise RuntimeError(
             "R0079 graph does not bind the exact R0065 120M substrate"
         )
+    confirmation = load_policy_confirmation(
+        policy_confirmation_path,
+        expected_sha256=policy_confirmation_sha256,
+        source_qualification_signature=graph["manifest"]["inputs"][
+            "gpu_qualification"
+        ],
+        substrate_signature=substrate["signature"],
+        eligibility_signature=outputs["eligibility"],
+        filtered_index_signature=graph["manifest"]["inputs"][
+            "filtered_index"
+        ],
+    )
     config, config_sha256 = train_config_from_capabilities(
         graph_manifest=graph["manifest"],
         graph_manifest_path=graph["signature"]["canonical_path"],
@@ -128,6 +145,7 @@ def prepare_round0079(
         substrate_manifest_sha256=substrate["signature"]["sha256"],
         scale_geometry_signature=scale_signature,
         anchor_leverage_signature=anchor_signature,
+        policy_confirmation_signature=confirmation["signature"],
     )
     reviews = {
         "0065": _require_review(
@@ -154,6 +172,14 @@ def prepare_round0079(
                 canonical_graph_manifest_sha256,
             ),
         ),
+        "0082": _require_review(
+            r0082_review_path,
+            expected_sha256=r0082_review_sha256,
+            required_text=(
+                "capability:minilm-balanced-120m-gpu-ivfpq-search-confirmed-v1",
+                policy_confirmation_sha256,
+            ),
+        ),
     }
     queue_root = create_fresh_directory(
         queue_root,
@@ -171,9 +197,11 @@ def prepare_round0079(
         canonical_graph_manifest_path,
         graph["manifest"]["outputs"]["targets"]["canonical_path"],
         graph["manifest"]["outputs"]["degrees"]["canonical_path"],
+        policy_confirmation_path,
         r0065_review_path,
         r0076_review_path,
         r0078_review_path,
+        r0082_review_path,
     ]))
     updates = int(config["optimizer"]["successful_positive_lr_updates"])
     p90_seconds = 25_200.0
@@ -189,11 +217,12 @@ def prepare_round0079(
     manifest["schema"] = "round0079-balanced-120m-train-queue-v1"
     manifest["repo_root"] = RELEASE_ROOT
     manifest["queue_class"] = "gpu-research"
-    manifest["required_reviews"] = ["0065", "0076", "0078"]
+    manifest["required_reviews"] = ["0065", "0076", "0078", "0082"]
     manifest["capability_dependencies"] = [
         "minilm-balanced-120m-int8-input-v1",
         "minilm-balanced-30m-45m-60m-90m-scale-geometry-v1",
         "minilm-balanced-120m-gpu-native-graph-v1",
+        "minilm-balanced-120m-gpu-ivfpq-search-confirmed-v1",
     ]
     manifest["capabilities_produced"] = [
         "minilm-balanced-120m-trained-model-seed42-v1",
@@ -207,6 +236,7 @@ def prepare_round0079(
         "anchor_leverage": anchor_signature,
         "substrate": substrate["signature"],
         "graph": graph["signature"],
+        "policy_confirmation": confirmation["signature"],
     }
     manifest["scientific_contract"] = {
         "tier": TIER,
@@ -233,6 +263,9 @@ def prepare_round0079(
         "training_wall_only": True,
         "density_threshold_tuned": False,
         "geometry_claim_requires_successor_evaluation": True,
+        "independent_search_policy_confirmation": (
+            confirmation["signature"]
+        ),
     }
     manifest["jobs"] = [{
         "id": "train_seed42_balanced_120m",
@@ -255,6 +288,8 @@ def prepare_round0079(
         "canonical_graph_manifest_sha256": (
             canonical_graph_manifest_sha256
         ),
+        "policy_confirmation": policy_confirmation_path,
+        "policy_confirmation_sha256": policy_confirmation_sha256,
         "train_config_sha256": config_sha256,
         "successful_updates": updates,
         "batch_size": config["optimizer"]["batch_size"],
@@ -281,7 +316,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--substrate-manifest-sha256", required=True)
     parser.add_argument("--canonical-graph-manifest", required=True)
     parser.add_argument("--canonical-graph-manifest-sha256", required=True)
-    for round_id in ("0065", "0076", "0078"):
+    parser.add_argument("--policy-confirmation", required=True)
+    parser.add_argument("--policy-confirmation-sha256", required=True)
+    for round_id in ("0065", "0076", "0078", "0082"):
         parser.add_argument(f"--r{round_id}-review", required=True)
         parser.add_argument(f"--r{round_id}-review-sha256", required=True)
     parser.add_argument(
@@ -300,12 +337,16 @@ def main(argv: list[str] | None = None) -> int:
             canonical_graph_manifest_sha256=(
                 args.canonical_graph_manifest_sha256
             ),
+            policy_confirmation_path=args.policy_confirmation,
+            policy_confirmation_sha256=args.policy_confirmation_sha256,
             r0065_review_path=args.r0065_review,
             r0065_review_sha256=args.r0065_review_sha256,
             r0076_review_path=args.r0076_review,
             r0076_review_sha256=args.r0076_review_sha256,
             r0078_review_path=args.r0078_review,
             r0078_review_sha256=args.r0078_review_sha256,
+            r0082_review_path=args.r0082_review,
+            r0082_review_sha256=args.r0082_review_sha256,
             queue_root=args.queue_root,
         )
     }, indent=2, sort_keys=True))
