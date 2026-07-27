@@ -182,7 +182,7 @@ def prepare_round0070(
     ):
         raise RuntimeError("R0019 model bundle bytes changed")
     balanced = validate_train_bundle(
-        label="r0061-balanced-30m",
+        label="r0061-30m",
         model_path=R0061_MODEL,
         model_sha256=balanced_model_sha256,
         train_receipt_path=R0061_RECEIPT,

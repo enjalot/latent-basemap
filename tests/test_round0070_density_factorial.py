@@ -76,6 +76,15 @@ def test_queue_is_one_cross_transform_one_reference_one_factorial() -> None:
     assert '"authorizes_larger_training_rung": False' in source
 
 
+def test_train_bundle_validator_uses_registered_round0064_label() -> None:
+    queue_source = inspect.getsource(prepare_round0070_queue.prepare_round0070)
+    node_source = inspect.getsource(round0070_nodes._balanced_bundle)
+    assert 'label="r0061-30m"' in queue_source
+    assert 'label="r0061-30m"' in node_source
+    assert "r0061-balanced-30m" not in queue_source
+    assert "r0061-balanced-30m" not in node_source
+
+
 def test_factorial_uses_identical_global_anchors_and_exact_radii() -> None:
     source = inspect.getsource(round0070_nodes.run_density_factorial)
     assert "selector.compact_to_global(compact_anchors)" in source
