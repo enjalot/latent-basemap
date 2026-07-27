@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
+from experiments.round0049_nodes import _write_shard
 from basemap.round0065_substrates import subset_spec
 from experiments import prepare_round0078_queue, round0078_nodes
 
@@ -33,6 +36,8 @@ def test_round0078_queue_is_one_resumable_no_training_job() -> None:
     ) == 1
     assert '"shard_rows": 100_000' in source
     assert '"resumable_shards": True' in source
+    assert '"rerank_workers": 2' in source
+    assert '"gpu_search_cpu_rerank_overlap": True' in source
     assert '"no_training": True' in source
     assert '"no_scale_decision": True' in source
     assert '"required_reviews"] = ["0065", "0077"]' in source
@@ -44,6 +49,84 @@ def test_round0078_gpu_clone_preserves_qualified_precision() -> None:
     assert "useFloat16 = False" in source
     assert "usePrecomputed = True" in source
     assert "setTempMemory(1 << 30)" in source
+
+
+def test_round0078_pipelined_rerank_matches_serial_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rng = np.random.RandomState(78)
+    encoded = rng.randint(
+        -127,
+        128,
+        size=(200, 384),
+        dtype=np.int16,
+    ).astype(np.int8)
+    scales = np.ones(200, dtype="<f2")
+    excluded = np.empty(0, dtype=np.int64)
+
+    class FakeIndex:
+        def search(self, queries, width, *, params=None):
+            assert width == 129
+            assert params.nprobe == 48
+            raw = np.tile(
+                np.arange(width, dtype=np.int64),
+                (len(queries), 1),
+            )
+            return np.zeros(raw.shape, dtype=np.float32), raw
+
+    class Parameters:
+        nprobe = 48
+
+    identity = lambda rows: np.asarray(rows, dtype=np.int64)
+    serial = tmp_path / "serial"
+    pipelined = tmp_path / "pipelined"
+    serial.mkdir()
+    pipelined.mkdir()
+    serial_receipt = _write_shard(
+        index=FakeIndex(),
+        parameters=Parameters(),
+        encoded=encoded,
+        scales=scales,
+        excluded=excluded,
+        shard_root=str(serial),
+        shard=0,
+        start=0,
+        stop=40,
+        nprobe=48,
+        round_id="0078",
+        compact_to_global_fn=identity,
+        global_to_compact_fn=identity,
+        source_rows=200,
+    )
+    monkeypatch.setattr(round0078_nodes, "SEARCH_BATCH_ROWS", 10)
+    pipelined_receipt = round0078_nodes._write_pipelined_shard(
+        index=FakeIndex(),
+        parameters=Parameters(),
+        encoded=encoded,
+        scales=scales,
+        excluded=excluded,
+        shard_root=str(pipelined),
+        shard=0,
+        start=0,
+        stop=40,
+        nprobe=48,
+        compact_to_global_fn=identity,
+        global_to_compact_fn=identity,
+        source_rows=200,
+    )
+    serial_targets = np.load(serial / "targets-0000.npy")
+    pipelined_targets = np.load(pipelined / "targets-0000.npy")
+    assert np.array_equal(serial_targets, pipelined_targets)
+    assert (
+        serial_receipt["targets"]["sha256"]
+        == pipelined_receipt["targets"]["sha256"]
+    )
+    assert pipelined_receipt["rerank_workers"] == 2
+    assert pipelined_receipt["search_rerank_overlap"] is True
+    with open(pipelined / "receipt-0000.json", encoding="utf-8") as handle:
+        persisted = json.load(handle)
+    assert persisted["targets"] == pipelined_receipt["targets"]
 
 
 def test_round0078_accepts_only_an_issued_round(

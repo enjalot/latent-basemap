@@ -194,6 +194,8 @@ def prepare_round0078(
         "search_width": 128,
         "selected_neighbors": 15,
         "exact_rerank": True,
+        "rerank_workers": 2,
+        "gpu_search_cpu_rerank_overlap": True,
         "shard_rows": 100_000,
         "resumable_shards": True,
         "fixed_degree": 15,

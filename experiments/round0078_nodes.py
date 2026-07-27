@@ -5,13 +5,18 @@ import math
 import os
 import resource
 import time
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
 from typing import Any, Mapping
 
 import numpy as np
 
 from basemap.artifact_identity import expected_input_signature
-from basemap.output_safety import atomic_write_new_json
+from basemap.output_safety import (
+    atomic_save_new_npy,
+    atomic_write_new_json,
+)
 from basemap.round0034_pipeline import GRAPH_SCHEMA
 from basemap.round0049_program import (
     DIMENSION,
@@ -37,9 +42,13 @@ from experiments.round0049_nodes import (
     SEARCH_WIDTH,
     SHARD_ROWS,
     _assemble_graph,
+    _clean_search,
+    _exact_rerank_shortlist,
     _initialize_graph_output,
+    _membership,
+    _shard_paths,
+    _validate_shard,
     _warm_page_cache,
-    _write_shard,
 )
 from experiments.round0059_nodes import (
     _GpuSearchAdapter,
@@ -60,6 +69,7 @@ RUNTIME_SPEC = os.path.join(
     os.path.dirname(__file__),
     "round0060_runtime.json",
 )
+RERANK_WORKERS = 2
 
 
 def _to_gpu(
@@ -79,6 +89,144 @@ def _to_gpu(
     clone_seconds = time.monotonic() - started
     gpu.nprobe = nprobe
     return resources, _GpuSearchAdapter(gpu, nprobe), clone_seconds
+
+
+def _write_pipelined_shard(
+    *,
+    index: Any,
+    parameters: Any,
+    encoded: np.ndarray,
+    scales: np.ndarray,
+    excluded: np.ndarray,
+    shard_root: str,
+    shard: int,
+    start: int,
+    stop: int,
+    nprobe: int,
+    compact_to_global_fn: Any,
+    global_to_compact_fn: Any,
+    source_rows: int,
+) -> dict[str, Any]:
+    """Overlap GPU search with two bounded, exact CPU rerank workers."""
+    target_path, receipt_path = _shard_paths(shard_root, shard)
+    previous = _validate_shard(
+        target_path=target_path,
+        receipt_path=receipt_path,
+        start=start,
+        stop=stop,
+        nprobe=nprobe,
+        round_id=ROUND_ID,
+    )
+    if previous is not None:
+        return {**previous, "resumed": True}
+    started = time.monotonic()
+    targets = np.full((stop - start, K), -1, dtype="<i4")
+    compact_rows = np.arange(start, stop, dtype=np.int64)
+    retained = compact_rows[
+        ~_membership(excluded, compact_rows)
+    ]
+    self_seen = 0
+    search_seconds = 0.0
+    rerank_seconds = 0.0
+    pending: deque[
+        tuple[np.ndarray, Future[tuple[np.ndarray, dict[str, Any]]]]
+    ] = deque()
+
+    def resolve_oldest() -> None:
+        nonlocal rerank_seconds
+        batch_rows, future = pending.popleft()
+        selected, rerank = future.result()
+        targets[batch_rows - start] = selected
+        rerank_seconds += float(rerank["wall_seconds"])
+
+    with ThreadPoolExecutor(
+        max_workers=RERANK_WORKERS,
+        thread_name_prefix="r0078-rerank",
+    ) as executor:
+        for batch_start in range(0, len(retained), SEARCH_BATCH_ROWS):
+            batch_rows = retained[
+                batch_start:batch_start + SEARCH_BATCH_ROWS
+            ]
+            query = (
+                np.asarray(encoded[batch_rows], dtype=np.float32)
+                * np.asarray(
+                    scales[batch_rows],
+                    dtype=np.float32,
+                )[:, None]
+            )
+            norms = np.linalg.norm(query, axis=1, keepdims=True)
+            if (
+                not np.isfinite(query).all()
+                or not np.isfinite(norms).all()
+                or np.any(norms <= 0)
+            ):
+                raise Round0078Error(
+                    "balanced-120M query block is nonfinite"
+                )
+            query /= norms
+            global_rows = compact_to_global_fn(batch_rows)
+            search_started = time.monotonic()
+            _distances, raw = index.search(
+                np.ascontiguousarray(query),
+                INDEX_SEARCH_WIDTH,
+                params=parameters,
+            )
+            search_seconds += time.monotonic() - search_started
+            shortlist, seen = _clean_search(
+                raw,
+                global_sources=global_rows,
+                candidate_count=SEARCH_WIDTH,
+                source_rows=source_rows,
+                global_to_compact_fn=global_to_compact_fn,
+            )
+            self_seen += seen
+            pending.append((
+                batch_rows.copy(),
+                executor.submit(
+                    _exact_rerank_shortlist,
+                    queries=query,
+                    shortlist=shortlist,
+                    encoded=encoded,
+                    scales=scales,
+                ),
+            ))
+            if len(pending) >= RERANK_WORKERS:
+                resolve_oldest()
+        while pending:
+            resolve_oldest()
+
+    retained_mask = ~_membership(excluded, compact_rows)
+    if (
+        np.any(targets[retained_mask] < 0)
+        or np.any(targets[~retained_mask] != -1)
+    ):
+        raise Round0078Error("graph shard retained/excluded rows disagree")
+    atomic_save_new_npy(target_path, targets, immutable=True)
+    body = {
+        "schema": "round0049-exact-rerank-graph-shard-v2",
+        "round_id": ROUND_ID,
+        "shard": shard,
+        "start": start,
+        "stop": stop,
+        "retained_sources": len(retained),
+        "excluded_sources": stop - start - len(retained),
+        "valid_edges": len(retained) * K,
+        "nprobe": nprobe,
+        "search_width": SEARCH_WIDTH,
+        "index_search_width": INDEX_SEARCH_WIDTH,
+        "selected_neighbors": K,
+        "exact_rerank": True,
+        "rerank_workers": RERANK_WORKERS,
+        "search_rerank_overlap": True,
+        "self_returned": self_seen,
+        "search_seconds": search_seconds,
+        "rerank_seconds": rerank_seconds,
+        "wall_seconds": time.monotonic() - started,
+        "targets": expected_input_signature(target_path),
+    }
+    receipt = _seal(body)
+    atomic_write_new_json(receipt_path, receipt, immutable=True)
+    return {**receipt, "resumed": False}
 
 
 def run_build_graph(
@@ -145,6 +293,8 @@ def run_build_graph(
         "k": K,
         "shard_rows": SHARD_ROWS,
         "search_batch_rows": SEARCH_BATCH_ROWS,
+        "rerank_workers": RERANK_WORKERS,
+        "search_rerank_overlap": True,
         "engine": "faiss-classic-GpuIndexIVFPQ",
     }
     shard_root = _initialize_graph_output(output, contract=contract)
@@ -195,7 +345,7 @@ def run_build_graph(
     shard_receipts: list[dict[str, Any]] = []
     for shard, start in enumerate(range(0, ROW_COUNT, SHARD_ROWS)):
         stop = min(start + SHARD_ROWS, ROW_COUNT)
-        shard_receipt = _write_shard(
+        shard_receipt = _write_pipelined_shard(
             index=gpu,
             parameters=parameters,
             encoded=encoded,
@@ -206,7 +356,6 @@ def run_build_graph(
             start=start,
             stop=stop,
             nprobe=nprobe,
-            round_id=ROUND_ID,
             compact_to_global_fn=compact_to_global_fn,
             global_to_compact_fn=global_to_compact_fn,
             source_rows=SOURCE_ROWS,
@@ -299,6 +448,8 @@ def run_build_graph(
             "index_search_width": INDEX_SEARCH_WIDTH,
             "selected_neighbors": K,
             "exact_rerank": True,
+            "exact_rerank_workers": RERANK_WORKERS,
+            "gpu_search_cpu_rerank_overlap": True,
             "rerank_vector_source": (
                 "balanced-120m int8-plus-fp16-scale exact cosine"
             ),
@@ -322,6 +473,12 @@ def run_build_graph(
             "gpu_clone_seconds": clone_seconds,
             "search_seconds": search_seconds,
             "rerank_seconds": rerank_seconds,
+            "rerank_seconds_semantics": (
+                "sum of exact worker durations; workers overlap each other "
+                "and GPU search"
+            ),
+            "rerank_workers": RERANK_WORKERS,
+            "gpu_search_cpu_rerank_overlap": True,
             "total_seconds": time.monotonic() - started,
             "shard_count": len(shard_receipts),
             "resumed_shards": resumed,
