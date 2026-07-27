@@ -108,7 +108,7 @@ def prepare_round0072(
         expected_sha256=r0059_review_sha256,
         required_text=(
             "capability:minilm-balanced-60m-gpu-ivfpq-search-qualified-v1",
-            "faiss-classic-GpuIndexIVFPQ",
+            "966c7782da5ef9142088eeab114c8d5b7b7086ae981a7c0ded226725095b4476",
         ),
     )
     review69 = _require_review(
