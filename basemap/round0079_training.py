@@ -52,6 +52,7 @@ def train_config_from_capabilities(
     substrate_manifest_sha256: str,
     scale_geometry_signature: Mapping[str, Any],
     anchor_leverage_signature: Mapping[str, Any],
+    policy_confirmation_signature: Mapping[str, Any],
 ) -> tuple[dict[str, Any], str]:
     """Derive the exact production configuration from reviewed capabilities."""
     excluded = int(ELIGIBILITY_SUMMARY["excluded_row_count"])
@@ -102,6 +103,7 @@ def train_config_from_capabilities(
         or not eligibility.get("sha256")
         or not scale_geometry_signature.get("sha256")
         or not anchor_leverage_signature.get("sha256")
+        or not policy_confirmation_signature.get("sha256")
     ):
         raise Round0079Error(
             "balanced-120M reviewed capabilities are incomplete"
@@ -158,6 +160,9 @@ def train_config_from_capabilities(
         },
         "weights_consumed": False,
         "qualification": graph_inputs["gpu_qualification"],
+        "independent_policy_confirmation": dict(
+            policy_confirmation_signature
+        ),
         "mean_recall_at_15_unambiguous": quality[
             "mean_recall_at_15_unambiguous"
         ],
@@ -227,6 +232,9 @@ def train_config_from_capabilities(
             "decision_sources": {
                 "r0076_scale_geometry": dict(scale_geometry_signature),
                 "r0074_anchor_leverage": dict(anchor_leverage_signature),
+                "r0082_policy_confirmation": dict(
+                    policy_confirmation_signature
+                ),
             },
             "selected_tier": TIER,
             "selection": (

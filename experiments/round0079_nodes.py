@@ -27,6 +27,7 @@ from basemap.round0034_pipeline import (
 from basemap.round0049_program import DIMENSION
 from basemap.round0064_evaluation import validate_seal
 from basemap.round0065_substrates import validate_scale_substrate
+from basemap.round0082_quality import load_policy_confirmation
 from basemap.round0079_training import (
     PIPELINE_SCHEMA,
     ROUND_ID,
@@ -182,6 +183,7 @@ def _load_pipeline(
     dict[str, Any],
     dict[str, Any],
     dict[str, Any],
+    dict[str, Any],
 ]:
     scale_signature, anchor_signature = _load_scale_evidence(job)
     substrate = validate_scale_substrate(
@@ -205,6 +207,18 @@ def _load_pipeline(
         raise Round0034PipelineError(
             "R0079 graph does not bind the exact R0065 120M substrate"
         )
+    confirmation = load_policy_confirmation(
+        str(job["policy_confirmation"]),
+        expected_sha256=str(job["policy_confirmation_sha256"]),
+        source_qualification_signature=graph["manifest"]["inputs"][
+            "gpu_qualification"
+        ],
+        substrate_signature=substrate["signature"],
+        eligibility_signature=outputs["eligibility"],
+        filtered_index_signature=graph["manifest"]["inputs"][
+            "filtered_index"
+        ],
+    )
     dataset = HostInt8MaterializedArray.from_files(
         int8_path=outputs["int8"]["canonical_path"],
         int8_sha256=outputs["int8"]["sha256"],
@@ -229,6 +243,7 @@ def _load_pipeline(
         substrate_manifest_sha256=substrate["signature"]["sha256"],
         scale_geometry_signature=scale_signature,
         anchor_leverage_signature=anchor_signature,
+        policy_confirmation_signature=confirmation["signature"],
     )
     updates = int(config["optimizer"]["successful_positive_lr_updates"])
     if (
@@ -244,6 +259,7 @@ def _load_pipeline(
         substrate,
         scale_signature,
         anchor_signature,
+        confirmation,
     )
 
 
@@ -259,6 +275,7 @@ def run_train(
         substrate,
         scale_signature,
         anchor_signature,
+        confirmation,
     ) = _load_pipeline(job)
     updates = int(config["optimizer"]["successful_positive_lr_updates"])
     output = create_fresh_directory(
@@ -417,6 +434,7 @@ def run_train(
         "substrate": substrate["signature"],
         "scale_geometry": scale_signature,
         "anchor_leverage": anchor_signature,
+        "policy_confirmation": confirmation["signature"],
         "train_wall_seconds": wall_seconds,
         "seed": SEED,
         "retry_count": 0,
