@@ -123,6 +123,8 @@ def test_round0072_is_one_bounded_no_training_gpu_job() -> None:
     assert '"no_graph": True' in source
     assert '"no_training": True' in source
     assert '"no_scale_decision": True' in source
+    assert '"required_reviews"] = ["0059", "0069", "0071"]' in source
+    assert "minilm-balanced-30m-45m-60m-scale-geometry-v1" in source
     assert round0072_nodes.QUALITY_SAMPLE_ROWS == 4_096
     assert MEAN_RECALL_FLOOR == 0.90
 

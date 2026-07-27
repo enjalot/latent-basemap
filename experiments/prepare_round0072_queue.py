@@ -88,6 +88,8 @@ def prepare_round0072(
     substrate_manifest_sha256: str,
     r0059_review_path: str,
     r0059_review_sha256: str,
+    r0069_review_path: str,
+    r0069_review_sha256: str,
     r0071_review_path: str,
     r0071_review_sha256: str,
     runtime_spec_sha256: str,
@@ -107,6 +109,15 @@ def prepare_round0072(
         required_text=(
             "capability:minilm-balanced-60m-gpu-ivfpq-search-qualified-v1",
             "faiss-classic-GpuIndexIVFPQ",
+        ),
+    )
+    review69 = _require_review(
+        r0069_review_path,
+        expected_sha256=r0069_review_sha256,
+        required_text=(
+            "capability:minilm-balanced-30m-45m-60m-scale-geometry-v1",
+            "45m_supported_as_deliberate_ladder_rung",
+            "advance_directly_to_120m",
         ),
     )
     review71 = _require_review(
@@ -142,6 +153,7 @@ def prepare_round0072(
             RUNTIME_SPEC,
             FAISS_WHEEL,
             r0059_review_path,
+            r0069_review_path,
             r0071_review_path,
         ]),
     ])
@@ -159,9 +171,10 @@ def prepare_round0072(
     )
     manifest["repo_root"] = RELEASE_ROOT
     manifest["queue_class"] = "gpu-research"
-    manifest["required_reviews"] = ["0059", "0071"]
+    manifest["required_reviews"] = ["0059", "0069", "0071"]
     manifest["capability_dependencies"] = [
         "minilm-balanced-60m-gpu-ivfpq-search-qualified-v1",
+        "minilm-balanced-30m-45m-60m-scale-geometry-v1",
         "minilm-balanced-90m-int8-input-v1",
     ]
     manifest["capabilities_produced"] = [
@@ -170,6 +183,7 @@ def prepare_round0072(
     manifest["training_performed"] = False
     manifest["reviewed_inputs"] = {
         "review_0059": review59,
+        "review_0069": review69,
         "review_0071": review71,
         "substrate": substrate["signature"],
     }
@@ -231,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--release-sha", required=True)
     parser.add_argument("--substrate-manifest", required=True)
     parser.add_argument("--substrate-manifest-sha256", required=True)
-    for round_id in ("0059", "0071"):
+    for round_id in ("0059", "0069", "0071"):
         parser.add_argument(f"--r{round_id}-review", required=True)
         parser.add_argument(
             f"--r{round_id}-review-sha256",
@@ -250,6 +264,8 @@ def main(argv: list[str] | None = None) -> int:
             substrate_manifest_sha256=args.substrate_manifest_sha256,
             r0059_review_path=args.r0059_review,
             r0059_review_sha256=args.r0059_review_sha256,
+            r0069_review_path=args.r0069_review,
+            r0069_review_sha256=args.r0069_review_sha256,
             r0071_review_path=args.r0071_review,
             r0071_review_sha256=args.r0071_review_sha256,
             runtime_spec_sha256=args.runtime_spec_sha256,
