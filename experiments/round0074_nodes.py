@@ -542,10 +542,12 @@ def run_anchor_leverage(
 
 def run_job(
     active: dict[str, Any],
-    job: dict[str, Any],
+    job: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if str(active.get("round_id")) != ROUND_ID:
+    if active.get("manifest", {}).get("round_id") != ROUND_ID:
         raise RuntimeError("R0074 handler requires the exact round")
-    if job.get("action") != "anchor_leverage":
-        raise RuntimeError(f"unknown R0074 action {job.get('action')!r}")
+    if job is None or job.get("action") != "anchor_leverage":
+        raise RuntimeError(
+            f"unknown R0074 action {(job or {}).get('action')!r}"
+        )
     return run_anchor_leverage(active, job)

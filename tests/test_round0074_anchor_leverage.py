@@ -171,3 +171,9 @@ def test_no_training_or_graph_handler_contract() -> None:
     handler = inspect.getsource(round0074_nodes.run_anchor_leverage)
     assert "build_graph" not in handler
     assert "faiss.write_index" not in handler
+
+
+def test_handler_reads_round_id_from_runner_manifest() -> None:
+    source = inspect.getsource(round0074_nodes.run_job)
+    assert 'active.get("manifest", {}).get("round_id")' in source
+    assert 'active.get("round_id")' not in source
