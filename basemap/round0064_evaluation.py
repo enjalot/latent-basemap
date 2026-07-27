@@ -63,6 +63,15 @@ MODEL_SPECS = {
         "updates": 748_757,
         "sampler_class": "HostInt8SelectedCanonicalSampler",
     },
+    "r0075-90m": {
+        "round_id": "0075",
+        "receipt_schema": "round0075-train-receipt-v1",
+        "config_schema": "round0075-production-config-v1",
+        "rows": 90_000_000,
+        "retained_rows": 88_945_313,
+        "updates": 1_493_293,
+        "sampler_class": "HostInt8Balanced90mCanonicalSampler",
+    },
 }
 
 
@@ -104,7 +113,7 @@ def validate_train_bundle(
     train_receipt_path: str,
     train_receipt_sha256: str,
 ) -> dict[str, Any]:
-    """Authenticate one exact R0061/R0063 model-and-receipt tuple."""
+    """Authenticate one exact registered scale model-and-receipt tuple."""
     try:
         spec = MODEL_SPECS[label]
     except KeyError as exc:

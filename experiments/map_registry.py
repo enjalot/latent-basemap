@@ -455,6 +455,7 @@ def scan_scale_evaluation_round(round_dir: Path, ledger: dict) -> list[dict]:
                 "label": raw.get("label"),
                 "training_round": raw.get("training_round"),
                 "panel_schema": raw.get("panel_schema"),
+                "density_semantics": raw.get("density_semantics"),
                 **resolved,
             })
     entries: list[dict] = []
@@ -488,6 +489,27 @@ def scan_scale_evaluation_round(round_dir: Path, ledger: dict) -> list[dict]:
             if definition["render"].is_file()
             else []
         )
+        checks = panel.get("decision_checks") or {}
+        if definition.get("density_semantics") == "representative-relative-v1":
+            selector_checks = {
+                key: value
+                for key, value in checks.items()
+                if key != "density_at_least_0_60"
+            }
+            selector_passed = bool(selector_checks) and all(
+                bool(value) for value in selector_checks.values()
+            )
+            selector_label = "representative-non-density-selector-pass"
+            selector_failed_label = (
+                "representative-non-density-selector-failed-diagnostic"
+            )
+        else:
+            # Preserve the registered decision on older panels. Some accepted
+            # scale panels predate the durable decision_checks object even
+            # though their absolute_selector_passed field is present.
+            selector_passed = bool(panel.get("absolute_selector_passed"))
+            selector_label = "same-domain-selector-pass"
+            selector_failed_label = "same-domain-selector-failed-diagnostic"
         entries.append({
             "map_id": f"round-{rid}-{_slug(definition['label'])}",
             "round_id": rid,
@@ -510,13 +532,12 @@ def scan_scale_evaluation_round(round_dir: Path, ledger: dict) -> list[dict]:
             ),
             "precision": "fp32-transform",
             "scientific_status": (
-                "same-domain-selector-pass"
-                if panel.get("absolute_selector_passed")
-                else "same-domain-selector-failed-diagnostic"
+                selector_label
+                if selector_passed
+                else selector_failed_label
             ),
-            "capability_candidate": bool(
-                panel.get("absolute_selector_passed")
-            ),
+            "capability_candidate": selector_passed,
+            "density_semantics": definition.get("density_semantics"),
             "model": model,
             "coordinates": {
                 "dir": _relpath(definition["coordinates"]),
@@ -533,7 +554,12 @@ def scan_scale_evaluation_round(round_dir: Path, ledger: dict) -> list[dict]:
                 "proj_knn_ffr": projection.get(
                     "proj_knn_regressor_ffr"
                 ),
-                "decision_checks_all_pass": bool(
+                "decision_checks_all_pass": selector_passed,
+                "raw_decision_checks_all_pass": (
+                    bool(checks)
+                    and all(bool(value) for value in checks.values())
+                ),
+                "legacy_absolute_selector_passed": bool(
                     panel.get("absolute_selector_passed")
                 ),
                 "formula_version": scientific.get("formula_version"),
