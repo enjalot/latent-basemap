@@ -64,14 +64,18 @@ def test_round0078_pipelined_rerank_matches_serial_bytes(
         dtype=np.int16,
     ).astype(np.int8)
     scales = np.ones(200, dtype="<f2")
-    excluded = np.empty(0, dtype=np.int64)
+    excluded = np.asarray([2, 17, 150], dtype=np.int64)
+    candidate_ids = np.asarray(
+        [row for row in range(200) if row not in set(excluded)][:129],
+        dtype=np.int64,
+    )
 
     class FakeIndex:
         def search(self, queries, width, *, params=None):
             assert width == 129
             assert params.nprobe == 48
             raw = np.tile(
-                np.arange(width, dtype=np.int64),
+                candidate_ids,
                 (len(queries), 1),
             )
             return np.zeros(raw.shape, dtype=np.float32), raw
@@ -119,6 +123,11 @@ def test_round0078_pipelined_rerank_matches_serial_bytes(
     serial_targets = np.load(serial / "targets-0000.npy")
     pipelined_targets = np.load(pipelined / "targets-0000.npy")
     assert np.array_equal(serial_targets, pipelined_targets)
+    assert np.all(pipelined_targets[[2, 17]] == -1)
+    retained_targets = pipelined_targets[
+        [row for row in range(40) if row not in {2, 17}]
+    ]
+    assert not np.any(np.isin(retained_targets, excluded))
     assert (
         serial_receipt["targets"]["sha256"]
         == pipelined_receipt["targets"]["sha256"]
