@@ -2,7 +2,14 @@ import inspect
 import json
 from pathlib import Path
 
-from basemap.round0064_evaluation import MODEL_SPECS, seal
+import pytest
+
+from basemap.round0064_evaluation import (
+    MODEL_SPECS,
+    Round0064Error,
+    expected_retained_rows_for_scale,
+    seal,
+)
 from experiments import map_registry, prepare_round0076_queue
 from experiments.round0076_nodes import (
     MATCHED_NONINFERIORITY_MARGINS,
@@ -92,6 +99,12 @@ def test_r0075_model_identity_is_registered_exactly() -> None:
         "updates": 1_493_293,
         "sampler_class": "HostInt8Balanced90mCanonicalSampler",
     }
+
+
+def test_90m_substrate_retained_rows_come_from_registered_model() -> None:
+    assert expected_retained_rows_for_scale(90_000_000) == 88_945_313
+    with pytest.raises(Round0064Error, match="not registered exactly"):
+        expected_retained_rows_for_scale(75_000_000)
 
 
 def test_noninferiority_uses_registered_relative_margins() -> None:
