@@ -104,6 +104,9 @@ def test_balanced_120m_updates_are_coverage_aligned() -> None:
     assert stamp["sampler_class"] == SAMPLER_CLASS
     assert stamp["positive_source_count"] == 118_067_492
     assert stamp["valid_canonical_edge_count"] == 1_771_012_380
+    assert config["scorer"]["required"][0] == (
+        "matched retained-90M scale comparison"
+    )
     assert config["graph"]["weights_consumed"] is False
     assert config["decision_thresholds"][
         "geometry_claim_requires_downstream_evaluation"

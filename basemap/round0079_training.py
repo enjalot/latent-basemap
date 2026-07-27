@@ -263,7 +263,7 @@ def train_config_from_capabilities(
     config["scorer"] = {
         "status": "registered-downstream-successor",
         "required": [
-            "matched retained-30M scale comparison",
+            "matched retained-90M scale comparison",
             "full balanced-120M representative geometry panel",
             "held-out query projection",
             "fixed-sample render",
