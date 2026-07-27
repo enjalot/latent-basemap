@@ -26,6 +26,7 @@ RUNS_DIR = Path("/data/latent-basemap/runs")
 CHECKPOINT_DIR = Path("/data/checkpoints/pumap")
 LEDGER_DIR = Path.home() / "code/latent-labs/basemap-100m"
 REGISTRY_PATH = Path("/data/latent-basemap/maps.json")
+HISTORY_DIR = Path("/data/latent-basemap/registry-history")
 SITE_DIR = Path.home() / ".agent/basemap-maps"
 SITE_URL = "http://gsv.local:8800/basemap-maps"
 
@@ -366,6 +367,41 @@ def scan() -> dict:
     }
 
 
+def _content_sha(reg: dict) -> str:
+    """Hash the inventory content, ignoring the generation timestamp, so a
+    rescan that finds nothing new does not mint a new snapshot."""
+    stable = {k: v for k, v in reg.items()
+              if k not in ("generated_utc", "content_sha256", "mutable_view_note")}
+    return hashlib.sha256(
+        json.dumps(stable, sort_keys=True).encode()).hexdigest()
+
+
+def write_registry(reg: dict) -> Path | None:
+    """Write the mutable view, plus an immutable content-addressed snapshot
+    under registry-history/ when the inventory actually changed.
+
+    maps.json is a regenerated VIEW (protocol v2.1): rounds and reviews bind
+    their own immutable snapshot artifacts, never this file. The history dir
+    makes any later divergence diagnosable without blocking a review.
+    """
+    reg = dict(reg)
+    sha = _content_sha(reg)
+    reg["content_sha256"] = sha
+    reg["mutable_view_note"] = (
+        "regenerated view; rounds/reviews bind immutable snapshots, not this file")
+    REGISTRY_PATH.write_text(json.dumps(reg, indent=1))
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    existing = sorted(HISTORY_DIR.glob("maps-*.json"))
+    if existing:
+        last = _load_json(existing[-1])
+        if last is not None and last.get("content_sha256") == sha:
+            return None
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    snapshot = HISTORY_DIR / f"maps-{stamp}-{sha[:12]}.json"
+    snapshot.write_text(json.dumps(reg, indent=1))
+    return snapshot
+
+
 # --------------------------------------------------------------- publish ----
 
 CSS = """
@@ -577,13 +613,14 @@ def main():
     args = ap.parse_args()
     if args.command == "scan":
         reg = scan()
-        REGISTRY_PATH.write_text(json.dumps(reg, indent=1))
-        print(f"wrote {REGISTRY_PATH}: {reg['counts']}")
+        snapshot = write_registry(reg)
+        print(f"wrote {REGISTRY_PATH}: {reg['counts']}"
+              + (f"; snapshot {snapshot}" if snapshot else "; inventory unchanged"))
     else:
         reg = _load_json(REGISTRY_PATH)
         if reg is None or reg.get("schema") != SCHEMA:
             reg = scan()
-            REGISTRY_PATH.write_text(json.dumps(reg, indent=1))
+            write_registry(reg)
             print(f"(re)scanned -> {REGISTRY_PATH}")
         publish(reg)
 
