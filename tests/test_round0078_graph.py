@@ -8,7 +8,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from experiments.round0049_nodes import _write_shard
+from experiments.round0049_nodes import (
+    Round0049Error,
+    _validate_shard,
+    _write_shard,
+)
 from basemap.round0065_substrates import subset_spec
 from experiments import prepare_round0078_queue, round0078_nodes
 
@@ -18,7 +22,7 @@ def test_round0078_graph_is_fixed_balanced_120m() -> None:
     source = inspect.getsource(round0078_nodes.run_build_graph)
     assert "ROW_COUNT" in source
     assert "INTERVALS" in source
-    assert "load_gpu_qualification(" in source
+    assert "load_gpu_policy_qualification(" in source
     assert "load_scale_decision" not in source
     assert '"scale_decision_made": False' in source
     assert round0078_nodes.ROW_COUNT == 120_000_000
@@ -30,7 +34,10 @@ def test_round0078_graph_is_fixed_balanced_120m() -> None:
 
 def test_round0078_queue_is_one_resumable_no_training_job() -> None:
     source = inspect.getsource(prepare_round0078_queue.prepare_round0078)
-    assert "gpu_hours_cap=5.0" in source
+    assert "gpu_hours_cap=8.0" in source
+    assert '"p90_wall_s": 28_800.0' in source
+    assert '"overlap_adjusted_projection_hours"' in source
+    assert "max(" in source
     assert source.count(
         '"action": "build_balanced_120m_gpu_graph"'
     ) == 1
@@ -42,7 +49,7 @@ def test_round0078_queue_is_one_resumable_no_training_job() -> None:
     assert '"gpu_search_cpu_rerank_overlap": True' in source
     assert '"no_training": True' in source
     assert '"no_scale_decision": True' in source
-    assert '"required_reviews"] = ["0065", "0077"]' in source
+    assert '"required_reviews"] = ["0065", "0081"]' in source
 
 
 def test_round0078_gpu_clone_preserves_qualified_precision() -> None:
@@ -117,6 +124,7 @@ def test_round0078_pipelined_rerank_matches_serial_bytes(
         start=0,
         stop=40,
         nprobe=48,
+        search_width=128,
         compact_to_global_fn=identity,
         global_to_compact_fn=identity,
         source_rows=200,
@@ -140,6 +148,19 @@ def test_round0078_pipelined_rerank_matches_serial_bytes(
     with open(pipelined / "receipt-0000.json", encoding="utf-8") as handle:
         persisted = json.load(handle)
     assert persisted["targets"] == pipelined_receipt["targets"]
+    with pytest.raises(
+        Round0049Error,
+        match="completed graph shard identity changed",
+    ):
+        _validate_shard(
+            target_path=str(pipelined / "targets-0000.npy"),
+            receipt_path=str(pipelined / "receipt-0000.json"),
+            start=0,
+            stop=40,
+            nprobe=48,
+            search_width=256,
+            round_id="0078",
+        )
 
 
 def test_round0078_accepts_only_an_issued_round(
