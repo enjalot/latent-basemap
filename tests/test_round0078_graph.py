@@ -34,8 +34,8 @@ def test_round0078_graph_is_fixed_balanced_120m() -> None:
 
 def test_round0078_queue_is_one_resumable_no_training_job() -> None:
     source = inspect.getsource(prepare_round0078_queue.prepare_round0078)
-    assert "gpu_hours_cap=12.0" in source
-    assert '"p90_wall_s": 36_000.0' in source
+    assert "gpu_hours_cap=8.0" in source
+    assert '"p90_wall_s": 28_800.0' in source
     assert '"overlap_adjusted_projection_hours"' in source
     assert "max(" in source
     assert source.count(
