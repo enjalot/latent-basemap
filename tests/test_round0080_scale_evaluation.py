@@ -111,7 +111,9 @@ def test_noninferiority_uses_registered_relative_margins() -> None:
         treatment[metric] = control[metric] - margin
     comparison = _noninferiority(treatment, control)
     assert all(item["passed"] for item in comparison.values())
-    treatment["ffr"] -= 0.000001
+    # The old six-decimal decision rounding incorrectly accepted a real
+    # 4e-7 miss. Reporting may round later, but acceptance uses raw metrics.
+    treatment["ffr"] -= 0.0000004
     comparison = _noninferiority(treatment, control)
     assert comparison["ffr"]["passed"] is False
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections.abc import Mapping
 from typing import Any
@@ -89,14 +90,23 @@ def _noninferiority(
 ) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for metric, margin in MATCHED_NONINFERIORITY_MARGINS.items():
-        delta = round(treatment[metric] - control[metric], 6)
+        delta = treatment[metric] - control[metric]
+        boundary = -margin
         result[metric] = {
             "control": "r0075-balanced-90m",
             "control_value": control[metric],
             "treatment_120m": treatment[metric],
             "delta": delta,
             "maximum_allowed_decrease": margin,
-            "passed": delta >= -margin,
+            "passed": (
+                delta >= boundary
+                or math.isclose(
+                    delta,
+                    boundary,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+            ),
         }
     return result
 
