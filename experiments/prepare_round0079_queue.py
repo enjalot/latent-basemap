@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -38,10 +39,7 @@ from experiments.round0079_nodes import _load_scale_evidence
 
 ROUND_ROOT = "/data/latent-basemap/runs/round-0079"
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
-ROUND_FILE = os.path.join(
-    LAB_ROOT,
-    "round-0079-2026-07-27.md",
-)
+ROUND_FILE_GLOB = os.path.join(LAB_ROOT, "round-0079-*.md")
 
 
 def _frontmatter_status(path: str) -> str | None:
@@ -69,9 +67,18 @@ def _require_review(
     return signature
 
 
-def _require_issued_round() -> None:
-    if _frontmatter_status(ROUND_FILE) != "issued":
-        raise RuntimeError("R0079 remains draft; refuse queue materialization")
+def _require_issued_round() -> str:
+    candidates = [
+        path
+        for path in sorted(glob.glob(ROUND_FILE_GLOB))
+        if _frontmatter_status(path) == "issued"
+    ]
+    if len(candidates) != 1:
+        raise RuntimeError(
+            "R0079 requires exactly one issued round document; "
+            f"found {len(candidates)}"
+        )
+    return candidates[0]
 
 
 def prepare_round0079(
@@ -95,7 +102,7 @@ def prepare_round0079(
     r0082_review_sha256: str,
     queue_root: str = os.path.join(ROUND_ROOT, "queue"),
 ) -> str:
-    _require_issued_round()
+    round_file = _require_issued_round()
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0079 release SHA must be one full commit")
     evidence_job = {
@@ -188,7 +195,7 @@ def prepare_round0079(
     artifacts = ensure_data_directory(os.path.join(queue_root, "artifacts"))
     output = os.path.join(artifacts, "train-balanced-120m")
     inputs = _dedupe(_file_inputs([
-        ROUND_FILE,
+        round_file,
         scale_geometry_path,
         substrate_manifest_path,
         outputs["int8"]["canonical_path"],
@@ -208,7 +215,7 @@ def prepare_round0079(
     manifest = _base_manifest(
         round_id=ROUND_ID,
         release_sha=release_sha,
-        round_file=ROUND_FILE,
+        round_file=round_file,
         queue_root=queue_root,
         gpu_hours_cap=7.0,
         execution_authority="autonomous-gpu",

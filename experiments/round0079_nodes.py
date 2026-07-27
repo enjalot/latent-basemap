@@ -29,6 +29,7 @@ from basemap.round0064_evaluation import validate_seal
 from basemap.round0065_substrates import validate_scale_substrate
 from basemap.round0082_quality import load_policy_confirmation
 from basemap.round0079_training import (
+    PERFORMANCE_WARMUP_UPDATES,
     PIPELINE_SCHEMA,
     ROUND_ID,
     ROW_COUNT,
@@ -302,7 +303,7 @@ def run_train(
     torch.cuda.reset_peak_memory_stats("cuda")
     instance = _exact_model(config)
     instance._max_train_steps = updates
-    instance._bench_warmup = 200
+    instance._bench_warmup = PERFORMANCE_WARMUP_UPDATES
     instance._perf_profile = True
     instance._perf_floor = float(
         config["execution"]["minimum_train_upd_s"]

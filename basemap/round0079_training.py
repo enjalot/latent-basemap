@@ -34,6 +34,12 @@ SUCCESSFUL_UPDATES = math.ceil(
     * ELIGIBILITY_SUMMARY["retained_row_count"]
     / REFERENCE_POSITIVE_SOURCES
 )
+PERFORMANCE_WARMUP_UPDATES = 200
+PERFORMANCE_WINDOW_UPDATES_MAX = 2_500
+PERFORMANCE_WINDOWS = math.ceil(
+    (SUCCESSFUL_UPDATES - PERFORMANCE_WARMUP_UPDATES)
+    / PERFORMANCE_WINDOW_UPDATES_MAX
+)
 PIPELINE_SCHEMA = "round0079-host-int8-balanced-120m-pipeline-v1"
 SAMPLER_CLASS = "HostInt8Balanced120mCanonicalSampler"
 
@@ -178,7 +184,9 @@ def train_config_from_capabilities(
         "residency": "host-ram-int8-plus-fp16-scale",
         "minimum_train_upd_s": 80.0,
         "warning_train_upd_s": 100.0,
-        "performance_windows": 200,
+        "performance_warmup_updates": PERFORMANCE_WARMUP_UPDATES,
+        "performance_window_updates_max": PERFORMANCE_WINDOW_UPDATES_MAX,
+        "performance_windows": PERFORMANCE_WINDOWS,
         "performance_subfloor_patience": 2,
         "performance_abort_latency_at_floor_seconds_max": 63.0,
         "full_run_retry_count": 0,
