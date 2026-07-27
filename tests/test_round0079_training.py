@@ -11,6 +11,9 @@ from basemap.round0065_substrates import SUBSTRATE_SCHEMA
 from basemap.round0079_training import (
     ELIGIBILITY_SUMMARY,
     INTERVALS,
+    PERFORMANCE_WINDOWS,
+    PERFORMANCE_WINDOW_UPDATES_MAX,
+    PERFORMANCE_WARMUP_UPDATES,
     PIPELINE_SCHEMA,
     ROW_COUNT,
     SAMPLER_CLASS,
@@ -83,6 +86,13 @@ def _capability_fixture():
 
 def test_balanced_120m_updates_are_coverage_aligned() -> None:
     assert SUCCESSFUL_UPDATES == 1_982_221
+    assert PERFORMANCE_WARMUP_UPDATES == 200
+    assert PERFORMANCE_WINDOW_UPDATES_MAX == 2_500
+    assert PERFORMANCE_WINDOWS == 793
+    assert (
+        2 * PERFORMANCE_WINDOW_UPDATES_MAX / 80.0
+        <= 63.0
+    )
     substrate, substrate_signature, graph = _capability_fixture()
     config, config_sha = train_config_from_capabilities(
         graph_manifest=graph,
@@ -175,6 +185,29 @@ def test_round0079_is_one_bounded_training_job() -> None:
         in source
     )
     assert "minilm-balanced-120m-gpu-ivfpq-search-confirmed-v1" in source
+
+
+def test_round0079_discovers_the_one_issued_dated_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    draft = tmp_path / "round-0079-2026-07-27.md"
+    issued = tmp_path / "round-0079-2026-07-28.md"
+    draft.write_text("---\nstatus: draft\n---\n", encoding="utf-8")
+    issued.write_text("---\nstatus: issued\n---\n", encoding="utf-8")
+    monkeypatch.setattr(
+        prepare_round0079_queue,
+        "ROUND_FILE_GLOB",
+        str(tmp_path / "round-0079-*.md"),
+    )
+    assert prepare_round0079_queue._require_issued_round() == str(issued)
+    draft.write_text("---\nstatus: issued\n---\n", encoding="utf-8")
+    try:
+        prepare_round0079_queue._require_issued_round()
+    except RuntimeError as exc:
+        assert "exactly one issued round document" in str(exc)
+    else:
+        raise AssertionError("multiple issued R0079 contracts were accepted")
 
 
 def test_round0079_receipts_exact_training_accounting() -> None:
