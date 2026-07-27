@@ -31,16 +31,14 @@ from basemap.round0065_substrates import (
     subset_spec,
     validate_scale_substrate,
 )
-from basemap.round0077_quality import load_gpu_qualification
 from basemap.round0078_graph import (
     GRAPH_RECEIPT_SCHEMA,
     ROUND_ID,
     Round0078Error,
 )
+from basemap.round0081_quality import load_gpu_policy_qualification
 from experiments.round0049_nodes import (
-    INDEX_SEARCH_WIDTH,
     SEARCH_BATCH_ROWS,
-    SEARCH_WIDTH,
     SHARD_ROWS,
     _assemble_graph,
     _clean_search,
@@ -109,6 +107,7 @@ def _write_pipelined_shard(
     start: int,
     stop: int,
     nprobe: int,
+    search_width: int,
     compact_to_global_fn: Any,
     global_to_compact_fn: Any,
     source_rows: int,
@@ -121,6 +120,7 @@ def _write_pipelined_shard(
         start=start,
         stop=stop,
         nprobe=nprobe,
+        search_width=search_width,
         round_id=ROUND_ID,
     )
     if previous is not None:
@@ -182,14 +182,14 @@ def _write_pipelined_shard(
                 search_started = time.monotonic()
                 _distances, raw = index.search(
                     np.ascontiguousarray(query),
-                    INDEX_SEARCH_WIDTH,
+                    search_width + 1,
                     params=parameters,
                 )
                 search_seconds += time.monotonic() - search_started
                 shortlist, seen = _clean_search(
                     raw,
                     global_sources=global_rows,
-                    candidate_count=SEARCH_WIDTH,
+                    candidate_count=search_width,
                     source_rows=source_rows,
                     global_to_compact_fn=global_to_compact_fn,
                 )
@@ -226,8 +226,8 @@ def _write_pipelined_shard(
         "excluded_sources": stop - start - len(retained),
         "valid_edges": len(retained) * K,
         "nprobe": nprobe,
-        "search_width": SEARCH_WIDTH,
-        "index_search_width": INDEX_SEARCH_WIDTH,
+        "search_width": search_width,
+        "index_search_width": search_width + 1,
         "selected_neighbors": K,
         "exact_rerank": True,
         "rerank_workers": RERANK_WORKERS,
@@ -258,20 +258,20 @@ def run_build_graph(
         expected_sha256=str(job["substrate_manifest_sha256"]),
     )
     outputs = substrate["manifest"]["outputs"]
-    qualification = load_gpu_qualification(
+    filtered_signature = expected_input_signature(
+        str(job["filtered_index"])
+    )
+    qualification = load_gpu_policy_qualification(
         str(job["gpu_qualification_receipt"]),
         expected_sha256=str(job["gpu_qualification_receipt_sha256"]),
         substrate_signature=substrate["signature"],
         eligibility_signature=outputs["eligibility"],
+        filtered_index_signature=filtered_signature,
     )
     receipt = qualification["receipt"]
-    nprobe = int(receipt["selected_nprobe"])
-    filtered_registered = receipt["candidate_universe"]["filtered_index"]
-    filtered_signature = expected_input_signature(
-        str(job["filtered_index"])
-    )
-    if filtered_signature != filtered_registered:
-        raise Round0078Error("qualified filtered-index bytes changed")
+    selected_policy = receipt["selected"]
+    nprobe = int(selected_policy["nprobe"])
+    search_width = int(selected_policy["shortlist_width"])
     runtime = _runtime_stamp(
         str(job["runtime_spec"]),
         str(job["runtime_spec_sha256"]),
@@ -303,8 +303,8 @@ def run_build_graph(
             str(job["runtime_spec"])
         ),
         "nprobe": nprobe,
-        "search_width": SEARCH_WIDTH,
-        "index_search_width": INDEX_SEARCH_WIDTH,
+        "search_width": search_width,
+        "index_search_width": search_width + 1,
         "exact_rerank": True,
         "k": K,
         "shard_rows": SHARD_ROWS,
@@ -374,6 +374,7 @@ def run_build_graph(
             start=start,
             stop=stop,
             nprobe=nprobe,
+            search_width=search_width,
             compact_to_global_fn=compact_to_global_fn,
             global_to_compact_fn=global_to_compact_fn,
             source_rows=SOURCE_ROWS,
@@ -395,6 +396,7 @@ def run_build_graph(
         shard_root=shard_root,
         excluded=excluded,
         nprobe=nprobe,
+        search_width=search_width,
         round_id=ROUND_ID,
         row_count=ROW_COUNT,
     )
@@ -462,8 +464,8 @@ def run_build_graph(
             "pq_m": 48,
             "pq_nbits": 8,
             "nprobe": nprobe,
-            "search_width": SEARCH_WIDTH,
-            "index_search_width": INDEX_SEARCH_WIDTH,
+            "search_width": search_width,
+            "index_search_width": search_width + 1,
             "selected_neighbors": K,
             "exact_rerank": True,
             "exact_rerank_workers": RERANK_WORKERS,
@@ -479,12 +481,15 @@ def run_build_graph(
             ),
         },
         "quality": {
-            "mean_recall_at_15_unambiguous": receipt["quality"][
-                "selected"
-            ]["mean_recall_at_15_unambiguous"],
+            "mean_recall_at_15_unambiguous": selected_policy[
+                "mean_recall_at_15_unambiguous"
+            ],
             "floor": 0.90,
             "qualification_sample_rows": receipt["quality"][
                 "sample_rows"
+            ],
+            "qualification_sample_seed": receipt["quality"][
+                "sample_seed"
             ],
         },
         "runtime": runtime,
