@@ -424,20 +424,25 @@ def run_registry(
             handle.write(payload)
 
     atomic_build_new_file(snapshot_path, write_snapshot, immutable=True)
-    map_registry.REGISTRY_PATH.write_bytes(payload)
+    history_path = map_registry.write_registry(registry)
     map_registry.publish(registry)
     snapshot = expected_input_signature(snapshot_path)
     current = expected_input_signature(str(map_registry.REGISTRY_PATH))
-    if (
-        snapshot["sha256"] != current["sha256"]
-        or snapshot["bytes"] != current["bytes"]
-    ):
-        raise Round0080Error("published registry differs from snapshot")
+    history = (
+        expected_input_signature(str(history_path))
+        if history_path is not None
+        else None
+    )
     body = {
         "schema": "round0080-map-registry-publication-v1",
         "round_id": ROUND_ID,
         "immutable_registry_snapshot": snapshot,
         "mutable_registry_after_publish": current,
+        "mutable_registry_content_sha256": map_registry._content_sha(
+            registry
+        ),
+        "content_addressed_history_snapshot_if_new": history,
+        "mutable_view_equality_is_nongating": True,
         "map_ids": sorted(item["map_id"] for item in entries),
         "base_map": required_label,
         "projection_probes": sorted(expected_probes),

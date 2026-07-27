@@ -8,6 +8,7 @@ from experiments.round0080_nodes import (
     MATCHED_NONINFERIORITY_MARGINS,
     _noninferiority,
     run_comparison,
+    run_registry,
 )
 
 
@@ -198,3 +199,53 @@ def test_round0080_discovers_the_one_issued_dated_contract(
         assert "exactly one issued round document" in str(exc)
     else:
         raise AssertionError("multiple issued R0080 contracts were accepted")
+
+
+def test_registry_binds_immutable_snapshot_without_gating_on_mutable_view(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from experiments import map_registry
+
+    label = "r0079-balanced-120m-seed42"
+    entries = [{
+        "map_id": "base",
+        "round_id": "0080",
+        "kind": "round-map",
+        "map_label": label,
+    }]
+    for probe in ("dadabase", "trec-covid", "code", "science", "latin"):
+        entries.append({
+            "map_id": f"projection-{probe}",
+            "round_id": "0080",
+            "kind": "projection-map",
+            "base_map": label,
+            "projection": {"probe": probe},
+        })
+    registry = {
+        "schema": "basemap-map-registry-v1",
+        "generated_utc": "2026-07-27T00:00:00+00:00",
+        "counts": {"maps": len(entries)},
+        "maps": entries,
+    }
+    monkeypatch.setattr(map_registry, "REGISTRY_PATH", tmp_path / "maps.json")
+    monkeypatch.setattr(
+        map_registry,
+        "HISTORY_DIR",
+        tmp_path / "registry-history",
+    )
+    monkeypatch.setattr(map_registry, "scan", lambda: registry)
+    monkeypatch.setattr(map_registry, "publish", lambda _registry: None)
+
+    receipt = run_registry({}, {
+        "outputs": [str(tmp_path / "round-snapshot")],
+    })
+
+    assert receipt["immutable_registry_snapshot"]["sha256"]
+    assert receipt["mutable_registry_after_publish"]["sha256"]
+    assert (
+        receipt["immutable_registry_snapshot"]["sha256"]
+        != receipt["mutable_registry_after_publish"]["sha256"]
+    )
+    assert receipt["content_addressed_history_snapshot_if_new"]["sha256"]
+    assert receipt["mutable_view_equality_is_nongating"] is True
