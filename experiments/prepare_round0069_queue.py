@@ -79,6 +79,11 @@ R0064_MATCHED_SAMPLE = os.path.join(
     "semantic-renders",
     "matched-30m-sample-rows.npy",
 )
+R0064_SCALE_COMPARISON = os.path.join(
+    R0064_ARTIFACTS,
+    "scale-comparison",
+    "scale-comparison.json",
+)
 
 
 def _frontmatter_status(path: str) -> str | None:
@@ -184,14 +189,13 @@ def prepare_round0069(
     )
     control_panel = expected_input_signature(R0064_CONTROL_PANEL)
     upper_panel = expected_input_signature(R0064_UPPER_MATCHED_PANEL)
+    scale_comparison = expected_input_signature(R0064_SCALE_COMPARISON)
     review64 = _require_review(
         r0064_review_path,
         expected_sha256=r0064_review_sha256,
         required_text=(
             "minilm-balanced-30m-60m-scale-geometry-v1",
-            reference_receipt["sha256"],
-            control_panel["sha256"],
-            upper_panel["sha256"],
+            scale_comparison["sha256"],
         ),
     )
     review65 = _require_review(
@@ -270,6 +274,7 @@ def prepare_round0069(
             MINILM_QUERIES,
             MINILM_QUERY_PROVENANCE,
             *CENTROIDS.values(),
+            R0064_SCALE_COMPARISON,
             R0064_CONTROL_PANEL,
             R0064_UPPER_MATCHED_PANEL,
             R0064_MATCHED_SAMPLE,
@@ -581,6 +586,7 @@ def prepare_round0069(
     manifest["reused_reviewed_evidence"] = {
         "r0064_review": review64,
         "r0065_review": review65,
+        "r0064_scale_comparison": scale_comparison,
         "reference_30m": reference_receipt,
         "control_30m_panel": control_panel,
         "upper_60m_on_30m_panel": upper_panel,

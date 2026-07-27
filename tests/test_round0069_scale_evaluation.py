@@ -165,6 +165,8 @@ def test_round0069_queue_is_bounded_reuses_control_and_never_trains() -> None:
     assert source.count('action="density_diagnostic"') == 1
     assert 'action="train"' not in source
     assert "R0064_REFERENCE_30" in source
+    assert "R0064_SCALE_COMPARISON" in source
+    assert 'scale_comparison["sha256"]' in source
     assert '"training_performed"] = False' in source
 
 
