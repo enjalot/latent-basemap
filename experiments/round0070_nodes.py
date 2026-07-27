@@ -67,7 +67,7 @@ def _panel_config():
 
 def _balanced_bundle(job: Mapping[str, Any]) -> dict[str, Any]:
     return validate_train_bundle(
-        label="r0061-balanced-30m",
+        label="r0061-30m",
         model_path=str(job["balanced_model_path"]),
         model_sha256=str(job["balanced_model_sha256"]),
         train_receipt_path=str(job["balanced_receipt_path"]),
