@@ -70,6 +70,7 @@ RUNTIME_SPEC = os.path.join(
     "round0060_runtime.json",
 )
 RERANK_WORKERS = 2
+MAX_PENDING_RERANKS = RERANK_WORKERS + 1
 
 
 def _to_gpu(
@@ -190,7 +191,7 @@ def _write_pipelined_shard(
                     scales=scales,
                 ),
             ))
-            if len(pending) >= RERANK_WORKERS:
+            if len(pending) >= MAX_PENDING_RERANKS:
                 resolve_oldest()
         while pending:
             resolve_oldest()
@@ -217,6 +218,7 @@ def _write_pipelined_shard(
         "selected_neighbors": K,
         "exact_rerank": True,
         "rerank_workers": RERANK_WORKERS,
+        "max_pending_reranks": MAX_PENDING_RERANKS,
         "search_rerank_overlap": True,
         "self_returned": self_seen,
         "search_seconds": search_seconds,
@@ -294,6 +296,7 @@ def run_build_graph(
         "shard_rows": SHARD_ROWS,
         "search_batch_rows": SEARCH_BATCH_ROWS,
         "rerank_workers": RERANK_WORKERS,
+        "max_pending_reranks": MAX_PENDING_RERANKS,
         "search_rerank_overlap": True,
         "engine": "faiss-classic-GpuIndexIVFPQ",
     }
@@ -449,6 +452,7 @@ def run_build_graph(
             "selected_neighbors": K,
             "exact_rerank": True,
             "exact_rerank_workers": RERANK_WORKERS,
+            "max_pending_exact_reranks": MAX_PENDING_RERANKS,
             "gpu_search_cpu_rerank_overlap": True,
             "rerank_vector_source": (
                 "balanced-120m int8-plus-fp16-scale exact cosine"
@@ -478,6 +482,7 @@ def run_build_graph(
                 "and GPU search"
             ),
             "rerank_workers": RERANK_WORKERS,
+            "max_pending_reranks": MAX_PENDING_RERANKS,
             "gpu_search_cpu_rerank_overlap": True,
             "total_seconds": time.monotonic() - started,
             "shard_count": len(shard_receipts),
