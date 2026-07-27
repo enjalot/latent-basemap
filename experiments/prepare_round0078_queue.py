@@ -30,7 +30,12 @@ from experiments.prepare_round0020_0022_queues import (
     _file_inputs,
 )
 from experiments.round0059_nodes import FAISS_WHEEL
-from experiments.round0078_nodes import RUNTIME_SPEC
+from experiments.round0078_nodes import (
+    MAX_PENDING_RERANKS,
+    RERANK_BLAS_THREADS,
+    RERANK_WORKERS,
+    RUNTIME_SPEC,
+)
 
 
 TIER = "120m"
@@ -194,8 +199,9 @@ def prepare_round0078(
         "search_width": 128,
         "selected_neighbors": 15,
         "exact_rerank": True,
-        "rerank_workers": 2,
-        "max_pending_reranks": 3,
+        "rerank_workers": RERANK_WORKERS,
+        "rerank_blas_threads_per_worker": RERANK_BLAS_THREADS,
+        "max_pending_reranks": MAX_PENDING_RERANKS,
         "gpu_search_cpu_rerank_overlap": True,
         "shard_rows": 100_000,
         "resumable_shards": True,
