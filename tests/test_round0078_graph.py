@@ -36,8 +36,9 @@ def test_round0078_queue_is_one_resumable_no_training_job() -> None:
     ) == 1
     assert '"shard_rows": 100_000' in source
     assert '"resumable_shards": True' in source
-    assert '"rerank_workers": 2' in source
-    assert '"max_pending_reranks": 3' in source
+    assert '"rerank_workers": RERANK_WORKERS' in source
+    assert '"rerank_blas_threads_per_worker": RERANK_BLAS_THREADS' in source
+    assert '"max_pending_reranks": MAX_PENDING_RERANKS' in source
     assert '"gpu_search_cpu_rerank_overlap": True' in source
     assert '"no_training": True' in source
     assert '"no_scale_decision": True' in source
@@ -133,6 +134,7 @@ def test_round0078_pipelined_rerank_matches_serial_bytes(
         == pipelined_receipt["targets"]["sha256"]
     )
     assert pipelined_receipt["rerank_workers"] == 2
+    assert pipelined_receipt["rerank_blas_threads_per_worker"] >= 1
     assert pipelined_receipt["max_pending_reranks"] == 3
     assert pipelined_receipt["search_rerank_overlap"] is True
     with open(pipelined / "receipt-0000.json", encoding="utf-8") as handle:

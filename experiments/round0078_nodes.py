@@ -11,6 +11,7 @@ from functools import partial
 from typing import Any, Mapping
 
 import numpy as np
+from threadpoolctl import threadpool_limits
 
 from basemap.artifact_identity import expected_input_signature
 from basemap.output_safety import (
@@ -71,6 +72,10 @@ RUNTIME_SPEC = os.path.join(
 )
 RERANK_WORKERS = 2
 MAX_PENDING_RERANKS = RERANK_WORKERS + 1
+RERANK_BLAS_THREADS = max(
+    1,
+    (os.cpu_count() or RERANK_WORKERS) // RERANK_WORKERS,
+)
 
 
 def _to_gpu(
@@ -140,61 +145,69 @@ def _write_pipelined_shard(
         targets[batch_rows - start] = selected
         rerank_seconds += float(rerank["wall_seconds"])
 
-    with ThreadPoolExecutor(
-        max_workers=RERANK_WORKERS,
-        thread_name_prefix="r0078-rerank",
-    ) as executor:
-        for batch_start in range(0, len(retained), SEARCH_BATCH_ROWS):
-            batch_rows = retained[
-                batch_start:batch_start + SEARCH_BATCH_ROWS
-            ]
-            query = (
-                np.asarray(encoded[batch_rows], dtype=np.float32)
-                * np.asarray(
-                    scales[batch_rows],
-                    dtype=np.float32,
-                )[:, None]
-            )
-            norms = np.linalg.norm(query, axis=1, keepdims=True)
-            if (
-                not np.isfinite(query).all()
-                or not np.isfinite(norms).all()
-                or np.any(norms <= 0)
-            ):
-                raise Round0078Error(
-                    "balanced-120M query block is nonfinite"
+    # NumPy's OpenBLAS defaults to every logical CPU. Without this bound, two
+    # simultaneous reranks each request the whole machine and turn the intended
+    # overlap into 2x oversubscription. The limit is process-wide for the
+    # bounded shard interval; the two workers therefore divide the host.
+    with threadpool_limits(
+        limits=RERANK_BLAS_THREADS,
+        user_api="blas",
+    ):
+        with ThreadPoolExecutor(
+            max_workers=RERANK_WORKERS,
+            thread_name_prefix="r0078-rerank",
+        ) as executor:
+            for batch_start in range(0, len(retained), SEARCH_BATCH_ROWS):
+                batch_rows = retained[
+                    batch_start:batch_start + SEARCH_BATCH_ROWS
+                ]
+                query = (
+                    np.asarray(encoded[batch_rows], dtype=np.float32)
+                    * np.asarray(
+                        scales[batch_rows],
+                        dtype=np.float32,
+                    )[:, None]
                 )
-            query /= norms
-            global_rows = compact_to_global_fn(batch_rows)
-            search_started = time.monotonic()
-            _distances, raw = index.search(
-                np.ascontiguousarray(query),
-                INDEX_SEARCH_WIDTH,
-                params=parameters,
-            )
-            search_seconds += time.monotonic() - search_started
-            shortlist, seen = _clean_search(
-                raw,
-                global_sources=global_rows,
-                candidate_count=SEARCH_WIDTH,
-                source_rows=source_rows,
-                global_to_compact_fn=global_to_compact_fn,
-            )
-            self_seen += seen
-            pending.append((
-                batch_rows.copy(),
-                executor.submit(
-                    _exact_rerank_shortlist,
-                    queries=query,
-                    shortlist=shortlist,
-                    encoded=encoded,
-                    scales=scales,
-                ),
-            ))
-            if len(pending) >= MAX_PENDING_RERANKS:
+                norms = np.linalg.norm(query, axis=1, keepdims=True)
+                if (
+                    not np.isfinite(query).all()
+                    or not np.isfinite(norms).all()
+                    or np.any(norms <= 0)
+                ):
+                    raise Round0078Error(
+                        "balanced-120M query block is nonfinite"
+                    )
+                query /= norms
+                global_rows = compact_to_global_fn(batch_rows)
+                search_started = time.monotonic()
+                _distances, raw = index.search(
+                    np.ascontiguousarray(query),
+                    INDEX_SEARCH_WIDTH,
+                    params=parameters,
+                )
+                search_seconds += time.monotonic() - search_started
+                shortlist, seen = _clean_search(
+                    raw,
+                    global_sources=global_rows,
+                    candidate_count=SEARCH_WIDTH,
+                    source_rows=source_rows,
+                    global_to_compact_fn=global_to_compact_fn,
+                )
+                self_seen += seen
+                pending.append((
+                    batch_rows.copy(),
+                    executor.submit(
+                        _exact_rerank_shortlist,
+                        queries=query,
+                        shortlist=shortlist,
+                        encoded=encoded,
+                        scales=scales,
+                    ),
+                ))
+                if len(pending) >= MAX_PENDING_RERANKS:
+                    resolve_oldest()
+            while pending:
                 resolve_oldest()
-        while pending:
-            resolve_oldest()
 
     retained_mask = ~_membership(excluded, compact_rows)
     if (
@@ -218,6 +231,7 @@ def _write_pipelined_shard(
         "selected_neighbors": K,
         "exact_rerank": True,
         "rerank_workers": RERANK_WORKERS,
+        "rerank_blas_threads_per_worker": RERANK_BLAS_THREADS,
         "max_pending_reranks": MAX_PENDING_RERANKS,
         "search_rerank_overlap": True,
         "self_returned": self_seen,
@@ -296,6 +310,7 @@ def run_build_graph(
         "shard_rows": SHARD_ROWS,
         "search_batch_rows": SEARCH_BATCH_ROWS,
         "rerank_workers": RERANK_WORKERS,
+        "rerank_blas_threads_per_worker": RERANK_BLAS_THREADS,
         "max_pending_reranks": MAX_PENDING_RERANKS,
         "search_rerank_overlap": True,
         "engine": "faiss-classic-GpuIndexIVFPQ",
@@ -452,6 +467,7 @@ def run_build_graph(
             "selected_neighbors": K,
             "exact_rerank": True,
             "exact_rerank_workers": RERANK_WORKERS,
+            "exact_rerank_blas_threads_per_worker": RERANK_BLAS_THREADS,
             "max_pending_exact_reranks": MAX_PENDING_RERANKS,
             "gpu_search_cpu_rerank_overlap": True,
             "rerank_vector_source": (
@@ -482,6 +498,7 @@ def run_build_graph(
                 "and GPU search"
             ),
             "rerank_workers": RERANK_WORKERS,
+            "rerank_blas_threads_per_worker": RERANK_BLAS_THREADS,
             "max_pending_reranks": MAX_PENDING_RERANKS,
             "gpu_search_cpu_rerank_overlap": True,
             "total_seconds": time.monotonic() - started,
