@@ -161,7 +161,7 @@ def prepare_round0078(
         release_sha=release_sha,
         round_file=ROUND_FILE,
         queue_root=queue_root,
-        gpu_hours_cap=5.0,
+        gpu_hours_cap=12.0,
         execution_authority="autonomous-gpu",
         gpu=True,
     )
@@ -187,6 +187,18 @@ def prepare_round0078(
     selected = qualification["receipt"]["selected"]
     nprobe = int(selected["nprobe"])
     search_width = int(selected["shortlist_width"])
+    serial_projection = selected["projected_full_graph_hours"]
+    overlap_projection = (
+        max(
+            float(serial_projection["search_hours"]),
+            float(serial_projection["rerank_hours"]),
+        )
+        + (
+            float(serial_projection["total_hours"])
+            - float(serial_projection["search_hours"])
+            - float(serial_projection["rerank_hours"])
+        )
+    )
     manifest["scientific_contract"] = {
         "fixed_tier": TIER,
         "rows": SPEC["row_count"],
@@ -201,6 +213,11 @@ def prepare_round0078(
         "rerank_blas_threads_per_worker": RERANK_BLAS_THREADS,
         "max_pending_reranks": MAX_PENDING_RERANKS,
         "gpu_search_cpu_rerank_overlap": True,
+        "registered_serial_projection": serial_projection,
+        "overlap_adjusted_projection_hours": overlap_projection,
+        "overlap_projection_semantics": (
+            "max(search, rerank) plus registered fixed and clone time"
+        ),
         "shard_rows": 100_000,
         "resumable_shards": True,
         "fixed_degree": 15,
@@ -219,7 +236,7 @@ def prepare_round0078(
             "build_gpu_native_graph_balanced_120m.done.json",
         ),
         "expected_inputs": inputs,
-        "p90_wall_s": 18_000.0,
+        "p90_wall_s": 36_000.0,
         "substrate_manifest": substrate_manifest_path,
         "substrate_manifest_sha256": substrate_manifest_sha256,
         "gpu_qualification_receipt": gpu_qualification_path,
@@ -233,8 +250,8 @@ def prepare_round0078(
         },
     }]
     manifest["p90_gpu_seconds"] = {
-        "build_gpu_native_graph_balanced_120m": 18_000.0,
-        "total": 18_000.0,
+        "build_gpu_native_graph_balanced_120m": 36_000.0,
+        "total": 36_000.0,
     }
     path = os.path.join(queue_root, "queue.json")
     atomic_write_new_json(path, manifest, immutable=True)
