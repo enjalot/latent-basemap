@@ -40,7 +40,7 @@ from experiments.run_round0036_node import (
 ROUND_ID = "0080"
 ROUND_ROOT = "/data/latent-basemap/runs/round-0080"
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
-ROUND_FILE = os.path.join(LAB_ROOT, "round-0080-2026-07-27.md")
+ROUND_FILE_GLOB = os.path.join(LAB_ROOT, "round-0080-*.md")
 SUBSTRATE_90 = (
     "/data/latent-basemap/runs/round-0071/queue/artifacts/"
     "balanced-90m-int8-substrate/balanced-90m-substrate-v1.json"
@@ -93,9 +93,18 @@ def _require_review(
     return signature
 
 
-def _require_issued_round() -> None:
-    if _frontmatter_status(ROUND_FILE) != "issued":
-        raise RuntimeError("R0080 remains draft; refuse queue materialization")
+def _require_issued_round() -> str:
+    candidates = [
+        path
+        for path in sorted(glob.glob(ROUND_FILE_GLOB))
+        if _frontmatter_status(path) == "issued"
+    ]
+    if len(candidates) != 1:
+        raise RuntimeError(
+            "R0080 requires exactly one issued round document; "
+            f"found {len(candidates)}"
+        )
+    return candidates[0]
 
 
 def _job(
@@ -150,7 +159,7 @@ def prepare_round0080(
     r0079_review_sha256: str,
     queue_root: str = os.path.join(ROUND_ROOT, "queue"),
 ) -> str:
-    _require_issued_round()
+    round_file = _require_issued_round()
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0080 release SHA must be one full commit")
     substrate90 = validate_substrate(
@@ -250,7 +259,7 @@ def prepare_round0080(
     control_coordinate_inputs = _file_inputs(control_coordinate_files)
     core = _dedupe([
         *_file_inputs([
-            ROUND_FILE,
+            round_file,
             r0065_review_path,
             r0076_review_path,
             r0079_review_path,
@@ -462,7 +471,7 @@ def prepare_round0080(
     manifest = _base_manifest(
         round_id=ROUND_ID,
         release_sha=release_sha,
-        round_file=ROUND_FILE,
+        round_file=round_file,
         queue_root=queue_root,
         gpu_hours_cap=3.0,
         execution_authority="autonomous-gpu",

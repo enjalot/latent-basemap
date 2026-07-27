@@ -175,3 +175,26 @@ def test_round0080_queue_is_bounded_no_training_and_nearest_rung() -> None:
     assert 'action="train"' not in source
     assert '"required_reviews"] = ["0065", "0076", "0079"]' in source
     assert '"120m_noninferiority_control": "90m"' in source
+
+
+def test_round0080_discovers_the_one_issued_dated_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    old = tmp_path / "round-0080-2026-07-27.md"
+    current = tmp_path / "round-0080-2026-07-28.md"
+    old.write_text("---\nstatus: draft\n---\n", encoding="utf-8")
+    current.write_text("---\nstatus: issued\n---\n", encoding="utf-8")
+    monkeypatch.setattr(
+        prepare_round0080_queue,
+        "ROUND_FILE_GLOB",
+        str(tmp_path / "round-0080-*.md"),
+    )
+    assert prepare_round0080_queue._require_issued_round() == str(current)
+    old.write_text("---\nstatus: issued\n---\n", encoding="utf-8")
+    try:
+        prepare_round0080_queue._require_issued_round()
+    except RuntimeError as exc:
+        assert "exactly one issued round document" in str(exc)
+    else:
+        raise AssertionError("multiple issued R0080 contracts were accepted")
