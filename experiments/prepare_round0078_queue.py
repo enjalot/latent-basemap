@@ -21,8 +21,8 @@ from basemap.round0065_substrates import (
     subset_spec,
     validate_scale_substrate,
 )
-from basemap.round0077_quality import load_gpu_qualification
 from basemap.round0078_graph import ROUND_ID
+from basemap.round0081_quality import load_gpu_policy_qualification
 from experiments.prepare_round0020_0022_queues import (
     LAB_ROOT,
     _base_manifest,
@@ -88,8 +88,8 @@ def prepare_round0078(
     filtered_index_path: str,
     r0065_review_path: str,
     r0065_review_sha256: str,
-    r0077_review_path: str,
-    r0077_review_sha256: str,
+    r0081_review_path: str,
+    r0081_review_sha256: str,
     runtime_spec_sha256: str,
     queue_root: str = os.path.join(ROUND_ROOT, "queue"),
 ) -> str:
@@ -102,18 +102,14 @@ def prepare_round0078(
         expected_sha256=substrate_manifest_sha256,
     )
     outputs = substrate["manifest"]["outputs"]
-    qualification = load_gpu_qualification(
+    filtered = expected_input_signature(filtered_index_path)
+    qualification = load_gpu_policy_qualification(
         gpu_qualification_path,
         expected_sha256=gpu_qualification_sha256,
         substrate_signature=substrate["signature"],
         eligibility_signature=outputs["eligibility"],
+        filtered_index_signature=filtered,
     )
-    filtered = expected_input_signature(filtered_index_path)
-    if (
-        filtered
-        != qualification["receipt"]["candidate_universe"]["filtered_index"]
-    ):
-        raise RuntimeError("R0078 filtered-index bytes changed")
     review65 = _require_review(
         r0065_review_path,
         expected_sha256=r0065_review_sha256,
@@ -122,11 +118,11 @@ def prepare_round0078(
             substrate_manifest_sha256,
         ),
     )
-    review77 = _require_review(
-        r0077_review_path,
-        expected_sha256=r0077_review_sha256,
+    review81 = _require_review(
+        r0081_review_path,
+        expected_sha256=r0081_review_sha256,
         required_text=(
-            "capability:minilm-balanced-120m-gpu-ivfpq-search-qualified-v1",
+            "capability:minilm-balanced-120m-gpu-ivfpq-search-qualified-v2",
             gpu_qualification_sha256,
             filtered["sha256"],
         ),
@@ -155,7 +151,7 @@ def prepare_round0078(
             gpu_qualification_path,
             filtered_index_path,
             r0065_review_path,
-            r0077_review_path,
+            r0081_review_path,
             RUNTIME_SPEC,
             FAISS_WHEEL,
         ]),
@@ -172,10 +168,10 @@ def prepare_round0078(
     manifest["schema"] = "round0078-balanced-120m-graph-queue-v1"
     manifest["repo_root"] = RELEASE_ROOT
     manifest["queue_class"] = "gpu-research"
-    manifest["required_reviews"] = ["0065", "0077"]
+    manifest["required_reviews"] = ["0065", "0081"]
     manifest["capability_dependencies"] = [
         "minilm-balanced-120m-int8-input-v1",
-        "minilm-balanced-120m-gpu-ivfpq-search-qualified-v1",
+        "minilm-balanced-120m-gpu-ivfpq-search-qualified-v2",
     ]
     manifest["capabilities_produced"] = [
         "minilm-balanced-120m-gpu-native-graph-v1",
@@ -183,20 +179,22 @@ def prepare_round0078(
     manifest["training_performed"] = False
     manifest["reviewed_inputs"] = {
         "review_0065": review65,
-        "review_0077": review77,
+        "review_0081": review81,
         "substrate": substrate["signature"],
         "gpu_qualification": qualification["signature"],
         "filtered_index": filtered,
     }
-    nprobe = int(qualification["receipt"]["selected_nprobe"])
+    selected = qualification["receipt"]["selected"]
+    nprobe = int(selected["nprobe"])
+    search_width = int(selected["shortlist_width"])
     manifest["scientific_contract"] = {
         "fixed_tier": TIER,
         "rows": SPEC["row_count"],
         "retained_rows": SPEC["eligibility_summary"][
             "retained_row_count"
         ],
-        "nprobe_selected_only_by_r0077": nprobe,
-        "search_width": 128,
+        "nprobe_selected_only_by_r0081": nprobe,
+        "search_width_selected_only_by_r0081": search_width,
         "selected_neighbors": 15,
         "exact_rerank": True,
         "rerank_workers": RERANK_WORKERS,
@@ -251,7 +249,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gpu-qualification", required=True)
     parser.add_argument("--gpu-qualification-sha256", required=True)
     parser.add_argument("--filtered-index", required=True)
-    for round_id in ("0065", "0077"):
+    for round_id in ("0065", "0081"):
         parser.add_argument(f"--r{round_id}-review", required=True)
         parser.add_argument(
             f"--r{round_id}-review-sha256",
@@ -273,8 +271,8 @@ def main(argv: list[str] | None = None) -> int:
             filtered_index_path=args.filtered_index,
             r0065_review_path=args.r0065_review,
             r0065_review_sha256=args.r0065_review_sha256,
-            r0077_review_path=args.r0077_review,
-            r0077_review_sha256=args.r0077_review_sha256,
+            r0081_review_path=args.r0081_review,
+            r0081_review_sha256=args.r0081_review_sha256,
             runtime_spec_sha256=args.runtime_spec_sha256,
             queue_root=args.queue_root,
         )

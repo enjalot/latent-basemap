@@ -444,6 +444,7 @@ def _validate_shard(
     start: int,
     stop: int,
     nprobe: int,
+    search_width: int | None = None,
     round_id: str = ROUND_ID,
 ) -> dict[str, Any] | None:
     if not os.path.exists(target_path) and not os.path.exists(receipt_path):
@@ -465,6 +466,14 @@ def _validate_shard(
         or receipt.get("start") != start
         or receipt.get("stop") != stop
         or receipt.get("nprobe") != nprobe
+        or (
+            search_width is not None
+            and (
+                receipt.get("search_width") != search_width
+                or receipt.get("index_search_width")
+                != search_width + 1
+            )
+        )
         or receipt.get("targets") != signature
     ):
         raise Round0049Error("completed graph shard identity changed")
@@ -988,6 +997,7 @@ def _assemble_graph(
     shard_root: str,
     excluded: np.ndarray,
     nprobe: int,
+    search_width: int | None = None,
     round_id: str = ROUND_ID,
     row_count: int = ROW_COUNT,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1012,6 +1022,7 @@ def _assemble_graph(
                 start=start,
                 stop=stop,
                 nprobe=nprobe,
+                search_width=search_width,
                 round_id=round_id,
             ) is None:
                 raise Round0049Error("graph assembly found a missing shard")
