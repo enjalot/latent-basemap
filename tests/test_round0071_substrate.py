@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
+
+import pytest
 
 from basemap import round0071_substrate
 from experiments import prepare_round0071_queue, round0071_nodes
@@ -54,3 +57,21 @@ def test_queue_has_one_cpu_node_and_no_scale_decision() -> None:
     assert '"gpu_required": False' in source
     assert '"no_scale_decision": True' in source
     assert '"no_training": True' in source
+
+
+def test_queue_accepts_only_an_issued_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    round_file = tmp_path / "round-0071.md"
+    monkeypatch.setattr(
+        prepare_round0071_queue,
+        "ROUND_FILE",
+        str(round_file),
+    )
+    round_file.write_text("---\nstatus: issued\n---\n", encoding="utf-8")
+    prepare_round0071_queue._require_issued_round()
+
+    round_file.write_text("---\nstatus: draft\n---\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="remains draft"):
+        prepare_round0071_queue._require_issued_round()

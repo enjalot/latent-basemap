@@ -43,7 +43,7 @@ ROUND_FILE = os.path.join(LAB_ROOT, "round-0071-2026-07-27.md")
 def _require_issued_round() -> None:
     with open(ROUND_FILE, encoding="utf-8") as handle:
         text = handle.read(4096)
-    match = re.search(r"(?m)^status:\\s*[\"']?([^\\s\"']+)", text)
+    match = re.search(r"(?m)^status:\s*[\"']?([^\s\"']+)", text)
     if not match or match.group(1) != "issued":
         raise RuntimeError("R0071 remains draft; refuse queue materialization")
 
