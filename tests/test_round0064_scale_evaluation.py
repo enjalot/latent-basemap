@@ -41,6 +41,15 @@ def _bundle_fixture(tmp_path: Path, *, label: str) -> dict:
             "updates": 997_248,
             "sampler": "HostInt8BalancedCanonicalSampler",
         },
+        "r0068-45m": {
+            "round": "0068",
+            "receipt": "round0068-train-receipt-v1",
+            "config": "round0068-production-config-v1",
+            "rows": 45_000_000,
+            "retained": 44_598_360,
+            "updates": 748_757,
+            "sampler": "HostInt8SelectedCanonicalSampler",
+        },
     }
     spec = specs[label]
     model_path = tmp_path / f"{label}.pt"
@@ -103,7 +112,10 @@ def _bundle_fixture(tmp_path: Path, *, label: str) -> dict:
     }
 
 
-@pytest.mark.parametrize("label", ["r0061-30m", "r0063-60m"])
+@pytest.mark.parametrize(
+    "label",
+    ["r0061-30m", "r0063-60m", "r0068-45m"],
+)
 def test_train_bundle_authenticates_exact_successful_execution(
     tmp_path: Path,
     label: str,

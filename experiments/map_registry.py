@@ -387,40 +387,76 @@ def scan_evaluation_round(round_dir: Path, ledger: dict) -> list[dict]:
 
 
 def scan_scale_evaluation_round(round_dir: Path, ledger: dict) -> list[dict]:
-    """Discover the two registry-facing maps produced by R0064.
+    """Discover registry-facing maps produced by scale evaluation rounds.
 
     R0064 intentionally evaluates three map/universe pairs, but only the
     matched 30M control and the full 60M treatment are base maps.  The
     60M-model-on-30M pair is a same-row diagnostic and remains available in
-    the scale-comparison receipt without becoming a third product map.
+    the scale-comparison receipt without becoming a third product map. Newer
+    rounds declare their base maps in an immutable, queue-local definition
+    file so registry discovery does not require another round-specific branch.
     """
     rid_m = re.match(r"round-(\d{4})", round_dir.name)
     rid = rid_m.group(1) if rid_m else round_dir.name
-    if rid != "0064":
-        return []
     art = round_dir / "queue/artifacts"
     queue = _load_json(round_dir / "queue/queue.json") or {}
     render_manifest = _load_json(
         art / "semantic-renders/render-manifest.json"
     ) or {}
-    definitions = (
-        {
-            "key": "r0061-30m-on-30m",
-            "label": "r0061-balanced-30m-seed42",
-            "coordinates": art / "coordinates-r0061-30m",
-            "panel": art / "panel-r0061-30m/panel.json",
-            "render": art / "semantic-renders/r0061-30m-on-30m.png",
-            "training_round": "0061",
-        },
-        {
-            "key": "r0063-60m-on-60m",
-            "label": "r0063-balanced-60m-seed42",
-            "coordinates": art / "coordinates-r0063-60m",
-            "panel": art / "panel-r0063-60m/panel.json",
-            "render": art / "semantic-renders/r0063-60m-on-60m.png",
-            "training_round": "0063",
-        },
-    )
+    if rid == "0064":
+        definitions = (
+            {
+                "key": "r0061-30m-on-30m",
+                "label": "r0061-balanced-30m-seed42",
+                "coordinates": art / "coordinates-r0061-30m",
+                "panel": art / "panel-r0061-30m/panel.json",
+                "render": art / "semantic-renders/r0061-30m-on-30m.png",
+                "training_round": "0061",
+                "panel_schema": "round0064-registered-panel-v1",
+            },
+            {
+                "key": "r0063-60m-on-60m",
+                "label": "r0063-balanced-60m-seed42",
+                "coordinates": art / "coordinates-r0063-60m",
+                "panel": art / "panel-r0063-60m/panel.json",
+                "render": art / "semantic-renders/r0063-60m-on-60m.png",
+                "training_round": "0063",
+                "panel_schema": "round0064-registered-panel-v1",
+            },
+        )
+    else:
+        declared = _load_json(
+            art / "semantic-renders/scale-map-definitions.json"
+        )
+        if (
+            not isinstance(declared, dict)
+            or declared.get("schema") != "scale-map-definitions-v1"
+            or declared.get("round_id") != rid
+            or not isinstance(declared.get("maps"), list)
+        ):
+            return []
+        definitions = []
+        for raw in declared["maps"]:
+            if not isinstance(raw, dict):
+                return []
+            resolved: dict[str, object] = {}
+            for field in ("coordinates", "panel", "render"):
+                value = raw.get(field)
+                relative = Path(value) if isinstance(value, str) else None
+                if (
+                    relative is None
+                    or relative.is_absolute()
+                    or ".." in relative.parts
+                ):
+                    return []
+                resolved[field] = art / relative
+            definitions.append({
+                "key": raw.get("key"),
+                "label": raw.get("label"),
+                "training_round": raw.get("training_round"),
+                "panel_schema": raw.get("panel_schema"),
+                **resolved,
+            })
     entries: list[dict] = []
     for definition in definitions:
         transform_path = definition["coordinates"] / "actual-transform.json"
@@ -432,7 +468,7 @@ def scan_scale_evaluation_round(round_dir: Path, ledger: dict) -> list[dict]:
             != "round0036-transform-capability-v1"
             or transform.get("map_key") != definition["key"]
             or not isinstance(panel, dict)
-            or panel.get("schema") != "round0064-registered-panel-v1"
+            or panel.get("schema") != definition["panel_schema"]
             or panel.get("map_key") != definition["key"]
         ):
             continue
@@ -470,7 +506,7 @@ def scan_scale_evaluation_round(round_dir: Path, ledger: dict) -> list[dict]:
             "kernel": "legacy_lp",
             "pipeline": (
                 f"R{definition['training_round']}-host-int8-canonical/"
-                "R0064-representative-evaluation"
+                f"R{rid}-representative-evaluation"
             ),
             "precision": "fp32-transform",
             "scientific_status": (

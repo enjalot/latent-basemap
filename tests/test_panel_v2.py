@@ -285,6 +285,45 @@ def test_score_panel_matches_brute():
     assert res["guards"]["coords_finite"] is True
 
 
+def test_score_panel_reports_registered_density_groups():
+    rng = np.random.RandomState(31)
+    X = rng.randn(900, 12).astype("float32")
+    Z = rng.randn(900, 2).astype("float32")
+    cfg = pv.PanelV2Config(
+        frac=0.02,
+        n_anchors=90,
+        corpus_chunk=180,
+    )
+    labels = np.asarray(
+        ["fineweb"] * 30 + ["redpajama"] * 30 + ["pile"] * 30
+    )
+    result = pv.score_panel(
+        X,
+        Z,
+        config=cfg,
+        density_group_labels=labels,
+        provenance={"t": "density-groups"},
+    )
+    assert set(result["density_by_group"]) == {
+        "fineweb",
+        "redpajama",
+        "pile",
+    }
+    assert sum(
+        group["anchors"]
+        for group in result["density_by_group"].values()
+    ) == 90
+
+    with pytest.raises(ValueError, match="one label per sampled anchor"):
+        pv.score_panel(
+            X,
+            Z,
+            config=cfg,
+            density_group_labels=labels[:-1],
+            provenance={"t": "bad-density-groups"},
+        )
+
+
 def test_golden_extension_purity_projection_3d():
     # P0-4: the golden gate must cover purity + projection + a 3D map (not just
     # ffr/recall/density). Small synthetic stand-in exercising all axes at once.

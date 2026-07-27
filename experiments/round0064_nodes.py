@@ -263,7 +263,9 @@ def run_high_d_reference(
     anchors_path = os.path.join(output, "anchor-substrate-rows.npy")
     atomic_save_new_npy(anchors_path, anchor_global, immutable=True)
     body = {
-        "schema": "round0064-high-d-reference-v1",
+        "schema": str(
+            job.get("reference_schema", "round0064-high-d-reference-v1")
+        ),
         "round_id": ROUND_ID,
         "substrate_label": job["substrate_label"],
         "eligibility": eligibility["signature"],
@@ -334,6 +336,19 @@ def run_panel(
             "actual-transform.json",
         )
     )
+    anchors_for_density = np.asarray(reference["anchor_ids"], dtype=np.int64)
+    density_rows = selector.compact_to_global(anchors_for_density)
+    rows_per_corpus = int(job.get("rows_per_corpus", 0))
+    density_group_labels = None
+    if rows_per_corpus > 0:
+        corpus_names = np.asarray(
+            ["fineweb", "redpajama", "pile"],
+            dtype="<U10",
+        )
+        corpus_index = density_rows // rows_per_corpus
+        if np.any(corpus_index < 0) or np.any(corpus_index >= len(corpus_names)):
+            raise Round0064Error("density anchor corpus assignment changed")
+        density_group_labels = corpus_names[corpus_index]
     panel = score_panel(
         retained,
         coordinates,
@@ -341,6 +356,7 @@ def run_panel(
         centroids_by_k=centroids,
         hiD_reference=reference,
         reference_identity=identity,
+        density_group_labels=density_group_labels,
         provenance={
             "round_id": ROUND_ID,
             "map_key": job["map_key"],
@@ -352,7 +368,7 @@ def run_panel(
             "excluded_rows_entered_scientific_universe": False,
         },
     )
-    anchors = np.asarray(reference["anchor_ids"], dtype=np.int64)
+    anchors = anchors_for_density
     hi50 = np.load(
         os.path.join(str(job["reference_output"]), "recall50-truth.npy"),
         mmap_mode="r",
@@ -439,7 +455,9 @@ def run_panel(
         "eligible_embeddings_nonzero": guards.get("emb_zero_rows") == 0,
     }
     body = {
-        "schema": "round0064-registered-panel-v1",
+        "schema": str(
+            job.get("panel_schema", "round0064-registered-panel-v1")
+        ),
         "round_id": ROUND_ID,
         "map_key": job["map_key"],
         "map": {
@@ -653,7 +671,7 @@ def run_ood(
         output_root=os.path.join(output, "common-corpus", "panel"),
     )
     body = {
-        "schema": "round0064-ood-bundle-v1",
+        "schema": str(job.get("ood_schema", "round0064-ood-bundle-v1")),
         "round_id": ROUND_ID,
         "map_key": job["map_key"],
         "map_label": MAP_LABELS[str(job["map_key"])],

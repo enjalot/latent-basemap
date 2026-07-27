@@ -1694,7 +1694,7 @@ def _require_score_panel_scale_admission(X, scale_admission):
 def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
                 centroids_by_k=None, anchor_masks=None, projection=None,
                 hiD_reference=None, reference_identity=None,
-                scale_admission=None, provenance):
+                scale_admission=None, density_group_labels=None, provenance):
     """The single evaluator both the runner and CLI call. Aligns X to Z exactly,
     runs ONE high-D and ONE low-D neighbour pass shared across ffr/recall/purity,
     an exact-radius pass for density, optional projection fidelity, and emits a
@@ -1785,6 +1785,33 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
     r_hd = np.asarray(ref["r_hd"])[sel_den]; r_ld = ld_r.mean(1); eps = 1e-12
     res["density"] = round(float(np.corrcoef(np.log(r_hd + eps), np.log(r_ld + eps))[0, 1]), 4)
     res["n_density_anchors"] = int(len(sel_den))
+    if density_group_labels is not None:
+        labels = np.asarray(density_group_labels)
+        if labels.shape != (m,):
+            raise ValueError(
+                "density_group_labels must contain one label per sampled anchor"
+            )
+        selected_labels = labels[sel_den]
+        groups = {}
+        for raw_label in sorted(np.unique(selected_labels), key=str):
+            mask = selected_labels == raw_label
+            count = int(mask.sum())
+            if count < 2:
+                raise ValueError(
+                    f"density group {raw_label!r} has fewer than two anchors"
+                )
+            group_hi = np.log(r_hd[mask] + eps)
+            group_lo = np.log(r_ld[mask] + eps)
+            groups[str(raw_label)] = {
+                "anchors": count,
+                "correlation": round(
+                    float(np.corrcoef(group_hi, group_lo)[0, 1]),
+                    4,
+                ),
+                "mean_log_high_d_radius": round(float(group_hi.mean()), 6),
+                "mean_log_low_d_radius": round(float(group_lo.mean()), 6),
+            }
+        res["density_by_group"] = groups
 
     # projection (out-of-sample) — kept in its own labelled keys, never merged
     # into the transductive ffr column (P0-C).

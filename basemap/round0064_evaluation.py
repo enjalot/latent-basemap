@@ -54,6 +54,15 @@ MODEL_SPECS = {
         "updates": 997_248,
         "sampler_class": "HostInt8BalancedCanonicalSampler",
     },
+    "r0068-45m": {
+        "round_id": "0068",
+        "receipt_schema": "round0068-train-receipt-v1",
+        "config_schema": "round0068-production-config-v1",
+        "rows": 45_000_000,
+        "retained_rows": 44_598_360,
+        "updates": 748_757,
+        "sampler_class": "HostInt8SelectedCanonicalSampler",
+    },
 }
 
 
@@ -267,6 +276,7 @@ def load_substrate(
     )
     expected_retained = {
         30_000_000: 29_781_754,
+        45_000_000: 44_598_360,
         60_000_000: 59_399_288,
     }.get(row_count)
     if (
