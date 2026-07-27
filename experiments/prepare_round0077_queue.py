@@ -124,6 +124,7 @@ def prepare_round0077(
         expected_sha256=r0076_review_sha256,
         required_text=(
             "capability:minilm-balanced-30m-45m-60m-90m-scale-geometry-v1",
+            "6b0559b75198b736251c62c7524609c23554f16fbbeec566d240a3b6a6ac235f",
         ),
     )
     runtime = expected_input_signature(RUNTIME_SPEC)

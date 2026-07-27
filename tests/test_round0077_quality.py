@@ -147,6 +147,10 @@ def test_round0077_is_one_bounded_no_training_gpu_job() -> None:
         in source
     )
     assert (
+        "6b0559b75198b736251c62c7524609c23554f16fbbeec566d240a3b6a6ac235f"
+        in source
+    )
+    assert (
         "a18a840e2f0116a5ffac55a00b1df6f32d48a6226c35f4df12cae12c22679607"
         in source
     )
