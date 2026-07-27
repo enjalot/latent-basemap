@@ -236,9 +236,11 @@ def _registry_entry(
     tmp_path: Path,
     *,
     density_semantics: str | None,
+    queue_name: str = "queue",
 ) -> dict:
     round_dir = tmp_path / "round-0076"
-    artifacts = round_dir / "queue/artifacts"
+    queue_dir = round_dir / queue_name
+    artifacts = queue_dir / "artifacts"
     coordinates = artifacts / "coordinates-r0075-90m"
     panel_path = artifacts / "panel-r0075-90m/panel.json"
     render_path = artifacts / "semantic-renders/r0075-90m-on-90m.png"
@@ -247,7 +249,7 @@ def _registry_entry(
     render_path.parent.mkdir(parents=True, exist_ok=True)
     render_path.write_bytes(b"png")
     (chunk / "coordinates.npy").write_bytes(b"coords")
-    _write_json(round_dir / "queue/queue.json", {"release_sha": "a" * 40})
+    _write_json(queue_dir / "queue.json", {"release_sha": "a" * 40})
     _write_json(coordinates / "actual-transform.json", {
         "schema": "round0036-transform-capability-v1",
         "map_key": "r0075-90m-on-90m",
@@ -289,7 +291,11 @@ def _registry_entry(
             "maps": [definition],
         },
     )
-    entries = map_registry.scan_scale_evaluation_round(round_dir, {})
+    entries = map_registry.scan_scale_evaluation_round(
+        round_dir,
+        {},
+        queue_dir=queue_dir,
+    )
     assert len(entries) == 1
     return entries[0]
 
@@ -319,6 +325,48 @@ def test_legacy_registry_semantics_preserve_registered_absolute_decision(
     assert entry["scientific_status"] == (
         "same-domain-selector-failed-diagnostic"
     )
+
+
+def test_registry_scan_uses_latest_preserved_queue_attempt(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    expected = _registry_entry(
+        tmp_path,
+        density_semantics="representative-relative-v1",
+        queue_name="queue-attempt-2",
+    )
+    stale = tmp_path / "round-0076/queue"
+    (stale / "artifacts").mkdir(parents=True)
+    _write_json(stale / "queue.json", {"release_sha": "0" * 40})
+    alias = tmp_path / "round-0076-attempt-2"
+    alias.mkdir()
+    (alias / "queue").symlink_to(
+        "../round-0076/queue-attempt-2",
+        target_is_directory=True,
+    )
+    monkeypatch.setattr(map_registry, "RUNS_DIR", tmp_path)
+    monkeypatch.setattr(
+        map_registry,
+        "LEDGER_DIR",
+        tmp_path / "missing-ledger",
+    )
+    monkeypatch.setattr(
+        map_registry,
+        "CHECKPOINT_DIR",
+        tmp_path / "missing-checkpoints",
+    )
+
+    registry = map_registry.scan()
+    entries = [
+        item
+        for item in registry["maps"]
+        if item.get("round_id") == "0076"
+        and item.get("kind") == "round-map"
+    ]
+    assert len(entries) == 1
+    assert entries[0]["map_id"] == expected["map_id"]
+    assert entries[0]["release_sha"] == "a" * 40
 
 
 def test_round0076_queue_is_bounded_no_training_and_reuses_geometry() -> None:
