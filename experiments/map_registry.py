@@ -125,11 +125,17 @@ def _projection_map_context(panel: dict, rid: str) -> tuple[str, dict | None, di
     return str(label or f"round{rid}"), model, coordinates
 
 
-def scan_projection_maps(round_dir: Path, ledger: dict) -> list[dict]:
+def scan_projection_maps(
+    round_dir: Path,
+    ledger: dict,
+    *,
+    queue_dir: Path | None = None,
+) -> list[dict]:
     """Discover immutable OOD coordinate archives beside registered panels."""
     rid_m = re.match(r"round-(\d{4})", round_dir.name)
     rid = rid_m.group(1) if rid_m else round_dir.name
-    artifacts = round_dir / "queue/artifacts"
+    queue_dir = queue_dir or round_dir / "queue"
+    artifacts = queue_dir / "artifacts"
     panels = sorted({
         *artifacts.glob("**/universality-panel-v1.json"),
         *artifacts.glob("**/common-corpus-ood-panel-v1.json"),
@@ -142,7 +148,7 @@ def scan_projection_maps(round_dir: Path, ledger: dict) -> list[dict]:
         "science": "Common Corpus science",
         "latin": "Common Corpus Latin",
     }
-    queue = _load_json(round_dir / "queue/queue.json") or {}
+    queue = _load_json(queue_dir / "queue.json") or {}
     release_sha = queue.get("release_sha") or (queue.get("release") or {}).get("sha")
     for panel_path in panels:
         panel = _load_json(panel_path)
@@ -217,12 +223,18 @@ def scan_projection_maps(round_dir: Path, ledger: dict) -> list[dict]:
     return entries
 
 
-def scan_modern_round(round_dir: Path, ledger: dict) -> list[dict]:
+def scan_modern_round(
+    round_dir: Path,
+    ledger: dict,
+    *,
+    queue_dir: Path | None = None,
+) -> list[dict]:
     """Rounds with a queue/ manifest (0014+ layout). One entry per trained map."""
     rid_m = re.match(r"round-(\d{4})", round_dir.name)
     rid = rid_m.group(1) if rid_m else round_dir.name
-    art = round_dir / "queue/artifacts"
-    queue = _load_json(round_dir / "queue/queue.json") or {}
+    queue_dir = queue_dir or round_dir / "queue"
+    art = queue_dir / "artifacts"
+    queue = _load_json(queue_dir / "queue.json") or {}
     entries = []
 
     receipt = _load_json(art / "train/train-receipt.json")
@@ -298,7 +310,12 @@ def scan_modern_round(round_dir: Path, ledger: dict) -> list[dict]:
     return entries
 
 
-def scan_evaluation_round(round_dir: Path, ledger: dict) -> list[dict]:
+def scan_evaluation_round(
+    round_dir: Path,
+    ledger: dict,
+    *,
+    queue_dir: Path | None = None,
+) -> list[dict]:
     """Discover a map evaluated in a successor round to its training round.
 
     R0034 stops at a reviewed model candidate and R0036 owns its transform and
@@ -308,7 +325,8 @@ def scan_evaluation_round(round_dir: Path, ledger: dict) -> list[dict]:
     """
     rid_m = re.match(r"round-(\d{4})", round_dir.name)
     rid = rid_m.group(1) if rid_m else round_dir.name
-    art = round_dir / "queue/artifacts"
+    queue_dir = queue_dir or round_dir / "queue"
+    art = queue_dir / "artifacts"
     transform_path = art / "coordinates/actual-transform.json"
     panel_path = art / "panel/panel.json"
     render_path = art / "semantic-renders/render-manifest.json"
@@ -321,7 +339,7 @@ def scan_evaluation_round(round_dir: Path, ledger: dict) -> list[dict]:
         or panel.get("schema") != "round0036-registered-panel-v1"
     ):
         return []
-    queue = _load_json(round_dir / "queue/queue.json") or {}
+    queue = _load_json(queue_dir / "queue.json") or {}
     render = _load_json(render_path) or {}
     scientific = panel.get("panel") if isinstance(panel.get("panel"), dict) else {}
     projection = panel.get("projection") \
@@ -386,7 +404,12 @@ def scan_evaluation_round(round_dir: Path, ledger: dict) -> list[dict]:
     }]
 
 
-def scan_scale_evaluation_round(round_dir: Path, ledger: dict) -> list[dict]:
+def scan_scale_evaluation_round(
+    round_dir: Path,
+    ledger: dict,
+    *,
+    queue_dir: Path | None = None,
+) -> list[dict]:
     """Discover registry-facing maps produced by scale evaluation rounds.
 
     R0064 intentionally evaluates three map/universe pairs, but only the
@@ -398,8 +421,9 @@ def scan_scale_evaluation_round(round_dir: Path, ledger: dict) -> list[dict]:
     """
     rid_m = re.match(r"round-(\d{4})", round_dir.name)
     rid = rid_m.group(1) if rid_m else round_dir.name
-    art = round_dir / "queue/artifacts"
-    queue = _load_json(round_dir / "queue/queue.json") or {}
+    queue_dir = queue_dir or round_dir / "queue"
+    art = queue_dir / "artifacts"
+    queue = _load_json(queue_dir / "queue.json") or {}
     render_manifest = _load_json(
         art / "semantic-renders/render-manifest.json"
     ) or {}
@@ -622,16 +646,49 @@ def scan_checkpoints() -> list[dict]:
     return out
 
 
+def _latest_queue_dir(round_dir: Path) -> Path | None:
+    """Select the newest immutable slim-runner attempt for one round.
+
+    ``queue`` is attempt 1. Setup corrections preserve it and materialize
+    ``queue-attempt-N`` siblings; scanning only the original directory makes
+    successful retry artifacts invisible to both the registry and the local
+    explorer. The highest numbered materialized attempt is the authoritative
+    artifact root while every older attempt remains untouched on disk.
+    """
+    candidates: list[tuple[int, Path]] = []
+    canonical = round_dir / "queue"
+    if (canonical / "artifacts").is_dir():
+        candidates.append((1, canonical))
+    for candidate in round_dir.glob("queue-attempt-*"):
+        match = re.fullmatch(r"queue-attempt-(\d+)", candidate.name)
+        if match and (candidate / "artifacts").is_dir():
+            candidates.append((int(match.group(1)), candidate))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
 def scan() -> dict:
     ledger = ledger_status()
     maps: list[dict] = []
     if RUNS_DIR.is_dir():
         for round_dir in sorted(RUNS_DIR.glob("round-*")):
-            if (round_dir / "queue/artifacts").is_dir():
-                maps += scan_modern_round(round_dir, ledger)
-                maps += scan_evaluation_round(round_dir, ledger)
-                maps += scan_scale_evaluation_round(round_dir, ledger)
-                maps += scan_projection_maps(round_dir, ledger)
+            if re.fullmatch(r"round-\d{4}", round_dir.name) is None:
+                continue
+            queue_dir = _latest_queue_dir(round_dir)
+            if queue_dir is not None:
+                maps += scan_modern_round(
+                    round_dir, ledger, queue_dir=queue_dir
+                )
+                maps += scan_evaluation_round(
+                    round_dir, ledger, queue_dir=queue_dir
+                )
+                maps += scan_scale_evaluation_round(
+                    round_dir, ledger, queue_dir=queue_dir
+                )
+                maps += scan_projection_maps(
+                    round_dir, ledger, queue_dir=queue_dir
+                )
             elif (round_dir / "renders").is_dir():
                 maps += scan_legacy_renders(round_dir, ledger)
     maps += scan_checkpoints()
