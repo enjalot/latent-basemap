@@ -72,6 +72,15 @@ MODEL_SPECS = {
         "updates": 1_493_293,
         "sampler_class": "HostInt8Balanced90mCanonicalSampler",
     },
+    "r0079-120m": {
+        "round_id": "0079",
+        "receipt_schema": "round0079-train-receipt-v1",
+        "config_schema": "round0079-production-config-v1",
+        "rows": 120_000_000,
+        "retained_rows": 118_067_492,
+        "updates": 1_982_221,
+        "sampler_class": "HostInt8Balanced120mCanonicalSampler",
+    },
 }
 
 
