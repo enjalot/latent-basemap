@@ -515,7 +515,10 @@ def scan_scale_evaluation_round(
             else []
         )
         checks = panel.get("decision_checks") or {}
-        if definition.get("density_semantics") == "representative-relative-v1":
+        if definition.get("density_semantics") in {
+            "representative-relative-v1",
+            "density-v2-fixed-floor-plus-legacy-diagnostic",
+        }:
             selector_checks = {
                 key: value
                 for key, value in checks.items()
