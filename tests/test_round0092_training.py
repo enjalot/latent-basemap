@@ -215,6 +215,157 @@ def test_round0092_discovers_one_issued_dated_contract(
         prepare_round0092_queue._require_issued_round()
 
 
+def test_round0092_preparer_materializes_the_exact_one_node_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    round_file = tmp_path / "round-0092-2026-07-28.md"
+    round_file.write_text("---\nstatus: issued\n---\n", encoding="utf-8")
+    substrate, substrate_signature, graph = _capability_fixture()
+    graph_signature = {
+        "canonical_path": "/data/150m-graph.json",
+        "bytes": 789,
+        "sha256": "c" * 64,
+    }
+    graph["outputs"] = {
+        "targets": {
+            "canonical_path": "/data/150m-targets.i32",
+            "bytes": ROW_COUNT * 15 * 4,
+            "sha256": "5" * 64,
+        },
+        "degrees": {
+            "canonical_path": "/data/150m-degrees.u8",
+            "bytes": ROW_COUNT,
+            "sha256": "6" * 64,
+        },
+    }
+    scale_signature = {
+        "canonical_path": "/data/r0080-scale.json",
+        "bytes": 321,
+        "sha256": "4" * 64,
+    }
+    monkeypatch.setattr(
+        prepare_round0092_queue,
+        "ROUND_FILE_GLOB",
+        str(tmp_path / "round-0092-*.md"),
+    )
+    monkeypatch.setattr(
+        prepare_round0092_queue,
+        "_load_scale_evidence",
+        lambda _job: scale_signature,
+    )
+    monkeypatch.setattr(
+        prepare_round0092_queue,
+        "validate_substrate",
+        lambda _path, expected_sha256: {
+            "manifest": substrate,
+            "signature": substrate_signature,
+        },
+    )
+    monkeypatch.setattr(
+        prepare_round0092_queue,
+        "load_canonical_graph",
+        lambda *_args, **_kwargs: {
+            "manifest": graph,
+            "signature": graph_signature,
+        },
+    )
+
+    def fake_review(
+        path: str,
+        *,
+        expected_sha256: str,
+        required_text: tuple[str, ...],
+    ) -> dict:
+        assert expected_sha256
+        assert required_text
+        return {
+            "canonical_path": str(Path(path).resolve()),
+            "bytes": 123,
+            "sha256": expected_sha256,
+        }
+
+    monkeypatch.setattr(
+        prepare_round0092_queue,
+        "_require_review",
+        fake_review,
+    )
+
+    def fake_fresh_directory(path: str, *, label: str) -> str:
+        assert label
+        target = Path(path)
+        target.mkdir(parents=True)
+        return str(target)
+
+    def fake_ensure_directory(path: str) -> str:
+        target = Path(path)
+        target.mkdir(parents=True)
+        return str(target)
+
+    def fake_atomic_json(
+        path: str,
+        payload: dict,
+        *,
+        immutable: bool,
+    ) -> None:
+        assert immutable is True
+        Path(path).write_text(
+            json.dumps(payload, sort_keys=True),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        prepare_round0092_queue,
+        "create_fresh_directory",
+        fake_fresh_directory,
+    )
+    monkeypatch.setattr(
+        prepare_round0092_queue,
+        "ensure_data_directory",
+        fake_ensure_directory,
+    )
+    monkeypatch.setattr(
+        prepare_round0092_queue,
+        "atomic_write_new_json",
+        fake_atomic_json,
+    )
+    queue = prepare_round0092_queue.prepare_round0092(
+        release_sha="7" * 40,
+        scale_geometry_path=scale_signature["canonical_path"],
+        scale_geometry_sha256=scale_signature["sha256"],
+        substrate_manifest_path=substrate_signature["canonical_path"],
+        substrate_manifest_sha256=substrate_signature["sha256"],
+        canonical_graph_manifest_path=graph_signature["canonical_path"],
+        canonical_graph_manifest_sha256=graph_signature["sha256"],
+        r0080_review_path="/labs/review-0080.md",
+        r0080_review_sha256="8" * 64,
+        r0086_review_path="/labs/review-0086.md",
+        r0086_review_sha256="9" * 64,
+        r0091_review_path="/labs/review-0091.md",
+        r0091_review_sha256="a" * 64,
+        queue_root=str(tmp_path / "queue"),
+    )
+    manifest = json.loads(Path(queue).read_text(encoding="utf-8"))
+    assert manifest["release_sha"] == "7" * 40
+    assert manifest["gpu_hours_cap"] == 8.0
+    assert manifest["p90_gpu_seconds"]["total"] == 27_000.0
+    assert manifest["scientific_contract"]["successful_updates"] == 2_471_689
+    assert len(manifest["jobs"]) == 1
+    job = manifest["jobs"][0]
+    assert job["action"] == "train_balanced_150m"
+    assert job["p90_wall_s"] == 27_000.0
+    assert job["successful_updates"] == 2_471_689
+    assert job["train_config_sha256"] == manifest[
+        "production_config_sha256"
+    ]
+    assert {item["canonical_path"] for item in job["expected_inputs"]} >= {
+        graph_signature["canonical_path"],
+        substrate_signature["canonical_path"],
+        graph["outputs"]["targets"]["canonical_path"],
+        graph["outputs"]["degrees"]["canonical_path"],
+    }
+
+
 def test_round0092_receipts_exact_training_accounting() -> None:
     source = inspect.getsource(round0092_nodes.run_train)
     for field in (
