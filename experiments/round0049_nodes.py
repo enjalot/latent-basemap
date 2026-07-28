@@ -603,34 +603,30 @@ def _sample_retained_rows(
     seed: int = QUALITY_SEED,
     row_count: int = ROW_COUNT,
 ) -> np.ndarray:
+    """Draw a deterministic uniform sample without replacement.
+
+    The candidate pool is sorted only after an unbiased random subset has
+    been selected.  Sorting an oversized candidate pool before truncation
+    would systematically select low row IDs.
+    """
     rng = np.random.RandomState(seed)
-    selected: list[np.ndarray] = []
-    have = 0
-    while have < count:
-        proposed = rng.randint(
-            0,
-            row_count,
-            size=max(2 * (count - have), 1_024),
-            dtype=np.int64,
-        )
-        proposed = proposed[
-            ~_membership(excluded, proposed)
-        ]
-        selected.append(proposed)
-        have += len(proposed)
-    rows = np.unique(np.concatenate(selected))
+    rows = np.empty(0, dtype=np.int64)
     while len(rows) < count:
         proposed = rng.randint(
             0,
             row_count,
-            size=count,
+            size=max(2 * (count - len(rows)), 1_024),
             dtype=np.int64,
         )
         proposed = proposed[
             ~_membership(excluded, proposed)
         ]
         rows = np.unique(np.concatenate((rows, proposed)))
-    return np.sort(rows[:count]).astype(np.int64, copy=False)
+    if len(rows) > count:
+        rows = rows[
+            rng.choice(len(rows), size=count, replace=False)
+        ]
+    return np.sort(rows).astype(np.int64, copy=False)
 
 
 def _exact_representative_truth(
