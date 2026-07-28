@@ -56,6 +56,11 @@ BENCHMARK_WARMUP_ROWS = 512
 BENCHMARK_REPEATS = 3
 
 
+def _peak_rss_gib() -> float:
+    """Read process RSS without sharing a name with FAISS GPU resources."""
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
+
+
 def _queries(
     encoded: np.ndarray,
     scales: np.ndarray,
@@ -368,12 +373,12 @@ def run_qualification(
             or int(cpu.code_size) != 48
         ):
             raise Round0094Error(f"{name} shard geometry changed")
-        resource = faiss.StandardGpuResources()
-        resource.setTempMemory(1 << 29)
+        gpu_resource = faiss.StandardGpuResources()
+        gpu_resource.setTempMemory(1 << 29)
         started = time.monotonic()
-        gpu = faiss.index_cpu_to_gpu(resource, 0, cpu, options)
+        gpu = faiss.index_cpu_to_gpu(gpu_resource, 0, cpu, options)
         clone_seconds.append(time.monotonic() - started)
-        gpu_resources.append(resource)
+        gpu_resources.append(gpu_resource)
         gpu_indices.append(_GpuSearchAdapter(gpu, 32))
 
     cells: dict[str, Any] = {}
@@ -502,10 +507,7 @@ def run_qualification(
             ]["median_wall_seconds_per_query"],
             "exact_truth": exact_performance,
             "gpu_clone_seconds_by_shard": clone_seconds,
-            "peak_rss_gib": (
-                resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                / (1024 ** 2)
-            ),
+            "peak_rss_gib": _peak_rss_gib(),
         },
         "checks": checks,
     }

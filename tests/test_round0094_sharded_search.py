@@ -22,6 +22,7 @@ from basemap.round0094_sharded_search import (
     seal,
     select_cell,
 )
+from experiments import round0094_nodes as nodes
 from experiments.round0094_nodes import _search_and_rerank
 
 
@@ -184,3 +185,15 @@ def test_sharded_search_preserves_each_shard_quota_before_global_rerank() -> Non
     assert receipt["nprobe_per_shard"] == 40
     assert all(index.index.nprobe == 40 for index in indices)
     assert receipt["self_returned"] == 2
+
+
+def test_peak_rss_uses_python_resource_module(monkeypatch) -> None:
+    class Usage:
+        ru_maxrss = 3 * 1024**2
+
+    monkeypatch.setattr(
+        nodes.resource,
+        "getrusage",
+        lambda who: Usage() if who == nodes.resource.RUSAGE_SELF else None,
+    )
+    assert nodes._peak_rss_gib() == 3.0
