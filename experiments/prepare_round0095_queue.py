@@ -123,8 +123,8 @@ def prepare_round0095(
         expected_sha256=r0094_review_sha256,
         required_text=(
             "0095",
-            r0094_qualification_sha256,
-            "sample",
+            SAMPLE_SHA256,
+            "R0094",
         ),
     )
     substrate = validate_substrate(
