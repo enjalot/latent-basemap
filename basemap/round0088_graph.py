@@ -15,6 +15,12 @@ from .round0086_program import (
     select_cell,
     validate_substrate,
 )
+from .round0093_policy import (
+    MEAN_RECALL_FLOOR as R0093_MEAN_RECALL_FLOOR,
+    QUALIFICATION_SCHEMA as R0093_QUALIFICATION_SCHEMA,
+    ROUND_ID as POLICY_ROUND_ID,
+    select_cell as select_r0093_cell,
+)
 
 
 ROUND_BY_CORPUS = {
@@ -77,10 +83,10 @@ def validate_qualification(
     substrate_signature: Mapping[str, Any],
     filtered_index_signature: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Authenticate the positive R0086 search qualification and selection."""
+    """Authenticate an exact reviewed R0086 or R0093 policy selection."""
     signature = expected_input_signature(path)
     if signature["sha256"] != expected_sha256:
-        raise Round0088Error("R0086 qualification bytes changed")
+        raise Round0088Error("150M policy qualification bytes changed")
     with open(path, encoding="utf-8") as handle:
         receipt = json.load(handle)
     body = {
@@ -88,18 +94,45 @@ def validate_qualification(
         for key, value in receipt.items()
         if key != "identity_sha256"
     }
-    selected = select_cell(receipt)
+    schema = receipt.get("schema")
+    if schema == QUALIFICATION_SCHEMA:
+        expected_round = STAGING_ROUND_ID
+        expected_floor = 0.90
+        selected = select_cell(receipt)
+    elif schema == R0093_QUALIFICATION_SCHEMA:
+        expected_round = POLICY_ROUND_ID
+        expected_floor = R0093_MEAN_RECALL_FLOOR
+        selected = select_r0093_cell(receipt)
+    else:
+        raise Round0088Error("unknown 150M policy qualification schema")
+    quality = receipt.get("quality") or {}
+    checks = receipt.get("checks") or {}
     if (
-        receipt.get("schema") != QUALIFICATION_SCHEMA
-        or receipt.get("round_id") != STAGING_ROUND_ID
+        receipt.get("round_id") != expected_round
         or receipt.get("identity_sha256") != sha256_bytes(canonical_json(body))
         or receipt.get("substrate") != dict(substrate_signature)
         or receipt.get("filtered_index") != dict(filtered_index_signature)
+        or receipt.get("validity_passed") is not True
+        or receipt.get("training_performed") is not False
+        or float(quality.get("floor", -1.0)) != expected_floor
+        or not checks
+        or any(value is not True for value in checks.values())
         or not isinstance(selected, dict)
         or receipt.get("selected") != selected
+        or selected.get("passes_mean_floor") is not True
+        or float(selected.get("mean_recall_at_15_unambiguous", -1.0))
+        < expected_floor
     ):
-        raise Round0088Error("R0086 did not release one valid passing policy")
-    return {"signature": signature, "receipt": receipt, "selected": selected}
+        raise Round0088Error(
+            "reviewed 150M qualification did not release one valid policy"
+        )
+    return {
+        "signature": signature,
+        "receipt": receipt,
+        "selected": selected,
+        "policy_round_id": expected_round,
+        "mean_recall_floor": expected_floor,
+    }
 
 
 def validate_filter_receipt(
@@ -215,8 +248,12 @@ def validate_part_receipt(
         or int(receipt.get("retained_sources", -1)) != spec["retained_rows"]
         or int(receipt.get("excluded_sources", -1)) != spec["excluded_rows"]
         or int(receipt.get("valid_edges", -1)) != spec["retained_rows"] * 15
-        or float(quality.get("floor", -1.0)) != 0.90
-        or float(quality.get("mean_recall_at_15_unambiguous", -1.0)) < 0.90
+        or float(quality.get("floor", -1.0)) not in {
+            0.90,
+            R0093_MEAN_RECALL_FLOOR,
+        }
+        or float(quality.get("mean_recall_at_15_unambiguous", -1.0))
+        < float(quality.get("floor", -1.0))
         or int(quality.get("qualification_sample_rows", -1)) != 4_096
         or int(quality.get("qualification_sample_seed", -1)) != 86
     ):

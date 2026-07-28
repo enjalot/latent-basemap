@@ -30,6 +30,7 @@ from basemap.round0088_graph import (
     validate_qualification,
     validate_staged_substrate,
 )
+from basemap.round0093_policy import load_decision as load_r0093_decision
 from experiments.prepare_round0020_0022_queues import (
     LAB_ROOT,
     _base_manifest,
@@ -54,9 +55,14 @@ FILTER_RECEIPT = os.path.join(
     "filtered-index-150m/filter-receipt.json",
 )
 QUALIFICATION = os.path.join(
-    STAGING_ROOT,
-    "gpu-ivfpq-policy-qualification-150m/"
+    "/data/latent-basemap/runs/round-0093/queue/artifacts",
+    "lower-recall-policy-qualification-150m/"
     "gpu-ivfpq-policy-qualification-v1.json",
+)
+POLICY_DECISION = os.path.join(
+    "/data/latent-basemap/runs/round-0093/queue/artifacts",
+    "lower-recall-policy-qualification-150m/"
+    "lower-recall-policy-decision.json",
 )
 PART_ROOTS = {
     corpus: (
@@ -103,6 +109,7 @@ def _authenticated_staging(
     filter_receipt_sha256: str,
     filtered_index_sha256: str,
     qualification_sha256: str,
+    policy_decision_sha256: str,
 ) -> dict[str, Any]:
     substrate = validate_staged_substrate(
         SUBSTRATE, expected_sha256=substrate_sha256
@@ -122,11 +129,27 @@ def _authenticated_staging(
         substrate_signature=substrate["signature"],
         filtered_index_signature=filtered,
     )
+    decision = load_r0093_decision(
+        POLICY_DECISION,
+        expected_sha256=policy_decision_sha256,
+    )
+    decision_receipt = decision["receipt"]
+    if (
+        decision_receipt.get("selected") != qualification["selected"]
+        or decision_receipt.get("qualification")
+        != qualification["signature"]
+        or decision_receipt.get("substrate") != substrate["signature"]
+        or decision_receipt.get("filtered_index") != filtered
+    ):
+        raise Round0088Error(
+            "R0093 decision does not bind the selected qualification"
+        )
     return {
         "substrate": substrate,
         "filtered_index": filtered,
         "filter_receipt": filter_receipt,
         "qualification": qualification,
+        "policy_decision": decision,
     }
 
 
@@ -136,10 +159,13 @@ def prepare_part_queue(
     release_sha: str,
     r0086_review_path: str,
     r0086_review_sha256: str,
+    r0093_review_path: str,
+    r0093_review_sha256: str,
     substrate_sha256: str,
     filter_receipt_sha256: str,
     filtered_index_sha256: str,
     qualification_sha256: str,
+    policy_decision_sha256: str,
     runtime_spec_sha256: str,
     queue_root: str | None = None,
 ) -> str:
@@ -152,14 +178,27 @@ def prepare_part_queue(
         LAB_ROOT, f"round-{round_id}-2026-07-28.md"
     )
     _require_issued_round(round_file)
-    review = _require_review(
+    review_0086 = _require_review(
         r0086_review_path,
         expected_sha256=r0086_review_sha256,
         required_text=(
             "capability:minilm-balanced-150m-int8-input-v1",
             "capability:minilm-balanced-150m-gpu-ivfpq-search-qualified-v1",
             substrate_sha256,
+            filtered_index_sha256,
+        ),
+    )
+    review_0093 = _require_review(
+        r0093_review_path,
+        expected_sha256=r0093_review_sha256,
+        required_text=(
+            "capability:minilm-graph-recall-operational-floor-0p84-v1",
+            (
+                "capability:minilm-balanced-150m-gpu-ivfpq-"
+                "search-qualified-low-recall-v1"
+            ),
             qualification_sha256,
+            policy_decision_sha256,
         ),
     )
     staged = _authenticated_staging(
@@ -167,6 +206,7 @@ def prepare_part_queue(
         filter_receipt_sha256=filter_receipt_sha256,
         filtered_index_sha256=filtered_index_sha256,
         qualification_sha256=qualification_sha256,
+        policy_decision_sha256=policy_decision_sha256,
     )
     runtime = expected_input_signature(RUNTIME_SPEC)
     if runtime["sha256"] != runtime_spec_sha256:
@@ -187,7 +227,8 @@ def prepare_part_queue(
     outputs = staged["substrate"]["manifest"]["outputs"]
     inputs = _dedupe([
         expected_input_signature(round_file),
-        review,
+        review_0086,
+        review_0093,
         staged["substrate"]["signature"],
         outputs["int8"],
         outputs["scales"],
@@ -195,6 +236,7 @@ def prepare_part_queue(
         staged["filter_receipt"]["signature"],
         staged["filtered_index"],
         staged["qualification"]["signature"],
+        staged["policy_decision"]["signature"],
         runtime,
         expected_input_signature(FAISS_WHEEL),
     ])
@@ -216,20 +258,23 @@ def prepare_part_queue(
     manifest["schema"] = "round0088-split-150m-graph-part-queue-v1"
     manifest["repo_root"] = RELEASE_ROOT
     manifest["queue_class"] = "gpu-research"
-    manifest["required_reviews"] = ["0086"]
+    manifest["required_reviews"] = ["0086", "0093"]
     manifest["capability_dependencies"] = [
         "minilm-balanced-150m-int8-input-v1",
-        "minilm-balanced-150m-gpu-ivfpq-search-qualified-v1",
+        "minilm-graph-recall-operational-floor-0p84-v1",
+        "minilm-balanced-150m-gpu-ivfpq-search-qualified-low-recall-v1",
     ]
     capability = f"minilm-balanced-150m-graph-part-{corpus}-v1"
     manifest["capabilities_produced"] = [capability]
     manifest["training_performed"] = False
     manifest["reviewed_inputs"] = {
-        "review_0086": review,
+        "review_0086": review_0086,
+        "review_0093": review_0093,
         "substrate": staged["substrate"]["signature"],
         "filter_receipt": staged["filter_receipt"]["signature"],
         "filtered_index": staged["filtered_index"],
         "gpu_qualification": staged["qualification"]["signature"],
+        "policy_decision": staged["policy_decision"]["signature"],
     }
     selected = staged["qualification"]["selected"]
     spec = CORPUS_SPECS[corpus]
@@ -242,6 +287,7 @@ def prepare_part_queue(
         "nprobe": int(selected["nprobe"]),
         "search_width": int(selected["shortlist_width"]),
         "selected_neighbors": 15,
+        "mean_recall_floor": staged["qualification"]["mean_recall_floor"],
         "exact_rerank": True,
         "fixed_degree_on_retained_sources": 15,
         "candidate_universe": "all retained balanced-150m representatives",
@@ -268,6 +314,8 @@ def prepare_part_queue(
         "filtered_index": FILTERED_INDEX,
         "gpu_qualification_receipt": QUALIFICATION,
         "gpu_qualification_receipt_sha256": qualification_sha256,
+        "policy_decision": POLICY_DECISION,
+        "policy_decision_sha256": policy_decision_sha256,
         "runtime_spec": RUNTIME_SPEC,
         "runtime_spec_sha256": runtime_spec_sha256,
         "node_policy": {
@@ -419,10 +467,13 @@ def main(argv: list[str] | None = None) -> int:
     part.add_argument("--release-sha", required=True)
     part.add_argument("--r0086-review", required=True)
     part.add_argument("--r0086-review-sha256", required=True)
+    part.add_argument("--r0093-review", required=True)
+    part.add_argument("--r0093-review-sha256", required=True)
     part.add_argument("--substrate-sha256", required=True)
     part.add_argument("--filter-receipt-sha256", required=True)
     part.add_argument("--filtered-index-sha256", required=True)
     part.add_argument("--qualification-sha256", required=True)
+    part.add_argument("--policy-decision-sha256", required=True)
     part.add_argument("--runtime-spec-sha256", required=True)
     part.add_argument("--queue-root")
     assembly = sub.add_parser("assembly")
@@ -447,10 +498,13 @@ def main(argv: list[str] | None = None) -> int:
             release_sha=args.release_sha,
             r0086_review_path=args.r0086_review,
             r0086_review_sha256=args.r0086_review_sha256,
+            r0093_review_path=args.r0093_review,
+            r0093_review_sha256=args.r0093_review_sha256,
             substrate_sha256=args.substrate_sha256,
             filter_receipt_sha256=args.filter_receipt_sha256,
             filtered_index_sha256=args.filtered_index_sha256,
             qualification_sha256=args.qualification_sha256,
+            policy_decision_sha256=args.policy_decision_sha256,
             runtime_spec_sha256=args.runtime_spec_sha256,
             queue_root=args.queue_root,
         ))

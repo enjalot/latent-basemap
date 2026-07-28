@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -29,7 +30,13 @@ from basemap.round0088_graph import (
     validate_part_receipt,
     validate_qualification,
 )
+from basemap.round0093_policy import (
+    POLICY_GRID as R0093_POLICY_GRID,
+    QUALIFICATION_SCHEMA as R0093_QUALIFICATION_SCHEMA,
+    seal as seal93,
+)
 from experiments import round0088_nodes as nodes
+from experiments import prepare_round0088_0091_queue as preparer
 
 
 def _write_json(path: Path, value: dict) -> str:
@@ -137,6 +144,7 @@ def test_qualification_and_filter_receipts_are_content_bound(
         "nprobe": 128,
         "shortlist_width": 256,
         "passes_mean_floor": True,
+        "mean_recall_at_15_unambiguous": 0.91,
         "benchmark": {
             "rows": 10_000,
             "median_search_seconds": 2.0,
@@ -155,6 +163,10 @@ def test_qualification_and_filter_receipts_are_content_bound(
         "round_id": "0086",
         "substrate": substrate,
         "filtered_index": filtered,
+        "validity_passed": True,
+        "training_performed": False,
+        "quality": {"floor": 0.90},
+        "checks": {"passing_policy_selected": True},
         "cells": cells,
         "selected": cell,
     })
@@ -167,6 +179,48 @@ def test_qualification_and_filter_receipts_are_content_bound(
         filtered_index_signature=filtered,
     )
     assert loaded["selected"] == cell
+    assert loaded["policy_round_id"] == "0086"
+
+    r0093_cells = {
+        f"nprobe-{nprobe}-width-{width}": (
+            {
+                **cell,
+                "nprobe": nprobe,
+                "shortlist_width": width,
+                "mean_recall_at_15_unambiguous": 0.85,
+            }
+            if (nprobe, width) == R0093_POLICY_GRID[0]
+            else None
+        )
+        for nprobe, width in R0093_POLICY_GRID
+    }
+    r0093_cell = r0093_cells[
+        f"nprobe-{R0093_POLICY_GRID[0][0]}-"
+        f"width-{R0093_POLICY_GRID[0][1]}"
+    ]
+    r0093 = seal93({
+        "schema": R0093_QUALIFICATION_SCHEMA,
+        "round_id": "0093",
+        "substrate": substrate,
+        "filtered_index": filtered,
+        "validity_passed": True,
+        "training_performed": False,
+        "quality": {"floor": 0.84},
+        "checks": {"passing_policy_selected": True},
+        "cells": r0093_cells,
+        "selected": r0093_cell,
+    })
+    r0093_path = tmp_path / "r0093-qualification.json"
+    r0093_sha = _write_json(r0093_path, r0093)
+    loaded_r0093 = validate_qualification(
+        str(r0093_path),
+        expected_sha256=r0093_sha,
+        substrate_signature=substrate,
+        filtered_index_signature=filtered,
+    )
+    assert loaded_r0093["selected"] == r0093_cell
+    assert loaded_r0093["policy_round_id"] == "0093"
+    assert loaded_r0093["mean_recall_floor"] == 0.84
 
     qualification["selected"] = {**cell, "nprobe": 192}
     bad_path = tmp_path / "bad-qualification.json"
@@ -212,6 +266,22 @@ def test_part_receipt_requires_exact_registered_counts(
         str(path), expected_sha256=sha
     )["receipt"]["corpus"] == corpus
 
+    lower = {
+        key: item
+        for key, item in value.items()
+        if key != "identity_sha256"
+    }
+    lower["quality"] = {
+        **lower["quality"],
+        "mean_recall_at_15_unambiguous": 0.85,
+        "floor": 0.84,
+    }
+    lower_path = tmp_path / f"{corpus}-lower.json"
+    lower_sha = _write_json(lower_path, seal(lower))
+    assert validate_part_receipt(
+        str(lower_path), expected_sha256=lower_sha
+    )["receipt"]["quality"]["floor"] == 0.84
+
     value["valid_edges"] += 1
     bad = tmp_path / f"{corpus}-bad.json"
     bad_sha = _write_json(bad, seal({
@@ -220,6 +290,17 @@ def test_part_receipt_requires_exact_registered_counts(
     }))
     with pytest.raises(Round0088Error):
         validate_part_receipt(str(bad), expected_sha256=bad_sha)
+
+
+def test_part_queue_binds_reviewed_r0093_decision() -> None:
+    source = inspect.getsource(preparer.prepare_part_queue)
+    assert 'manifest["required_reviews"] = ["0086", "0093"]' in source
+    assert "minilm-graph-recall-operational-floor-0p84-v1" in source
+    assert "search-qualified-low-recall-v1" in source
+    assert '"policy_decision": staged["policy_decision"]["signature"]' in source
+    node_source = inspect.getsource(nodes.run_build_part)
+    assert "load_r0093_decision" in node_source
+    assert '"floor": qualification["mean_recall_floor"]' in node_source
 
 
 def _write_shard(

@@ -46,6 +46,7 @@ from basemap.round0088_graph import (
     validate_qualification,
     validate_staged_substrate,
 )
+from basemap.round0093_policy import load_decision as load_r0093_decision
 from experiments.round0049_nodes import (
     SEARCH_BATCH_ROWS,
     SHARD_ROWS,
@@ -262,6 +263,21 @@ def run_build_part(
         filtered_index_signature=filtered,
     )
     selected = qualification["selected"]
+    policy_decision = load_r0093_decision(
+        str(job["policy_decision"]),
+        expected_sha256=str(job["policy_decision_sha256"]),
+    )
+    decision_receipt = policy_decision["receipt"]
+    if (
+        decision_receipt.get("selected") != selected
+        or decision_receipt.get("qualification")
+        != qualification["signature"]
+        or decision_receipt.get("substrate") != substrate["signature"]
+        or decision_receipt.get("filtered_index") != filtered
+    ):
+        raise Round0088Error(
+            "R0093 decision does not bind the graph-part policy"
+        )
     nprobe = int(selected["nprobe"])
     search_width = int(selected["shortlist_width"])
     runtime = _runtime_stamp(
@@ -291,6 +307,7 @@ def run_build_part(
         "substrate": substrate["signature"],
         "filter_receipt": filter_receipt["signature"],
         "gpu_qualification": qualification["signature"],
+        "policy_decision": policy_decision["signature"],
         "filtered_index": filtered,
         "runtime_spec": expected_input_signature(str(job["runtime_spec"])),
         "nprobe": nprobe,
@@ -402,6 +419,7 @@ def run_build_part(
         "substrate": substrate["signature"],
         "filter_receipt": filter_receipt["signature"],
         "gpu_qualification": qualification["signature"],
+        "policy_decision": policy_decision["signature"],
         "filtered_index": filtered,
         "nprobe": nprobe,
         "search_width": search_width,
@@ -411,7 +429,7 @@ def run_build_part(
             "mean_recall_at_15_unambiguous": selected[
                 "mean_recall_at_15_unambiguous"
             ],
-            "floor": 0.90,
+            "floor": qualification["mean_recall_floor"],
             "qualification_sample_rows": qualification["receipt"][
                 "quality"
             ]["sample_rows"],
