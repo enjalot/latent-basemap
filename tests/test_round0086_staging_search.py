@@ -61,6 +61,8 @@ def test_queue_is_reference_stage_filter_then_fixed_qualification() -> None:
     assert '"substrate_is_reference_only_no_payload_copy": True' in source
     assert '"r0083_does_not_change_floor_in_place": True' in source
     assert '"sample_seed": 86' in source
+    assert "_file_inputs(" not in source
+    assert "*fixed.values()" in source
 
 
 def test_historical_dependencies_match_actual_consumers() -> None:

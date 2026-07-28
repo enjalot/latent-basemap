@@ -37,7 +37,6 @@ from experiments.prepare_round0020_0022_queues import (
     LAB_ROOT,
     _base_manifest,
     _dedupe,
-    _file_inputs,
 )
 from experiments.round0059_nodes import FAISS_WHEEL
 from experiments.round0081_nodes import (
@@ -234,20 +233,16 @@ def prepare_round0086(
     ):
         raise RuntimeError("R0086 150M source geometry changed")
 
-    inputs = _dedupe(_file_inputs([
-        ROUND_FILE,
-        *REVIEWS.values(),
-        r0080_review_path,
-        scale_geometry_path,
-        R0025_MANIFEST,
-        INT8,
-        SCALES,
-        R0033_RECEIPT,
-        ELIGIBILITY,
-        INDEX_PATH,
-        RUNTIME_SPEC,
-        FAISS_WHEEL,
-    ]))
+    # Reuse the exact signatures already computed above. Rehashing the 57.6 GB
+    # int8 payload and 8.4 GB source index here would add roughly 132 GB of
+    # redundant queue-preparation I/O without strengthening the manifest.
+    inputs = _dedupe([
+        expected_input_signature(ROUND_FILE),
+        *reviews.values(),
+        advance,
+        *fixed.values(),
+        expected_input_signature(FAISS_WHEEL),
+    ])
     queue_root = create_fresh_directory(
         queue_root,
         label="Round 0086 staging/search queue",
