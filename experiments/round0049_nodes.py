@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -410,22 +411,35 @@ def _exact_rerank_shortlist(
     }
 
 
-def _warm_page_cache(path: str) -> dict[str, Any]:
-    """Synchronously populate the page cache before random rerank gathers."""
+def _warm_page_cache(
+    path: str,
+    *,
+    expected_signature: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Populate page cache and optionally verify the bound bytes in one pass."""
     started = time.monotonic()
     buffer = bytearray(64 * 1024 * 1024)
     observed = 0
+    digest = hashlib.sha256()
     with open(path, "rb", buffering=0) as handle:
         while True:
             count = handle.readinto(buffer)
             if not count:
                 break
             observed += count
-    signature = expected_input_signature(path)
-    if observed != signature["bytes"]:
-        raise Round0049Error("short read while warming rerank substrate")
+            digest.update(memoryview(buffer)[:count])
+    sha256 = digest.hexdigest()
+    if expected_signature is not None and (
+        os.path.realpath(path) != expected_signature.get("canonical_path")
+        or observed != int(expected_signature.get("bytes", -1))
+        or sha256 != expected_signature.get("sha256")
+    ):
+        raise Round0049Error(
+            "page-cache warm disagrees with the bound rerank substrate"
+        )
     return {
         "bytes": observed,
+        "sha256": sha256,
         "wall_seconds": time.monotonic() - started,
     }
 

@@ -29,7 +29,7 @@ from basemap.round0049_program import (
     compact_to_global,
     global_to_compact,
 )
-from basemap.round0086_program import RETAINED_ROWS, ROW_COUNT
+from basemap.round0096_larger_nlist import NLIST, RETAINED_ROWS, ROW_COUNT
 from basemap.round0088_graph import (
     ASSEMBLED_GRAPH_SCHEMA,
     ASSEMBLY_RECEIPT_SCHEMA,
@@ -41,7 +41,8 @@ from basemap.round0088_graph import (
     Round0088Error,
     corpus_spec,
     seal,
-    validate_filter_receipt,
+    validate_decision,
+    validate_index_receipt,
     validate_part_receipt,
     validate_qualification,
     validate_staged_substrate,
@@ -248,20 +249,29 @@ def run_build_part(
         expected_sha256=str(job["substrate_manifest_sha256"]),
     )
     outputs = substrate["manifest"]["outputs"]
-    filtered = expected_input_signature(str(job["filtered_index"]))
-    filter_receipt = validate_filter_receipt(
-        str(job["filter_receipt"]),
-        expected_sha256=str(job["filter_receipt_sha256"]),
+    index_signature = expected_input_signature(str(job["index"]))
+    if index_signature["sha256"] != str(job["index_sha256"]):
+        raise Round0088Error("R0096 retained IVF32768 index bytes changed")
+    index_receipt = validate_index_receipt(
+        str(job["index_receipt"]),
+        expected_sha256=str(job["index_receipt_sha256"]),
         substrate_signature=substrate["signature"],
-        filtered_index_signature=filtered,
+        index_signature=index_signature,
     )
     qualification = validate_qualification(
-        str(job["gpu_qualification_receipt"]),
-        expected_sha256=str(job["gpu_qualification_receipt_sha256"]),
+        str(job["search_qualification"]),
+        expected_sha256=str(job["search_qualification_sha256"]),
         substrate_signature=substrate["signature"],
-        filtered_index_signature=filtered,
+        index_signature=index_signature,
+        index_receipt_signature=index_receipt["signature"],
     )
     selected = qualification["selected"]
+    decision = validate_decision(
+        str(job["search_decision"]),
+        expected_sha256=str(job["search_decision_sha256"]),
+        qualification_signature=qualification["signature"],
+        selected=selected,
+    )
     nprobe = int(selected["nprobe"])
     search_width = int(selected["shortlist_width"])
     runtime = _runtime_stamp(
@@ -282,16 +292,17 @@ def run_build_part(
 
     output = str(job["outputs"][0])
     contract = {
-        "schema": "round0088-split-150m-graph-part-contract-v1",
+        "schema": "round0097-balanced-150m-ivf32768-graph-part-contract-v1",
         "round_id": round_id,
         "release_sha": active["manifest"]["release_sha"],
         "corpus": corpus,
         "start": spec["start"],
         "stop": spec["stop"],
         "substrate": substrate["signature"],
-        "filter_receipt": filter_receipt["signature"],
-        "gpu_qualification": qualification["signature"],
-        "filtered_index": filtered,
+        "index_receipt": index_receipt["signature"],
+        "search_qualification": qualification["signature"],
+        "search_decision": decision["signature"],
+        "index": index_signature,
         "runtime_spec": expected_input_signature(str(job["runtime_spec"])),
         "nprobe": nprobe,
         "search_width": search_width,
@@ -308,8 +319,14 @@ def run_build_part(
     }
     shard_root = _initialize_graph_output(output, contract=contract)
     page_cache_warm = {
-        "int8": _warm_page_cache(outputs["int8"]["canonical_path"]),
-        "scales": _warm_page_cache(outputs["scales"]["canonical_path"]),
+        "int8": _warm_page_cache(
+            outputs["int8"]["canonical_path"],
+            expected_signature=outputs["int8"],
+        ),
+        "scales": _warm_page_cache(
+            outputs["scales"]["canonical_path"],
+            expected_signature=outputs["scales"],
+        ),
     }
     encoded = np.memmap(
         outputs["int8"]["canonical_path"],
@@ -323,17 +340,17 @@ def run_build_part(
         mode="r",
         shape=(ROW_COUNT,),
     )
-    index = faiss.read_index(filtered["canonical_path"])
+    index = faiss.read_index(index_signature["canonical_path"])
     if (
         type(index).__name__ != "IndexIVFPQ"
         or int(index.ntotal) != RETAINED_ROWS
         or int(index.d) != DIMENSION
-        or int(index.nlist) != 8_192
+        or int(index.nlist) != NLIST
         or int(index.code_size) != 48
         or int(index.pq.M) != 48
         or int(index.pq.nbits) != 8
     ):
-        raise Round0088Error("qualified 150M filtered-index geometry changed")
+        raise Round0088Error("qualified 150M IVF32768 index geometry changed")
     resources, gpu, clone_seconds = _to_gpu(
         faiss, index, nprobe=nprobe
     )
@@ -400,24 +417,34 @@ def run_build_part(
             ],
         })["identity_sha256"],
         "substrate": substrate["signature"],
-        "filter_receipt": filter_receipt["signature"],
-        "gpu_qualification": qualification["signature"],
-        "filtered_index": filtered,
+        "index_receipt": index_receipt["signature"],
+        "search_qualification": qualification["signature"],
+        "search_decision": decision["signature"],
+        "index": index_signature,
         "nprobe": nprobe,
         "search_width": search_width,
         "selected_neighbors": K,
         "exact_rerank": True,
         "quality": {
-            "mean_recall_at_15_unambiguous": selected[
+            "selected_global_mean_recall": selected[
                 "mean_recall_at_15_unambiguous"
             ],
-            "floor": 0.90,
+            "selected_by_corpus": selected["by_corpus"],
+            "global_mean_floor": qualification["receipt"]["quality"][
+                "global_mean_floor"
+            ],
+            "per_corpus_mean_floor": qualification["receipt"]["quality"][
+                "per_corpus_mean_floor"
+            ],
             "qualification_sample_rows": qualification["receipt"][
                 "quality"
             ]["sample_rows"],
             "qualification_sample_seed": qualification["receipt"][
                 "quality"
             ]["sample_seed"],
+            "qualification_sample_sha256": qualification["receipt"][
+                "quality"
+            ]["sample_sha256"],
         },
         "training_performed": False,
         "optimizer_updates": 0,

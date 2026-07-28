@@ -8,24 +8,25 @@ import pytest
 
 from basemap.artifact_identity import expected_input_signature
 from basemap.round0034_pipeline import GRAPH_SCHEMA
-from basemap.round0086_program import (
-    FILTER_RECEIPT_SCHEMA,
+from basemap.round0096_larger_nlist import (
+    DECISION_SCHEMA,
+    INDEX_SCHEMA,
     POLICY_GRID,
+    QUALITY_SAMPLE_SHA256,
     QUALIFICATION_SCHEMA,
-    seal as seal86,
 )
 from basemap.round0088_graph import (
     CORPUS_SPECS,
     ASSEMBLED_GRAPH_SCHEMA,
     PART_SCHEMA,
     ROUND_BY_CORPUS,
-    R0081_SELECTED_RERANK_SECONDS_PER_QUERY,
-    R0081_SELECTED_SEARCH_SECONDS_PER_QUERY,
+    R0081_SELECTED_TOTAL_SECONDS_PER_QUERY,
     Round0088Error,
     projected_corpus_wall_seconds,
     seal,
     selected_benchmark_seconds_per_query,
-    validate_filter_receipt,
+    validate_decision,
+    validate_index_receipt,
     validate_part_receipt,
     validate_qualification,
 )
@@ -62,8 +63,7 @@ def test_projection_replays_r0078_rate_at_unit_ratio(corpus: str) -> None:
     )
     projected = projected_corpus_wall_seconds(
         corpus,
-        selected_search_seconds_per_query=R0081_SELECTED_SEARCH_SECONDS_PER_QUERY,
-        selected_rerank_seconds_per_query=R0081_SELECTED_RERANK_SECONDS_PER_QUERY,
+        selected_total_seconds_per_query=R0081_SELECTED_TOTAL_SECONDS_PER_QUERY,
     )
     assert projected == pytest.approx(observed * 1.25 + 300.0)
     assert projected < 7.5 * 3600
@@ -72,37 +72,31 @@ def test_projection_replays_r0078_rate_at_unit_ratio(corpus: str) -> None:
 def test_projection_scales_with_measured_search_cost() -> None:
     baseline = projected_corpus_wall_seconds(
         "fineweb",
-        selected_search_seconds_per_query=R0081_SELECTED_SEARCH_SECONDS_PER_QUERY,
-        selected_rerank_seconds_per_query=R0081_SELECTED_RERANK_SECONDS_PER_QUERY,
+        selected_total_seconds_per_query=R0081_SELECTED_TOTAL_SECONDS_PER_QUERY,
     )
     slower = projected_corpus_wall_seconds(
         "fineweb",
-        selected_search_seconds_per_query=2 * R0081_SELECTED_SEARCH_SECONDS_PER_QUERY,
-        selected_rerank_seconds_per_query=R0081_SELECTED_RERANK_SECONDS_PER_QUERY,
+        selected_total_seconds_per_query=2
+        * R0081_SELECTED_TOTAL_SECONDS_PER_QUERY,
     )
     assert slower == pytest.approx(2 * (baseline - 300.0) + 300.0)
     with pytest.raises(Round0088Error):
         projected_corpus_wall_seconds(
-            "fineweb", selected_search_seconds_per_query=0.0
+            "fineweb", selected_total_seconds_per_query=0.0
         )
 
 
 def test_selected_benchmark_rates_keep_search_and_rerank_separate() -> None:
     selected = {
         "benchmark": {
-            "rows": 10_000,
-            "median_search_seconds": 2.5,
-            "median_rerank_seconds": 1.5,
-            "median_total_seconds": 9.0,
+            "queries": 8_192,
+            "median_wall_seconds_per_query": 0.00025,
         }
     }
-    assert selected_benchmark_seconds_per_query(selected) == (
-        0.00025,
-        0.00015,
-    )
+    assert selected_benchmark_seconds_per_query(selected) == 0.00025
 
 
-def test_qualification_and_filter_receipts_are_content_bound(
+def test_r0096_index_qualification_and_decision_are_content_bound(
     tmp_path: Path,
 ) -> None:
     substrate = {
@@ -111,52 +105,98 @@ def test_qualification_and_filter_receipts_are_content_bound(
         "sha256": "a" * 64,
         "kind": "file",
     }
-    filtered = {
+    index = {
         "canonical_path": "/tmp/index.ivfpq",
         "bytes": 20,
         "sha256": "b" * 64,
         "kind": "file",
     }
-    filter_value = seal86({
-        "schema": FILTER_RECEIPT_SCHEMA,
-        "round_id": "0086",
+    index_receipt_value = seal({
+        "schema": INDEX_SCHEMA,
+        "round_id": "0096",
         "substrate": substrate,
-        "filtered_index": filtered,
-    })
-    filter_path = tmp_path / "filter.json"
-    filter_sha = _write_json(filter_path, filter_value)
-    loaded_filter = validate_filter_receipt(
-        str(filter_path),
-        expected_sha256=filter_sha,
-        substrate_signature=substrate,
-        filtered_index_signature=filtered,
-    )
-    assert loaded_filter["receipt"]["round_id"] == "0086"
-
-    cell = {
-        "nprobe": 128,
-        "shortlist_width": 256,
-        "passes_mean_floor": True,
-        "benchmark": {
-            "rows": 10_000,
-            "median_search_seconds": 2.0,
-            "median_rerank_seconds": 1.0,
-            "median_wall_seconds_per_query": 0.0003,
+        "index": index,
+        "geometry": {
+            "class": "IndexIVFPQ",
+            "dimension": 384,
+            "nlist": 32_768,
+            "ntotal": 147_221_757,
+            "code_size": 48,
+            "pq_m": 48,
+            "pq_bits": 8,
+            "metric_type": 0,
         },
-    }
+        "id_validation": {
+            "global_ids_unique": True,
+            "excluded_rows_absent": True,
+            "seen_retained_rows": 147_221_757,
+        },
+        "training_performed": False,
+        "optimizer_updates": 0,
+    })
+    index_receipt_path = tmp_path / "index-receipt.json"
+    index_receipt_sha = _write_json(
+        index_receipt_path, index_receipt_value,
+    )
+    loaded_index = validate_index_receipt(
+        str(index_receipt_path),
+        expected_sha256=index_receipt_sha,
+        substrate_signature=substrate,
+        index_signature=index,
+    )
+
+    def cell(nprobe: int, width: int) -> dict:
+        return {
+            "nprobe": nprobe,
+            "shortlist_width": width,
+            "passes_global_floor": True,
+            "passes_every_corpus_floor": True,
+            "mean_recall_at_15_unambiguous": 0.91,
+            "by_corpus": {
+                corpus: {
+                    "mean_recall_at_15_unambiguous": 0.90,
+                    "passes_floor": True,
+                    "unambiguous_rows": 1_000,
+                }
+                for corpus in CORPUS_SPECS
+            },
+            "benchmark": {
+                "queries": 8_192,
+                "median_wall_seconds_per_query": (
+                    0.0003
+                    if (nprobe, width) == (128, 512)
+                    else 0.0004 + nprobe / 1e9 + width / 1e10
+                ),
+            },
+        }
+
     cells = {
-        f"nprobe-{nprobe}-width-{width}": (
-            cell if (nprobe, width) == POLICY_GRID[0] else None
-        )
+        f"nprobe-{nprobe}-width-{width}": cell(nprobe, width)
         for nprobe, width in POLICY_GRID
     }
-    qualification = seal86({
+    selected = cells["nprobe-128-width-512"]
+    qualification = seal({
         "schema": QUALIFICATION_SCHEMA,
-        "round_id": "0086",
+        "round_id": "0096",
         "substrate": substrate,
-        "filtered_index": filtered,
+        "index": index,
+        "index_receipt": loaded_index["signature"],
         "cells": cells,
-        "selected": cell,
+        "selected": selected,
+        "quality": {
+            "sample_rows": 4_096,
+            "sample_seed": 86,
+            "sample_sha256": QUALITY_SAMPLE_SHA256,
+            "global_mean_floor": 0.90,
+            "per_corpus_mean_floor": 0.84,
+        },
+        "checks": {"all_registered_cells_present": True},
+        "failed_checks": [],
+        "geometry": {"nlist": 32_768, "ntotal": 147_221_757},
+        "validity_passed": True,
+        "training_performed": False,
+        "scale_decision_made": False,
+        "optimizer_updates": 0,
     })
     qualification_path = tmp_path / "qualification.json"
     qualification_sha = _write_json(qualification_path, qualification)
@@ -164,24 +204,30 @@ def test_qualification_and_filter_receipts_are_content_bound(
         str(qualification_path),
         expected_sha256=qualification_sha,
         substrate_signature=substrate,
-        filtered_index_signature=filtered,
+        index_signature=index,
+        index_receipt_signature=loaded_index["signature"],
     )
-    assert loaded["selected"] == cell
-
-    qualification["selected"] = {**cell, "nprobe": 192}
-    bad_path = tmp_path / "bad-qualification.json"
-    bad_sha = _write_json(bad_path, seal86({
-        key: value
-        for key, value in qualification.items()
-        if key != "identity_sha256"
-    }))
-    with pytest.raises(Round0088Error):
-        validate_qualification(
-            str(bad_path),
-            expected_sha256=bad_sha,
-            substrate_signature=substrate,
-            filtered_index_signature=filtered,
-        )
+    assert loaded["selected"] == selected
+    decision = seal({
+        "schema": DECISION_SCHEMA,
+        "round_id": "0096",
+        "qualification": loaded["signature"],
+        "selected": selected,
+        "outcome": "qualified",
+        "validity_passed": True,
+        "graph_build_released": True,
+        "training_performed": False,
+        "scale_decision_made": False,
+        "optimizer_updates": 0,
+    })
+    decision_path = tmp_path / "decision.json"
+    decision_sha = _write_json(decision_path, decision)
+    assert validate_decision(
+        str(decision_path),
+        expected_sha256=decision_sha,
+        qualification_signature=loaded["signature"],
+        selected=selected,
+    )["receipt"]["graph_build_released"] is True
 
 
 @pytest.mark.parametrize("corpus", list(CORPUS_SPECS))
@@ -200,10 +246,15 @@ def test_part_receipt_requires_exact_registered_counts(
         "excluded_sources": spec["excluded_rows"],
         "valid_edges": spec["retained_rows"] * 15,
         "quality": {
-            "mean_recall_at_15_unambiguous": 0.91,
-            "floor": 0.90,
+            "selected_global_mean_recall": 0.91,
+            "selected_by_corpus": {
+                corpus: {"mean_recall_at_15_unambiguous": 0.90},
+            },
+            "global_mean_floor": 0.90,
+            "per_corpus_mean_floor": 0.84,
             "qualification_sample_rows": 4_096,
             "qualification_sample_seed": 86,
+            "qualification_sample_sha256": QUALITY_SAMPLE_SHA256,
         },
     })
     path = tmp_path / f"{corpus}.json"

@@ -25,7 +25,8 @@ from basemap.round0088_graph import (
     Round0088Error,
     projected_corpus_wall_seconds,
     selected_benchmark_seconds_per_query,
-    validate_filter_receipt,
+    validate_decision,
+    validate_index_receipt,
     validate_part_receipt,
     validate_qualification,
     validate_staged_substrate,
@@ -45,18 +46,25 @@ SUBSTRATE = os.path.join(
     STAGING_ROOT,
     "balanced-150m-substrate/balanced-150m-substrate-v1.json",
 )
-FILTERED_INDEX = os.path.join(
-    STAGING_ROOT,
-    "filtered-index-150m/balanced-150m-retained.ivfpq",
+SEARCH_ROOT = "/data/latent-basemap/runs/round-0096"
+INDEX = os.path.join(
+    SEARCH_ROOT,
+    "queue/artifacts/larger-index-assembly/"
+    "balanced-150m-retained-ivf32768.ivfpq",
 )
-FILTER_RECEIPT = os.path.join(
-    STAGING_ROOT,
-    "filtered-index-150m/filter-receipt.json",
+INDEX_RECEIPT = os.path.join(
+    SEARCH_ROOT,
+    "queue/artifacts/larger-index-assembly/index-receipt.json",
 )
 QUALIFICATION = os.path.join(
-    STAGING_ROOT,
-    "gpu-ivfpq-policy-qualification-150m/"
-    "gpu-ivfpq-policy-qualification-v1.json",
+    SEARCH_ROOT,
+    "queue-attempt-2/artifacts/larger-index-qualification/"
+    "ivf32768-policy-qualification.json",
+)
+DECISION = os.path.join(
+    SEARCH_ROOT,
+    "queue-attempt-2/artifacts/larger-index-qualification/"
+    "search-policy-decision.json",
 )
 PART_ROOTS = {
     corpus: (
@@ -100,33 +108,42 @@ def _require_review(
 def _authenticated_staging(
     *,
     substrate_sha256: str,
-    filter_receipt_sha256: str,
-    filtered_index_sha256: str,
+    index_sha256: str,
+    index_receipt_sha256: str,
     qualification_sha256: str,
+    decision_sha256: str,
 ) -> dict[str, Any]:
     substrate = validate_staged_substrate(
         SUBSTRATE, expected_sha256=substrate_sha256
     )
-    filtered = expected_input_signature(FILTERED_INDEX)
-    if filtered["sha256"] != filtered_index_sha256:
-        raise Round0088Error("R0086 filtered-index bytes changed")
-    filter_receipt = validate_filter_receipt(
-        FILTER_RECEIPT,
-        expected_sha256=filter_receipt_sha256,
+    index = expected_input_signature(INDEX)
+    if index["sha256"] != index_sha256:
+        raise Round0088Error("R0096 retained IVF32768 index bytes changed")
+    index_receipt = validate_index_receipt(
+        INDEX_RECEIPT,
+        expected_sha256=index_receipt_sha256,
         substrate_signature=substrate["signature"],
-        filtered_index_signature=filtered,
+        index_signature=index,
     )
     qualification = validate_qualification(
         QUALIFICATION,
         expected_sha256=qualification_sha256,
         substrate_signature=substrate["signature"],
-        filtered_index_signature=filtered,
+        index_signature=index,
+        index_receipt_signature=index_receipt["signature"],
+    )
+    decision = validate_decision(
+        DECISION,
+        expected_sha256=decision_sha256,
+        qualification_signature=qualification["signature"],
+        selected=qualification["selected"],
     )
     return {
         "substrate": substrate,
-        "filtered_index": filtered,
-        "filter_receipt": filter_receipt,
+        "index": index,
+        "index_receipt": index_receipt,
         "qualification": qualification,
+        "decision": decision,
     }
 
 
@@ -134,12 +151,17 @@ def prepare_part_queue(
     *,
     round_id: str,
     release_sha: str,
-    r0086_review_path: str,
-    r0086_review_sha256: str,
+    r0025_review_path: str,
+    r0025_review_sha256: str,
+    r0033_review_path: str,
+    r0033_review_sha256: str,
+    r0096_review_path: str,
+    r0096_review_sha256: str,
     substrate_sha256: str,
-    filter_receipt_sha256: str,
-    filtered_index_sha256: str,
+    index_sha256: str,
+    index_receipt_sha256: str,
     qualification_sha256: str,
+    decision_sha256: str,
     runtime_spec_sha256: str,
     queue_root: str | None = None,
 ) -> str:
@@ -152,32 +174,51 @@ def prepare_part_queue(
         LAB_ROOT, f"round-{round_id}-2026-07-28.md"
     )
     _require_issued_round(round_file)
-    review = _require_review(
-        r0086_review_path,
-        expected_sha256=r0086_review_sha256,
+    review_0025 = _require_review(
+        r0025_review_path,
+        expected_sha256=r0025_review_sha256,
         required_text=(
-            "capability:minilm-balanced-150m-int8-input-v1",
-            "capability:minilm-balanced-150m-gpu-ivfpq-search-qualified-v1",
+            "capability:minilm-int8-shards-v1",
+            "2171e4bf3c21e7156435b4b4021ca62b2ef8a57d9404b2764e6e968d210b7090",
+        ),
+    )
+    review_0033 = _require_review(
+        r0033_review_path,
+        expected_sha256=r0033_review_sha256,
+        required_text=(
+            "capability:minilm-150m-row-eligibility-v1",
+            "cd9738d1cb35b7847923ec24e343583ac91dea4d76381ec28c8c2c8bf6412aca",
+        ),
+    )
+    review_0096 = _require_review(
+        r0096_review_path,
+        expected_sha256=r0096_review_sha256,
+        required_text=(
+            "capability:minilm-balanced-150m-ivf32768-search-qualified-v1",
+            index_sha256,
+            index_receipt_sha256,
             substrate_sha256,
             qualification_sha256,
+            decision_sha256,
+            f"R{round_id}",
         ),
     )
     staged = _authenticated_staging(
         substrate_sha256=substrate_sha256,
-        filter_receipt_sha256=filter_receipt_sha256,
-        filtered_index_sha256=filtered_index_sha256,
+        index_sha256=index_sha256,
+        index_receipt_sha256=index_receipt_sha256,
         qualification_sha256=qualification_sha256,
+        decision_sha256=decision_sha256,
     )
     runtime = expected_input_signature(RUNTIME_SPEC)
     if runtime["sha256"] != runtime_spec_sha256:
         raise Round0088Error("graph runtime specification changed")
-    selected_search, selected_rerank = selected_benchmark_seconds_per_query(
+    selected_total = selected_benchmark_seconds_per_query(
         staged["qualification"]["selected"]
     )
     projected = projected_corpus_wall_seconds(
         corpus,
-        selected_search_seconds_per_query=selected_search,
-        selected_rerank_seconds_per_query=selected_rerank,
+        selected_total_seconds_per_query=selected_total,
     )
     if projected > 7.5 * 3600:
         raise Round0088Error(
@@ -187,14 +228,17 @@ def prepare_part_queue(
     outputs = staged["substrate"]["manifest"]["outputs"]
     inputs = _dedupe([
         expected_input_signature(round_file),
-        review,
+        review_0025,
+        review_0033,
+        review_0096,
         staged["substrate"]["signature"],
         outputs["int8"],
         outputs["scales"],
         outputs["eligibility"],
-        staged["filter_receipt"]["signature"],
-        staged["filtered_index"],
+        staged["index_receipt"]["signature"],
+        staged["index"],
         staged["qualification"]["signature"],
+        staged["decision"]["signature"],
         runtime,
         expected_input_signature(FAISS_WHEEL),
     ])
@@ -213,23 +257,27 @@ def prepare_part_queue(
         execution_authority="autonomous-gpu",
         gpu=True,
     )
-    manifest["schema"] = "round0088-split-150m-graph-part-queue-v1"
+    manifest["schema"] = "round0097-balanced-150m-ivf32768-graph-part-queue-v1"
     manifest["repo_root"] = RELEASE_ROOT
     manifest["queue_class"] = "gpu-research"
-    manifest["required_reviews"] = ["0086"]
+    manifest["required_reviews"] = ["0025", "0033", "0096"]
     manifest["capability_dependencies"] = [
-        "minilm-balanced-150m-int8-input-v1",
-        "minilm-balanced-150m-gpu-ivfpq-search-qualified-v1",
+        "minilm-int8-shards-v1",
+        "minilm-150m-row-eligibility-v1",
+        "minilm-balanced-150m-ivf32768-search-qualified-v1",
     ]
-    capability = f"minilm-balanced-150m-graph-part-{corpus}-v1"
+    capability = f"minilm-balanced-150m-ivf32768-graph-part-{corpus}-v1"
     manifest["capabilities_produced"] = [capability]
     manifest["training_performed"] = False
     manifest["reviewed_inputs"] = {
-        "review_0086": review,
+        "review_0025": review_0025,
+        "review_0033": review_0033,
+        "review_0096": review_0096,
         "substrate": staged["substrate"]["signature"],
-        "filter_receipt": staged["filter_receipt"]["signature"],
-        "filtered_index": staged["filtered_index"],
-        "gpu_qualification": staged["qualification"]["signature"],
+        "index_receipt": staged["index_receipt"]["signature"],
+        "index": staged["index"],
+        "search_qualification": staged["qualification"]["signature"],
+        "search_decision": staged["decision"]["signature"],
     }
     selected = staged["qualification"]["selected"]
     spec = CORPUS_SPECS[corpus]
@@ -245,6 +293,8 @@ def prepare_part_queue(
         "exact_rerank": True,
         "fixed_degree_on_retained_sources": 15,
         "candidate_universe": "all retained balanced-150m representatives",
+        "index_geometry": "IVF32768,PQ48x8,inner-product",
+        "selected_policy_source": "accepted Review 0096",
         "no_training": True,
         "no_scale_decision": True,
         "r0078_corpus_calibrated_p90_seconds": projected,
@@ -263,11 +313,14 @@ def prepare_part_queue(
         "corpus": corpus,
         "substrate_manifest": SUBSTRATE,
         "substrate_manifest_sha256": substrate_sha256,
-        "filter_receipt": FILTER_RECEIPT,
-        "filter_receipt_sha256": filter_receipt_sha256,
-        "filtered_index": FILTERED_INDEX,
-        "gpu_qualification_receipt": QUALIFICATION,
-        "gpu_qualification_receipt_sha256": qualification_sha256,
+        "index": INDEX,
+        "index_sha256": index_sha256,
+        "index_receipt": INDEX_RECEIPT,
+        "index_receipt_sha256": index_receipt_sha256,
+        "search_qualification": QUALIFICATION,
+        "search_qualification_sha256": qualification_sha256,
+        "search_decision": DECISION,
+        "search_decision_sha256": decision_sha256,
         "runtime_spec": RUNTIME_SPEC,
         "runtime_spec_sha256": runtime_spec_sha256,
         "node_policy": {
@@ -417,12 +470,17 @@ def main(argv: list[str] | None = None) -> int:
     part = sub.add_parser("part")
     part.add_argument("--round-id", required=True)
     part.add_argument("--release-sha", required=True)
-    part.add_argument("--r0086-review", required=True)
-    part.add_argument("--r0086-review-sha256", required=True)
+    part.add_argument("--r0025-review", required=True)
+    part.add_argument("--r0025-review-sha256", required=True)
+    part.add_argument("--r0033-review", required=True)
+    part.add_argument("--r0033-review-sha256", required=True)
+    part.add_argument("--r0096-review", required=True)
+    part.add_argument("--r0096-review-sha256", required=True)
     part.add_argument("--substrate-sha256", required=True)
-    part.add_argument("--filter-receipt-sha256", required=True)
-    part.add_argument("--filtered-index-sha256", required=True)
+    part.add_argument("--index-sha256", required=True)
+    part.add_argument("--index-receipt-sha256", required=True)
     part.add_argument("--qualification-sha256", required=True)
+    part.add_argument("--decision-sha256", required=True)
     part.add_argument("--runtime-spec-sha256", required=True)
     part.add_argument("--queue-root")
     assembly = sub.add_parser("assembly")
@@ -445,12 +503,17 @@ def main(argv: list[str] | None = None) -> int:
         print(prepare_part_queue(
             round_id=args.round_id,
             release_sha=args.release_sha,
-            r0086_review_path=args.r0086_review,
-            r0086_review_sha256=args.r0086_review_sha256,
+            r0025_review_path=args.r0025_review,
+            r0025_review_sha256=args.r0025_review_sha256,
+            r0033_review_path=args.r0033_review,
+            r0033_review_sha256=args.r0033_review_sha256,
+            r0096_review_path=args.r0096_review,
+            r0096_review_sha256=args.r0096_review_sha256,
             substrate_sha256=args.substrate_sha256,
-            filter_receipt_sha256=args.filter_receipt_sha256,
-            filtered_index_sha256=args.filtered_index_sha256,
+            index_sha256=args.index_sha256,
+            index_receipt_sha256=args.index_receipt_sha256,
             qualification_sha256=args.qualification_sha256,
+            decision_sha256=args.decision_sha256,
             runtime_spec_sha256=args.runtime_spec_sha256,
             queue_root=args.queue_root,
         ))
