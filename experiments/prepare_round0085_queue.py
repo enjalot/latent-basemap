@@ -209,14 +209,16 @@ def _coordinate_inputs(root: str) -> list[str]:
     return [os.path.join(root, "actual-transform.json"), *paths]
 
 
-def _model_sha256(transform_root: str) -> tuple[str, str]:
+def _model_signature(
+    transform_root: str,
+) -> tuple[str, dict[str, Any]]:
     receipt_path = os.path.join(transform_root, "actual-transform.json")
     with open(receipt_path, encoding="utf-8") as handle:
         receipt = json.load(handle)
     model_sha = (receipt.get("model") or {}).get("sha256")
     if not re.fullmatch(r"[0-9a-f]{64}", str(model_sha)):
         raise RuntimeError(f"coordinate model is not content-bound: {receipt_path}")
-    return str(model_sha), expected_input_signature(receipt_path)["sha256"]
+    return str(model_sha), expected_input_signature(receipt_path)
 
 
 def prepare_round0085(
@@ -229,7 +231,8 @@ def prepare_round0085(
         raise ValueError("R0085 release SHA must be one full commit")
     reviews = {round_id: _require_review(round_id) for round_id in REVIEWS}
     universes: list[dict[str, Any]] = []
-    input_paths = [ROUND_FILE, *REVIEWS.values()]
+    validated_inputs = list(reviews.values())
+    input_paths = [ROUND_FILE]
     for label, raw in UNIVERSE_PATHS.items():
         reference_root = str(raw["reference_root"])
         eligibility = expected_input_signature(str(raw["eligibility_path"]))
@@ -266,11 +269,11 @@ def prepare_round0085(
             "anchor_rows_path": anchors["canonical_path"],
             "anchor_rows_sha256": anchors["sha256"],
         })
-        input_paths.extend([
-            eligibility["canonical_path"],
-            reference["canonical_path"],
-            receipt["canonical_path"],
-            anchors["canonical_path"],
+        validated_inputs.extend([
+            eligibility,
+            reference,
+            receipt,
+            anchors,
         ])
 
     cells: list[dict[str, Any]] = []
@@ -282,7 +285,8 @@ def prepare_round0085(
         expected_receipt_sha,
         expected_model_sha,
     ) in CELL_PATHS:
-        model_sha, receipt_sha = _model_sha256(coordinates)
+        model_sha, receipt_signature = _model_signature(coordinates)
+        receipt_sha = receipt_signature["sha256"]
         if (
             receipt_sha != expected_receipt_sha
             or model_sha != expected_model_sha
@@ -296,7 +300,13 @@ def prepare_round0085(
             "coordinates_path": coordinates,
             "coordinate_receipt_sha256": receipt_sha,
         })
-        input_paths.extend(_coordinate_inputs(coordinates))
+        coordinate_inputs = _coordinate_inputs(coordinates)
+        if coordinate_inputs[0] != receipt_signature["canonical_path"]:
+            raise RuntimeError(
+                f"coordinate receipt path changed: {coordinates}"
+            )
+        validated_inputs.append(receipt_signature)
+        input_paths.extend(coordinate_inputs[1:])
 
     r0074_receipt = expected_input_signature(
         os.path.join(R74, "duplicate-anchor-leverage.json")
@@ -309,9 +319,9 @@ def prepare_round0085(
         or r0074_radii["sha256"] != R0074_EXPECTED["radii_sha256"]
     ):
         raise RuntimeError("issued R0074 replay bytes changed")
-    input_paths.extend([
-        r0074_receipt["canonical_path"],
-        r0074_radii["canonical_path"],
+    validated_inputs.extend([
+        r0074_receipt,
+        r0074_radii,
     ])
     queue_root = create_fresh_directory(
         queue_root,
@@ -330,7 +340,10 @@ def prepare_round0085(
             artifacts,
             "density_v2_calibration.done.json",
         ),
-        "expected_inputs": _dedupe(_file_inputs(input_paths)),
+        "expected_inputs": _dedupe([
+            *validated_inputs,
+            *_file_inputs(input_paths),
+        ]),
         "p90_wall_s": 1_200.0,
         "node_policy": {
             "gpu_required": True,
