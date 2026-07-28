@@ -248,24 +248,30 @@ def prepare_round0083(
         raise RuntimeError("R0083 issued treatment evidence changed")
 
     outputs = substrate["manifest"]["outputs"]
-    static_paths = [
+    # Reuse the exact signatures produced by the fail-closed validators
+    # above. Rehashing these paths while assembling the manifest would read
+    # the 30M substrate, filtered index, and canonical graph a second time
+    # without adding an identity check.
+    validated_inputs = [
+        *reviews.values(),
+        substrate["signature"],
+        outputs["int8"],
+        outputs["scales"],
+        outputs["eligibility"],
+        quality_signature,
+        sweep_signature,
+        baseline_qualification_signature,
+        filtered,
+        graph["signature"],
+        graph["manifest"]["outputs"]["targets"],
+        graph["manifest"]["outputs"]["degrees"],
+        runtime,
+        baseline_panel,
+        reference,
+    ]
+    remaining_paths = [
         ROUND_FILE,
-        *REVIEWS.values(),
-        SUBSTRATE,
-        outputs["int8"]["canonical_path"],
-        outputs["scales"]["canonical_path"],
-        outputs["eligibility"]["canonical_path"],
-        QUALITY,
-        R0058_SWEEP,
-        R0060_QUALIFICATION,
-        FILTERED_INDEX,
-        R0060_GRAPH,
-        graph["manifest"]["outputs"]["targets"]["canonical_path"],
-        graph["manifest"]["outputs"]["degrees"]["canonical_path"],
-        RUNTIME_SPEC,
         FAISS_WHEEL,
-        R0064_BASELINE_PANEL,
-        os.path.join(R0064_REFERENCE, "reference.npz"),
         os.path.join(R0064_REFERENCE, "reference-receipt.json"),
         os.path.join(R0064_REFERENCE, "recall50-truth.npy"),
         os.path.join(R0064_REFERENCE, "anchor-substrate-rows.npy"),
@@ -273,7 +279,10 @@ def prepare_round0083(
         MINILM_QUERY_PROVENANCE,
         *CENTROIDS.values(),
     ]
-    inputs = _dedupe(_file_inputs(static_paths))
+    inputs = _dedupe([
+        *validated_inputs,
+        *_file_inputs(remaining_paths),
+    ])
     queue_root = create_fresh_directory(
         queue_root,
         label="Round 0083 graph-recall queue",
