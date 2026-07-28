@@ -178,6 +178,42 @@ def test_round0080_queue_is_bounded_no_training_and_nearest_rung() -> None:
     assert '"120m_noninferiority_control": "90m"' in source
 
 
+def test_r0076_inputs_bind_reviewed_attempt_two_and_exact_hashes(
+    monkeypatch,
+) -> None:
+    assert prepare_round0080_queue.R0076_ARTIFACTS == (
+        "/data/latent-basemap/runs/round-0076/queue-attempt-2/artifacts"
+    )
+    assert prepare_round0080_queue.R0076_REVIEWED_SHA256 == {
+        "coordinates-r0075-90m/actual-transform.json":
+            "abab96a89e45226335d1b87789fec2fe4ec38152fc7f096576fd77cb47bed009",
+        "high-d-reference-90m/reference.npz":
+            "9cf81ea4e9e3f44367e3781f98d70eae0a3e25974c39079d4d546c9126040c18",
+        "high-d-reference-90m/reference-receipt.json":
+            "cc3c749501506e6f06e58221ae3fd0bae39ed0c6b219bb6af03720ec7f5b6642",
+        "high-d-reference-90m/recall50-truth.npy":
+            "4f25549677343889915e36ecb5c57271f28099bb2b56695b8f2b919b964fb580",
+        "panel-r0075-90m/panel.json":
+            "351c131a61bd5f9ff6d570aab04170a447b88426f21ddf28f35bb43ce048db72",
+    }
+
+    relative_path = "panel-r0075-90m/panel.json"
+    monkeypatch.setattr(
+        prepare_round0080_queue,
+        "expected_input_signature",
+        lambda _path: {
+            "canonical_path": "/wrong/attempt/panel.json",
+            "sha256": "0" * 64,
+        },
+    )
+    try:
+        prepare_round0080_queue._reviewed_r0076_signature(relative_path)
+    except RuntimeError as exc:
+        assert "reviewed R0076 artifact changed" in str(exc)
+    else:
+        raise AssertionError("unreviewed R0076 artifact was accepted")
+
+
 def test_round0080_discovers_the_one_issued_dated_contract(
     tmp_path: Path,
     monkeypatch,

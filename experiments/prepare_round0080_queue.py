@@ -46,8 +46,20 @@ SUBSTRATE_90 = (
     "balanced-90m-int8-substrate/balanced-90m-substrate-v1.json"
 )
 R0076_ARTIFACTS = (
-    "/data/latent-basemap/runs/round-0076/queue/artifacts"
+    "/data/latent-basemap/runs/round-0076/queue-attempt-2/artifacts"
 )
+R0076_REVIEWED_SHA256 = {
+    "coordinates-r0075-90m/actual-transform.json":
+        "abab96a89e45226335d1b87789fec2fe4ec38152fc7f096576fd77cb47bed009",
+    "high-d-reference-90m/reference.npz":
+        "9cf81ea4e9e3f44367e3781f98d70eae0a3e25974c39079d4d546c9126040c18",
+    "high-d-reference-90m/reference-receipt.json":
+        "cc3c749501506e6f06e58221ae3fd0bae39ed0c6b219bb6af03720ec7f5b6642",
+    "high-d-reference-90m/recall50-truth.npy":
+        "4f25549677343889915e36ecb5c57271f28099bb2b56695b8f2b919b964fb580",
+    "panel-r0075-90m/panel.json":
+        "351c131a61bd5f9ff6d570aab04170a447b88426f21ddf28f35bb43ce048db72",
+}
 CONTROL_TRANSFORM = os.path.join(
     R0076_ARTIFACTS,
     "coordinates-r0075-90m",
@@ -66,6 +78,18 @@ MATCHED_SAMPLE = os.path.join(
     "semantic-renders",
     "full-90m-sample-rows.npy",
 )
+
+
+def _reviewed_r0076_signature(relative_path: str) -> dict[str, Any]:
+    """Return one exact artifact released by Review 0076 attempt 2."""
+    expected_sha256 = R0076_REVIEWED_SHA256[relative_path]
+    path = os.path.join(R0076_ARTIFACTS, relative_path)
+    signature = expected_input_signature(path)
+    if signature["sha256"] != expected_sha256:
+        raise RuntimeError(
+            f"reviewed R0076 artifact changed: {relative_path}"
+        )
+    return signature
 
 
 def _frontmatter_status(path: str) -> str | None:
@@ -192,7 +216,15 @@ def prepare_round0080(
         is not True
     ):
         raise RuntimeError("R0076 scale geometry changed")
-    control_panel = expected_input_signature(CONTROL_PANEL)
+    reviewed_r0076_inputs = [
+        _reviewed_r0076_signature(relative_path)
+        for relative_path in R0076_REVIEWED_SHA256
+    ]
+    control_panel = next(
+        signature
+        for signature in reviewed_r0076_inputs
+        if signature["canonical_path"] == os.path.realpath(CONTROL_PANEL)
+    )
     with open(CONTROL_PANEL, encoding="utf-8") as handle:
         control_value = json.load(handle)
     validate_seal(control_value, label="R0080 R0076 full-90M panel")
@@ -271,14 +303,10 @@ def prepare_round0080(
             MINILM_QUERIES,
             MINILM_QUERY_PROVENANCE,
             *CENTROIDS.values(),
-            CONTROL_PANEL,
             MATCHED_SAMPLE,
-            os.path.join(CONTROL_REFERENCE, "reference.npz"),
-            os.path.join(CONTROL_REFERENCE, "reference-receipt.json"),
-            os.path.join(CONTROL_REFERENCE, "recall50-truth.npy"),
             os.path.join(CONTROL_REFERENCE, "anchor-substrate-rows.npy"),
-            os.path.join(CONTROL_TRANSFORM, "actual-transform.json"),
         ]),
+        *reviewed_r0076_inputs,
         *control_coordinate_inputs,
     ])
     inputs90 = _dedupe([
