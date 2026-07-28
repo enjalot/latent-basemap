@@ -301,6 +301,7 @@ def test_part_queue_binds_reviewed_r0093_decision() -> None:
         '"capability:minilm-balanced-150m-gpu-ivfpq-search-qualified-v1"'
         not in source
     )
+    assert "minilm-balanced-150m-int8-input-v1" not in source
     assert "filter_receipt_sha256" in source
     assert '"policy_decision": staged["policy_decision"]["signature"]' in source
     node_source = inspect.getsource(nodes.run_build_part)

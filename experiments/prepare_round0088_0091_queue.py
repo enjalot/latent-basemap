@@ -182,7 +182,6 @@ def prepare_part_queue(
         r0086_review_path,
         expected_sha256=r0086_review_sha256,
         required_text=(
-            "capability:minilm-balanced-150m-int8-input-v1",
             substrate_sha256,
             filter_receipt_sha256,
             filtered_index_sha256,
@@ -260,7 +259,6 @@ def prepare_part_queue(
     manifest["queue_class"] = "gpu-research"
     manifest["required_reviews"] = ["0086", "0093"]
     manifest["capability_dependencies"] = [
-        "minilm-balanced-150m-int8-input-v1",
         "minilm-graph-recall-operational-floor-0p84-v1",
         "minilm-balanced-150m-gpu-ivfpq-search-qualified-low-recall-v1",
     ]
