@@ -36,7 +36,7 @@ from experiments.prepare_round0020_0022_queues import (
 
 
 ROUND_ROOT = "/data/latent-basemap/runs/round-0087"
-RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
+RELEASE_ROOT = "/home/enjalot/code/latent-basemap-cpu-run"
 ROUND_FILE = os.path.join(LAB_ROOT, "round-0087-2026-07-27.md")
 
 
