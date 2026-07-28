@@ -12,10 +12,10 @@ from basemap.round0086_program import (
     QUALIFICATION_SCHEMA as R0086_QUALIFICATION_SCHEMA,
 )
 from basemap.round0093_policy import (
-    FALLBACK_POLICY_GRID,
-    LOWER_POLICY_GRID,
+    EXPANDED_POLICY_GRID,
     MEAN_RECALL_FLOOR,
     POLICY_GRID,
+    R0086_REPLAY_POLICY_GRID,
     R0083_SCHEMA,
     R0084_SCHEMA,
     STABILITY_MARGINS,
@@ -105,42 +105,65 @@ def _r0084_body(*, ffr_delta: float = 0.01) -> dict:
 
 
 def _r0086_body() -> dict:
-    nprobe, width = R0086_POLICY_GRID[0]
-    key = f"nprobe-{nprobe}-width-{width}"
-    selected = {
-        "nprobe": nprobe,
-        "shortlist_width": width,
-        "passes_mean_floor": True,
-        "mean_recall_at_15_unambiguous": 0.91,
-        "benchmark": {"median_wall_seconds_per_query": 0.001},
+    cells = {
+        f"nprobe-{nprobe}-width-{width}": {
+            "nprobe": nprobe,
+            "shortlist_width": width,
+            "passes_mean_floor": False,
+            "mean_recall_at_15_unambiguous": (
+                0.832 if (nprobe, width) == (256, 512) else 0.81
+            ),
+            "benchmark": None,
+        }
+        for nprobe, width in R0086_POLICY_GRID
     }
     return {
         "schema": R0086_QUALIFICATION_SCHEMA,
         "round_id": "0086",
-        "validity_passed": True,
+        "validity_passed": False,
         "training_performed": False,
         "quality": {"floor": 0.90},
-        "cells": {key: selected},
-        "selected": selected,
-        "checks": {"passing_policy_selected": True},
+        "cells": cells,
+        "selected": None,
+        "failed_checks": [
+            "minimum_measured_wall_policy_selected",
+            "passing_policy_selected",
+        ],
+        "checks": {
+            "all_registered_cells_present": True,
+            "filtered_candidate_count": True,
+            "fixed_registered_150m_universe": True,
+            "minimum_measured_wall_policy_selected": False,
+            "no_scale_decision_made": True,
+            "no_training_performed": True,
+            "passing_policy_selected": False,
+            "runtime_matches": True,
+            "unambiguous_fraction_at_least_0_90": True,
+        },
     }
 
 
-def test_lower_recall_grid_is_bounded_and_selects_measured_fastest() -> None:
+def test_wider_recall_grid_is_bounded_and_selects_measured_fastest() -> None:
     assert MEAN_RECALL_FLOOR == 0.84
-    assert LOWER_POLICY_GRID == (
-        (32, 128),
-        (64, 128),
-        (96, 128),
-        (32, 256),
-        (64, 256),
-        (96, 256),
-        (32, 384),
-        (64, 384),
-        (96, 384),
+    assert R0086_REPLAY_POLICY_GRID == ((256, 512),)
+    assert EXPANDED_POLICY_GRID == (
+        (64, 768),
+        (96, 768),
+        (128, 768),
+        (256, 768),
+        (512, 768),
+        (64, 1_024),
+        (96, 1_024),
+        (128, 1_024),
+        (256, 1_024),
+        (512, 1_024),
+        (64, 1_536),
+        (96, 1_536),
+        (128, 1_536),
+        (256, 1_536),
+        (512, 1_536),
     )
-    assert FALLBACK_POLICY_GRID == tuple(R0086_POLICY_GRID)
-    assert POLICY_GRID == LOWER_POLICY_GRID + FALLBACK_POLICY_GRID
+    assert POLICY_GRID == R0086_REPLAY_POLICY_GRID + EXPANDED_POLICY_GRID
     cells = {}
     for index, (nprobe, width) in enumerate(POLICY_GRID):
         cells[f"nprobe-{nprobe}-width-{width}"] = {
@@ -152,7 +175,7 @@ def test_lower_recall_grid_is_bounded_and_selects_measured_fastest() -> None:
             },
         }
     selected = select_cell({"cells": cells})
-    assert selected is cells["nprobe-32-width-256"]
+    assert selected is cells["nprobe-128-width-768"]
 
 
 def test_r0083_direct_treatment_must_support_preregistered_floor(
@@ -201,7 +224,7 @@ def test_r0084_is_only_a_conservative_descriptive_screen(
         )
 
 
-def test_r0086_old_floor_policy_is_an_authenticated_fallback(
+def test_r0086_old_floor_policy_is_an_authenticated_negative(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "r0086.json"
@@ -211,6 +234,11 @@ def test_r0086_old_floor_policy_is_an_authenticated_fallback(
         expected_sha256=digest,
     )
     assert evidence["receipt"]["quality"]["floor"] == 0.90
+    assert evidence["receipt"]["selected"] is None
+    assert (
+        evidence["best_observed_cell"]["mean_recall_at_15_unambiguous"]
+        == 0.832
+    )
 
 
 def test_generic_qualification_records_the_active_floor() -> None:

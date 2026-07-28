@@ -175,8 +175,8 @@ def prepare_round0093(
             expected_sha256=r0086_review_sha256,
             required_text=(
                 "capability:minilm-balanced-150m-int8-input-v1",
-                "capability:minilm-balanced-150m-gpu-ivfpq-search-qualified-v1",
                 r0086_qualification_sha256,
+                filtered_index_sha256,
             ),
         ),
     }
@@ -219,7 +219,6 @@ def prepare_round0093(
         "minilm-30m-graph-recall-sensitivity-v1",
         "minilm-balanced-90m-seed43-sensitivity-v1",
         "minilm-balanced-150m-int8-input-v1",
-        "minilm-balanced-150m-gpu-ivfpq-search-qualified-v1",
     ]
     manifest["capabilities_produced"] = [
         "minilm-graph-recall-operational-floor-0p84-v1",
@@ -269,6 +268,7 @@ def prepare_round0093(
         "full_150m_map_evaluation_still_required": True,
         "no_graph": True,
         "no_training": True,
+        "r0086_old_floor_negative": True,
     }
     manifest["jobs"] = [{
         "id": node_id,

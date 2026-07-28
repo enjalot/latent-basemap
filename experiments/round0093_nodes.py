@@ -23,9 +23,10 @@ from basemap.round0086_program import (
 )
 from basemap.round0093_policy import (
     DECISION_SCHEMA,
-    LOWER_POLICY_GRID,
+    EXPANDED_POLICY_GRID,
     MEAN_RECALL_FLOOR,
     POLICY_GRID,
+    R0086_REPLAY_POLICY_GRID,
     QUALIFICATION_SCHEMA,
     ROUND_ID,
     Round0093Error,
@@ -152,7 +153,7 @@ def run_qualification(
         or r0086_receipt.get("filtered_index") != filtered
     ):
         raise Round0093Error(
-            "R0086 fallback policy does not bind the qualified 150M index"
+            "R0086 negative policy does not bind the qualified 150M index"
         )
     filter_receipt = _load_filter_receipt(
         str(job["filter_receipt"]),
@@ -168,14 +169,15 @@ def run_qualification(
         "registered_mean_recall_floor": MEAN_RECALL_FLOOR,
         "validity_passed": True,
         "selected": selected,
-        "selected_from_new_lower_cost_grid": (
+        "selected_from_expanded_grid": (
             (
                 int(selected["nprobe"]),
                 int(selected["shortlist_width"]),
             )
-            in LOWER_POLICY_GRID
+            in EXPANDED_POLICY_GRID
         ),
-        "fallback_r0086_selected": r0086_receipt["selected"],
+        "r0086_replay_cell": list(R0086_REPLAY_POLICY_GRID[0]),
+        "r0086_best_observed_cell": r0086["best_observed_cell"],
         "qualification": generic["receipt"],
         "substrate": substrate_signature,
         "filtered_index": filtered,
@@ -189,10 +191,11 @@ def run_qualification(
             "margins": r0084["margins"],
             "one_contrast_is_not_variance_or_error_bar": True,
         },
-        "r0086_fallback_qualification": r0086["signature"],
+        "r0086_negative_qualification": r0086["signature"],
         "selection_semantics": (
-            "fastest measured registered cell meeting mean unambiguous "
-            "exact-reranked recall@15 >= 0.84; ties by shortlist then nprobe"
+            "fastest measured registered wider-search cell meeting mean "
+            "unambiguous exact-reranked recall@15 >= 0.84; ties by "
+            "shortlist then nprobe"
         ),
         "full_150m_map_evaluation_still_required": True,
         "changes_prior_artifacts_in_place": False,

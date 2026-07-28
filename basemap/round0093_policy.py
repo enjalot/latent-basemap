@@ -20,19 +20,13 @@ from .round0086_program import select_cell as select_r0086_cell
 ROUND_ID = "0093"
 TIER = "150m"
 MEAN_RECALL_FLOOR = 0.84
-LOWER_POLICY_GRID = (
-    (32, 128),
-    (64, 128),
-    (96, 128),
-    (32, 256),
-    (64, 256),
-    (96, 256),
-    (32, 384),
-    (64, 384),
-    (96, 384),
+R0086_REPLAY_POLICY_GRID = ((256, 512),)
+EXPANDED_POLICY_GRID = tuple(
+    (nprobe, width)
+    for width in (768, 1_024, 1_536)
+    for nprobe in (64, 96, 128, 256, 512)
 )
-FALLBACK_POLICY_GRID = tuple(R0086_POLICY_GRID)
-POLICY_GRID = LOWER_POLICY_GRID + FALLBACK_POLICY_GRID
+POLICY_GRID = R0086_REPLAY_POLICY_GRID + EXPANDED_POLICY_GRID
 QUALIFICATION_SCHEMA = (
     "round0093-balanced-150m-lower-recall-policy-qualification-v1"
 )
@@ -192,7 +186,7 @@ def validate_r0086_qualification(
     *,
     expected_sha256: str,
 ) -> dict[str, Any]:
-    """Authenticate the old-floor qualification used as the fallback policy."""
+    """Authenticate the complete negative old-floor qualification."""
     receipt, signature = _load_sealed(
         path,
         expected_sha256=expected_sha256,
@@ -200,21 +194,58 @@ def validate_r0086_qualification(
     )
     selected = receipt.get("selected")
     checks = receipt.get("checks") or {}
+    cells = receipt.get("cells") or {}
+    expected_keys = {
+        f"nprobe-{nprobe}-width-{width}"
+        for nprobe, width in R0086_POLICY_GRID
+    }
+    observed = [
+        cell
+        for cell in cells.values()
+        if isinstance(cell, dict)
+    ]
+    best = max(
+        observed,
+        key=lambda cell: float(
+            cell.get("mean_recall_at_15_unambiguous", -1.0)
+        ),
+        default=None,
+    )
     if (
         receipt.get("schema") != R0086_QUALIFICATION_SCHEMA
         or receipt.get("round_id") != "0086"
-        or receipt.get("validity_passed") is not True
+        or receipt.get("validity_passed") is not False
         or receipt.get("training_performed") is not False
         or float((receipt.get("quality") or {}).get("floor", -1.0)) != 0.90
-        or selected is None
-        or selected != select_r0086_cell(receipt)
-        or not checks
-        or any(value is not True for value in checks.values())
+        or selected is not None
+        or select_r0086_cell(receipt) is not None
+        or set(cells) != expected_keys
+        or len(observed) != len(expected_keys)
+        or any(cell.get("passes_mean_floor") is not False for cell in observed)
+        or best is None
+        or float(best.get("mean_recall_at_15_unambiguous", -1.0))
+        >= MEAN_RECALL_FLOOR
+        or set(receipt.get("failed_checks") or [])
+        != {
+            "minimum_measured_wall_policy_selected",
+            "passing_policy_selected",
+        }
+        or checks.get("passing_policy_selected") is not False
+        or checks.get("minimum_measured_wall_policy_selected") is not False
+        or any(
+            value is not True
+            for key, value in checks.items()
+            if key not in {
+                "passing_policy_selected",
+                "minimum_measured_wall_policy_selected",
+            }
+        )
     ):
-        raise Round0093Error("R0086 fallback qualification changed")
+        raise Round0093Error("R0086 negative qualification changed")
     return {
         "receipt": receipt,
         "signature": signature,
+        "best_observed_cell": best,
     }
 
 
