@@ -13,6 +13,7 @@ from typing import Any
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from basemap.artifact_identity import expected_input_signature
+from basemap.artifact_identity import canonical_json, sha256_bytes
 from basemap.output_safety import (
     atomic_write_new_json,
     create_fresh_directory,
@@ -42,6 +43,7 @@ from experiments.prepare_round0020_0022_queues import (
 ROUND_ROOT = "/data/latent-basemap/runs/round-0096"
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE_GLOB = os.path.join(LAB_ROOT, "round-0096-*.md")
+INITIAL_RELEASE_SHA = "6aae68eba1601037b24ce02415d5807fc56919af"
 
 
 def _frontmatter_status(path: str) -> str | None:
@@ -115,6 +117,77 @@ def _require_r0095_evidence(
     return audit, decision
 
 
+def _require_prior_attempt(
+    prior_queue_root: str,
+) -> dict[str, Any]:
+    root = os.path.realpath(prior_queue_root)
+    expected_root = os.path.join(ROUND_ROOT, "queue")
+    if root != expected_root:
+        raise RuntimeError(
+            f"R0096 retry must reuse exact Attempt 1 root {expected_root}"
+        )
+    manifest = expected_input_signature(os.path.join(root, "queue.json"))
+    terminal = expected_input_signature(
+        os.path.join(root, "runner-terminal.json")
+    )
+    with open(terminal["canonical_path"], encoding="utf-8") as handle:
+        terminal_value = json.load(handle)
+    expected_completed = [
+        "train_larger_index_template",
+        "build_larger_index_fineweb",
+        "build_larger_index_redpajama",
+        "build_larger_index_pile",
+        "assemble_larger_index",
+    ]
+    if (
+        terminal_value.get("schema") != "slim-runner-terminal-v3"
+        or terminal_value.get("round_id") != ROUND_ID
+        or terminal_value.get("verdict") != "failed"
+        or terminal_value.get("completed_jobs") != expected_completed
+        or terminal_value.get("gpu_wall_accounting_complete") is not True
+        or terminal_value.get("queue_manifest_sha256")
+        != manifest["sha256"]
+        or (
+            (terminal_value.get("release_checkout") or {}).get("head")
+            != INITIAL_RELEASE_SHA
+        )
+    ):
+        raise RuntimeError("R0096 Attempt 1 terminal evidence changed")
+    index_receipt = expected_input_signature(os.path.join(
+        root, "artifacts", "larger-index-assembly", "index-receipt.json",
+    ))
+    with open(index_receipt["canonical_path"], encoding="utf-8") as handle:
+        index_receipt_value = json.load(handle)
+    body = {
+        key: value
+        for key, value in index_receipt_value.items()
+        if key != "identity_sha256"
+    }
+    index = expected_input_signature(os.path.join(
+        root,
+        "artifacts",
+        "larger-index-assembly",
+        "balanced-150m-retained-ivf32768.ivfpq",
+    ))
+    if (
+        index_receipt_value.get("schema")
+        != "round0096-balanced-150m-ivf32768-index-v1"
+        or index_receipt_value.get("round_id") != ROUND_ID
+        or index_receipt_value.get("release_sha") != INITIAL_RELEASE_SHA
+        or index_receipt_value.get("index") != index
+        or index_receipt_value.get("identity_sha256")
+        != sha256_bytes(canonical_json(body))
+    ):
+        raise RuntimeError("R0096 Attempt 1 assembled-index evidence changed")
+    return {
+        "queue_manifest": manifest,
+        "terminal": terminal,
+        "terminal_value": terminal_value,
+        "index_receipt": index_receipt,
+        "index": index,
+    }
+
+
 def _job(
     *,
     node_id: str,
@@ -159,6 +232,7 @@ def prepare_round0096(
     substrate_manifest_sha256: str,
     runtime_spec_path: str,
     runtime_spec_sha256: str,
+    prior_queue_root: str | None = None,
     queue_root: str = os.path.join(ROUND_ROOT, "queue"),
 ) -> str:
     round_file = _require_issued_round()
@@ -180,6 +254,11 @@ def prepare_round0096(
     runtime = expected_input_signature(runtime_spec_path)
     if runtime["sha256"] != runtime_spec_sha256:
         raise RuntimeError("R0096 runtime specification changed")
+    prior = (
+        _require_prior_attempt(prior_queue_root)
+        if prior_queue_root is not None
+        else None
+    )
 
     queue_root = create_fresh_directory(
         queue_root, label="Round 0096 larger-nlist queue",
@@ -221,6 +300,16 @@ def prepare_round0096(
         decision,
         substrate["signature"],
         runtime,
+        *(
+            [
+                prior["queue_manifest"],
+                prior["terminal"],
+                prior["index_receipt"],
+                prior["index"],
+            ]
+            if prior is not None
+            else []
+        ),
     ])
     external = {
         "substrate_manifest": substrate_manifest_path,
@@ -230,83 +319,107 @@ def prepare_round0096(
         "r0095_review": r0095_review_path,
         "r0095_review_sha256": r0095_review_sha256,
     }
-    jobs = [
-        _job(
-            node_id="train_larger_index_template",
-            action="train_larger_index_template",
-            deps=[],
-            output=template_output,
-            p90_wall_s=10_800.0,
-            inputs=inputs,
-            gpu=True,
-            **external,
-        ),
-    ]
-    for corpus in ("fineweb", "redpajama", "pile"):
+    if prior is None:
+        jobs = [
+            _job(
+                node_id="train_larger_index_template",
+                action="train_larger_index_template",
+                deps=[],
+                output=template_output,
+                p90_wall_s=10_800.0,
+                inputs=inputs,
+                gpu=True,
+                **external,
+            ),
+        ]
+        for corpus in ("fineweb", "redpajama", "pile"):
+            jobs.append(_job(
+                node_id=f"build_larger_index_{corpus}",
+                action="build_larger_index_shard",
+                deps=["train_larger_index_template"],
+                output=shard_outputs[corpus],
+                p90_wall_s=3_600.0,
+                inputs=inputs,
+                gpu=True,
+                corpus=corpus,
+                template_index=template_index,
+                template_receipt=template_receipt,
+                **external,
+            ))
         jobs.append(_job(
-            node_id=f"build_larger_index_{corpus}",
-            action="build_larger_index_shard",
-            deps=["train_larger_index_template"],
-            output=shard_outputs[corpus],
-            p90_wall_s=3_600.0,
+            node_id="assemble_larger_index",
+            action="assemble_larger_index",
+            deps=[
+                "build_larger_index_fineweb",
+                "build_larger_index_redpajama",
+                "build_larger_index_pile",
+            ],
+            output=assembly_output,
+            p90_wall_s=1_800.0,
             inputs=inputs,
-            gpu=True,
-            corpus=corpus,
+            gpu=False,
             template_index=template_index,
             template_receipt=template_receipt,
+            **{
+                f"{corpus}_{kind}": value
+                for corpus in ("fineweb", "redpajama", "pile")
+                for kind, value in (
+                    ("index", shard_indexes[corpus]),
+                    ("receipt", shard_receipts[corpus]),
+                )
+            },
             **external,
         ))
-    jobs.append(_job(
-        node_id="assemble_larger_index",
-        action="assemble_larger_index",
-        deps=[
-            "build_larger_index_fineweb",
-            "build_larger_index_redpajama",
-            "build_larger_index_pile",
-        ],
-        output=assembly_output,
-        p90_wall_s=1_800.0,
-        inputs=inputs,
-        gpu=False,
-        template_index=template_index,
-        template_receipt=template_receipt,
-        **{
-            f"{corpus}_{kind}": value
-            for corpus in ("fineweb", "redpajama", "pile")
-            for kind, value in (
-                ("index", shard_indexes[corpus]),
-                ("receipt", shard_receipts[corpus]),
-            )
-        },
-        **external,
-    ))
+        qualification_deps = ["assemble_larger_index"]
+        qualification_index = assembled_index
+        qualification_receipt = assembled_receipt
+        prior_fields: dict[str, Any] = {}
+    else:
+        qualification_deps = []
+        qualification_index = prior["index"]["canonical_path"]
+        qualification_receipt = prior["index_receipt"]["canonical_path"]
+        prior_fields = {
+            "index_release_sha": INITIAL_RELEASE_SHA,
+            "prior_terminal": prior["terminal"]["canonical_path"],
+            "prior_terminal_sha256": prior["terminal"]["sha256"],
+        }
     jobs.append(_job(
         node_id="qualify_larger_index",
         action="qualify_larger_index",
-        deps=["assemble_larger_index"],
+        deps=qualification_deps,
         output=qualification_output,
         p90_wall_s=1_800.0,
         inputs=inputs,
         gpu=True,
-        index=assembled_index,
-        index_receipt=assembled_receipt,
+        index=qualification_index,
+        index_receipt=qualification_receipt,
         r0095_audit=r0095_audit_path,
         r0095_audit_sha256=r0095_audit_sha256,
         r0095_decision=r0095_decision_path,
         r0095_decision_sha256=r0095_decision_sha256,
+        **prior_fields,
         **external,
     ))
 
+    prior_gpu_seconds = (
+        float(prior["terminal_value"]["gpu_wall_s"])
+        if prior is not None
+        else 0.0
+    )
     manifest = _base_manifest(
         round_id=ROUND_ID,
         release_sha=release_sha,
         round_file=round_file,
         queue_root=queue_root,
-        gpu_hours_cap=8.0,
+        gpu_hours_cap=max(0.1, 8.0 - prior_gpu_seconds / 3_600.0),
         execution_authority="autonomous-gpu",
         gpu=True,
     )
-    manifest["schema"] = "round0096-balanced-150m-ivf32768-queue-v1"
+    manifest["schema"] = (
+        "round0096-balanced-150m-ivf32768-retry-queue-v1"
+        if prior is not None
+        else "round0096-balanced-150m-ivf32768-queue-v1"
+    )
     manifest["repo_root"] = RELEASE_ROOT
     manifest["queue_class"] = "gpu-research"
     manifest["required_reviews"] = ["0095"]
@@ -354,16 +467,38 @@ def prepare_round0096(
         "no_graph": True,
         "no_map_training": True,
         "no_scale_decision": True,
+        "setup_correction": (
+            {
+                "prior_release_sha": INITIAL_RELEASE_SHA,
+                "prior_queue_manifest": prior["queue_manifest"],
+                "prior_terminal": prior["terminal"],
+                "prior_gpu_wall_seconds": prior_gpu_seconds,
+                "only_change": (
+                    "maximum exact-rerank width 2048 -> 2047 so "
+                    "width-plus-self request respects FAISS max-k 2048"
+                ),
+                "reuses_exact_assembled_index": prior["index"],
+            }
+            if prior is not None
+            else None
+        ),
     }
     manifest["jobs"] = jobs
-    manifest["p90_gpu_seconds"] = {
-        "train_larger_index_template": 10_800.0,
-        "build_larger_index_fineweb": 3_600.0,
-        "build_larger_index_redpajama": 3_600.0,
-        "build_larger_index_pile": 3_600.0,
-        "qualify_larger_index": 1_800.0,
-        "total": 23_400.0,
-    }
+    manifest["p90_gpu_seconds"] = (
+        {
+            "qualify_larger_index": 1_800.0,
+            "total": 1_800.0,
+        }
+        if prior is not None
+        else {
+            "train_larger_index_template": 10_800.0,
+            "build_larger_index_fineweb": 3_600.0,
+            "build_larger_index_redpajama": 3_600.0,
+            "build_larger_index_pile": 3_600.0,
+            "qualify_larger_index": 1_800.0,
+            "total": 23_400.0,
+        }
+    )
     path = os.path.join(queue_root, "queue.json")
     atomic_write_new_json(path, manifest, immutable=True)
     return path
@@ -382,6 +517,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--substrate-manifest-sha256", required=True)
     parser.add_argument("--runtime-spec", required=True)
     parser.add_argument("--runtime-spec-sha256", required=True)
+    parser.add_argument("--prior-queue")
     parser.add_argument(
         "--queue-root", default=os.path.join(ROUND_ROOT, "queue"),
     )
@@ -398,6 +534,7 @@ def main(argv: list[str] | None = None) -> int:
         substrate_manifest_sha256=args.substrate_manifest_sha256,
         runtime_spec_path=args.runtime_spec,
         runtime_spec_sha256=args.runtime_spec_sha256,
+        prior_queue_root=args.prior_queue,
         queue_root=args.queue_root,
     )
     print(json.dumps({"queue_manifest": path}, indent=2, sort_keys=True))

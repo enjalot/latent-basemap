@@ -706,11 +706,50 @@ def run_qualify_index(
         label="R0096 assembled index receipt",
     )
     index_signature = expected_input_signature(str(job["index"]))
+    expected_index_release = str(
+        job.get("index_release_sha", active["manifest"]["release_sha"])
+    )
     if (
         index_receipt.get("index") != index_signature
         or index_receipt.get("substrate") != substrate["signature"]
+        or index_receipt.get("release_sha") != expected_index_release
     ):
         raise Round0096Error("R0096 assembled index lineage changed")
+    prior_terminal_signature = None
+    prior_gpu_wall_seconds = 0.0
+    if job.get("prior_terminal"):
+        prior_terminal_signature = expected_input_signature(
+            str(job["prior_terminal"])
+        )
+        if (
+            prior_terminal_signature["sha256"]
+            != str(job["prior_terminal_sha256"])
+        ):
+            raise Round0096Error("R0096 prior terminal bytes changed")
+        with open(
+            prior_terminal_signature["canonical_path"], encoding="utf-8"
+        ) as handle:
+            prior_terminal = json.load(handle)
+        expected_completed = [
+            "train_larger_index_template",
+            "build_larger_index_fineweb",
+            "build_larger_index_redpajama",
+            "build_larger_index_pile",
+            "assemble_larger_index",
+        ]
+        if (
+            prior_terminal.get("schema") != "slim-runner-terminal-v3"
+            or prior_terminal.get("round_id") != ROUND_ID
+            or prior_terminal.get("verdict") != "failed"
+            or prior_terminal.get("completed_jobs") != expected_completed
+            or prior_terminal.get("gpu_wall_accounting_complete") is not True
+            or (
+                (prior_terminal.get("release_checkout") or {}).get("head")
+                != expected_index_release
+            )
+        ):
+            raise Round0096Error("R0096 prior attempt evidence changed")
+        prior_gpu_wall_seconds = float(prior_terminal["gpu_wall_s"])
 
     sample = _sample_retained_rows(
         excluded,
@@ -819,6 +858,9 @@ def run_qualify_index(
         "r0095_decision": r0095_decision_signature,
         "index_receipt": index_receipt_signature,
         "index": index_signature,
+        "index_release_sha": expected_index_release,
+        "prior_terminal": prior_terminal_signature,
+        "prior_attempt_gpu_wall_seconds": prior_gpu_wall_seconds,
         "geometry": _index_geometry(cpu),
         "quality": {
             "global_mean_floor": GLOBAL_MEAN_FLOOR,
@@ -877,6 +919,7 @@ def run_qualify_index(
         "validity_passed": validity_passed,
         "qualification": expected_input_signature(qualification_path),
         "selected": selected,
+        "prior_attempt_gpu_wall_seconds": prior_gpu_wall_seconds,
         "outcome": (
             "qualified"
             if selected is not None
