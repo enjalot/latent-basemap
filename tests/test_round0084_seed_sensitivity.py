@@ -4,6 +4,8 @@ import copy
 import inspect
 import json
 
+import pytest
+
 from basemap.round0075_training import SUCCESSFUL_UPDATES
 from basemap.round0084_program import (
     CONFIG_SCHEMA,
@@ -127,3 +129,57 @@ def test_handler_restores_shared_trainer_globals() -> None:
     assert "finally:" in source
     assert 'trainer.ROUND_ID = previous["round_id"]' in source
     assert 'trainer.SEED = previous["seed"]' in source
+
+
+def test_trainer_adapter_accepts_and_authenticates_inherited_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with open(BASELINE_RECEIPT, encoding="utf-8") as handle:
+        baseline_config = json.load(handle)["production_config"]
+    with open(SUBSTRATE, encoding="utf-8") as handle:
+        substrate = json.load(handle)
+    with open(GRAPH, encoding="utf-8") as handle:
+        graph = json.load(handle)
+    monkeypatch.setattr(
+        round0084_nodes,
+        "_baseline_bundle",
+        lambda _job: {"production_config": baseline_config},
+    )
+    sources = baseline_config["execution"]["scale_transition"][
+        "decision_sources"
+    ]
+    builder = round0084_nodes._config_builder({})
+    config, digest = builder(
+        graph_manifest=graph,
+        graph_manifest_path=GRAPH,
+        graph_manifest_sha256=(
+            "d8ec25e2887926d11af6da7b6c6c4bf07d1fa9adedfc9f84d2c1c5baf07fcef5"
+        ),
+        substrate_manifest=substrate,
+        substrate_manifest_path=SUBSTRATE,
+        substrate_manifest_sha256=(
+            "032e3c6396e26e0f2ff0db81f764330e4e84175d337d164ab63ae9c7ddeec6d2"
+        ),
+        scale_geometry_signature=sources["r0069_scale_geometry"],
+        anchor_leverage_signature=sources["r0074_anchor_leverage"],
+    )
+    assert config["optimizer"]["seed"] == 43
+    assert len(digest) == 64
+    with pytest.raises(
+        round0084_nodes.Round0084Error,
+        match="inherited scale/anchor evidence changed",
+    ):
+        builder(
+            graph_manifest=graph,
+            graph_manifest_path=GRAPH,
+            graph_manifest_sha256=(
+                "d8ec25e2887926d11af6da7b6c6c4bf07d1fa9adedfc9f84d2c1c5baf07fcef5"
+            ),
+            substrate_manifest=substrate,
+            substrate_manifest_path=SUBSTRATE,
+            substrate_manifest_sha256=(
+                "032e3c6396e26e0f2ff0db81f764330e4e84175d337d164ab63ae9c7ddeec6d2"
+            ),
+            scale_geometry_signature={"sha256": "changed"},
+            anchor_leverage_signature=sources["r0074_anchor_leverage"],
+        )

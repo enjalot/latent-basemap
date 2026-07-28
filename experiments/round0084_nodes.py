@@ -88,11 +88,41 @@ def _baseline_bundle(job: Mapping[str, Any]) -> dict[str, Any]:
 
 def _config_builder(job: Mapping[str, Any]):
     baseline = _baseline_bundle(job)
+    decision_sources = (
+        baseline["production_config"]
+        .get("execution", {})
+        .get("scale_transition", {})
+        .get("decision_sources", {})
+    )
 
-    def build(**kwargs: Any) -> tuple[dict[str, Any], str]:
+    def build(
+        *,
+        graph_manifest: Mapping[str, Any],
+        graph_manifest_path: str,
+        graph_manifest_sha256: str,
+        substrate_manifest: Mapping[str, Any],
+        substrate_manifest_path: str,
+        substrate_manifest_sha256: str,
+        scale_geometry_signature: Mapping[str, Any],
+        anchor_leverage_signature: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        if (
+            dict(scale_geometry_signature)
+            != decision_sources.get("r0069_scale_geometry")
+            or dict(anchor_leverage_signature)
+            != decision_sources.get("r0074_anchor_leverage")
+        ):
+            raise Round0084Error(
+                "R0084 inherited scale/anchor evidence changed"
+            )
         return seed43_config_from_seed42(
             baseline["production_config"],
-            **kwargs,
+            graph_manifest=graph_manifest,
+            graph_manifest_path=graph_manifest_path,
+            graph_manifest_sha256=graph_manifest_sha256,
+            substrate_manifest=substrate_manifest,
+            substrate_manifest_path=substrate_manifest_path,
+            substrate_manifest_sha256=substrate_manifest_sha256,
         )
 
     return build
