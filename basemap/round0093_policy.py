@@ -11,6 +11,7 @@ from .artifact_identity import (
     sha256_bytes,
 )
 from .round0086_program import (
+    POLICY_GRID as R0086_POLICY_GRID,
     QUALIFICATION_SCHEMA as R0086_QUALIFICATION_SCHEMA,
 )
 from .round0086_program import select_cell as select_r0086_cell
@@ -19,7 +20,7 @@ from .round0086_program import select_cell as select_r0086_cell
 ROUND_ID = "0093"
 TIER = "150m"
 MEAN_RECALL_FLOOR = 0.84
-POLICY_GRID = (
+LOWER_POLICY_GRID = (
     (32, 128),
     (64, 128),
     (96, 128),
@@ -30,6 +31,8 @@ POLICY_GRID = (
     (64, 384),
     (96, 384),
 )
+FALLBACK_POLICY_GRID = tuple(R0086_POLICY_GRID)
+POLICY_GRID = LOWER_POLICY_GRID + FALLBACK_POLICY_GRID
 QUALIFICATION_SCHEMA = (
     "round0093-balanced-150m-lower-recall-policy-qualification-v1"
 )

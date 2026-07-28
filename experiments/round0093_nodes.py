@@ -23,6 +23,7 @@ from basemap.round0086_program import (
 )
 from basemap.round0093_policy import (
     DECISION_SCHEMA,
+    LOWER_POLICY_GRID,
     MEAN_RECALL_FLOOR,
     POLICY_GRID,
     QUALIFICATION_SCHEMA,
@@ -167,6 +168,13 @@ def run_qualification(
         "registered_mean_recall_floor": MEAN_RECALL_FLOOR,
         "validity_passed": True,
         "selected": selected,
+        "selected_from_new_lower_cost_grid": (
+            (
+                int(selected["nprobe"]),
+                int(selected["shortlist_width"]),
+            )
+            in LOWER_POLICY_GRID
+        ),
         "fallback_r0086_selected": r0086_receipt["selected"],
         "qualification": generic["receipt"],
         "substrate": substrate_signature,

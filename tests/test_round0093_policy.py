@@ -12,6 +12,8 @@ from basemap.round0086_program import (
     QUALIFICATION_SCHEMA as R0086_QUALIFICATION_SCHEMA,
 )
 from basemap.round0093_policy import (
+    FALLBACK_POLICY_GRID,
+    LOWER_POLICY_GRID,
     MEAN_RECALL_FLOOR,
     POLICY_GRID,
     R0083_SCHEMA,
@@ -126,7 +128,7 @@ def _r0086_body() -> dict:
 
 def test_lower_recall_grid_is_bounded_and_selects_measured_fastest() -> None:
     assert MEAN_RECALL_FLOOR == 0.84
-    assert POLICY_GRID == (
+    assert LOWER_POLICY_GRID == (
         (32, 128),
         (64, 128),
         (96, 128),
@@ -137,6 +139,8 @@ def test_lower_recall_grid_is_bounded_and_selects_measured_fastest() -> None:
         (64, 384),
         (96, 384),
     )
+    assert FALLBACK_POLICY_GRID == tuple(R0086_POLICY_GRID)
+    assert POLICY_GRID == LOWER_POLICY_GRID + FALLBACK_POLICY_GRID
     cells = {}
     for index, (nprobe, width) in enumerate(POLICY_GRID):
         cells[f"nprobe-{nprobe}-width-{width}"] = {
