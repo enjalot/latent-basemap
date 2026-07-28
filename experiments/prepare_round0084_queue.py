@@ -248,31 +248,33 @@ def prepare_round0084(
 
     outputs30 = substrate30["manifest"]["outputs"]
     outputs90 = substrate90["manifest"]["outputs"]
-    static_paths = [
+    # All large substrate/graph/model artifacts were authenticated by the
+    # validators above. Carry those exact signatures into the runner
+    # manifest instead of rereading roughly 50 GB solely to reconstruct the
+    # same dictionaries.
+    validated_inputs = [
+        *reviews.values(),
+        substrate30["signature"],
+        outputs30["int8"],
+        outputs30["scales"],
+        outputs30["eligibility"],
+        substrate90["signature"],
+        outputs90["int8"],
+        outputs90["scales"],
+        outputs90["eligibility"],
+        graph["signature"],
+        graph["manifest"]["outputs"]["targets"],
+        graph["manifest"]["outputs"]["degrees"],
+        baseline["model"],
+        baseline["train_receipt"],
+        *fixed_signatures.values(),
+    ]
+    remaining_paths = [
         ROUND_FILE,
-        *REVIEWS.values(),
-        SUBSTRATE_30,
-        outputs30["int8"]["canonical_path"],
-        outputs30["scales"]["canonical_path"],
-        outputs30["eligibility"]["canonical_path"],
-        SUBSTRATE_90,
-        outputs90["int8"]["canonical_path"],
-        outputs90["scales"]["canonical_path"],
-        outputs90["eligibility"]["canonical_path"],
-        GRAPH_90,
-        graph["manifest"]["outputs"]["targets"]["canonical_path"],
-        graph["manifest"]["outputs"]["degrees"]["canonical_path"],
-        SCALE_GEOMETRY,
-        ANCHOR_LEVERAGE,
-        BASELINE_MODEL,
-        BASELINE_RECEIPT,
-        BASELINE_MATCHED_PANEL,
-        BASELINE_FULL_PANEL,
         *[
             os.path.join(root, name)
             for root in (REFERENCE_30, REFERENCE_90)
             for name in (
-                "reference.npz",
                 "reference-receipt.json",
                 "recall50-truth.npy",
                 "anchor-substrate-rows.npy",
@@ -282,7 +284,10 @@ def prepare_round0084(
         MINILM_QUERY_PROVENANCE,
         *CENTROIDS.values(),
     ]
-    inputs = _dedupe(_file_inputs(static_paths))
+    inputs = _dedupe([
+        *validated_inputs,
+        *_file_inputs(remaining_paths),
+    ])
     queue_root = create_fresh_directory(
         queue_root,
         label="Round 0084 seed-sensitivity queue",
