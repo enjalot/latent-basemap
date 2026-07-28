@@ -136,6 +136,42 @@ def test_duplicate_census_crosses_shard_boundaries_and_excludes_bad_rows(
     assert census["summary"]["fingerprint_collision_splits"] == 0
 
 
+def test_duplicate_representative_is_lexicographic_not_global_first(
+    tmp_path,
+) -> None:
+    later_name = tmp_path / "z-dataset.npy"
+    earlier_name = tmp_path / "a-dataset.npy"
+    row = np.ones((1, 768), dtype="<f2")
+    np.save(later_name, row)
+    np.save(earlier_name, row)
+    selection = {
+        "selected_rows": 2,
+        "ranges": [
+            {
+                "dataset": "z-dataset",
+                "global_row_start": 0,
+                "global_row_stop": 1,
+                "shard_row_start": 0,
+                "shard_row_stop": 1,
+                "shard": {"canonical_path": str(later_name)},
+            },
+            {
+                "dataset": "a-dataset",
+                "global_row_start": 1,
+                "global_row_stop": 2,
+                "shard_row_start": 0,
+                "shard_row_stop": 1,
+                "shard": {"canonical_path": str(earlier_name)},
+            },
+        ],
+    }
+    census = duplicate_census(selection)
+    arrays = census["arrays"]
+    assert arrays["representative_rows"].tolist() == [1]
+    assert arrays["duplicate_excluded_rows"].tolist() == [0]
+    assert arrays["duplicate_representative_rows"].tolist() == [1]
+
+
 def test_inventory_itemizes_invalid_shards_and_rejects_trailing_bytes(
     tmp_path,
 ) -> None:
@@ -169,7 +205,8 @@ def test_queue_is_one_cpu_io_heavy_nontraining_job() -> None:
     assert source.count('"action": "inventory"') == 1
     assert '"queue_class"] = "cpu-io-heavy"' in source
     assert "gpu_hours_cap=0.0" in source
-    assert '"must_not_overlap_active_gpu_queue": True' in source
+    assert '"may_overlap_active_gpu_graph_queue": True' in source
+    assert '"drop_scanned_pages_after_use": True' in source
     assert '"training_performed": False' in source
 
 

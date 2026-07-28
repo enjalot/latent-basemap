@@ -25,6 +25,7 @@ from basemap.round0087_inventory import (
     ROUND_ID,
     TARGET_ROWS,
     discover_inventory_files,
+    drop_file_cache,
 )
 from experiments.prepare_round0020_0022_queues import (
     LAB_ROOT,
@@ -58,11 +59,14 @@ def prepare_round0087(
     discovered = discover_inventory_files()
     if not discovered:
         raise RuntimeError("R0087 found no jina-v5-nano inventory files")
-    inputs = _dedupe(_file_inputs([
+    source_paths = [
         ROUND_FILE,
         str(CATALOG_PATH),
         *discovered,
-    ]))
+    ]
+    inputs = _dedupe(_file_inputs(source_paths))
+    for path in discovered:
+        drop_file_cache(path)
     queue_root = create_fresh_directory(
         queue_root,
         label="Round 0087 CPU inventory queue",
@@ -111,7 +115,9 @@ def prepare_round0087(
         "no_embedding": True,
         "no_graph": True,
         "no_training": True,
-        "must_not_overlap_active_gpu_queue": True,
+        "may_overlap_active_gpu_graph_queue": True,
+        "concurrency_priority": "nice-15,ionice-idle,numba-4-threads",
+        "drop_scanned_pages_after_use": True,
     }
     manifest["inventory_file_count_at_preparation"] = len(discovered)
     manifest["jobs"] = [{

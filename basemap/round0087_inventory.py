@@ -45,6 +45,26 @@ class Round0087Error(RuntimeError):
     """The diverse inventory differs from the registered contract."""
 
 
+def drop_file_cache(path: str) -> None:
+    """Best-effort eviction of this scan's sequential pages.
+
+    R0087 is allowed to share the machine with a GPU graph build.  Its input
+    bytes are not reused after each inventory/fingerprint pass, while the graph
+    worker depends on a hot 150M rerank substrate.  Dropping only R0087's pages
+    prevents this sequential inventory from needlessly displacing that working
+    set.  Correctness never depends on advisory-cache support.
+    """
+    if not hasattr(os, "posix_fadvise") or not hasattr(
+        os, "POSIX_FADV_DONTNEED"
+    ):
+        return
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    try:
+        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    finally:
+        os.close(fd)
+
+
 def language_code(dataset: str) -> str | None:
     if dataset.startswith(LANGUAGE_PREFIX) and dataset.endswith(
         LANGUAGE_SUFFIX
@@ -107,12 +127,15 @@ def inspect_shard(path: str) -> dict[str, Any]:
         raise Round0087Error(
             f"{path} has trailing or incomplete bytes outside its NumPy payload"
         )
-    return {
+    result = {
         **signature,
         "rows": int(array.shape[0]),
         "dimension": DIMENSION,
         "dtype": DTYPE.str,
     }
+    del array
+    drop_file_cache(path)
+    return result
 
 
 def _invalid_shard(path: Path, error: BaseException) -> dict[str, Any]:
@@ -372,6 +395,24 @@ class _SelectedRows:
         )
         return np.asarray(array[local]).tobytes(order="C")
 
+    def lexicographic_key(self, row: int) -> tuple[str, str, int]:
+        index = bisect.bisect_right(self.stops, row)
+        item = self.ranges[index]
+        local = int(item["shard_row_start"]) + (
+            row - int(item["global_row_start"])
+        )
+        return (
+            str(item.get("dataset", "")),
+            str(item["shard"]["canonical_path"]),
+            local,
+        )
+
+    def close_and_drop_cache(self) -> None:
+        paths = list(self.arrays)
+        self.arrays.clear()
+        for path in paths:
+            drop_file_cache(path)
+
 
 def duplicate_census(
     selection: Mapping[str, Any],
@@ -408,6 +449,8 @@ def duplicate_census(
         records["row"][start:stop] = np.arange(
             start, stop, dtype=np.uint32
         )
+        del source, array
+        drop_file_cache(str(item["shard"]["canonical_path"]))
     fingerprint_seconds = time.monotonic() - fingerprint_started
     sort_started = time.monotonic()
     records.sort(order=("h0", "h1"), kind="stable")
@@ -441,13 +484,15 @@ def duplicate_census(
                 for row in candidates.tolist():
                     exact.setdefault(accessor.bytes(row), []).append(row)
                 collision_splits += max(len(exact) - 1, 0)
-                families.extend(
-                    np.asarray(rows, dtype=np.int64)
-                    for rows in exact.values()
-                    if len(rows) >= 2
-                )
+                for rows in exact.values():
+                    if len(rows) >= 2:
+                        rows.sort(key=accessor.lexicographic_key)
+                        families.append(np.asarray(rows, dtype=np.int64))
         index = stop
-    families.sort(key=lambda value: int(value[0]))
+    accessor.close_and_drop_cache()
+    families.sort(
+        key=lambda value: accessor.lexicographic_key(int(value[0]))
+    )
     counts = np.asarray([len(rows) for rows in families], dtype=np.int64)
     representatives = np.asarray(
         [rows[0] for rows in families], dtype=np.int64
