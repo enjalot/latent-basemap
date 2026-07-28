@@ -424,7 +424,8 @@ def run_qualification(
         "policy_selector": (
             "lowest median three-repeat 10000-query search-plus-rerank "
             "wall among cells with mean unambiguous exact-reranked "
-            "recall@15 at least 0.90; ties by shortlist width then nprobe"
+            f"recall@15 at least {MEAN_RECALL_FLOOR:.2f}; "
+            "ties by shortlist width then nprobe"
         ),
         "selected": selected_cell,
         "cells": cells,
