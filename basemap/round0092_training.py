@@ -18,7 +18,7 @@ from .round0086_program import (
 )
 
 
-ROUND_ID = "0092"
+ROUND_ID = "0101"
 SEED = 42
 TIER = "150m"
 REFERENCE_ROUND = "0046"
@@ -37,7 +37,7 @@ PERFORMANCE_WINDOWS = math.ceil(
 )
 MINIMUM_UPDATES_PER_SECOND = 100.0
 WARNING_UPDATES_PER_SECOND = 110.0
-PIPELINE_SCHEMA = "round0092-host-int8-balanced-150m-pipeline-v1"
+PIPELINE_SCHEMA = "round0101-host-int8-balanced-150m-pipeline-v1"
 SAMPLER_CLASS = "HostInt8Balanced150mCanonicalSampler"
 
 
@@ -61,6 +61,7 @@ def train_config_from_capabilities(
     graph_inputs = graph_manifest.get("inputs") or {}
     summary = graph_manifest.get("summary") or {}
     quality = graph_manifest.get("quality") or {}
+    selected_by_corpus = quality.get("selected_by_corpus") or {}
     if (
         substrate_manifest.get("schema") != SUBSTRATE_SCHEMA
         or substrate_manifest.get("round_id") != "0086"
@@ -70,7 +71,7 @@ def train_config_from_capabilities(
         or substrate_manifest.get("global_150m_intervals")
         != [[0, ROW_COUNT]]
         or graph_manifest.get("schema") != GRAPH_SCHEMA
-        or graph_manifest.get("round_id") != "0091"
+        or graph_manifest.get("round_id") != "0100"
         or graph_manifest.get("row_count") != ROW_COUNT
         or graph_manifest.get("input_k") != K
         or graph_inputs.get("eligibility") != eligibility
@@ -87,8 +88,15 @@ def train_config_from_capabilities(
         != RETAINED_ROWS * K
         or summary.get("degree_histogram")
         != {"0": EXCLUDED_ROWS, str(K): RETAINED_ROWS}
-        or float(quality.get("mean_recall_at_15_unambiguous", -1.0)) < 0.90
-        or float(quality.get("floor", -1.0)) != 0.90
+        or float(quality.get("selected_global_mean_recall", -1.0)) < 0.90
+        or float(quality.get("global_mean_floor", -1.0)) != 0.90
+        or float(quality.get("per_corpus_mean_floor", -1.0)) != 0.84
+        or set(selected_by_corpus) != {"fineweb", "redpajama", "pile"}
+        or any(
+            float(value.get("mean_recall_at_15_unambiguous", -1.0))
+            < 0.84
+            for value in selected_by_corpus.values()
+        )
         or int(quality.get("qualification_sample_rows", -1)) != 4_096
         or int(quality.get("qualification_sample_seed", -1)) != 86
     ):
@@ -106,7 +114,7 @@ def train_config_from_capabilities(
         raise Round0092Error("balanced-150M reviewed inputs are incomplete")
 
     config = copy.deepcopy(_R0021_CONFIG)
-    config["schema"] = "round0092-production-config-v1"
+    config["schema"] = "round0101-production-config-v1"
     config["phrase"] = (
         "balanced 150M MiniLM seed42 native-k15 coverage-aligned rung"
     )
@@ -158,7 +166,7 @@ def train_config_from_capabilities(
             "quality": dict(quality),
         },
         "mean_recall_at_15_unambiguous": quality[
-            "mean_recall_at_15_unambiguous"
+            "selected_global_mean_recall"
         ],
     }
     config["optimizer"]["seed"] = SEED

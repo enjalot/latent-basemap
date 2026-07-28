@@ -61,14 +61,19 @@ def _capability_fixture():
         },
     }
     quality = {
-        "mean_recall_at_15_unambiguous": 0.91,
-        "floor": 0.90,
+        "selected_global_mean_recall": 0.91,
+        "selected_by_corpus": {
+            corpus: {"mean_recall_at_15_unambiguous": 0.90}
+            for corpus in ("fineweb", "redpajama", "pile")
+        },
+        "global_mean_floor": 0.90,
+        "per_corpus_mean_floor": 0.84,
         "qualification_sample_rows": 4_096,
         "qualification_sample_seed": 86,
     }
     graph = {
         "schema": GRAPH_SCHEMA,
-        "round_id": "0091",
+        "round_id": "0100",
         "row_count": ROW_COUNT,
         "input_k": 15,
         "inputs": {
@@ -138,7 +143,7 @@ def test_balanced_150m_updates_are_coverage_aligned_and_bounded() -> None:
 
 def test_graph_quality_and_complete_counts_fail_closed() -> None:
     substrate, substrate_signature, graph = _capability_fixture()
-    graph["quality"]["mean_recall_at_15_unambiguous"] = 0.899
+    graph["quality"]["selected_global_mean_recall"] = 0.899
     with pytest.raises(RuntimeError, match="geometry changed"):
         train_config_from_capabilities(
             graph_manifest=graph,
@@ -191,7 +196,7 @@ def test_round0092_is_one_bounded_training_job() -> None:
     assert '"training_wall_only": True' in source
     assert '"geometry_claim_requires_successor_evaluation": True' in source
     assert (
-        'manifest["required_reviews"] = ["0080", "0086", "0091"]'
+        'manifest["required_reviews"] = ["0025", "0033", "0080", "0100"]'
         in source
     )
 
@@ -200,14 +205,14 @@ def test_round0092_discovers_one_issued_dated_contract(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    draft = tmp_path / "round-0092-2026-07-28.md"
-    issued = tmp_path / "round-0092-2026-07-29.md"
+    draft = tmp_path / "round-0101-2026-07-28.md"
+    issued = tmp_path / "round-0101-2026-07-29.md"
     draft.write_text("---\nstatus: draft\n---\n", encoding="utf-8")
     issued.write_text("---\nstatus: issued\n---\n", encoding="utf-8")
     monkeypatch.setattr(
         prepare_round0092_queue,
         "ROUND_FILE_GLOB",
-        str(tmp_path / "round-0092-*.md"),
+        str(tmp_path / "round-0101-*.md"),
     )
     assert prepare_round0092_queue._require_issued_round() == str(issued)
     draft.write_text("---\nstatus: issued\n---\n", encoding="utf-8")
@@ -219,7 +224,7 @@ def test_round0092_preparer_materializes_the_exact_one_node_contract(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    round_file = tmp_path / "round-0092-2026-07-28.md"
+    round_file = tmp_path / "round-0101-2026-07-28.md"
     round_file.write_text("---\nstatus: issued\n---\n", encoding="utf-8")
     substrate, substrate_signature, graph = _capability_fixture()
     graph_signature = {
@@ -247,7 +252,7 @@ def test_round0092_preparer_materializes_the_exact_one_node_contract(
     monkeypatch.setattr(
         prepare_round0092_queue,
         "ROUND_FILE_GLOB",
-        str(tmp_path / "round-0092-*.md"),
+        str(tmp_path / "round-0101-*.md"),
     )
     monkeypatch.setattr(
         prepare_round0092_queue,
@@ -337,12 +342,14 @@ def test_round0092_preparer_materializes_the_exact_one_node_contract(
         substrate_manifest_sha256=substrate_signature["sha256"],
         canonical_graph_manifest_path=graph_signature["canonical_path"],
         canonical_graph_manifest_sha256=graph_signature["sha256"],
+        r0025_review_path="/labs/review-0025.md",
+        r0025_review_sha256="7" * 64,
+        r0033_review_path="/labs/review-0033.md",
+        r0033_review_sha256="b" * 64,
         r0080_review_path="/labs/review-0080.md",
         r0080_review_sha256="8" * 64,
-        r0086_review_path="/labs/review-0086.md",
-        r0086_review_sha256="9" * 64,
-        r0091_review_path="/labs/review-0091.md",
-        r0091_review_sha256="a" * 64,
+        r0100_review_path="/labs/review-0100.md",
+        r0100_review_sha256="a" * 64,
         queue_root=str(tmp_path / "queue"),
     )
     manifest = json.loads(Path(queue).read_text(encoding="utf-8"))
@@ -381,7 +388,7 @@ def test_round0092_receipts_exact_training_accounting() -> None:
     ):
         assert field in source
     loader = inspect.getsource(round0092_nodes._load_pipeline)
-    assert 'graph["manifest"].get("round_id") != "0091"' in loader
+    assert 'graph["manifest"].get("round_id") != "0100"' in loader
     assert "HostInt8MaterializedArray.from_files" not in loader
     assert "validate_substrate(" in loader
     handler = inspect.getsource(round0092_nodes.run_job)

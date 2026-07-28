@@ -63,7 +63,7 @@ class HostInt8Balanced150mCanonicalSampler(
 
 
 class Round0092TrainingInput(Round0034TrainingInput):
-    """Bind the efficient trainer to the reviewed assembled R0091 graph."""
+    """Bind the efficient trainer to the reviewed assembled R0100 graph."""
 
     def prepare_round0034_training(
         self,
@@ -87,7 +87,7 @@ class Round0092TrainingInput(Round0034TrainingInput):
         signature = self.graph["signature"]
         if os.path.realpath(edges_path) != signature["canonical_path"]:
             raise Round0034PipelineError(
-                "R0092 trainer graph is not the loaded manifest"
+                "R0101 trainer graph is not the loaded manifest"
             )
         if (
             positive_target_mode != "binary"
@@ -96,7 +96,7 @@ class Round0092TrainingInput(Round0034TrainingInput):
             or required_input_pipeline != "host_int8_canonical"
         ):
             raise Round0034PipelineError(
-                "R0092 requires binary uniform sampling on host int8"
+                "R0101 requires binary uniform sampling on host int8"
             )
         summary = manifest["summary"]
         sampler = HostInt8Balanced150mCanonicalSampler(
@@ -184,12 +184,12 @@ def _load_pipeline(
         row_count=ROW_COUNT,
     )
     if (
-        graph["manifest"].get("round_id") != "0091"
+        graph["manifest"].get("round_id") != "0100"
         or graph["manifest"].get("inputs", {}).get("substrate")
         != substrate["signature"]
     ):
         raise Round0034PipelineError(
-            "R0092 graph does not bind the exact R0086 150M substrate"
+            "R0101 graph does not bind the exact 150M substrate"
         )
     # validate_substrate has just rehashed both payloads.  The generic file
     # loader would immediately hash the 57.9 GB pair a second time before
@@ -230,7 +230,7 @@ def _load_pipeline(
         job.get("train_config_sha256") != config_sha256
         or int(job.get("successful_updates", -1)) != updates
     ):
-        raise Round0034PipelineError("R0092 queue/config identity changed")
+        raise Round0034PipelineError("R0101 queue/config identity changed")
     return (
         wrapper,
         graph,
@@ -256,12 +256,12 @@ def run_train(
     updates = int(config["optimizer"]["successful_positive_lr_updates"])
     output = create_fresh_directory(
         job["outputs"][0],
-        label="Round 0092 train output",
+        label="Round 0101 train output",
     )
     atomic_write_new_json(
         os.path.join(output, "production-config.json"),
         {
-            "schema": "round0092-production-config-receipt-v1",
+            "schema": "round0101-production-config-receipt-v1",
             "config": config,
             "config_sha256": config_sha256,
         },
@@ -334,7 +334,7 @@ def run_train(
     }
     if mismatches:
         raise Round0034PipelineError(
-            f"R0092 exact train accounting failed: {mismatches}"
+            f"R0101 exact train accounting failed: {mismatches}"
         )
     runtime = wrapper.runtime_stamp()
     runtime_mismatches = {
@@ -356,7 +356,7 @@ def run_train(
         or prefetch_delta not in {0, 1}
     ):
         raise Round0034PipelineError(
-            "R0092 runtime endpoint/pipeline accounting changed: "
+            "R0101 runtime endpoint/pipeline accounting changed: "
             f"{runtime_mismatches}"
         )
     _synchronize_flattened_runtime_counters(accounting, runtime)
@@ -371,7 +371,7 @@ def run_train(
         != config["execution"]["performance_windows"]
     ):
         raise Round0034PipelineError(
-            "R0092 profiler did not close every window"
+            "R0101 profiler did not close every window"
         )
 
     model_path = os.path.join(output, "model.pt")
@@ -392,7 +392,7 @@ def run_train(
 
     atomic_build_new_file(model_path, write_model, immutable=True)
     body = {
-        "schema": "round0092-train-receipt-v1",
+        "schema": "round0101-train-receipt-v1",
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
         "tier": TIER,
@@ -424,11 +424,11 @@ def run_job(
     job: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if active.get("manifest", {}).get("round_id") != ROUND_ID:
-        raise RuntimeError("R0092 trainer received another queue")
+        raise RuntimeError("R0101 trainer received another queue")
     selected = job if job is not None else active.get("job") or {}
     if (
         selected.get("action") != "train_balanced_150m"
         or len(selected.get("outputs") or []) != 1
     ):
-        raise RuntimeError("R0092 accepts one train job")
+        raise RuntimeError("R0101 accepts one train job")
     return run_train(active, selected)
