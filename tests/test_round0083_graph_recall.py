@@ -112,6 +112,26 @@ def test_sensitivity_classification_is_ordered_by_measured_recall() -> None:
     )["verdict"] == "nonmonotonic-map-outcome-requires-follow-up"
 
 
+def test_noninferiority_decides_on_unrounded_values() -> None:
+    baseline = {
+        "ffr": 0.48,
+        "purity_k256": 1.05,
+        "purity_k1024": 0.88,
+        "projection_ffr": 0.44,
+    }
+    treatment = {
+        metric: baseline[metric] - margin
+        for metric, margin in round0083_nodes.NONINFERIORITY_MARGINS.items()
+    }
+    comparison = round0083_nodes._noninferiority(treatment, baseline)
+    assert all(item["passed"] for item in comparison.values())
+
+    # Six-decimal decision rounding would turn this real 4e-7 miss into a pass.
+    treatment["ffr"] -= 0.0000004
+    comparison = round0083_nodes._noninferiority(treatment, baseline)
+    assert comparison["ffr"]["passed"] is False
+
+
 def test_queue_has_two_fixed_graph_train_panel_cells() -> None:
     source = inspect.getsource(
         prepare_round0083_queue.prepare_round0083

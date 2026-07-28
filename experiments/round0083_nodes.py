@@ -783,6 +783,26 @@ def _metrics(panel: Mapping[str, Any]) -> dict[str, float]:
     }
 
 
+def _noninferiority(
+    treatment: Mapping[str, float],
+    baseline: Mapping[str, float],
+) -> dict[str, Any]:
+    """Apply registered margins to raw values; rounding is reporting-only."""
+    result: dict[str, Any] = {}
+    for metric, margin in NONINFERIORITY_MARGINS.items():
+        baseline_value = float(baseline[metric])
+        treatment_value = float(treatment[metric])
+        delta = treatment_value - baseline_value
+        result[metric] = {
+            "baseline": baseline_value,
+            "treatment": treatment_value,
+            "delta": delta,
+            "maximum_allowed_decrease": margin,
+            "passed": treatment_value >= baseline_value - margin,
+        }
+    return result
+
+
 def _load_panel(
     path: str,
     *,
@@ -883,16 +903,7 @@ def run_comparison(
     for nprobe in NPROBES:
         panel = treatments[nprobe]
         metrics = _metrics(panel)
-        noninferiority: dict[str, Any] = {}
-        for metric, margin in NONINFERIORITY_MARGINS.items():
-            delta = round(metrics[metric] - baseline_metrics[metric], 6)
-            noninferiority[metric] = {
-                "baseline": baseline_metrics[metric],
-                "treatment": metrics[metric],
-                "delta": delta,
-                "maximum_allowed_decrease": margin,
-                "passed": delta >= -margin,
-            }
+        noninferiority = _noninferiority(metrics, baseline_metrics)
         checks = dict(panel.get("decision_checks") or {})
         non_density_checks = {
             key: value
