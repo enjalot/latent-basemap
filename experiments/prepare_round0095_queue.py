@@ -65,24 +65,27 @@ def _require_issued_round() -> str:
 def _require_review(
     path: str,
     *,
+    label: str,
     expected_sha256: str,
     required_text: tuple[str, ...],
 ) -> dict[str, Any]:
     if _frontmatter_status(path) not in {"accepted", "partial", "rejected"}:
-        raise RuntimeError("R0094 review is not terminal")
+        raise RuntimeError(f"{label} review is not terminal")
     signature = expected_input_signature(path)
     if signature["sha256"] != expected_sha256:
-        raise RuntimeError("R0094 review bytes changed")
+        raise RuntimeError(f"{label} review bytes changed")
     with open(path, encoding="utf-8") as handle:
         text = handle.read()
     if any(value not in text for value in required_text):
-        raise RuntimeError("R0094 review does not release corrected audit")
+        raise RuntimeError(f"{label} review does not release corrected audit")
     return signature
 
 
 def prepare_round0095(
     *,
     release_sha: str,
+    r0093_review_path: str,
+    r0093_review_sha256: str,
     r0094_review_path: str,
     r0094_review_sha256: str,
     r0094_qualification_path: str,
@@ -104,8 +107,19 @@ def prepare_round0095(
     round_file = _require_issued_round()
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0095 release SHA must be one full commit")
-    review = _require_review(
+    review_0093 = _require_review(
+        r0093_review_path,
+        label="R0093",
+        expected_sha256=r0093_review_sha256,
+        required_text=(
+            "0095",
+            "Pile `[100M,150M)`",
+            SAMPLE_SHA256,
+        ),
+    )
+    review_0094 = _require_review(
         r0094_review_path,
+        label="R0094",
         expected_sha256=r0094_review_sha256,
         required_text=(
             "0095",
@@ -170,7 +184,8 @@ def prepare_round0095(
     ]
     inputs = _dedupe([
         expected_input_signature(round_file),
-        review,
+        review_0093,
+        review_0094,
         r0094["signature"],
         split_signature,
         r0093_qualification,
@@ -192,7 +207,7 @@ def prepare_round0095(
     manifest["schema"] = "round0095-unbiased-search-audit-queue-v1"
     manifest["repo_root"] = RELEASE_ROOT
     manifest["queue_class"] = "gpu-research"
-    manifest["required_reviews"] = ["0094"]
+    manifest["required_reviews"] = ["0093", "0094"]
     manifest["capability_dependencies"] = []
     manifest["capabilities_produced"] = [
         "minilm-balanced-150m-unbiased-search-audit-v1",
@@ -264,6 +279,8 @@ def prepare_round0095(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-sha", required=True)
+    parser.add_argument("--r0093-review", required=True)
+    parser.add_argument("--r0093-review-sha256", required=True)
     parser.add_argument("--r0094-review", required=True)
     parser.add_argument("--r0094-review-sha256", required=True)
     parser.add_argument("--r0094-qualification", required=True)
@@ -288,6 +305,8 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps({
         "queue_manifest": prepare_round0095(
             release_sha=args.release_sha,
+            r0093_review_path=args.r0093_review,
+            r0093_review_sha256=args.r0093_review_sha256,
             r0094_review_path=args.r0094_review,
             r0094_review_sha256=args.r0094_review_sha256,
             r0094_qualification_path=args.r0094_qualification,
