@@ -29,7 +29,7 @@ GLOBAL_MEAN_FLOOR = 0.90
 PER_CORPUS_MEAN_FLOOR = 0.84
 POLICY_GRID = tuple(
     (nprobe, width)
-    for width in (512, 1_024, 1_536, 2_048)
+    for width in (512, 1_024, 1_536, 2_047)
     for nprobe in (128, 256, 512, 768)
 )
 CORPUS_RANGES = {

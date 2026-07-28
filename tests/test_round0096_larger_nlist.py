@@ -22,6 +22,7 @@ def test_registered_geometry_is_one_deliberate_four_x_step() -> None:
     assert TRAIN_ROWS == 40 * NLIST
     assert len(POLICY_GRID) == 16
     assert len(set(POLICY_GRID)) == len(POLICY_GRID)
+    assert max(width for _nprobe, width in POLICY_GRID) + 1 == 2_048
     assert GLOBAL_MEAN_FLOOR == 0.90
     assert PER_CORPUS_MEAN_FLOOR == 0.84
 
