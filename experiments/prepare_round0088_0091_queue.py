@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import re
 import sys
@@ -344,12 +345,12 @@ def prepare_assembly_queue(
     substrate_sha256: str,
     part_roots: dict[str, str] | None = None,
     queue_root: str = (
-        "/data/latent-basemap/runs/round-0091/queue"
+        "/data/latent-basemap/runs/round-0100/queue"
     ),
 ) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("assembly release SHA must be one full commit")
-    round_file = os.path.join(LAB_ROOT, "round-0091-2026-07-28.md")
+    round_file = os.path.join(LAB_ROOT, "round-0100-2026-07-28.md")
     _require_issued_round(round_file)
     substrate = validate_staged_substrate(
         SUBSTRATE, expected_sha256=substrate_sha256
@@ -360,13 +361,17 @@ def prepare_assembly_queue(
     parts: dict[str, dict[str, Any]] = {}
     reviews: dict[str, dict[str, Any]] = {}
     shard_receipts: list[dict[str, Any]] = []
+    shard_targets: list[dict[str, Any]] = []
     for corpus, round_id in ROUND_BY_CORPUS.items():
         part_path = os.path.join(roots[corpus], "part-receipt.json")
         parts[corpus] = validate_part_receipt(
             part_path,
             expected_sha256=part_receipt_sha256[corpus],
         )
-        capability = f"capability:minilm-balanced-150m-graph-part-{corpus}-v1"
+        capability = (
+            "capability:minilm-balanced-150m-ivf32768-"
+            f"graph-part-{corpus}-v1"
+        )
         reviews[corpus] = _require_review(
             review_paths[corpus],
             expected_sha256=review_sha256[corpus],
@@ -384,9 +389,24 @@ def prepare_assembly_queue(
                 f"{corpus} has {len(receipt_paths)} shard receipts, "
                 f"expected {expected_count}"
             )
-        shard_receipts.extend(
-            expected_input_signature(path) for path in receipt_paths
-        )
+        for path in receipt_paths:
+            receipt_signature = expected_input_signature(path)
+            with open(path, encoding="utf-8") as handle:
+                receipt = json.load(handle)
+            target = receipt.get("targets")
+            if not isinstance(target, dict):
+                raise Round0088Error(
+                    f"{corpus} shard receipt lacks a target signature"
+                )
+            observed_target = expected_input_signature(
+                str(target.get("canonical_path", ""))
+            )
+            if observed_target != target:
+                raise Round0088Error(
+                    f"{corpus} shard target bytes changed"
+                )
+            shard_receipts.append(receipt_signature)
+            shard_targets.append(observed_target)
     inputs = _dedupe([
         expected_input_signature(round_file),
         substrate["signature"],
@@ -394,9 +414,10 @@ def prepare_assembly_queue(
         *reviews.values(),
         *(value["signature"] for value in parts.values()),
         *shard_receipts,
+        *shard_targets,
     ])
     root = create_fresh_directory(
-        queue_root, label="Round 0091 graph assembly queue"
+        queue_root, label="Round 0100 graph assembly queue"
     )
     artifacts = ensure_data_directory(os.path.join(root, "artifacts"))
     output = os.path.join(artifacts, "canonical-graph-balanced-150m")
@@ -409,16 +430,16 @@ def prepare_assembly_queue(
         execution_authority="autonomous-cpu",
         gpu=False,
     )
-    manifest["schema"] = "round0091-balanced-150m-assembly-queue-v1"
+    manifest["schema"] = "round0100-balanced-150m-assembly-queue-v1"
     manifest["repo_root"] = RELEASE_ROOT
     manifest["queue_class"] = "cpu"
-    manifest["required_reviews"] = ["0088", "0089", "0090"]
+    manifest["required_reviews"] = ["0097", "0098", "0099"]
     manifest["capability_dependencies"] = [
-        f"minilm-balanced-150m-graph-part-{corpus}-v1"
+        f"minilm-balanced-150m-ivf32768-graph-part-{corpus}-v1"
         for corpus in CORPUS_SPECS
     ]
     manifest["capabilities_produced"] = [
-        "minilm-balanced-150m-gpu-native-graph-v1"
+        "minilm-balanced-150m-ivf32768-canonical-graph-v1"
     ]
     manifest["training_performed"] = False
     manifest["reviewed_inputs"] = {
@@ -497,7 +518,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     assembly.add_argument(
         "--queue-root",
-        default="/data/latent-basemap/runs/round-0091/queue",
+        default="/data/latent-basemap/runs/round-0100/queue",
     )
     args = parser.parse_args(argv)
     if args.command == "part":

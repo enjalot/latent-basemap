@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,7 @@ from basemap.round0088_graph import (
     validate_qualification,
 )
 from experiments import round0088_nodes as nodes
+from experiments import prepare_round0088_0091_queue as prepare
 
 
 def _write_json(path: Path, value: dict) -> str:
@@ -345,3 +347,11 @@ def test_small_three_part_assembly_preserves_global_order(
     )
     assert np.array_equal(target_values, np.concatenate(expected))
     assert degree_values.tolist() == [15, 15, 15, 0, 15, 15]
+
+
+def test_r0100_queue_declares_every_shard_target_as_an_input() -> None:
+    source = inspect.getsource(prepare.prepare_assembly_queue)
+    assert "shard_targets" in source
+    assert "observed_target != target" in source
+    assert "*shard_targets" in source
+    assert '"required_reviews"] = ["0097", "0098", "0099"]' in source

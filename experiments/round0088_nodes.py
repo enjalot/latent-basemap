@@ -583,7 +583,15 @@ def run_assemble(
         for corpus in CORPUS_SPECS
     }
     qualifications = {
-        value["receipt"]["gpu_qualification"]["sha256"]
+        value["receipt"]["search_qualification"]["sha256"]
+        for value in parts.values()
+    }
+    decisions = {
+        value["receipt"]["search_decision"]["sha256"]
+        for value in parts.values()
+    }
+    indexes = {
+        value["receipt"]["index"]["sha256"]
         for value in parts.values()
     }
     policies = {
@@ -602,6 +610,8 @@ def run_assemble(
     ]
     if (
         len(qualifications) != 1
+        or len(decisions) != 1
+        or len(indexes) != 1
         or len(policies) != 1
         or substrates != {substrate["signature"]["sha256"]}
         or any(value != qualities[0] for value in qualities[1:])
@@ -610,7 +620,7 @@ def run_assemble(
     nprobe, search_width = next(iter(policies))
     output = create_fresh_directory(
         str(job["outputs"][0]),
-        label="R0091 canonical balanced-150M graph",
+        label="R0100 canonical balanced-150M graph",
     )
     targets, degrees = _assemble_part_roots(
         output=output,
@@ -662,6 +672,9 @@ def run_assemble(
         },
         "candidate_generator": {
             "index_type": "GpuIndexIVFPQ",
+            "nlist": NLIST,
+            "pq_m": 48,
+            "pq_bits": 8,
             "source_index_rows": SOURCE_ROWS,
             "physically_filtered_index_rows": RETAINED_ROWS,
             "nprobe": nprobe,
