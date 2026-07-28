@@ -174,8 +174,9 @@ def prepare_round0093(
             r0086_review_path,
             expected_sha256=r0086_review_sha256,
             required_text=(
-                "capability:minilm-balanced-150m-int8-input-v1",
                 r0086_qualification_sha256,
+                substrate_manifest_sha256,
+                filter_receipt_sha256,
                 filtered_index_sha256,
             ),
         ),
@@ -218,7 +219,6 @@ def prepare_round0093(
     manifest["capability_dependencies"] = [
         "minilm-30m-graph-recall-sensitivity-v1",
         "minilm-balanced-90m-seed43-sensitivity-v1",
-        "minilm-balanced-150m-int8-input-v1",
     ]
     manifest["capabilities_produced"] = [
         "minilm-graph-recall-operational-floor-0p84-v1",

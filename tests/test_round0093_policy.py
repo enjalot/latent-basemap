@@ -428,3 +428,8 @@ def test_preparer_materializes_exact_one_node_contract(
         filter_receipt["canonical_path"],
         runtime["canonical_path"],
     }
+    source = inspect.getsource(prepare_round0093_queue.prepare_round0093)
+    assert "substrate_manifest_sha256" in source
+    assert "filter_receipt_sha256" in source
+    assert "filtered_index_sha256" in source
+    assert "minilm-balanced-150m-int8-input-v1" not in source
