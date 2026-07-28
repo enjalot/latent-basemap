@@ -198,7 +198,7 @@ def prepare_part_queue(
             "capability:minilm-balanced-150m-ivf32768-search-qualified-v1",
             index_sha256,
             index_receipt_sha256,
-            substrate_sha256,
+            "substrate `e5ad...`",
             qualification_sha256,
             decision_sha256,
             f"R{round_id}",
