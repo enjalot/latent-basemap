@@ -183,8 +183,8 @@ def prepare_part_queue(
         expected_sha256=r0086_review_sha256,
         required_text=(
             "capability:minilm-balanced-150m-int8-input-v1",
-            "capability:minilm-balanced-150m-gpu-ivfpq-search-qualified-v1",
             substrate_sha256,
+            filter_receipt_sha256,
             filtered_index_sha256,
         ),
     )

@@ -297,6 +297,11 @@ def test_part_queue_binds_reviewed_r0093_decision() -> None:
     assert 'manifest["required_reviews"] = ["0086", "0093"]' in source
     assert "minilm-graph-recall-operational-floor-0p84-v1" in source
     assert "search-qualified-low-recall-v1" in source
+    assert (
+        '"capability:minilm-balanced-150m-gpu-ivfpq-search-qualified-v1"'
+        not in source
+    )
+    assert "filter_receipt_sha256" in source
     assert '"policy_decision": staged["policy_decision"]["signature"]' in source
     node_source = inspect.getsource(nodes.run_build_part)
     assert "load_r0093_decision" in node_source
