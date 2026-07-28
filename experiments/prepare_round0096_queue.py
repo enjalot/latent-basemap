@@ -375,6 +375,7 @@ def prepare_round0096(
         qualification_receipt = assembled_receipt
         prior_fields: dict[str, Any] = {}
     else:
+        jobs = []
         qualification_deps = []
         qualification_index = prior["index"]["canonical_path"]
         qualification_receipt = prior["index_receipt"]["canonical_path"]
