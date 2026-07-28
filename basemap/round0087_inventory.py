@@ -99,14 +99,34 @@ def inspect_shard(path: str) -> dict[str, Any]:
         )
     signature = expected_input_signature(path)
     expected_bytes = int(array.shape[0]) * DIMENSION * DTYPE.itemsize
-    if signature["bytes"] <= expected_bytes:
-        raise Round0087Error(f"{path} has an invalid NumPy header/payload")
+    payload_offset = int(getattr(array, "offset", -1))
+    if (
+        payload_offset <= 0
+        or signature["bytes"] != payload_offset + expected_bytes
+    ):
+        raise Round0087Error(
+            f"{path} has trailing or incomplete bytes outside its NumPy payload"
+        )
     return {
         **signature,
         "rows": int(array.shape[0]),
         "dimension": DIMENSION,
         "dtype": DTYPE.str,
     }
+
+
+def _invalid_shard(path: Path, error: BaseException) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "canonical_path": str(path.resolve()),
+        "error_type": type(error).__name__,
+        "error": str(error),
+    }
+    try:
+        record["file"] = expected_input_signature(str(path))
+    except (OSError, ValueError) as signature_error:
+        record["file"] = None
+        record["signature_error"] = str(signature_error)
+    return record
 
 
 def inventory_datasets(
@@ -123,11 +143,19 @@ def inventory_datasets(
                 expected_input_signature(str(item))
                 for item in sorted(path.rglob("manifest.json"))
             ]
-        shards = [inspect_shard(str(item)) for item in shard_paths]
+        shards: list[dict[str, Any]] = []
+        invalid_shards: list[dict[str, Any]] = []
+        for item in shard_paths:
+            try:
+                shards.append(inspect_shard(str(item)))
+            except (OSError, ValueError, EOFError, Round0087Error) as error:
+                invalid_shards.append(_invalid_shard(item, error))
         inventory[name] = {
             "dataset": name,
             "root": str(path.resolve()),
             "shards": shards,
+            "invalid_shards": invalid_shards,
+            "enumerated_shard_count": len(shard_paths),
             "auxiliary_manifests": auxiliary,
             "rows": sum(int(item["rows"]) for item in shards),
             "bytes": sum(int(item["bytes"]) for item in shards),

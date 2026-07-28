@@ -6,12 +6,15 @@ import numpy as np
 
 from basemap.round0087_inventory import (
     ENGLISH_BUDGETS,
+    FINEWEB,
     MULTILINGUAL_BASE,
     MULTILINGUAL_REMAINDER,
     POLISH,
     TARGET_ROWS,
     build_selection,
     duplicate_census,
+    inspect_shard,
+    inventory_datasets,
     registered_budgets,
 )
 from experiments import prepare_round0087_queue, round0087_nodes
@@ -131,6 +134,34 @@ def test_duplicate_census_crosses_shard_boundaries_and_excludes_bad_rows(
     assert arrays["excluded_rows"].tolist() == [2, 3, 4, 6]
     assert census["summary"]["retained_row_count"] == 3
     assert census["summary"]["fingerprint_collision_splits"] == 0
+
+
+def test_inventory_itemizes_invalid_shards_and_rejects_trailing_bytes(
+    tmp_path,
+) -> None:
+    dataset = tmp_path / FINEWEB
+    dataset.mkdir()
+    good = dataset / "000.npy"
+    trailing = dataset / "001.npy"
+    np.save(good, np.ones((2, 768), dtype="<f2"))
+    np.save(trailing, np.ones((3, 768), dtype="<f2"))
+    with open(trailing, "ab") as handle:
+        handle.write(b"unregistered trailing bytes")
+
+    try:
+        inspect_shard(str(trailing))
+    except Exception as exc:
+        assert "trailing or incomplete bytes" in str(exc)
+    else:
+        raise AssertionError("trailing shard bytes were accepted")
+
+    inventory = inventory_datasets(tmp_path)
+    observed = inventory[FINEWEB]
+    assert observed["enumerated_shard_count"] == 2
+    assert len(observed["shards"]) == 1
+    assert observed["shards"][0]["rows"] == 2
+    assert len(observed["invalid_shards"]) == 1
+    assert observed["invalid_shards"][0]["file"]["bytes"] > 0
 
 
 def test_queue_is_one_cpu_io_heavy_nontraining_job() -> None:

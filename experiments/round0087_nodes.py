@@ -41,6 +41,14 @@ def run_inventory(
     selection = build_selection(inventory)
     catalog = reconcile_catalog(inventory, catalog_path=CATALOG_PATH)
     census = duplicate_census(selection)
+    invalid_shards = [
+        {
+            "dataset": name,
+            **item,
+        }
+        for name, dataset in inventory.items()
+        for item in dataset["invalid_shards"]
+    ]
     eligibility_path = os.path.join(
         output, "jina-diverse-25m-eligibility-v1.npz"
     )
@@ -63,6 +71,12 @@ def run_inventory(
         "release_sha": active["manifest"]["release_sha"],
         "embedding_prompt": "raw",
         "inventory": inventory,
+        "inventory_validation": {
+            "all_shards_valid": not invalid_shards,
+            "invalid_shard_count": len(invalid_shards),
+            "invalid_shards": invalid_shards,
+            "invalid_shards_excluded_from_selection": True,
+        },
         "selection": selection,
         "catalog_reconciliation": catalog,
         "duplicate_control": {
