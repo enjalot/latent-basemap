@@ -179,7 +179,8 @@ def prepare_part_queue(
         expected_sha256=r0025_review_sha256,
         required_text=(
             "capability:minilm-int8-shards-v1",
-            "2171e4bf3c21e7156435b4b4021ca62b2ef8a57d9404b2764e6e968d210b7090",
+            "150M int8 `2171e4bf...`",
+            "150M scales `d282d4f5...`",
         ),
     )
     review_0033 = _require_review(
