@@ -86,7 +86,7 @@ def _queries(
         or not np.isfinite(norms).all()
         or np.any(norms <= 0)
     ):
-        raise Round0081Error("balanced-120M policy queries are invalid")
+        raise Round0081Error(f"balanced-{TIER} policy queries are invalid")
     values /= norms
     return np.ascontiguousarray(values)
 
@@ -210,7 +210,7 @@ def run_qualification(
 
     output = create_fresh_directory(
         str(job["outputs"][0]),
-        label="Round 0081 balanced-120M policy qualification",
+        label=f"Round {ROUND_ID} balanced-{TIER} policy qualification",
     )
     substrate = validate_scale_substrate(
         str(job["substrate_manifest"]),
@@ -230,7 +230,9 @@ def run_qualification(
         len(excluded) != expected_excluded
         or ROW_COUNT - len(excluded) != expected_retained
     ):
-        raise Round0081Error("balanced-120M eligibility accounting changed")
+        raise Round0081Error(
+            f"balanced-{TIER} eligibility accounting changed"
+        )
     encoded = np.memmap(
         outputs["int8"]["canonical_path"],
         dtype=np.int8,
@@ -292,7 +294,9 @@ def run_qualification(
         or int(filtered.pq.M) != 48
         or int(filtered.pq.nbits) != 8
     ):
-        raise Round0081Error("reviewed 120M filtered index geometry changed")
+        raise Round0081Error(
+            f"reviewed {TIER} filtered index geometry changed"
+        )
 
     resources = faiss.StandardGpuResources()
     resources.setTempMemory(1 << 30)
@@ -369,7 +373,7 @@ def run_qualification(
         "runtime_matches": all(
             value is True for value in runtime["checks"].values()
         ),
-        "fixed_registered_120m_universe": (
+        f"fixed_registered_{TIER}_universe": (
             substrate["manifest"]["tier"] == TIER
             and substrate["manifest"]["row_count"] == ROW_COUNT
         ),
@@ -458,7 +462,7 @@ def run_qualification(
     del resources, gpu, filtered
     if not passed:
         raise Round0081Error(
-            "balanced-120M policy qualification failed: "
+            f"balanced-{TIER} policy qualification failed: "
             + ", ".join(receipt["failed_checks"])
         )
     return {
