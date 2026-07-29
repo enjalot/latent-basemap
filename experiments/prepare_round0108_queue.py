@@ -78,7 +78,7 @@ LABELS_PATH = (
     "jina-diverse-25m-full768-int8-substrate/labels.npz"
 )
 GRAPH_MANIFEST = (
-    "/data/latent-basemap/runs/round-0106/queue/artifacts/"
+    "/data/latent-basemap/runs/round-0106/queue-attempt-3/artifacts/"
     "canonical-fuzzy-graph/graph-manifest.json"
 )
 TRAIN_OUTPUT = (
@@ -87,7 +87,7 @@ TRAIN_OUTPUT = (
 )
 PART_OUTPUTS = {
     part: (
-        "/data/latent-basemap/runs/round-0106/queue/artifacts/"
+        "/data/latent-basemap/runs/round-0106/queue-attempt-3/artifacts/"
         f"graph-part-{part}"
     )
     for part in PARTS

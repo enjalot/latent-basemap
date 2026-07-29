@@ -19,6 +19,13 @@ from basemap.round0108_evaluation import (
     map_family_sizes,
     projection_metrics,
 )
+from experiments.prepare_round0108_queue import GRAPH_MANIFEST, PART_OUTPUTS
+
+
+def test_graph_inputs_bind_successful_r0106_attempt() -> None:
+    expected_root = "/round-0106/queue-attempt-3/artifacts/"
+    assert expected_root in GRAPH_MANIFEST
+    assert all(expected_root in path for path in PART_OUTPUTS.values())
 
 
 def _density_cell(point: float, sd: float, null: float) -> dict:
