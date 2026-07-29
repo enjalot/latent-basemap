@@ -156,6 +156,7 @@ def _gpu_options() -> Any:
     options = faiss.GpuClonerOptions()
     options.indicesOptions = faiss.INDICES_64_BIT
     options.useFloat16 = False
+    options.useFloat16LookupTables = True
     options.usePrecomputed = True
     return options
 
