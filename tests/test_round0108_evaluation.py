@@ -273,6 +273,38 @@ def test_registry_view_failure_is_sealed_but_does_not_fail_science(
     assert receipt["immutable_artifacts"]["atlas_decision"]["sha256"]
 
 
+def test_probe_ids_bind_one_unique_disjoint_id_to_each_embedding() -> None:
+    from experiments.round0108_nodes import _validated_probe_ids
+
+    corpus, queries, receipt = _validated_probe_ids(
+        np.asarray(["c0", "c1"]),
+        np.asarray(["q0"]),
+        corpus_rows=2,
+        query_rows=1,
+    )
+    assert corpus.tolist() == ["c0", "c1"]
+    assert queries.tolist() == ["q0"]
+    assert receipt["corpus"]["rows"] == 2
+    assert receipt["queries"]["rows"] == 1
+    assert receipt["disjoint"] is True
+
+    invalid = (
+        (np.asarray(["c0"]), np.asarray(["q0"]), 2, 1),
+        (np.asarray(["c0", "c0"]), np.asarray(["q0"]), 2, 1),
+        (np.asarray(["c0", "c1"]), np.asarray(["q0", "q0"]), 2, 2),
+        (np.asarray(["c0", "c1"]), np.asarray(["c1"]), 2, 1),
+        (np.asarray([["c0", "c1"]]), np.asarray(["q0"]), 2, 1),
+    )
+    for corpus_ids, query_ids, corpus_rows, query_rows in invalid:
+        with pytest.raises(Round0108Error):
+            _validated_probe_ids(
+                corpus_ids,
+                query_ids,
+                corpus_rows=corpus_rows,
+                query_rows=query_rows,
+            )
+
+
 def test_registry_view_success_requires_expected_round_map(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -465,6 +465,32 @@ def _id_identity(values: np.ndarray) -> dict[str, Any]:
     }
 
 
+def _validated_probe_ids(
+    corpus_ids: np.ndarray,
+    query_ids: np.ndarray,
+    *,
+    corpus_rows: int,
+    query_rows: int,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    corpus = np.asarray(corpus_ids)
+    queries = np.asarray(query_ids)
+    if corpus.ndim != 1 or queries.ndim != 1:
+        raise Round0108Error("probe IDs must be one-dimensional")
+    if len(corpus) != corpus_rows or len(queries) != query_rows:
+        raise Round0108Error("probe ID counts do not match embedding rows")
+    if len(np.unique(corpus)) != len(corpus):
+        raise Round0108Error("probe corpus IDs are not unique")
+    if len(np.unique(queries)) != len(queries):
+        raise Round0108Error("probe query IDs are not unique")
+    if len(np.intersect1d(corpus, queries)) != 0:
+        raise Round0108Error("probe corpus/query IDs overlap")
+    return corpus, queries, {
+        "corpus": _id_identity(corpus),
+        "queries": _id_identity(queries),
+        "disjoint": True,
+    }
+
+
 def run_core_score(
     _active: Mapping[str, Any],
     job: Mapping[str, Any],
@@ -784,6 +810,12 @@ def _probe_score(
     started = time.monotonic()
     corpus_values = np.asarray(corpus)
     query_values = np.asarray(queries)
+    corpus_id_values, query_id_values, selection = _validated_probe_ids(
+        corpus_ids,
+        query_ids,
+        corpus_rows=len(corpus_values),
+        query_rows=len(query_values),
+    )
     duplicate_control = exact_split_duplicate_diagnostics(
         corpus_values, query_values
     )
@@ -833,8 +865,8 @@ def _probe_score(
             immutable=True,
             probe_corpus_coords=corpus_coordinates,
             probe_query_coords=query_coordinates,
-            probe_corpus_ids=np.asarray(corpus_ids),
-            probe_query_ids=np.asarray(query_ids),
+            probe_corpus_ids=corpus_id_values,
+            probe_query_ids=query_id_values,
             exact_high_d_top10=truth,
             low_d_top50=np.asarray(low[:, :K_LOW_MAX], dtype=np.int64),
         )
@@ -862,11 +894,7 @@ def _probe_score(
             **truth_guard,
             "ordered_top10_sha256": ordered_array_sha256(truth),
         },
-        "selection": {
-            "corpus": _id_identity(np.asarray(corpus_ids)),
-            "queries": _id_identity(np.asarray(query_ids)),
-            "disjoint": len(np.intersect1d(corpus_ids, query_ids)) == 0,
-        },
+        "selection": selection,
         "coordinates": artifact,
         "inputs": dict(inputs),
         "duplicate_control": {
