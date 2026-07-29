@@ -435,6 +435,7 @@ def run_stage(
             "dtype": "|u1",
             "shape": [TARGET_ROWS],
             "vocabulary": labels["vocabulary"],
+            "counts": labels["counts"],
         },
         "quantization": {
             "method": (

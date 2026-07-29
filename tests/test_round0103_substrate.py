@@ -182,6 +182,22 @@ def test_compact_labels_preserve_dataset_english_and_language_identity() -> None
         "eng_Latn",
         "arb_Arab",
     ]
+    assert labels["counts"]["dataset"] == {
+        FINEWEB: 2,
+        REDPAJAMA: 2,
+        PILE: 2,
+        language: 2,
+    }
+    assert labels["counts"]["english_corpus"] == {
+        "not-english-source": 2,
+        FINEWEB: 2,
+        REDPAJAMA: 2,
+        PILE: 2,
+    }
+    assert labels["counts"]["language"] == {
+        "eng_Latn": 6,
+        "arb_Arab": 2,
+    }
 
 
 def test_queue_is_one_cpu_only_nonoverlapping_stage() -> None:

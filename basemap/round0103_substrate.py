@@ -258,6 +258,12 @@ def build_label_arrays(
     dataset_ids = np.full(row_count, 255, dtype=np.uint8)
     english_corpus_ids = np.full(row_count, 255, dtype=np.uint8)
     language_ids = np.full(row_count, 255, dtype=np.uint8)
+    dataset_counts = {label: 0 for label in source_order}
+    english_counts = {
+        label: 0
+        for label in ["not-english-source", *ENGLISH_DATASETS]
+    }
+    language_counts = {label: 0 for label in language_labels}
     cursor = 0
     for item in ranges:
         start = int(item.get("global_row_start", -1))
@@ -274,6 +280,15 @@ def build_label_arrays(
         language_ids[start:stop] = language_code[
             languages_by_dataset[dataset]
         ]
+        count = stop - start
+        dataset_counts[dataset] += count
+        english_label = (
+            dataset
+            if dataset in ENGLISH_DATASETS
+            else "not-english-source"
+        )
+        english_counts[english_label] += count
+        language_counts[languages_by_dataset[dataset]] += count
         cursor = stop
     if (
         cursor != row_count
@@ -295,5 +310,10 @@ def build_label_arrays(
                 *ENGLISH_DATASETS,
             ],
             "language": language_labels,
+        },
+        "counts": {
+            "dataset": dataset_counts,
+            "english_corpus": english_counts,
+            "language": language_counts,
         },
     }
