@@ -15,6 +15,7 @@ from basemap.round0107_training import (
     successful_update_target,
     train_config,
 )
+from experiments.prepare_round0107_queue import GRAPH_MANIFEST
 
 
 class _FakeDataset:
@@ -74,6 +75,13 @@ def test_update_horizon_is_exact_integer_ceiling():
     assert successful_update_target(750_000_000) == 1_833_741
     with pytest.raises(Round0107Error):
         successful_update_target(0)
+
+
+def test_graph_input_binds_successful_r0106_attempt():
+    assert GRAPH_MANIFEST.endswith(
+        "/round-0106/queue-attempt-3/artifacts/"
+        "canonical-fuzzy-graph/graph-manifest.json"
+    )
 
 
 def test_performance_window_count_tracks_dynamic_horizon():
