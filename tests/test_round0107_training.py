@@ -97,6 +97,7 @@ def test_uniform_envelope_rejection_is_weight_proportional():
     assert fraction_heavy == pytest.approx(0.9, abs=0.01)
     stamp = sampler.execution_stamp()
     assert stamp["weight_sampler"] == "uniform-envelope-rejection-max-weight-one"
+    assert stamp["weight_uniform_dtype"] == "<f8"
     assert 0 < stamp["weight_acceptance_rate"] < 1
     assert stamp["weight_emitted_draws"] == len(draws)
     assert (
@@ -163,6 +164,10 @@ def test_train_config_binds_topology_derived_horizon():
     )
     assert config["optimizer"]["successful_positive_lr_updates"] == 3
     assert config["execution"]["required_pipeline"] == PIPELINE
+    assert (
+        config["execution"]["expected_pipeline_stamp"]["weight_uniform_dtype"]
+        == "<f8"
+    )
     assert len(digest) == 64
 
 
