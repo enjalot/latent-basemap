@@ -67,6 +67,7 @@ from basemap.round0108_evaluation import (
     Round0108Error,
     core_geometry_decision,
     exact_cosine_topk,
+    exact_split_duplicate_diagnostics,
     headline_ood_decision,
     identity_for_rows,
     jina_density_floor,
@@ -778,10 +779,27 @@ def _probe_score(
     output: str,
     inputs: Mapping[str, Any],
     save_coordinates: bool,
+    duplicate_policy: str,
 ) -> dict[str, Any]:
     started = time.monotonic()
     corpus_values = np.asarray(corpus)
     query_values = np.asarray(queries)
+    duplicate_control = exact_split_duplicate_diagnostics(
+        corpus_values, query_values
+    )
+    if duplicate_policy not in {
+        "require-corpus-query-exact-family-disjoint",
+        "diagnostic-only",
+    }:
+        raise Round0108Error("unknown probe duplicate policy")
+    if (
+        duplicate_policy
+        == "require-corpus-query-exact-family-disjoint"
+        and not duplicate_control["corpus_query_exact_family_disjoint"]
+    ):
+        raise Round0108Error(
+            f"{name} exact embedding family crosses corpus/query split"
+        )
     truth, truth_guard = exact_cosine_topk(
         query_values, corpus_values, k=K_HIT
     )
@@ -851,6 +869,16 @@ def _probe_score(
         },
         "coordinates": artifact,
         "inputs": dict(inputs),
+        "duplicate_control": {
+            **duplicate_control,
+            "policy": duplicate_policy,
+            "passed": (
+                duplicate_control["corpus_query_exact_family_disjoint"]
+                if duplicate_policy
+                == "require-corpus-query-exact-family-disjoint"
+                else None
+            ),
+        },
         "projection_ffr_role": "diagnostic-only",
         "wall_seconds": time.monotonic() - started,
     }
@@ -929,6 +957,9 @@ def run_ood(
                     ),
                 },
                 save_coordinates=language == POLISH,
+                duplicate_policy=(
+                    "require-corpus-query-exact-family-disjoint"
+                ),
             )
             language_metrics[language] = report["probe"]
             language_artifacts[language] = report
@@ -1115,6 +1146,7 @@ def run_ood(
                 "dimension": DIMENSION,
             },
             save_coordinates=True,
+            duplicate_policy="diagnostic-only",
         )
         del dad_corpus, dad_queries
 
@@ -1146,6 +1178,7 @@ def run_ood(
                 "dimension": DIMENSION,
             },
             save_coordinates=True,
+            duplicate_policy="diagnostic-only",
         )
         del fw_corpus, fw_queries
 
@@ -1184,6 +1217,7 @@ def run_ood(
             "dimension": DIMENSION,
         },
         save_coordinates=True,
+        duplicate_policy="diagnostic-only",
     )
 
     transform_path = os.path.join(
@@ -1205,6 +1239,7 @@ def run_ood(
                 "inputs": report["inputs"],
                 "truth": report["truth"],
                 "selection": report["selection"],
+                "duplicate_control": report["duplicate_control"],
                 "verdict": "diagnostic-only",
             }
             for name, report in diagnostic_reports.items()

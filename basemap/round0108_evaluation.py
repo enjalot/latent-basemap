@@ -225,6 +225,91 @@ def fixed_probe_split(
     return corpus_rows, query_rows
 
 
+def exact_split_duplicate_diagnostics(
+    corpus: np.ndarray,
+    queries: np.ndarray,
+) -> dict[str, Any]:
+    """Byte-verify exact families and whether any cross the probe split."""
+    left = np.asarray(corpus)
+    right = np.asarray(queries)
+    if (
+        left.ndim != 2
+        or right.ndim != 2
+        or left.shape[1:] != right.shape[1:]
+        or left.shape[1] <= 0
+        or left.dtype != right.dtype
+        or left.dtype.kind != "f"
+        or left.dtype.itemsize not in {2, 4, 8}
+    ):
+        raise Round0108Error("probe duplicate-audit inputs are malformed")
+
+    # Identical rows must match at these positions.  Grouping on this compact
+    # necessary condition keeps the audit cheap; every candidate group is
+    # then split by complete row bytes, so projection collisions cannot create
+    # false exact families and exact families cannot be missed.
+    positions = np.unique(
+        np.linspace(0, left.shape[1] - 1, 32, dtype=np.int64)
+    )
+    uint_dtype = np.dtype(f"u{left.dtype.itemsize}")
+    fingerprints = np.concatenate(
+        (
+            np.ascontiguousarray(left[:, positions]).view(uint_dtype),
+            np.ascontiguousarray(right[:, positions]).view(uint_dtype),
+        ),
+        axis=0,
+    )
+    _keys, inverse, counts = np.unique(
+        fingerprints, axis=0, return_inverse=True, return_counts=True
+    )
+    candidate_groups = np.flatnonzero(counts > 1)
+    exact_family_count = 0
+    exact_family_rows = 0
+    maximum_family_size = 1
+    cross_split_family_count = 0
+    query_rows_with_exact_corpus_copy = 0
+    collision_splits = 0
+    corpus_rows = len(left)
+
+    def row_bytes(index: int) -> bytes:
+        if index < corpus_rows:
+            return np.asarray(left[index]).tobytes(order="C")
+        return np.asarray(right[index - corpus_rows]).tobytes(order="C")
+
+    for candidate_id in candidate_groups:
+        members = np.flatnonzero(inverse == candidate_id)
+        exact: dict[bytes, list[int]] = {}
+        for member in members.tolist():
+            exact.setdefault(row_bytes(member), []).append(member)
+        collision_splits += max(len(exact) - 1, 0)
+        for family in exact.values():
+            if len(family) < 2:
+                continue
+            exact_family_count += 1
+            exact_family_rows += len(family)
+            maximum_family_size = max(maximum_family_size, len(family))
+            left_count = sum(index < corpus_rows for index in family)
+            right_count = len(family) - left_count
+            if left_count and right_count:
+                cross_split_family_count += 1
+                query_rows_with_exact_corpus_copy += right_count
+
+    disjoint = cross_split_family_count == 0
+    return {
+        "identity": "complete stored-row bytes",
+        "candidate_projection_positions": positions.tolist(),
+        "candidate_repeated_groups": len(candidate_groups),
+        "candidate_collision_splits": collision_splits,
+        "exact_nontrivial_family_count": exact_family_count,
+        "rows_in_exact_nontrivial_families": exact_family_rows,
+        "maximum_exact_family_size": maximum_family_size,
+        "cross_split_exact_family_count": cross_split_family_count,
+        "query_rows_with_exact_corpus_copy": (
+            query_rows_with_exact_corpus_copy
+        ),
+        "corpus_query_exact_family_disjoint": disjoint,
+    }
+
+
 def recall_from_neighbors(
     truth: np.ndarray,
     observed: np.ndarray,

@@ -12,6 +12,7 @@ from basemap.round0108_evaluation import (
     POLISH,
     Round0108Error,
     core_geometry_decision,
+    exact_split_duplicate_diagnostics,
     fixed_probe_split,
     headline_ood_decision,
     jina_density_floor,
@@ -62,6 +63,40 @@ def test_fixed_probe_split_is_deterministic_disjoint_and_in_tail() -> None:
     assert len(first[1]) == 500
     assert int(first[0].min()) >= 835_454
     assert len(np.intersect1d(*first)) == 0
+
+
+def test_exact_duplicate_audit_distinguishes_within_and_cross_split_families(
+) -> None:
+    corpus = np.asarray(
+        [[1, 2, 3], [1, 2, 3], [4, 5, 6], [7, 8, 9]],
+        dtype=np.float16,
+    )
+    queries = np.asarray(
+        [[4, 5, 6], [10, 11, 12]], dtype=np.float16
+    )
+    report = exact_split_duplicate_diagnostics(corpus, queries)
+    assert report["exact_nontrivial_family_count"] == 2
+    assert report["rows_in_exact_nontrivial_families"] == 4
+    assert report["maximum_exact_family_size"] == 2
+    assert report["cross_split_exact_family_count"] == 1
+    assert report["query_rows_with_exact_corpus_copy"] == 1
+    assert report["corpus_query_exact_family_disjoint"] is False
+
+    clean = exact_split_duplicate_diagnostics(corpus, queries[1:])
+    assert clean["exact_nontrivial_family_count"] == 1
+    assert clean["cross_split_exact_family_count"] == 0
+    assert clean["corpus_query_exact_family_disjoint"] is True
+
+    collision = np.zeros((2, 64), dtype=np.float16)
+    sampled = set(np.linspace(0, 63, 32, dtype=np.int64).tolist())
+    unsampled = next(index for index in range(64) if index not in sampled)
+    collision[1, unsampled] = 1
+    split = exact_split_duplicate_diagnostics(
+        collision, np.ones((1, 64), dtype=np.float16)
+    )
+    assert split["candidate_repeated_groups"] == 1
+    assert split["candidate_collision_splits"] == 1
+    assert split["exact_nontrivial_family_count"] == 0
 
 
 def test_projection_metrics_keep_ffr_diagnostic_and_recall_ordered() -> None:
