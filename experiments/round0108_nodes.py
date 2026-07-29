@@ -46,6 +46,7 @@ from basemap.round0108_evaluation import (
     CROSS_ATLAS_CONTROL_SEED,
     DECISION_SCHEMA,
     DIMENSION,
+    EMBEDDING_PROMPT,
     FAMILY_SIZE_CUTOFF,
     FRACTION,
     HELDOUT_CORPUS_ROWS,
@@ -992,6 +993,8 @@ def run_ood(
     job: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Evaluate nineteen in-mix languages, held-out Polish, and map cards."""
+    if job.get("embedding_prompt") != EMBEDDING_PROMPT:
+        raise Round0108Error("R0108 raw embedding-prompt binding changed")
     output = create_fresh_directory(
         str(job["outputs"][0]), label="R0108 OOD evaluation"
     )
@@ -1037,7 +1040,12 @@ def run_ood(
                 inputs={
                     "source": source_spec,
                     "selection": selection_signature,
-                    "prompt_semantics": "R0087 production embedding convention",
+                    "embedding_prompt": EMBEDDING_PROMPT,
+                    "prompt_applied": False,
+                    "prompt_semantics": (
+                        "R0087 reviewed historical raw/unprompted convention; "
+                        "not the production Document: convention"
+                    ),
                     "dimension": DIMENSION,
                     "training_membership": (
                         "absent"
@@ -1231,7 +1239,11 @@ def run_ood(
                 "embeddings": dad_source,
                 "texts": job["diagnostic_sources"]["dadabase_texts"],
                 "selection": selection_signature,
-                "prompt_semantics": "Jina-v5-nano Dadabase embedding artifact",
+                "prompt_semantics": (
+                    "legacy Jina-v5-nano Dadabase artifact; prompt bytes are "
+                    "not independently sealed"
+                ),
+                "production_prompt_compatibility_claimed": False,
                 "dimension": DIMENSION,
             },
             save_coordinates=True,
@@ -1262,7 +1274,12 @@ def run_ood(
             inputs={
                 "embeddings": fineweb_source,
                 "selection": selection_signature,
-                "prompt_semantics": "R0087 FineWeb production convention",
+                "embedding_prompt": EMBEDDING_PROMPT,
+                "prompt_applied": False,
+                "prompt_semantics": (
+                    "R0087 reviewed historical raw/unprompted convention; "
+                    "not the production Document: convention"
+                ),
                 "training_membership": "dedicated FineWeb held-out artifact",
                 "dimension": DIMENSION,
             },
@@ -1302,7 +1319,11 @@ def run_ood(
             "query_embeddings": trec_query_spec,
             "corpus_ids": job["diagnostic_sources"]["trec_corpus_ids"],
             "query_ids": job["diagnostic_sources"]["trec_query_ids"],
-            "prompt_semantics": "Jina-v5-nano BEIR corpus/query conventions",
+            "prompt_semantics": (
+                "legacy Jina-v5-nano BEIR artifact conventions; prompt bytes "
+                "are not independently sealed"
+            ),
+            "production_prompt_compatibility_claimed": False,
             "dimension": DIMENSION,
         },
         save_coordinates=True,
@@ -1352,6 +1373,10 @@ def run_ood(
         "diagnostic_map_cards": diagnostic_reports,
         "universality_panel": expected_input_signature(panel_path),
         "projection_ffr_role": "diagnostic-only",
+        "embedding_prompt": EMBEDDING_PROMPT,
+        "prompt_applied": False,
+        "production_document_prompt_transfer_resolved": False,
+        "production_readiness_claimed": False,
         "universal_ood_claim_made": False,
         "training_performed": False,
         "wall_seconds": time.monotonic() - started,
@@ -1590,7 +1615,11 @@ def run_decision(
     )
     core_passed = bool((core.get("decision") or {}).get("passed"))
     ood_passed = bool((ood.get("headline_decision") or {}).get("passed"))
-    accepted = core_passed and ood_passed
+    raw_prompt_bound = (
+        ood.get("embedding_prompt") == EMBEDDING_PROMPT
+        and ood.get("prompt_applied") is False
+    )
+    accepted = core_passed and ood_passed and raw_prompt_bound
     receipt = seal({
         "schema": DECISION_SCHEMA,
         "round_id": ROUND_ID,
@@ -1608,7 +1637,12 @@ def run_decision(
             "core_geometry_passed": core_passed,
             "headline_polish_ood_passed": ood_passed,
             "projection_ffr_excluded_from_decision": True,
+            "raw_embedding_prompt_bound": raw_prompt_bound,
         },
+        "embedding_prompt": EMBEDDING_PROMPT,
+        "prompt_applied": False,
+        "production_document_prompt_transfer_resolved": False,
+        "production_readiness_claimed": False,
         "atlas_quality_capability_released": accepted,
         "map_registry_artifacts_complete": all(
             (ood.get("diagnostic_map_cards") or {}).get(name, {}).get(
@@ -1641,6 +1675,10 @@ def run_decision(
         "map_key": MAP_KEY,
         "map_label": MAP_LABEL,
         "training_round": "0107",
+        "embedding_prompt": EMBEDDING_PROMPT,
+        "prompt_applied": False,
+        "production_document_prompt_transfer_resolved": False,
+        "production_ready": False,
         "coordinates": expected_input_signature(
             os.path.join(
                 str(job["transform_output"]), "actual-transform.json"

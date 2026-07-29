@@ -640,6 +640,11 @@ def scan_round0108_atlas(
         or core.get("schema") != "round0108-diverse-jina-core-geometry-v1"
         or not isinstance(decision, dict)
         or decision.get("schema") != "round0108-diverse-jina-atlas-decision-v1"
+        or definition.get("embedding_prompt") != "raw"
+        or definition.get("prompt_applied") is not False
+        or definition.get("production_document_prompt_transfer_resolved")
+        is not False
+        or definition.get("production_ready") is not False
     ):
         return []
     queue = _load_json(queue_dir / "queue.json") or {}
@@ -667,6 +672,12 @@ def scan_round0108_atlas(
         "kernel": "legacy_lp",
         "pipeline": "R0107 weighted-host-int8/R0108 retained evaluation",
         "precision": "fp32-transform",
+        "embedding_prompt": definition.get("embedding_prompt"),
+        "prompt_applied": definition.get("prompt_applied"),
+        "production_document_prompt_transfer_resolved": definition.get(
+            "production_document_prompt_transfer_resolved"
+        ),
+        "production_ready": definition.get("production_ready") is True,
         "scientific_status": (
             "core-and-polish-ood-pass"
             if accepted else "failed-with-registered-diagnostics"

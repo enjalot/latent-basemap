@@ -38,6 +38,7 @@ from .round0107_training import (
 ROUND_ID = "0108"
 MAP_KEY = "r0107-diverse-jina-25m-seed42"
 MAP_LABEL = "r0107-diverse-jina-25m-seed42"
+EMBEDDING_PROMPT = "raw"
 
 PANEL_SEED = 108
 ANCHORS_PER_GROUP = 256

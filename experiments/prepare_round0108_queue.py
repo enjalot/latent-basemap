@@ -35,6 +35,7 @@ from basemap.round0108_evaluation import (
     CALIBRATION_BOOTSTRAP_SEED,
     CALIBRATION_NULL_DRAWS,
     CALIBRATION_NULL_SEED,
+    EMBEDDING_PROMPT,
     HELDOUT_SEED,
     IN_MIX_LANGUAGES,
     MAP_KEY,
@@ -364,6 +365,7 @@ def prepare_round0108(
     common = _dedupe([
         expected_input_signature(round_file),
         *reviews.values(),
+        inventory_signature,
         selection_signature,
     ])
     calibration_output = os.path.join(artifacts, "jina-density-calibration")
@@ -534,6 +536,7 @@ def prepare_round0108(
             "graph_manifest_sha256": graph_signature["sha256"],
             "language_sources": language_sources,
             "diagnostic_sources": diagnostics,
+            "embedding_prompt": EMBEDDING_PROMPT,
         },
         {
             "id": "decide_and_publish_registry",
@@ -590,6 +593,10 @@ def prepare_round0108(
     queue["training_performed"] = False
     queue["scientific_contract"] = {
         "map_key": MAP_KEY,
+        "embedding_prompt": EMBEDDING_PROMPT,
+        "prompt_applied": False,
+        "production_document_prompt_transfer_resolved": False,
+        "production_or_publishing_claim": False,
         "calibration": {
             "cells": ["R0037 full-768 seed42", "R0038 full-768 seed43"],
             "representative_census": expected_input_signature(

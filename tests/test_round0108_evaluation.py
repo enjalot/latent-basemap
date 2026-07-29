@@ -8,6 +8,7 @@ import pytest
 
 from basemap.round0105_search import GROUPS
 from basemap.round0108_evaluation import (
+    EMBEDDING_PROMPT,
     IN_MIX_LANGUAGES,
     POLISH,
     Round0108Error,
@@ -27,6 +28,13 @@ def test_graph_inputs_bind_successful_r0106_attempt() -> None:
     expected_root = "/round-0106/queue-attempt-3/artifacts/"
     assert expected_root in GRAPH_MANIFEST
     assert all(expected_root in path for path in PART_OUTPUTS.values())
+
+
+def test_diverse_atlas_prompt_is_explicitly_raw_not_production() -> None:
+    assert EMBEDDING_PROMPT == "raw"
+    source = Path("experiments/round0108_nodes.py").read_text()
+    assert "R0087 production embedding convention" not in source
+    assert "R0087 FineWeb production convention" not in source
 
 
 def test_directed_membership_gather_supports_eliminated_zero_weights() -> None:
@@ -231,6 +239,10 @@ def test_map_registry_discovers_explicit_round0108_atlas(
             "round_id": "0108",
             "map_key": "r0107-diverse-jina-25m-seed42",
             "map_label": "r0107-diverse-jina-25m-seed42",
+            "embedding_prompt": "raw",
+            "prompt_applied": False,
+            "production_document_prompt_transfer_resolved": False,
+            "production_ready": False,
         })
     )
     (artifacts / "coordinates" / "actual-transform.json").write_text(
@@ -267,6 +279,9 @@ def test_map_registry_discovers_explicit_round0108_atlas(
     assert maps[0]["dims"] == [768, 2]
     assert maps[0]["panel"]["ffr"] == 0.5
     assert maps[0]["capability_candidate"] is True
+    assert maps[0]["embedding_prompt"] == "raw"
+    assert maps[0]["prompt_applied"] is False
+    assert maps[0]["production_ready"] is False
 
 
 def test_registry_view_failure_is_sealed_but_does_not_fail_science(
