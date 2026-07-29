@@ -1296,16 +1296,30 @@ def _refresh_registry_best_effort(
     registry: dict[str, Any] | None = None
     map_ids: list[str] = []
     expected_map_id = f"round-{ROUND_ID}-{MAP_KEY}"
+    expected_projection_probes = {
+        "dadabase", "fineweb-heldout", "trec-covid"
+    }
+    observed_projection_probes: set[str] = set()
     try:
         registry = map_registry.scan()
-        map_ids = sorted(
-            str(item["map_id"])
+        round_entries = [
+            item
             for item in registry["maps"]
             if item.get("round_id") == ROUND_ID
+        ]
+        map_ids = sorted(
+            str(item["map_id"])
+            for item in round_entries
         )
+        observed_projection_probes = {
+            str((item.get("projection") or {}).get("probe"))
+            for item in round_entries
+            if item.get("kind") == "projection-map"
+        }
         stages["scan"] = {
             "status": "completed",
             "round_map_ids": map_ids,
+            "projection_probes": sorted(observed_projection_probes),
         }
     except Exception as exc:
         stages["scan"] = _registry_error("scan", exc)
@@ -1316,6 +1330,10 @@ def _refresh_registry_best_effort(
             "reason": "registry scan failed",
         }
         stages["publish_site"] = {
+            "status": "skipped",
+            "reason": "registry scan failed",
+        }
+        stages["site_artifacts"] = {
             "status": "skipped",
             "reason": "registry scan failed",
         }
@@ -1346,17 +1364,87 @@ def _refresh_registry_best_effort(
         except Exception as exc:
             stages["publish_site"] = _registry_error("publish_site", exc)
 
+        if stages["publish_site"]["status"] != "completed":
+            stages["site_artifacts"] = {
+                "status": "skipped",
+                "reason": "site publisher failed",
+            }
+        else:
+            try:
+                expected_projection_entries = {
+                    str((item.get("projection") or {}).get("probe")): item
+                    for item in registry["maps"]
+                    if (
+                        item.get("round_id") == ROUND_ID
+                        and item.get("kind") == "projection-map"
+                        and str((item.get("projection") or {}).get("probe"))
+                        in expected_projection_probes
+                    )
+                }
+                missing = []
+                base_page = (
+                    map_registry.SITE_DIR
+                    / f"round-{ROUND_ID}"
+                    / "index.html"
+                )
+                if not base_page.is_file():
+                    missing.append(str(base_page))
+                for probe in sorted(expected_projection_probes):
+                    entry = expected_projection_entries.get(probe)
+                    if entry is None:
+                        missing.append(f"registry projection probe:{probe}")
+                        continue
+                    root = (
+                        map_registry.SITE_DIR
+                        / "projections"
+                        / str(entry["map_id"])
+                    )
+                    for name in ("index.html", "manifest.json"):
+                        if not (root / name).is_file():
+                            missing.append(str(root / name))
+                stages["site_artifacts"] = {
+                    "status": "completed" if not missing else "failed",
+                    "expected_projection_probes": sorted(
+                        expected_projection_probes
+                    ),
+                    "missing": missing,
+                }
+            except Exception as exc:
+                stages["site_artifacts"] = _registry_error(
+                    "validate_site_artifacts", exc
+                )
+
     expected_map_discovered = expected_map_id in map_ids
+    expected_projections_discovered = (
+        expected_projection_probes <= observed_projection_probes
+    )
     stages["inventory_validation"] = {
-        "status": "completed" if expected_map_discovered else "failed",
+        "status": (
+            "completed"
+            if expected_map_discovered and expected_projections_discovered
+            else "failed"
+        ),
         "expected_map_id": expected_map_id,
         "expected_map_discovered": expected_map_discovered,
+        "expected_projection_probes": sorted(expected_projection_probes),
+        "observed_projection_probes": sorted(
+            observed_projection_probes
+        ),
+        "expected_projections_discovered": (
+            expected_projections_discovered
+        ),
     }
     view_published = (
         expected_map_discovered
         and all(
             stages[name]["status"] == "completed"
-            for name in ("scan", "write_mutable_registry", "publish_site")
+            for name in (
+                "scan",
+                "write_mutable_registry",
+                "publish_site",
+                "inventory_validation",
+                "site_artifacts",
+            )
         )
     )
     receipt = seal({
@@ -1367,6 +1455,7 @@ def _refresh_registry_best_effort(
             "atlas_decision": expected_input_signature(decision_path),
         },
         "expected_map_ids": [expected_map_id],
+        "expected_projection_probes": sorted(expected_projection_probes),
         "observed_round_map_ids": map_ids,
         "mutable_view_refresh": {
             "status": (

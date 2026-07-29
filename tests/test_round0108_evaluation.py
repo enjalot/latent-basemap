@@ -268,6 +268,7 @@ def test_registry_view_failure_is_sealed_but_does_not_fail_science(
     assert refresh["stages"]["scan"]["error_type"] == "builtins.RuntimeError"
     assert refresh["stages"]["write_mutable_registry"]["status"] == "skipped"
     assert refresh["stages"]["publish_site"]["status"] == "skipped"
+    assert refresh["stages"]["site_artifacts"]["status"] == "skipped"
     assert receipt["immutable_artifacts"]["map_definition"]["sha256"]
     assert receipt["immutable_artifacts"]["atlas_decision"]["sha256"]
 
@@ -292,7 +293,16 @@ def test_registry_view_success_requires_expected_round_map(
             "map_id": (
                 "round-0108-r0107-diverse-jina-25m-seed42"
             ),
-        }]
+            "kind": "round-map",
+        }] + [
+            {
+                "round_id": "0108",
+                "map_id": f"round-0108-{probe}-projection",
+                "kind": "projection-map",
+                "projection": {"probe": probe},
+            }
+            for probe in ("dadabase", "fineweb-heldout", "trec-covid")
+        ]
     }
 
     def write_registry(value: dict) -> Path:
@@ -301,10 +311,27 @@ def test_registry_view_success_requires_expected_round_map(
         return history_path
 
     published: list[dict] = []
+
+    def publish(value: dict) -> None:
+        published.append(value)
+        base = tmp_path / "site" / "round-0108"
+        base.mkdir(parents=True)
+        (base / "index.html").write_text("atlas")
+        for item in value["maps"]:
+            if item.get("kind") != "projection-map":
+                continue
+            root = (
+                tmp_path / "site" / "projections" / item["map_id"]
+            )
+            root.mkdir(parents=True)
+            (root / "index.html").write_text("projection")
+            (root / "manifest.json").write_text("{}")
+
     monkeypatch.setattr(map_registry, "REGISTRY_PATH", registry_path)
+    monkeypatch.setattr(map_registry, "SITE_DIR", tmp_path / "site")
     monkeypatch.setattr(map_registry, "scan", lambda: registry)
     monkeypatch.setattr(map_registry, "write_registry", write_registry)
-    monkeypatch.setattr(map_registry, "publish", published.append)
+    monkeypatch.setattr(map_registry, "publish", publish)
     receipt = _refresh_registry_best_effort(
         receipt_path=str(publication),
         map_definition_path=str(definition),
@@ -315,4 +342,5 @@ def test_registry_view_success_requires_expected_round_map(
     assert refresh["status"] == "published"
     assert refresh["requires_followup"] is False
     assert refresh["stages"]["inventory_validation"]["status"] == "completed"
+    assert refresh["stages"]["site_artifacts"]["status"] == "completed"
     assert published == [registry]
