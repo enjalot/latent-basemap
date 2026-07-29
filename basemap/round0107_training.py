@@ -261,6 +261,8 @@ class DiverseWeightedJinaSampler:
         self._consumer_batches = 0
         self._weight_proposals = 0
         self._weight_acceptances = 0
+        self._weight_emitted_draws = 0
+        self._accepted_buffer = np.empty(0, dtype=np.int64)
         self._rejection_iterations = 0
         if (
             len(dataset) != self.n_nodes
@@ -306,7 +308,11 @@ class DiverseWeightedJinaSampler:
     def _draw_weighted_edge_ids(self, count: int) -> np.ndarray:
         """Sample proportional to w exactly because every w is in (0,1]."""
         output = np.empty(count, dtype=np.int64)
-        filled = 0
+        buffered = min(count, len(self._accepted_buffer))
+        if buffered:
+            output[:buffered] = self._accepted_buffer[:buffered]
+            self._accepted_buffer = self._accepted_buffer[buffered:]
+        filled = buffered
         iterations = 0
         while filled < count:
             remaining = count - filled
@@ -322,11 +328,16 @@ class DiverseWeightedJinaSampler:
             if take:
                 output[filled : filled + take] = accepted[:take]
                 filled += take
+            if take < len(accepted):
+                self._accepted_buffer = np.concatenate(
+                    (self._accepted_buffer, accepted[take:])
+                )
             self._weight_proposals += proposal_count
             self._weight_acceptances += len(accepted)
             iterations += 1
             if iterations > 10_000:
                 raise Round0107Error("R0107 weighted rejection did not progress")
+        self._weight_emitted_draws += count
         self._rejection_iterations += iterations
         return output
 
@@ -406,6 +417,8 @@ class DiverseWeightedJinaSampler:
             "weight_sampler": "uniform-envelope-rejection-max-weight-one",
             "weight_proposals": self._weight_proposals,
             "weight_acceptances": self._weight_acceptances,
+            "weight_emitted_draws": self._weight_emitted_draws,
+            "weight_buffered_draws": len(self._accepted_buffer),
             "weight_acceptance_rate": (
                 self._weight_acceptances / self._weight_proposals
                 if self._weight_proposals
@@ -601,6 +614,8 @@ _DYNAMIC_PIPELINE_COUNTERS = (
     "host_prefetch_destination_rows_filled",
     "weight_proposals",
     "weight_acceptances",
+    "weight_emitted_draws",
+    "weight_buffered_draws",
     "weight_acceptance_rate",
     "weight_rejection_iterations",
 )

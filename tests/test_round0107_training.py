@@ -90,6 +90,29 @@ def test_uniform_envelope_rejection_is_weight_proportional():
     stamp = sampler.execution_stamp()
     assert stamp["weight_sampler"] == "uniform-envelope-rejection-max-weight-one"
     assert 0 < stamp["weight_acceptance_rate"] < 1
+    assert stamp["weight_emitted_draws"] == len(draws)
+    assert (
+        stamp["weight_acceptances"]
+        == stamp["weight_emitted_draws"] + stamp["weight_buffered_draws"]
+    )
+
+
+def test_weighted_rejection_reuses_surplus_acceptances():
+    sampler = _sampler()
+    first = sampler._draw_weighted_edge_ids(5)
+    after_first = sampler.execution_stamp()
+    proposals = after_first["weight_proposals"]
+    second = sampler._draw_weighted_edge_ids(5)
+    after_second = sampler.execution_stamp()
+    assert len(first) == len(second) == 5
+    assert after_first["weight_buffered_draws"] > 0
+    assert after_second["weight_proposals"] == proposals
+    assert after_second["weight_emitted_draws"] == 10
+    assert (
+        after_second["weight_acceptances"]
+        == after_second["weight_emitted_draws"]
+        + after_second["weight_buffered_draws"]
+    )
 
 
 def test_weighted_rejection_is_seed_deterministic():
