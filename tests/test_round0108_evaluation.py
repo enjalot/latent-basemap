@@ -200,3 +200,84 @@ def test_map_registry_discovers_explicit_round0108_atlas(
     assert maps[0]["dims"] == [768, 2]
     assert maps[0]["panel"]["ffr"] == 0.5
     assert maps[0]["capability_candidate"] is True
+
+
+def test_registry_view_failure_is_sealed_but_does_not_fail_science(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from experiments import map_registry
+    from experiments.round0108_nodes import _refresh_registry_best_effort
+
+    definition = tmp_path / "map-definition.json"
+    decision = tmp_path / "atlas-decision.json"
+    publication = tmp_path / "registry-publication.json"
+    definition.write_text(json.dumps({"artifact": "map definition"}))
+    decision.write_text(json.dumps({"artifact": "atlas decision"}))
+
+    def fail_scan() -> dict:
+        raise RuntimeError("synthetic mutable-view outage")
+
+    monkeypatch.setattr(map_registry, "scan", fail_scan)
+    receipt = _refresh_registry_best_effort(
+        receipt_path=str(publication),
+        map_definition_path=str(definition),
+        decision_path=str(decision),
+    )
+
+    assert publication.is_file()
+    refresh = receipt["mutable_view_refresh"]
+    assert refresh["status"] == "deferred-best-effort-view-refresh"
+    assert refresh["requires_followup"] is True
+    assert refresh["scientific_decision_affected"] is False
+    assert refresh["stages"]["scan"]["error_type"] == "builtins.RuntimeError"
+    assert refresh["stages"]["write_mutable_registry"]["status"] == "skipped"
+    assert refresh["stages"]["publish_site"]["status"] == "skipped"
+    assert receipt["immutable_artifacts"]["map_definition"]["sha256"]
+    assert receipt["immutable_artifacts"]["atlas_decision"]["sha256"]
+
+
+def test_registry_view_success_requires_expected_round_map(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from experiments import map_registry
+    from experiments.round0108_nodes import _refresh_registry_best_effort
+
+    definition = tmp_path / "map-definition.json"
+    decision = tmp_path / "atlas-decision.json"
+    publication = tmp_path / "registry-publication.json"
+    registry_path = tmp_path / "maps.json"
+    history_path = tmp_path / "maps-history.json"
+    definition.write_text(json.dumps({"artifact": "map definition"}))
+    decision.write_text(json.dumps({"artifact": "atlas decision"}))
+    registry = {
+        "maps": [{
+            "round_id": "0108",
+            "map_id": (
+                "round-0108-r0107-diverse-jina-25m-seed42"
+            ),
+        }]
+    }
+
+    def write_registry(value: dict) -> Path:
+        registry_path.write_text(json.dumps(value))
+        history_path.write_text(json.dumps(value))
+        return history_path
+
+    published: list[dict] = []
+    monkeypatch.setattr(map_registry, "REGISTRY_PATH", registry_path)
+    monkeypatch.setattr(map_registry, "scan", lambda: registry)
+    monkeypatch.setattr(map_registry, "write_registry", write_registry)
+    monkeypatch.setattr(map_registry, "publish", published.append)
+    receipt = _refresh_registry_best_effort(
+        receipt_path=str(publication),
+        map_definition_path=str(definition),
+        decision_path=str(decision),
+    )
+
+    refresh = receipt["mutable_view_refresh"]
+    assert refresh["status"] == "published"
+    assert refresh["requires_followup"] is False
+    assert refresh["stages"]["inventory_validation"]["status"] == "completed"
+    assert published == [registry]

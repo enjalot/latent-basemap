@@ -1239,6 +1239,115 @@ def run_ood(
     return {**receipt, "receipt": expected_input_signature(receipt_path)}
 
 
+def _registry_error(stage: str, exc: Exception) -> dict[str, Any]:
+    return {
+        "status": "failed",
+        "stage": stage,
+        "error_type": f"{type(exc).__module__}.{type(exc).__qualname__}",
+        "error_message": str(exc)[:2_000],
+    }
+
+
+def _refresh_registry_best_effort(
+    *,
+    receipt_path: str,
+    map_definition_path: str,
+    decision_path: str,
+) -> dict[str, Any]:
+    """Refresh mutable registry views without invalidating immutable evidence."""
+    from experiments import map_registry
+
+    stages: dict[str, Any] = {}
+    registry: dict[str, Any] | None = None
+    map_ids: list[str] = []
+    expected_map_id = f"round-{ROUND_ID}-{MAP_KEY}"
+    try:
+        registry = map_registry.scan()
+        map_ids = sorted(
+            str(item["map_id"])
+            for item in registry["maps"]
+            if item.get("round_id") == ROUND_ID
+        )
+        stages["scan"] = {
+            "status": "completed",
+            "round_map_ids": map_ids,
+        }
+    except Exception as exc:
+        stages["scan"] = _registry_error("scan", exc)
+
+    if registry is None:
+        stages["write_mutable_registry"] = {
+            "status": "skipped",
+            "reason": "registry scan failed",
+        }
+        stages["publish_site"] = {
+            "status": "skipped",
+            "reason": "registry scan failed",
+        }
+    else:
+        try:
+            history = map_registry.write_registry(registry)
+            stages["write_mutable_registry"] = {
+                "status": "completed",
+                "mutable_view_observed": expected_input_signature(
+                    str(map_registry.REGISTRY_PATH)
+                ),
+                "immutable_history_snapshot": (
+                    expected_input_signature(str(history))
+                    if history is not None else None
+                ),
+                "scientific_input_binding": False,
+            }
+        except Exception as exc:
+            stages["write_mutable_registry"] = _registry_error(
+                "write_mutable_registry", exc
+            )
+        try:
+            map_registry.publish(registry)
+            stages["publish_site"] = {
+                "status": "completed",
+                "site_url": map_registry.SITE_URL,
+            }
+        except Exception as exc:
+            stages["publish_site"] = _registry_error("publish_site", exc)
+
+    expected_map_discovered = expected_map_id in map_ids
+    stages["inventory_validation"] = {
+        "status": "completed" if expected_map_discovered else "failed",
+        "expected_map_id": expected_map_id,
+        "expected_map_discovered": expected_map_discovered,
+    }
+    view_published = (
+        expected_map_discovered
+        and all(
+            stages[name]["status"] == "completed"
+            for name in ("scan", "write_mutable_registry", "publish_site")
+        )
+    )
+    receipt = seal({
+        "schema": "round0108-map-registry-publication-v2",
+        "round_id": ROUND_ID,
+        "immutable_artifacts": {
+            "map_definition": expected_input_signature(map_definition_path),
+            "atlas_decision": expected_input_signature(decision_path),
+        },
+        "expected_map_ids": [expected_map_id],
+        "observed_round_map_ids": map_ids,
+        "mutable_view_refresh": {
+            "status": (
+                "published"
+                if view_published
+                else "deferred-best-effort-view-refresh"
+            ),
+            "stages": stages,
+            "requires_followup": not view_published,
+            "scientific_decision_affected": False,
+        },
+    })
+    atomic_write_new_json(receipt_path, receipt, immutable=True)
+    return receipt
+
+
 def run_decision(
     active: Mapping[str, Any],
     job: Mapping[str, Any],
@@ -1331,28 +1440,12 @@ def run_decision(
     definitions_path = os.path.join(render_root, "map-definition.json")
     atomic_write_new_json(definitions_path, definitions, immutable=True)
 
-    from experiments import map_registry
-
-    registry = map_registry.scan()
-    history = map_registry.write_registry(registry)
-    map_registry.publish(registry)
-    registry_receipt = seal({
-        "schema": "round0108-map-registry-publication-v1",
-        "round_id": ROUND_ID,
-        "registry": expected_input_signature(str(map_registry.REGISTRY_PATH)),
-        "history": (
-            expected_input_signature(str(history))
-            if history is not None else None
-        ),
-        "map_ids": sorted(
-            item["map_id"]
-            for item in registry["maps"]
-            if item.get("round_id") == ROUND_ID
-        ),
-        "site_url": map_registry.SITE_URL,
-    })
     registry_path = os.path.join(output, "registry-publication.json")
-    atomic_write_new_json(registry_path, registry_receipt, immutable=True)
+    _refresh_registry_best_effort(
+        receipt_path=registry_path,
+        map_definition_path=definitions_path,
+        decision_path=receipt_path,
+    )
     return {
         **receipt,
         "receipt": expected_input_signature(receipt_path),
