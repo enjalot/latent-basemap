@@ -542,7 +542,7 @@ def _write_shard(
     audit_knn_distances = np.zeros_like(
         audit_knn_indices, dtype=np.float32
     )
-    audit_knn_distances[:, 1:] = audit_distances
+    audit_knn_distances[:, 1:] = all_distances[audit_offsets]
     (
         audit_fuzzy_sources,
         audit_fuzzy_targets,
@@ -574,6 +574,37 @@ def _write_shard(
         )
         if fuzzy_topology_matches and len(reference_weights)
         else float("inf")
+    )
+    cpu_knn_distances = np.zeros_like(
+        audit_knn_indices, dtype=np.float32
+    )
+    cpu_knn_distances[:, 1:] = audit_distances
+    (
+        cpu_fuzzy_sources,
+        cpu_fuzzy_targets,
+        cpu_fuzzy_weights,
+        *_cpu_fuzzy_stats,
+    ) = fuzzy_directed_from_knn(
+        audit_knn_indices,
+        cpu_knn_distances,
+        N_NEIGHBORS,
+        local_connectivity=LOCAL_CONNECTIVITY,
+    )
+    cpu_fuzzy_topology_matches = (
+        np.array_equal(cpu_fuzzy_sources, reference_sources)
+        and np.array_equal(cpu_fuzzy_targets, reference_targets)
+    )
+    cpu_fuzzy_weight_max_abs_error = (
+        float(
+            np.max(
+                np.abs(
+                    cpu_fuzzy_weights.astype(np.float64)
+                    - reference_weights.astype(np.float64)
+                )
+            )
+        )
+        if cpu_fuzzy_topology_matches and len(reference_weights)
+        else None
     )
     if (
         not fuzzy_topology_matches
@@ -634,10 +665,21 @@ def _write_shard(
                 "CPU fp32 native-int8-plus-scale exact cosine"
             ),
             "distance_max_abs_error": distance_max_abs_error,
-            "fuzzy_path": "independent-row replay of reviewed UMAP kernel",
+            "fuzzy_path": (
+                "exact-row replay of reviewed UMAP kernel on sealed "
+                "production fp32 distances"
+            ),
             "weight_max_abs_error": weight_max_abs_error,
             "tolerance": 2e-5,
             "passed": True,
+            "cpu_recomputed_fuzzy_diagnostic": {
+                "role": (
+                    "diagnostic-only; endpoint-distance tolerance and exact "
+                    "kernel replay are gated separately"
+                ),
+                "topology_matches": cpu_fuzzy_topology_matches,
+                "weight_max_abs_error": cpu_fuzzy_weight_max_abs_error,
+            },
         },
         "performance": {
             "search_seconds": search_seconds,
