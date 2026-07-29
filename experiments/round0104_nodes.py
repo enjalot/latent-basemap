@@ -50,6 +50,7 @@ from basemap.round0104_training import (
     ROWS,
     SEED,
     SUCCESSFUL_UPDATES,
+    TRAIN_MINIMUM_UPDATES_PER_S,
     InventoryFp16Array,
     Round0104Error,
     Round0104TrainingInput,
