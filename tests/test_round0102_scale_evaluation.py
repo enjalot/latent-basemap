@@ -294,6 +294,46 @@ def test_r0080_inputs_bind_exact_reviewed_hashes(monkeypatch) -> None:
         raise AssertionError("unreviewed R0080 artifact was accepted")
 
 
+def test_r0025_partial_review_binds_its_abbreviated_artifact_receipt(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    int8_sha = "2171e4bf" + "1" * 56
+    scales_sha = "d282d4f5" + "2" * 56
+    substrate = {
+        "manifest": {
+            "outputs": {
+                "int8": {"sha256": int8_sha},
+                "scales": {"sha256": scales_sha},
+            },
+        },
+    }
+    review = tmp_path / "review-0025.md"
+    review.write_text(
+        "---\nstatus: partial\n---\n"
+        "releases capability:minilm-int8-shards-v1; "
+        "150M int8 `2171e4bf...`, 150M scales `d282d4f5...`\n",
+        encoding="utf-8",
+    )
+    review_sha = "3" * 64
+    monkeypatch.setattr(
+        prepare_round0102_queue,
+        "expected_input_signature",
+        lambda path: {
+            "canonical_path": str(path),
+            "sha256": review_sha,
+        },
+    )
+
+    signature = prepare_round0102_queue._require_review(
+        str(review),
+        expected_sha256=review_sha,
+        required_text=prepare_round0102_queue._r0025_required_text(substrate),
+    )
+
+    assert signature["sha256"] == review_sha
+
+
 def test_round0102_discovers_the_one_issued_dated_contract(
     tmp_path: Path,
     monkeypatch,

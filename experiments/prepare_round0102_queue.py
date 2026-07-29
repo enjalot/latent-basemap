@@ -134,6 +134,16 @@ def _require_review(
     return signature
 
 
+def _r0025_required_text(substrate: dict[str, Any]) -> tuple[str, ...]:
+    """Match the exact accepted R0025 review's abbreviated artifact receipt."""
+    outputs = substrate["manifest"]["outputs"]
+    return (
+        "capability:minilm-int8-shards-v1",
+        outputs["int8"]["sha256"][:8],
+        outputs["scales"]["sha256"][:8],
+    )
+
+
 def _require_issued_round() -> str:
     candidates = [
         path
@@ -281,10 +291,7 @@ def prepare_round0102(
         "0025": _require_review(
             r0025_review_path,
             expected_sha256=r0025_review_sha256,
-            required_text=(
-                "capability:minilm-int8-shards-v1",
-                substrate150["manifest"]["outputs"]["int8"]["sha256"],
-            ),
+            required_text=_r0025_required_text(substrate150),
         ),
         "0033": _require_review(
             r0033_review_path,
