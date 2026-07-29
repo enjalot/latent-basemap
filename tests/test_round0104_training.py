@@ -5,10 +5,12 @@ from basemap.round0104_training import (
     ARMS,
     DECISION_METRICS,
     NONINFERIORITY_RATIO,
+    PANEL_SEED,
     Round0104Error,
     paired_decision,
     preprocessing_stamp,
 )
+from experiments import round0104_nodes
 from experiments.round0104_nodes import _recall_rows, _without_self
 
 
@@ -59,3 +61,7 @@ def test_search_helpers_exclude_self_and_measure_recall():
     assert np.array_equal(observed, np.asarray([[2, 3], [3, 2]]))
     truth = np.asarray([[2, 4], [3, 5]], dtype=np.int64)
     assert np.allclose(_recall_rows(observed, truth), [0.5, 0.5])
+
+
+def test_shared_builder_imports_registered_panel_seed():
+    assert round0104_nodes.PANEL_SEED == PANEL_SEED == 123

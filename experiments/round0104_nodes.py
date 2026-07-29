@@ -40,6 +40,7 @@ from basemap.round0104_training import (
     GRAPH_TRAIN_SEED,
     L2NormalizedArray,
     PANEL_ANCHORS,
+    PANEL_SEED,
     PERFORMANCE_WARMUP_UPDATES,
     PERFORMANCE_WINDOWS,
     PIPELINE,
