@@ -61,8 +61,9 @@ def test_registered_geometry_and_grid_are_fixed() -> None:
 def test_gpu_clone_options_support_registered_pq96_on_5090() -> None:
     options = _gpu_options()
     assert options.indicesOptions != 0
-    assert options.useFloat16 is False
-    assert options.useFloat16LookupTables is True
+    # GpuClonerOptions.useFloat16 is the actual SWIG-backed field that the
+    # IndexIVFPQ cloner maps to GpuIndexIVFPQConfig.useFloat16LookupTables.
+    assert options.useFloat16 is True
     assert options.usePrecomputed is True
 
 
