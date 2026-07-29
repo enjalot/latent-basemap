@@ -522,7 +522,11 @@ def train_config(
     *,
     graph_manifest: Mapping[str, Any],
     graph_signature: Mapping[str, Any],
+    seed: int = SEED,
+    schema: str = "round0107-diverse-jina-train-config-v1",
 ) -> tuple[dict[str, Any], str]:
+    if seed < 0 or not schema:
+        raise Round0107Error("diverse-Jina train identity is invalid")
     edges = int(graph_manifest["directed_edge_count"])
     updates = successful_update_target(edges)
     expected_pipeline = {
@@ -553,7 +557,7 @@ def train_config(
         "source_representation": "int8-treatment",
     }
     config = {
-        "schema": "round0107-diverse-jina-train-config-v1",
+        "schema": schema,
         "input": {
             "rows": RETAINED_ROWS,
             "dimension": DIMENSION,
@@ -581,7 +585,7 @@ def train_config(
             "b": 1.0,
         },
         "optimizer": {
-            "seed": SEED,
+            "seed": seed,
             "learning_rate": 0.001,
             "batch_size": BATCH_SIZE,
             "positive_ratio": POSITIVE_RATIO,

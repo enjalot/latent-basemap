@@ -25,6 +25,7 @@ from basemap.round0107_training import (
     PIPELINE,
     ROUND_ID,
     SEED,
+    TRAIN_RECEIPT_SCHEMA,
     TRAIN_MINIMUM_UPDATES_PER_S,
     CompactHostInt8MaterializedArray,
     Round0107Error,
@@ -99,7 +100,18 @@ def _graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> dict[str, Any]:
     return graph
 
 
-def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+def run_train_contract(
+    active: dict[str, Any],
+    job: dict[str, Any],
+    *,
+    round_id: str,
+    seed: int,
+    train_config_schema: str,
+    production_config_schema: str,
+    train_receipt_schema: str,
+    output_label: str,
+) -> dict[str, Any]:
+    """Run one seed under the immutable R0107 graph/input/training law."""
     import torch
 
     graph = _graph(active, job)
@@ -107,6 +119,8 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     config, config_sha256 = train_config(
         graph_manifest=manifest,
         graph_signature=graph["signature"],
+        seed=seed,
+        schema=train_config_schema,
     )
     updates = int(config["optimizer"]["successful_positive_lr_updates"])
     if updates != int(graph["successful_updates"]):
@@ -131,22 +145,22 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         dataset, graph_view, required_pipeline=PIPELINE
     )
     output = create_fresh_directory(
-        str(job["outputs"][0]), label="R0107 diverse-Jina train output"
+        str(job["outputs"][0]), label=output_label
     )
     atomic_write_new_json(
         os.path.join(output, "production-config.json"),
         {
-            "schema": "round0107-production-config-v1",
-            "round_id": ROUND_ID,
+            "schema": production_config_schema,
+            "round_id": round_id,
             "config": config,
             "config_sha256": config_sha256,
         },
         immutable=True,
     )
-    random.seed(SEED)
-    np.random.seed(SEED)
-    torch.manual_seed(SEED)
-    torch.cuda.manual_seed_all(SEED)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
     torch.cuda.reset_peak_memory_stats("cuda")
     model = _new_model(config)
     model._max_train_steps = updates
@@ -164,7 +178,7 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         low_memory=True,
         verbose=False,
         n_processes=6,
-        random_state=SEED,
+        random_state=seed,
         resample_negatives=False,
         precomputed_edges_path=graph["signature"]["canonical_path"],
         use_wandb=False,
@@ -251,8 +265,8 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     atomic_build_new_file(model_path, model.save, immutable=True)
     free_bytes, total_bytes = torch.cuda.mem_get_info("cuda")
     receipt = seal({
-        "schema": "round0107-diverse-jina-train-receipt-v1",
-        "round_id": ROUND_ID,
+        "schema": train_receipt_schema,
+        "round_id": round_id,
         "release_sha": active["manifest"]["release_sha"],
         "production_config_sha256": config_sha256,
         "model": expected_input_signature(model_path),
@@ -299,6 +313,19 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     torch.cuda.empty_cache()
     gc.collect()
     return {**receipt, "receipt": expected_input_signature(receipt_path)}
+
+
+def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+    return run_train_contract(
+        active,
+        job,
+        round_id=ROUND_ID,
+        seed=SEED,
+        train_config_schema="round0107-diverse-jina-train-config-v1",
+        production_config_schema="round0107-production-config-v1",
+        train_receipt_schema=TRAIN_RECEIPT_SCHEMA,
+        output_label="R0107 diverse-Jina train output",
+    )
 
 
 def run_job(
