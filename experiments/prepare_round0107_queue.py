@@ -44,7 +44,7 @@ ROUND_ROOT = "/data/latent-basemap/runs/round-0107"
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE_GLOB = os.path.join(LAB_ROOT, "round-0107-*.md")
 GRAPH_MANIFEST = (
-    "/data/latent-basemap/runs/round-0106/queue/artifacts/"
+    "/data/latent-basemap/runs/round-0106/queue-attempt-3/artifacts/"
     "canonical-fuzzy-graph/graph-manifest.json"
 )
 
