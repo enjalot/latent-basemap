@@ -18,7 +18,10 @@ from experiments.build_weighted_graph import (
     fuzzy_directed_from_knn,
     symmetrize_bucket,
 )
-from experiments.round0106_nodes import _validate_joined_reciprocity
+from experiments.round0106_nodes import (
+    _validate_directed_memberships,
+    _validate_joined_reciprocity,
+)
 from experiments.prepare_round0106_queue import (
     DECISION,
     INDEX,
@@ -90,6 +93,59 @@ def test_performance_streak_ignores_warmup_and_resets_on_recovery():
             0,
             completed_new_shards=2,
             sources_per_second=float("nan"),
+        )
+
+
+def test_fuzzy_membership_closure_allows_fp32_zero_elimination():
+    rows = np.asarray([10, 11], dtype=np.int64)
+    all_targets = np.asarray(
+        [
+            np.arange(20, 20 + K),
+            np.arange(40, 40 + K),
+        ],
+        dtype=np.int32,
+    )
+    sources = np.concatenate(
+        [
+            np.full(K - 5, 10, dtype=np.int32),
+            np.full(K, 11, dtype=np.int32),
+        ]
+    )
+    targets = np.concatenate(
+        [all_targets[0, : K - 5], all_targets[1]]
+    ).astype(np.int32)
+    weights = np.linspace(
+        np.nextafter(np.float32(0), np.float32(1)),
+        np.float32(1),
+        len(sources),
+        dtype=np.float32,
+    )
+    closure = _validate_directed_memberships(
+        rows=rows,
+        all_targets=all_targets,
+        sources=sources,
+        targets=targets,
+        weights=weights,
+    )
+    assert closure == {
+        "knn_edges": 2 * K,
+        "directed_edges": 2 * K - 5,
+        "zero_memberships_eliminated": 5,
+        "sources_with_eliminated_memberships": 1,
+        "minimum_memberships_per_source": K - 5,
+    }
+
+
+def test_fuzzy_membership_closure_rejects_non_knn_target():
+    rows = np.asarray([10], dtype=np.int64)
+    all_targets = np.arange(20, 20 + K, dtype=np.int32)[None, :]
+    with pytest.raises(Round0106Error, match="membership"):
+        _validate_directed_memberships(
+            rows=rows,
+            all_targets=all_targets,
+            sources=np.full(K, 10, dtype=np.int32),
+            targets=np.r_[all_targets[0, :-1], 999].astype(np.int32),
+            weights=np.ones(K, dtype=np.float32),
         )
 
 

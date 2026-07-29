@@ -236,6 +236,83 @@ def _gpu_exact_rerank(
     }
 
 
+def _validate_directed_memberships(
+    *,
+    rows: np.ndarray,
+    all_targets: np.ndarray,
+    sources: np.ndarray,
+    targets: np.ndarray,
+    weights: np.ndarray,
+) -> dict[str, int]:
+    """Validate positive memberships as a subset of the fixed kNN topology."""
+    source_rows = np.asarray(rows, dtype=np.int64)
+    knn_targets = np.asarray(all_targets, dtype=np.int32)
+    edge_sources = np.asarray(sources)
+    edge_targets = np.asarray(targets)
+    edge_weights = np.asarray(weights)
+    knn_edges = len(source_rows) * K
+    if (
+        source_rows.ndim != 1
+        or knn_targets.shape != (len(source_rows), K)
+        or edge_sources.ndim != 1
+        or edge_targets.ndim != 1
+        or edge_weights.ndim != 1
+        or edge_sources.shape != edge_targets.shape
+        or edge_sources.shape != edge_weights.shape
+        or len(edge_sources) > knn_edges
+        or edge_sources.dtype != np.int32
+        or edge_targets.dtype != np.int32
+        or edge_weights.dtype != np.float32
+        or not np.isfinite(edge_weights).all()
+        or np.any(edge_weights <= 0)
+        or np.any(edge_weights > 1)
+    ):
+        raise Round0106Error("R0106 directed fuzzy membership is malformed")
+    if len(source_rows) == 0:
+        raise Round0106Error("R0106 fuzzy membership source set is empty")
+    compact_start = int(source_rows[0])
+    if (
+        not np.array_equal(
+            source_rows,
+            np.arange(
+                compact_start,
+                compact_start + len(source_rows),
+                dtype=np.int64,
+            ),
+        )
+    ):
+        raise Round0106Error("R0106 fuzzy membership source order changed")
+    if (
+        np.any(edge_sources < compact_start)
+        or np.any(edge_sources >= compact_start + len(source_rows))
+        or np.any(edge_sources[1:] < edge_sources[:-1])
+    ):
+        raise Round0106Error("R0106 directed fuzzy membership is malformed")
+    source_offsets = edge_sources.astype(np.int64) - compact_start
+    target_matches = (
+        edge_targets[:, None] == knn_targets[source_offsets]
+    ).sum(axis=1)
+    counts = np.bincount(source_offsets, minlength=len(source_rows))
+    keys = (
+        edge_sources.astype(np.uint64) * np.uint64(RETAINED_ROWS)
+        + edge_targets.astype(np.uint64)
+    )
+    if (
+        np.any(counts < 1)
+        or np.any(counts > K)
+        or not np.all(target_matches == 1)
+        or len(np.unique(keys)) != len(keys)
+    ):
+        raise Round0106Error("R0106 directed fuzzy membership is malformed")
+    return {
+        "knn_edges": knn_edges,
+        "directed_edges": len(edge_weights),
+        "zero_memberships_eliminated": knn_edges - len(edge_weights),
+        "sources_with_eliminated_memberships": int(np.count_nonzero(counts < K)),
+        "minimum_memberships_per_source": int(counts.min()),
+    }
+
+
 def _shard_paths(output: str, shard: int) -> tuple[str, str]:
     artifact = os.path.join(output, f"shard-{shard:05d}.npz")
     return artifact, artifact + ".receipt.json"
@@ -280,24 +357,53 @@ def _validate_shard(
         sources = archive["sources"]
         targets = archive["targets"]
         weights = archive["weights"]
-        expected_edges = (compact_stop - compact_start) * K
+        retained_sources = compact_stop - compact_start
+        knn_edges = retained_sources * K
+        directed_edges = int(receipt.get("directed_edges", -1))
+        zero_memberships = int(
+            receipt.get("zero_memberships_eliminated", -1)
+        )
         if (
-            sources.shape != (expected_edges,)
-            or targets.shape != (expected_edges,)
-            or weights.shape != (expected_edges,)
+            int(receipt.get("retained_sources", -1)) != retained_sources
+            or int(receipt.get("knn_edges", -1)) != knn_edges
+            or directed_edges < retained_sources
+            or directed_edges > knn_edges
+            or zero_memberships != knn_edges - directed_edges
+            or sources.shape != (directed_edges,)
+            or targets.shape != (directed_edges,)
+            or weights.shape != (directed_edges,)
             or sources.dtype != np.int32
             or targets.dtype != np.int32
             or weights.dtype != np.float32
-            or not np.array_equal(
-                sources.reshape(-1, K)[:, 0],
-                np.arange(compact_start, compact_stop, dtype=np.int32),
+            or not np.isfinite(weights).all()
+            or np.any(weights <= 0)
+            or np.any(weights > 1)
+            or np.any(sources < compact_start)
+            or np.any(sources >= compact_stop)
+            or np.any(targets < 0)
+            or np.any(targets >= RETAINED_ROWS)
+            or np.any(sources == targets)
+            or np.any(sources[1:] < sources[:-1])
+        ):
+            raise Round0106Error(f"R0106 shard arrays changed: {artifact}")
+        counts = np.bincount(
+            sources.astype(np.int64) - compact_start,
+            minlength=retained_sources,
+        )
+        keys = (
+            sources.astype(np.uint64) * np.uint64(RETAINED_ROWS)
+            + targets.astype(np.uint64)
+        )
+        if (
+            np.any(counts < 1)
+            or np.any(counts > K)
+            or len(np.unique(keys)) != len(keys)
+            or int(receipt.get("minimum_memberships_per_source", -1))
+            != int(counts.min())
+            or int(
+                receipt.get("sources_with_eliminated_memberships", -1)
             )
-            or not np.all(
-                sources.reshape(-1, K)
-                == np.arange(
-                    compact_start, compact_stop, dtype=np.int32
-                )[:, None]
-            )
+            != int(np.count_nonzero(counts < K))
         ):
             raise Round0106Error(f"R0106 shard arrays changed: {artifact}")
     return receipt
@@ -391,15 +497,14 @@ def _write_shard(
         N_NEIGHBORS,
         local_connectivity=LOCAL_CONNECTIVITY,
     )
-    expected_sources = np.repeat(rows.astype(np.int32), K)
-    if (
-        not np.array_equal(sources, expected_sources)
-        or not np.array_equal(targets.reshape(-1, K), all_targets)
-        or not np.isfinite(weights).all()
-        or np.any(weights <= 0)
-        or np.any(weights > 1)
-    ):
-        raise Round0106Error("R0106 directed fuzzy membership is malformed")
+    expected_targets = all_targets.reshape(-1)
+    membership_closure = _validate_directed_memberships(
+        rows=rows,
+        all_targets=all_targets,
+        sources=sources,
+        targets=targets,
+        weights=weights,
+    )
     audit_offsets = np.unique(
         np.linspace(0, len(rows) - 1, min(len(rows), 32)).astype(np.int64)
     )
@@ -449,24 +554,29 @@ def _write_shard(
         N_NEIGHBORS,
         local_connectivity=LOCAL_CONNECTIVITY,
     )
-    reference_weights = weights.reshape(-1, K)[audit_offsets].reshape(-1)
-    weight_max_abs_error = float(
-        np.max(
-            np.abs(
-                audit_fuzzy_weights.astype(np.float64)
-                - reference_weights.astype(np.float64)
+    audit_source_ids = rows[audit_offsets].astype(np.int32)
+    reference_mask = np.isin(sources, audit_source_ids)
+    reference_sources = sources[reference_mask]
+    reference_targets = targets[reference_mask]
+    reference_weights = weights[reference_mask]
+    fuzzy_topology_matches = (
+        np.array_equal(audit_fuzzy_sources, reference_sources)
+        and np.array_equal(audit_fuzzy_targets, reference_targets)
+    )
+    weight_max_abs_error = (
+        float(
+            np.max(
+                np.abs(
+                    audit_fuzzy_weights.astype(np.float64)
+                    - reference_weights.astype(np.float64)
+                )
             )
         )
+        if fuzzy_topology_matches and len(reference_weights)
+        else float("inf")
     )
     if (
-        not np.array_equal(
-            audit_fuzzy_sources,
-            np.repeat(rows[audit_offsets].astype(np.int32), K),
-        )
-        or not np.array_equal(
-            audit_fuzzy_targets,
-            audit_targets_compact.astype(np.int32).reshape(-1),
-        )
+        not fuzzy_topology_matches
         or distance_max_abs_error > 2e-5
         or weight_max_abs_error > 2e-5
     ):
@@ -489,7 +599,7 @@ def _write_shard(
         "global_stop_inclusive": int(global_rows[-1]),
         "contract_sha256": contract_sha256,
         "retained_sources": len(rows),
-        "directed_edges": len(weights),
+        **membership_closure,
         "k_real": K,
         "n_neighbors_including_self": N_NEIGHBORS,
         "local_connectivity": LOCAL_CONNECTIVITY,
@@ -497,6 +607,9 @@ def _write_shard(
         "distance_dtype": "float32",
         "weight_dtype": "float32",
         "source_ids_ordered_sha256": ordered_array_sha256(rows),
+        "knn_target_ids_ordered_sha256": ordered_array_sha256(
+            expected_targets
+        ),
         "target_ids_ordered_sha256": ordered_array_sha256(targets),
         "weights_ordered_sha256": ordered_array_sha256(weights),
         "distance_summary": {
@@ -668,12 +781,21 @@ def run_build_part(
     retained_sources = sum(
         int(receipt["retained_sources"]) for receipt in shard_receipts
     )
+    knn_edges = sum(
+        int(receipt["knn_edges"]) for receipt in shard_receipts
+    )
     directed_edges = sum(
         int(receipt["directed_edges"]) for receipt in shard_receipts
     )
+    zero_memberships_eliminated = sum(
+        int(receipt["zero_memberships_eliminated"])
+        for receipt in shard_receipts
+    )
     if (
         retained_sources != spec["retained_rows"]
-        or directed_edges != spec["retained_rows"] * K
+        or knn_edges != spec["retained_rows"] * K
+        or directed_edges + zero_memberships_eliminated != knn_edges
+        or directed_edges < retained_sources
     ):
         raise Round0106Error(f"R0106 {part} source/edge closure failed")
     receipt = seal({
@@ -690,7 +812,17 @@ def run_build_part(
         },
         "selected_policy": selected,
         "retained_sources": retained_sources,
+        "knn_edges": knn_edges,
         "directed_edges": directed_edges,
+        "zero_memberships_eliminated": zero_memberships_eliminated,
+        "sources_with_eliminated_memberships": sum(
+            int(receipt["sources_with_eliminated_memberships"])
+            for receipt in shard_receipts
+        ),
+        "minimum_memberships_per_source": min(
+            int(receipt["minimum_memberships_per_source"])
+            for receipt in shard_receipts
+        ),
         "shard_rows": SHARD_ROWS,
         "shards": [
             {
@@ -776,7 +908,16 @@ def _validate_part_receipt(
         or receipt.get("part_spec") != spec
         or receipt.get("identity_sha256") != sha256_bytes(canonical_json(body))
         or int(receipt.get("retained_sources", -1)) != spec["retained_rows"]
-        or int(receipt.get("directed_edges", -1)) != spec["retained_rows"] * K
+        or int(receipt.get("knn_edges", -1)) != spec["retained_rows"] * K
+        or int(receipt.get("directed_edges", -1))
+        + int(receipt.get("zero_memberships_eliminated", -1))
+        != int(receipt.get("knn_edges", -1))
+        or int(receipt.get("directed_edges", -1)) < spec["retained_rows"]
+        or int(receipt.get("sources_with_eliminated_memberships", -1)) < 0
+        or int(receipt.get("sources_with_eliminated_memberships", -1))
+        > spec["retained_rows"]
+        or int(receipt.get("minimum_memberships_per_source", -1)) < 1
+        or int(receipt.get("minimum_memberships_per_source", -1)) > K
     ):
         raise Round0106Error(f"R0106 {part} part receipt contract changed")
     for member in receipt.get("shards") or []:
@@ -818,6 +959,9 @@ def _partition_forward_edges(
         open(os.path.join(temporary, f"p{bucket:04d}.bin"), "wb")
         for bucket in range(PAIR_BUCKETS)
     ]
+    expected_forward_records = sum(
+        int(receipt["directed_edges"]) for _root, receipt in parts.values()
+    )
     shard_count = 0
     record_count = 0
     try:
@@ -859,7 +1003,7 @@ def _partition_forward_edges(
     finally:
         for handle in handles:
             handle.close()
-    if record_count != RETAINED_ROWS * K:
+    if record_count != expected_forward_records:
         raise Round0106Error("R0106 forward bucket edge count did not close")
     os.replace(temporary, final)
     buckets = []
@@ -880,6 +1024,7 @@ def _partition_forward_edges(
             "phase_a_closure_sha256": contract_sha256,
             "partitions": PAIR_BUCKETS,
             "forward_records": record_count,
+            "expected_forward_records": expected_forward_records,
             "buckets": buckets,
         },
         immutable=True,
@@ -1173,6 +1318,23 @@ def run_assemble(
         )
         part_values[part] = (root, receipt)
         part_signatures[part] = signature
+    knn_edge_count = sum(
+        int(receipt["knn_edges"]) for _root, receipt in part_values.values()
+    )
+    forward_membership_count = sum(
+        int(receipt["directed_edges"])
+        for _root, receipt in part_values.values()
+    )
+    zero_memberships_eliminated = sum(
+        int(receipt["zero_memberships_eliminated"])
+        for _root, receipt in part_values.values()
+    )
+    if (
+        knn_edge_count != RETAINED_ROWS * K
+        or forward_membership_count + zero_memberships_eliminated
+        != knn_edge_count
+    ):
+        raise Round0106Error("R0106 pre-assembly membership accounting changed")
     substrate, excluded, _encoded, _scales = _substrate_arrays()
     labels_signature = substrate["manifest"]["outputs"]["labels"]
     _validate_signature(labels_signature, label="R0103 labels")
@@ -1242,6 +1404,24 @@ def run_assemble(
             "sources": sources_signature,
             "targets": targets_signature,
             "weights": weights_signature,
+        },
+        "knn_topology": {
+            "distinct_nonself_neighbors_per_source": K,
+            "knn_edge_count": knn_edge_count,
+            "source_coverage_complete": True,
+        },
+        "forward_memberships": {
+            "positive_count": forward_membership_count,
+            "zero_memberships_eliminated": zero_memberships_eliminated,
+            "elimination_semantics": "umap-eliminate-zeros-after-fp32-cast",
+            "sources_with_eliminated_memberships": sum(
+                int(receipt["sources_with_eliminated_memberships"])
+                for _root, receipt in part_values.values()
+            ),
+            "minimum_positive_memberships_per_source": min(
+                int(receipt["minimum_memberships_per_source"])
+                for _root, receipt in part_values.values()
+            ),
         },
         "directed_edge_count": int(join_stats["n_edges"]),
         "weight_sum": float(join_stats["weight_sum"]),
