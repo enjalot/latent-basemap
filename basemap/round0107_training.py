@@ -34,6 +34,7 @@ PERFORMANCE_WARMUP_UPDATES = 200
 PERFORMANCE_WINDOW_UPDATES = 2_500
 TRAIN_MINIMUM_UPDATES_PER_S = 70.0
 TRAIN_WARNING_UPDATES_PER_S = 80.0
+WEIGHT_UNIFORM_DTYPE = np.dtype("float64")
 
 PIPELINE = "host_weighted_jina_diverse_25m"
 PIPELINE_SCHEMA = "round0107-host-weighted-jina-diverse-pipeline-v1"
@@ -320,9 +321,15 @@ class DiverseWeightedJinaSampler:
             edge_ids = self.rng.integers(
                 0, self.n_pos, size=proposal_count, dtype=np.int64
             )
-            uniforms = self.rng.random(proposal_count, dtype=np.float32)
+            # Draw the rejection threshold in float64.  The graph stores
+            # float32 weights, including a very small positive tail; float32
+            # uniforms quantize every weight below 2**-24 to the same
+            # acceptance probability instead of preserving its stored mass.
+            uniforms = self.rng.random(
+                proposal_count, dtype=WEIGHT_UNIFORM_DTYPE
+            )
             accepted = edge_ids[
-                uniforms < np.asarray(self.weights[edge_ids], dtype=np.float32)
+                uniforms < np.asarray(self.weights[edge_ids], dtype=np.float64)
             ]
             take = min(remaining, len(accepted))
             if take:
@@ -415,6 +422,7 @@ class DiverseWeightedJinaSampler:
             "uniform_with_replacement": False,
             "positive_with_replacement": True,
             "weight_sampler": "uniform-envelope-rejection-max-weight-one",
+            "weight_uniform_dtype": WEIGHT_UNIFORM_DTYPE.str,
             "weight_proposals": self._weight_proposals,
             "weight_acceptances": self._weight_acceptances,
             "weight_emitted_draws": self._weight_emitted_draws,
@@ -539,6 +547,7 @@ def train_config(
         "uniform_with_replacement": False,
         "positive_with_replacement": True,
         "weight_sampler": "uniform-envelope-rejection-max-weight-one",
+        "weight_uniform_dtype": WEIGHT_UNIFORM_DTYPE.str,
         "valid_canonical_edge_count": edges,
         "compact_retained_rows": RETAINED_ROWS,
         "source_representation": "int8-treatment",
