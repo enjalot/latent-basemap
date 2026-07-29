@@ -606,6 +606,97 @@ def scan_scale_evaluation_round(
     return entries
 
 
+def scan_round0108_atlas(
+    round_dir: Path,
+    ledger: dict,
+    *,
+    queue_dir: Path | None = None,
+) -> list[dict]:
+    """Discover the diverse-Jina atlas evaluated by R0108.
+
+    The map was trained in R0107 and transformed/evaluated in R0108.  Its
+    compact retained order and Jina-specific density calibration are not the
+    MiniLM scale-evaluation schema, so consume its explicit immutable
+    definition instead of pretending it is an R0036 map.
+    """
+    queue_dir = queue_dir or round_dir / "queue"
+    artifacts = queue_dir / "artifacts"
+    definition_path = artifacts / "semantic-renders/map-definition.json"
+    definition = _load_json(definition_path)
+    transform_path = artifacts / "coordinates/actual-transform.json"
+    core_path = artifacts / "core-geometry/core-geometry.json"
+    decision_path = artifacts / "decision/atlas-decision.json"
+    transform = _load_json(transform_path)
+    core = _load_json(core_path)
+    decision = _load_json(decision_path)
+    if (
+        not isinstance(definition, dict)
+        or definition.get("schema") != "round0108-map-definition-v1"
+        or definition.get("round_id") != "0108"
+        or not isinstance(transform, dict)
+        or transform.get("round_id") != "0108"
+        or transform.get("map_key") != definition.get("map_key")
+        or not isinstance(core, dict)
+        or core.get("schema") != "round0108-diverse-jina-core-geometry-v1"
+        or not isinstance(decision, dict)
+        or decision.get("schema") != "round0108-diverse-jina-atlas-decision-v1"
+    ):
+        return []
+    queue = _load_json(queue_dir / "queue.json") or {}
+    global_metrics = (core.get("metrics") or {}).get("global") or {}
+    density = (core.get("metrics") or {}).get("density_v2") or {}
+    accounting = transform.get("row_accounting") or {}
+    accepted = decision.get("atlas_quality_capability_released") is True
+    coordinate_chunks = sorted(
+        (artifacts / "coordinates").glob("chunk-*/coordinates.npy")
+    )
+    return [{
+        "map_id": "round-0108-r0107-diverse-jina-25m-seed42",
+        "round_id": "0108",
+        "kind": "round-map",
+        "map_label": definition.get("map_label"),
+        "date": datetime.fromtimestamp(
+            decision_path.stat().st_mtime, tz=timezone.utc
+        ).isoformat(),
+        "evidence_status": evidence_status("0108", ledger),
+        "n_rows": accounting.get("all_rows"),
+        "scientific_rows": accounting.get("retained_representatives"),
+        "dims": [768, 2],
+        "architecture": "residual_bottleneck",
+        "hidden_dim": 2048,
+        "kernel": "legacy_lp",
+        "pipeline": "R0107 weighted-host-int8/R0108 retained evaluation",
+        "precision": "fp32-transform",
+        "scientific_status": (
+            "core-and-polish-ood-pass"
+            if accepted else "failed-with-registered-diagnostics"
+        ),
+        "capability_candidate": accepted,
+        "density_semantics": "jina-density-v2-two-seed-calibrated",
+        "model": transform.get("model"),
+        "coordinates": {
+            "dir": _relpath(artifacts / "coordinates"),
+            "chunks": len(coordinate_chunks),
+            "receipt_sha256": _file_signature(transform_path)["sha256"],
+        },
+        "panel": {
+            "path": _relpath(core_path),
+            "ffr": global_metrics.get("ffr"),
+            "density": density.get("correlation"),
+            "purity_k256": None,
+            "purity_k1024": None,
+            "proj_ffr": None,
+            "decision_checks_all_pass": accepted,
+            "formula_version": "density-v2-jina-calibrated",
+        },
+        "renders": [],
+        "render_diagnostics": core.get("geometry_diagnostics"),
+        "release_sha": queue.get("release_sha"),
+        "run_dir": _relpath(round_dir),
+        "training_round": "0107",
+    }]
+
+
 def _sha_of(obj) -> str | None:
     if isinstance(obj, dict):
         return obj.get("sha256") or obj.get("identity_sha256")
@@ -688,6 +779,9 @@ def scan() -> dict:
                     round_dir, ledger, queue_dir=queue_dir
                 )
                 maps += scan_scale_evaluation_round(
+                    round_dir, ledger, queue_dir=queue_dir
+                )
+                maps += scan_round0108_atlas(
                     round_dir, ledger, queue_dir=queue_dir
                 )
                 maps += scan_projection_maps(

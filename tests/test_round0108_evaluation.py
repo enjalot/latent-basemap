@@ -1,0 +1,202 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from basemap.round0105_search import GROUPS
+from basemap.round0108_evaluation import (
+    IN_MIX_LANGUAGES,
+    POLISH,
+    Round0108Error,
+    core_geometry_decision,
+    fixed_probe_split,
+    headline_ood_decision,
+    jina_density_floor,
+    map_family_sizes,
+    projection_metrics,
+)
+
+
+def _density_cell(point: float, sd: float, null: float) -> dict:
+    return {
+        "density_v2": {
+            "correlation": point,
+            "bootstrap": {"standard_deviation": sd},
+            "permuted_radius_null": {
+                "absolute_99_9_percentile": null
+            },
+        }
+    }
+
+
+def test_jina_density_floor_uses_only_two_preregistered_cells() -> None:
+    floor = jina_density_floor({
+        "seed42": _density_cell(0.20, 0.01, 0.03),
+        "seed43": _density_cell(0.18, 0.02, 0.04),
+    })
+    assert floor["proposed_floor"] == pytest.approx(0.12)
+    assert floor["registered_floor"] == pytest.approx(0.12)
+    assert floor["gating_floor_registered"] is True
+
+    failed = jina_density_floor({
+        "seed42": _density_cell(0.05, 0.02, 0.03),
+        "seed43": _density_cell(0.04, 0.01, 0.03),
+    })
+    assert failed["proposed_floor"] < 0
+    assert failed["registered_floor"] is None
+
+
+def test_fixed_probe_split_is_deterministic_disjoint_and_in_tail() -> None:
+    first = fixed_probe_split(
+        row_start=835_454, row_stop=2_000_000, seed=108
+    )
+    second = fixed_probe_split(
+        row_start=835_454, row_stop=2_000_000, seed=108
+    )
+    assert np.array_equal(first[0], second[0])
+    assert np.array_equal(first[1], second[1])
+    assert len(first[0]) == 49_500
+    assert len(first[1]) == 500
+    assert int(first[0].min()) >= 835_454
+    assert len(np.intersect1d(*first)) == 0
+
+
+def test_projection_metrics_keep_ffr_diagnostic_and_recall_ordered() -> None:
+    truth = np.asarray([[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]])
+    low = np.asarray([list(range(1, 51))])
+    metrics = projection_metrics(truth, low, fraction_k=50)
+    assert metrics == {
+        "ffr_diagnostic": 1.0,
+        "recall_at_10": 1.0,
+        "recall_at_50_of_high10": 1.0,
+    }
+
+
+def test_headline_ood_gate_uses_polish_not_projection_ffr() -> None:
+    cells = {
+        language: {
+            "recall_at_10": 0.10,
+            "recall_at_50_of_high10": 0.40,
+            "ffr_diagnostic": -100.0,
+        }
+        for language in IN_MIX_LANGUAGES
+    }
+    cells[POLISH] = {
+        "recall_at_10": 0.15,
+        "recall_at_50_of_high10": 0.21,
+        "ffr_diagnostic": -100.0,
+    }
+    decision = headline_ood_decision(cells)
+    assert decision["passed"] is True
+    assert decision["polish_to_in_mix_median_ratio"] == pytest.approx(0.525)
+    assert decision["projection_ffr_used_for_decision"] is False
+
+    cells[POLISH]["recall_at_50_of_high10"] = 0.15
+    assert headline_ood_decision(cells)["passed"] is False
+
+
+def test_core_gate_requires_each_language_relative_to_pooled_english() -> None:
+    group_ffr = {group: 0.50 for group in GROUPS}
+    passed = core_geometry_decision(
+        density_value=0.20,
+        density_floor=0.10,
+        global_ffr=0.45,
+        group_ffr=group_ffr,
+        recall_at_10=0.01,
+        recall_at_50=0.02,
+        finite_noncollapsed=True,
+    )
+    assert passed["passed"] is True
+    assert passed["projection_ffr_used_for_decision"] is False
+
+    group_ffr[IN_MIX_LANGUAGES[0]] = 0.19
+    failed = core_geometry_decision(
+        density_value=0.20,
+        density_floor=0.10,
+        global_ffr=0.45,
+        group_ffr=group_ffr,
+        recall_at_10=0.01,
+        recall_at_50=0.02,
+        finite_noncollapsed=True,
+    )
+    assert failed["passed"] is False
+
+
+def test_family_size_lookup_defaults_singletons_and_maps_representatives() -> None:
+    rows = np.asarray([2, 5, 10, 11], dtype=np.int64)
+    representatives = np.asarray([5, 10], dtype=np.int64)
+    counts = np.asarray([20, 3], dtype=np.int64)
+    assert map_family_sizes(rows, representatives, counts).tolist() == [
+        1, 20, 3, 1
+    ]
+    with pytest.raises(Round0108Error):
+        map_family_sizes(
+            rows,
+            np.asarray([10, 5], dtype=np.int64),
+            counts,
+        )
+
+
+def test_map_registry_discovers_explicit_round0108_atlas(
+    tmp_path: Path,
+) -> None:
+    from experiments.map_registry import scan_round0108_atlas
+
+    round_dir = tmp_path / "round-0108"
+    artifacts = round_dir / "queue" / "artifacts"
+    (artifacts / "semantic-renders").mkdir(parents=True)
+    (artifacts / "coordinates" / "chunk-00000").mkdir(parents=True)
+    (artifacts / "core-geometry").mkdir()
+    (artifacts / "decision").mkdir()
+    np.save(
+        artifacts / "coordinates" / "chunk-00000" / "coordinates.npy",
+        np.zeros((2, 2), dtype=np.float32),
+    )
+    (round_dir / "queue" / "queue.json").write_text(json.dumps({
+        "release_sha": "a" * 40,
+    }))
+    (artifacts / "semantic-renders" / "map-definition.json").write_text(
+        json.dumps({
+            "schema": "round0108-map-definition-v1",
+            "round_id": "0108",
+            "map_key": "r0107-diverse-jina-25m-seed42",
+            "map_label": "r0107-diverse-jina-25m-seed42",
+        })
+    )
+    (artifacts / "coordinates" / "actual-transform.json").write_text(
+        json.dumps({
+            "round_id": "0108",
+            "map_key": "r0107-diverse-jina-25m-seed42",
+            "model": {"sha256": "b" * 64},
+            "row_accounting": {
+                "all_rows": 24_948_663,
+                "retained_representatives": 24_948_663,
+            },
+        })
+    )
+    (artifacts / "core-geometry" / "core-geometry.json").write_text(
+        json.dumps({
+            "schema": "round0108-diverse-jina-core-geometry-v1",
+            "metrics": {
+                "global": {"ffr": 0.5},
+                "density_v2": {"correlation": 0.2},
+            },
+            "geometry_diagnostics": {},
+        })
+    )
+    (artifacts / "decision" / "atlas-decision.json").write_text(
+        json.dumps({
+            "schema": "round0108-diverse-jina-atlas-decision-v1",
+            "atlas_quality_capability_released": True,
+        })
+    )
+    maps = scan_round0108_atlas(
+        round_dir, {"0108": {"round": {"status": "issued"}}}
+    )
+    assert len(maps) == 1
+    assert maps[0]["dims"] == [768, 2]
+    assert maps[0]["panel"]["ffr"] == 0.5
+    assert maps[0]["capability_candidate"] is True
