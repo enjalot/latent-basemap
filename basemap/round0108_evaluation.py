@@ -601,24 +601,34 @@ def load_reviewed_model(
     train_output: str,
     graph_manifest_path: str,
     graph_manifest_sha256: str,
+    expected_train_round_id: str = "0107",
+    expected_train_receipt_schema: str = TRAIN_RECEIPT_SCHEMA,
+    expected_production_config_schema: str = "round0107-production-config-v1",
+    expected_seed: int = 42,
 ):
-    """Authenticate the R0107 train bundle and load its exact generic model."""
+    """Authenticate one reviewed diverse-Jina train bundle and load its model."""
     train_path = os.path.join(train_output, "train-receipt.json")
     config_path = os.path.join(train_output, "production-config.json")
     train_signature = expected_input_signature(train_path)
     config_signature = expected_input_signature(config_path)
     with open(train_path, encoding="utf-8") as handle:
         train = json.load(handle)
-    validate_training_seal(train, label="R0107 train receipt")
+    validate_training_seal(
+        train, label=f"R{expected_train_round_id} train receipt"
+    )
     with open(config_path, encoding="utf-8") as handle:
         config_receipt = json.load(handle)
     config = config_receipt.get("config")
     if (
-        config_receipt.get("schema") != "round0107-production-config-v1"
-        or config_receipt.get("round_id") != "0107"
+        config_receipt.get("schema") != expected_production_config_schema
+        or config_receipt.get("round_id") != expected_train_round_id
         or not isinstance(config, dict)
+        or not isinstance(config.get("optimizer"), dict)
+        or config["optimizer"].get("seed") != expected_seed
     ):
-        raise Round0108Error("R0107 production config is missing")
+        raise Round0108Error(
+            f"R{expected_train_round_id} production config is missing"
+        )
     graph_signature = expected_input_signature(graph_manifest_path)
     with open(graph_manifest_path, encoding="utf-8") as handle:
         graph = json.load(handle)
@@ -632,8 +642,8 @@ def load_reviewed_model(
     }
     train_checks = train.get("train_checks")
     if (
-        train.get("schema") != TRAIN_RECEIPT_SCHEMA
-        or train.get("round_id") != "0107"
+        train.get("schema") != expected_train_receipt_schema
+        or train.get("round_id") != expected_train_round_id
         or train.get("graph_manifest") != graph_signature
         or graph_signature["sha256"] != graph_manifest_sha256
         or graph.get("schema") != GRAPH_SCHEMA
@@ -645,8 +655,12 @@ def load_reviewed_model(
         or set(train_checks) != required_train_checks
         or not all(train_checks.values())
     ):
-        raise Round0108Error("R0107 reviewed train/model bundle changed")
-    model_path = verify_signature(train.get("model"), label="R0107 model")
+        raise Round0108Error(
+            f"R{expected_train_round_id} reviewed train/model bundle changed"
+        )
+    model_path = verify_signature(
+        train.get("model"), label=f"R{expected_train_round_id} model"
+    )
     mapping_path = verify_signature(
         graph.get("compact_mapping"), label="R0106 compact mapping"
     )
@@ -667,7 +681,9 @@ def load_reviewed_model(
         "b": model.b,
     }
     if observed != expected:
-        raise Round0108Error("R0107 model architecture changed")
+        raise Round0108Error(
+            f"R{expected_train_round_id} model architecture changed"
+        )
     mapping = np.load(mapping_path, mmap_mode="r", allow_pickle=False)
     return {
         "model": model,
