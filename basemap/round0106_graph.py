@@ -35,6 +35,9 @@ SHARD_ROWS = 100_000
 SEARCH_BATCH_ROWS = 4_096
 RERANK_BATCH_ROWS = 512
 PAIR_BUCKETS = 128
+PERFORMANCE_WARMUP_SHARDS = 1
+MINIMUM_SHARD_SOURCES_PER_SECOND = 500.0
+PERFORMANCE_SUBFLOOR_PATIENCE = 2
 
 PART_SCHEMA = "round0106-jina-diverse-25m-fuzzy-graph-part-v1"
 GRAPH_SCHEMA = "round0106-jina-diverse-25m-fuzzy-graph-v1"
@@ -88,6 +91,25 @@ def part_spec(name: str) -> dict[str, int]:
         return dict(PARTS[name])
     except KeyError as exc:
         raise Round0106Error(f"unknown R0106 graph part {name!r}") from exc
+
+
+def update_performance_streak(
+    current: int,
+    *,
+    completed_new_shards: int,
+    sources_per_second: float,
+) -> int:
+    """Track consecutive grossly infeasible shard rates after warmup."""
+    rate = float(sources_per_second)
+    if not np.isfinite(rate) or rate <= 0:
+        raise Round0106Error("R0106 shard throughput is nonfinite/nonpositive")
+    if completed_new_shards <= PERFORMANCE_WARMUP_SHARDS:
+        return 0
+    return (
+        current + 1
+        if rate < MINIMUM_SHARD_SOURCES_PER_SECOND
+        else 0
+    )
 
 
 def membership(sorted_rows: np.ndarray, values: np.ndarray) -> np.ndarray:

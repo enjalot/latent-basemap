@@ -5,11 +5,13 @@ import pytest
 
 from basemap.round0106_graph import (
     K,
+    MINIMUM_SHARD_SOURCES_PER_SECOND,
     PARTS,
     RETAINED_ROWS,
     Round0106Error,
     compact_to_global,
     global_to_compact,
+    update_performance_streak,
     validate_part_specs,
 )
 from experiments.build_weighted_graph import (
@@ -44,6 +46,36 @@ def test_parts_close_exact_universe_and_degree():
     assert sum(value["retained_rows"] * K for value in PARTS.values()) == (
         RETAINED_ROWS * K
     )
+
+
+def test_performance_streak_ignores_warmup_and_resets_on_recovery():
+    assert update_performance_streak(
+        0,
+        completed_new_shards=1,
+        sources_per_second=1.0,
+    ) == 0
+    streak = update_performance_streak(
+        0,
+        completed_new_shards=2,
+        sources_per_second=MINIMUM_SHARD_SOURCES_PER_SECOND - 1,
+    )
+    assert streak == 1
+    assert update_performance_streak(
+        streak,
+        completed_new_shards=3,
+        sources_per_second=MINIMUM_SHARD_SOURCES_PER_SECOND - 1,
+    ) == 2
+    assert update_performance_streak(
+        streak,
+        completed_new_shards=3,
+        sources_per_second=MINIMUM_SHARD_SOURCES_PER_SECOND,
+    ) == 0
+    with pytest.raises(Round0106Error, match="throughput"):
+        update_performance_streak(
+            0,
+            completed_new_shards=2,
+            sources_per_second=float("nan"),
+        )
 
 
 def test_fuzzy_directed_rows_and_tconorm_are_reciprocal():
