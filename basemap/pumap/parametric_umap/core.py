@@ -68,6 +68,8 @@ class ParametricUMAP:
         weighted_edge_sampling=False,
         gpu_resident_data="auto",
         gpu_resident_vram_budget_gb=10.0,
+        graph_manifest_path=None,
+        graph_manifest_sha256=None,
     ):
         if device is None:
             if torch.cuda.is_available():
@@ -135,6 +137,8 @@ class ParametricUMAP:
         self.mn_pairs_per_batch = mn_pairs_per_batch
         self.mn_weight_scale = mn_weight_scale
         self.weighted_edge_sampling = weighted_edge_sampling
+        self.graph_manifest_path = graph_manifest_path
+        self.graph_manifest_sha256 = graph_manifest_sha256
         # GPU-resident fast path (input-pipeline optimisation). "auto" enables it
         # when X fits in VRAM within the budget on CUDA; True forces it on any
         # device (fp16 storage on CUDA, fp32 on CPU); False keeps the legacy path.
@@ -285,6 +289,60 @@ class ParametricUMAP:
                                "(self.model already initialized) — pipeline/graph/weight "
                                "fail-closed checks would run after GPU commit (L0.5).")
         self._edges_path_used = edges_path
+
+        # R0042's 30M canonical graph has no redundant source/weight arrays and
+        # needs its exact source-normalized sampler rather than generic NPZ
+        # edge sampling. Dispatch before the historical R0034 adapter and
+        # generic loading so the selected semantics remain receipt-visible.
+        prepare_round0042 = getattr(X, "prepare_round0042_training", None)
+        if callable(prepare_round0042):
+            dataset, loader, n_pos_edges, pipeline_info, verified = (
+                prepare_round0042(
+                    edges_path=edges_path,
+                    batch_size=self.batch_size,
+                    pos_ratio=self.pos_ratio,
+                    random_state=random_state,
+                    positive_target_mode=self.positive_target_mode,
+                    weighted_edge_sampling=self.weighted_edge_sampling,
+                    reject_neighbors=self.reject_neighbors,
+                    required_input_pipeline=self.required_input_pipeline,
+                )
+            )
+            self._pipeline_info = pipeline_info
+            self._pipeline_verified_hashes = verified
+            self._fast_device_path = True
+            self._X_dev = X
+            return dataset, loader, n_pos_edges
+
+        # R0034's 150M feature matrix cannot be resident on CUDA and its
+        # canonical graph deliberately has no redundant source/weight arrays.
+        # The explicit adapter supplies the same already-on-device batch
+        # contract as the fast samplers.  Dispatch before generic NPZ loading;
+        # otherwise the legacy path would decompress 18 GB of arrays that the
+        # canonical adapter has already proved and removed.
+        prepare_round0034 = getattr(X, "prepare_round0034_training", None)
+        if callable(prepare_round0034):
+            dataset, loader, n_pos_edges, pipeline_info, verified = (
+                prepare_round0034(
+                    edges_path=edges_path,
+                    batch_size=self.batch_size,
+                    pos_ratio=self.pos_ratio,
+                    random_state=random_state,
+                    positive_target_mode=self.positive_target_mode,
+                    weighted_edge_sampling=self.weighted_edge_sampling,
+                    reject_neighbors=self.reject_neighbors,
+                    required_input_pipeline=self.required_input_pipeline,
+                )
+            )
+            self._pipeline_info = pipeline_info
+            self._pipeline_verified_hashes = verified
+            self._fast_device_path = True
+            # Only disabled R0034 options (mid-near / anchor hold) currently
+            # call this directly, but retaining the adapter here preserves the
+            # fast-loader contract and keeps an accidental use explicit.
+            self._X_dev = X
+            return dataset, loader, n_pos_edges
+
         load_weights = (self.positive_target_mode == "probability"
                         or self.weighted_edge_sampling)
         sources, targets, weights, n_nodes = load_edge_arrays(
@@ -327,10 +385,39 @@ class ParametricUMAP:
                 # graph independently passes the required sibling-manifest gate.
                 trusted = validate_materialized_pack(X)
             self._pipeline_verified_hashes = trusted
-        for man_path in (edges_path + ".manifest.json",
-                         edges_path.rsplit(".", 1)[0] + ".manifest.json"):
+        explicit_manifest = self.graph_manifest_path
+        if explicit_manifest:
+            if (not isinstance(explicit_manifest, str) or
+                    not os.path.isabs(explicit_manifest) or
+                    os.path.islink(explicit_manifest) or
+                    os.path.realpath(explicit_manifest) != explicit_manifest or
+                    not os.path.isfile(explicit_manifest)):
+                raise ValueError(
+                    "explicit graph manifest must be one canonical regular file")
+            from ...artifact_identity import sha256_file as _sha256_file
+            observed_manifest_sha256 = _sha256_file(explicit_manifest)
+            if (not self.graph_manifest_sha256 or
+                    observed_manifest_sha256 != self.graph_manifest_sha256):
+                raise ValueError(
+                    "explicit graph manifest SHA-256 does not match the "
+                    "declared execution contract")
+            manifest_candidates = (explicit_manifest,)
+        else:
+            observed_manifest_sha256 = None
+            manifest_candidates = (
+                edges_path + ".manifest.json",
+                edges_path.rsplit(".", 1)[0] + ".manifest.json",
+            )
+        for man_path in manifest_candidates:
             if os.path.exists(man_path):
                 _man = _json.load(open(man_path))
+                expected_preprocessing = _man.get("input_preprocessing")
+                actual_preprocessing = getattr(
+                    X, "execution_preprocessing_stamp", None)
+                if (expected_preprocessing is not None and
+                        expected_preprocessing != actual_preprocessing):
+                    raise ValueError(
+                        "graph manifest input preprocessing does not match X")
                 logging.info("P0-E: validating X identity against graph manifest %s", man_path)
                 validate_against_manifest(X, _man,
                                           allow_prefix=getattr(self, "allow_prefix_edge_filter", False))
@@ -347,6 +434,8 @@ class ParametricUMAP:
                 self._pipeline_verified_hashes = {
                     **(getattr(self, "_pipeline_verified_hashes", None) or {}),
                     **trusted,
+                    **({"graph_manifest_sha256": observed_manifest_sha256}
+                       if observed_manifest_sha256 else {}),
                 }                                           # admission artifact
                 man_found = man_path
                 break
@@ -462,6 +551,7 @@ class ParametricUMAP:
                     (self.weighted_edge_sampling and weighted_ok)
                     or uniform_with_replacement),
                 "path_reason": reason,
+                **dict(getattr(X, "execution_preprocessing_stamp", {}) or {}),
                 **self._duplicate_multiplicity_info}
             # weighted request must NEVER silently reach a uniform sampler.
             if self.weighted_edge_sampling and not weighted_ok:
@@ -1414,7 +1504,8 @@ class ParametricUMAP:
                 floor=float(getattr(self, "_perf_floor", 200.0)),
                 warn_rate=getattr(self, "_perf_warn_rate", None),
                 subfloor_patience=int(getattr(self, "_perf_subfloor_patience", 3)),
-                device=self.device, baseline_key=bkey)
+                device=self.device, baseline_key=bkey,
+                n_windows=int(getattr(self, "_perf_n_windows", 6)))
             self._canary_profiler = prof
         def _ph(name):
             return prof.phase(name, global_step) if prof is not None else _perf_null
@@ -1455,8 +1546,19 @@ class ParametricUMAP:
                 _fwd_ph.__enter__()
                 with torch.autocast(device_type='cuda' if use_amp else 'cpu', enabled=bool(use_amp), dtype=amp_dtype):
                     # Forward pass
-                    src_embeddings = self.model(src_values)
-                    dst_embeddings = self.model(dst_values)
+                    if getattr(loader, "fused_endpoint_forward", False):
+                        if self.use_batchnorm or self.use_dropout:
+                            raise RuntimeError(
+                                "fused endpoint forward requires batchnorm/dropout disabled")
+                        endpoint_count = len(src_values)
+                        both_embeddings = self.model(
+                            torch.cat((src_values, dst_values), dim=0)
+                        )
+                        src_embeddings = both_embeddings[:endpoint_count]
+                        dst_embeddings = both_embeddings[endpoint_count:]
+                    else:
+                        src_embeddings = self.model(src_values)
+                        dst_embeddings = self.model(dst_values)
 
                     # Low-D similarity kernel (P0.1 switch). `dists` is the
                     # kernel's radial term (‖Δ‖_{2b} legacy / ‖Δ‖²^b umap), used
@@ -1736,6 +1838,18 @@ class ParametricUMAP:
                 global_step += 1
                 st["executed_iters"] = global_step
 
+                # Close performance windows on the update that reaches their
+                # boundary.  This must precede the LR-horizon break: otherwise
+                # an exact-budget run exits before recording its final window
+                # (R0042 recorded 199 of 200).  Placing the boundary here also
+                # avoids drawing an unused next batch merely to finalize timing.
+                if prof is not None and prof.on_update(
+                        global_step, st["positive_lr_optimizer_steps"]):
+                    logging.error("S2 canary abort: %s", prof.abort_reason)
+                    st["stop_reason"] = "canary_subfloor_abort"
+                    stop_training = True
+                    break
+
                 # P0-B: stop when the cosine update budget is spent — i.e. the
                 # schedule has taken `lr_horizon` successful steps (progress=1,
                 # LR≈0). Counting scheduler_steps is exact; testing current_lr<=0
@@ -1810,13 +1924,6 @@ class ParametricUMAP:
                 with _ph("sample"):        # S2: sampler draw + gather + H2D
                     batch = _get_next()
                 pbar.update(1)
-                # S2: advance canary rate windows; abort on repeated sub-floor.
-                if prof is not None and prof.on_update(
-                        global_step, self._train_stats["positive_lr_optimizer_steps"]):
-                    logging.error("S2 canary abort: %s", prof.abort_reason)
-                    self._train_stats["stop_reason"] = "canary_subfloor_abort"
-                    stop_training = True
-                    break
                 if verbose:
                     pbar.set_postfix({
                         'loss': f'{loss.item():.4f}',
@@ -1907,10 +2014,16 @@ class ParametricUMAP:
                      s["lr_horizon"], s["executed_iters"], s["optimizer_steps_succeeded"],
                      s["amp_overflow_skips"], s["nonfinite_loss_skips"], s["nonfinite_gradient_skips"],
                      s["first_lr"] or 0.0, s["peak_lr"], s["final_lr"] or 0.0, s["updates_per_s"])
+        # Capture mutable endpoint accounting after the final batch.  Requested
+        # configuration and the pre-update stamp are not evidence that both
+        # endpoints actually traversed the intended host-int8 path.
         # Stop HostStreamEdgeSampler producer threads so they don't keep drawing
         # and discarding batches during the final transform / downstream scoring.
         if hasattr(loader, "close"):
             loader.close()
+        if hasattr(loader, "execution_stamp"):
+            self._pipeline_runtime_info = loader.execution_stamp()
+            self._train_stats["pipeline_runtime"] = self._pipeline_runtime_info
         if use_wandb:
             wandb.finish()
         return self
