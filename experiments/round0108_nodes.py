@@ -373,16 +373,57 @@ def run_transform(
     return {**receipt, "receipt": expected_input_signature(receipt_path)}
 
 
+def _gather_directed_memberships(
+    sources: np.ndarray,
+    targets: np.ndarray,
+    weights: np.ndarray,
+    anchors: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Gather up to K positive directed memberships for each source."""
+    edge_sources = np.asarray(sources, dtype=np.int64)
+    edge_targets = np.asarray(targets, dtype=np.int64)
+    edge_weights = np.asarray(weights, dtype=np.float32)
+    selected = np.asarray(anchors, dtype=np.int64)
+    if (
+        edge_sources.ndim != 1
+        or edge_targets.shape != edge_sources.shape
+        or edge_weights.shape != edge_sources.shape
+        or selected.ndim != 1
+        or np.any(edge_sources[1:] < edge_sources[:-1])
+        or not np.isfinite(edge_weights).all()
+        or np.any(edge_weights <= 0)
+        or np.any(edge_weights > 1)
+    ):
+        raise Round0108Error("R0106 directed membership arrays are malformed")
+    gathered_targets = np.full((len(selected), K), -1, dtype=np.int64)
+    gathered_weights = np.zeros((len(selected), K), dtype=np.float32)
+    counts = np.empty(len(selected), dtype=np.int64)
+    starts = np.searchsorted(edge_sources, selected, side="left")
+    stops = np.searchsorted(edge_sources, selected, side="right")
+    for position, (start, stop) in enumerate(zip(starts, stops)):
+        count = int(stop - start)
+        counts[position] = count
+        if count < 1 or count > K:
+            raise Round0108Error(
+                "R0106 source has an invalid positive-membership count"
+            )
+        gathered_targets[position, :count] = edge_targets[start:stop]
+        gathered_weights[position, :count] = edge_weights[start:stop]
+    return gathered_targets, gathered_weights, counts
+
+
 def _load_graph_truth(
     compact_anchors: np.ndarray,
     part_outputs: Mapping[str, str],
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-    """Gather each anchor's exact R0106 top-15 neighbors from sealed shards."""
+    """Gather each anchor's sealed positive R0106 directed memberships."""
     from experiments.round0106_nodes import _validate_part_receipt
 
     anchors = np.asarray(compact_anchors, dtype=np.int64)
-    targets = np.empty((len(anchors), K), dtype=np.int64)
-    weights = np.empty((len(anchors), K), dtype=np.float32)
+    targets = np.full((len(anchors), K), -1, dtype=np.int64)
+    weights = np.zeros((len(anchors), K), dtype=np.float32)
+    counts = np.zeros(len(anchors), dtype=np.int64)
+    filled = np.zeros(len(anchors), dtype=bool)
     touched: dict[str, dict[str, Any]] = {}
     for part, spec in PARTS.items():
         mask = (
@@ -415,33 +456,52 @@ def _load_graph_truth(
                 label=f"R0106 {part} shard {shard}",
             )
             with np.load(artifact_path, allow_pickle=False) as archive:
-                source = np.asarray(archive["sources"], dtype=np.int64).reshape(
-                    -1, K
+                selected_anchors = anchors[selected_positions]
+                selected_targets, selected_weights, selected_counts = (
+                    _gather_directed_memberships(
+                        archive["sources"],
+                        archive["targets"],
+                        archive["weights"],
+                        selected_anchors,
+                    )
                 )
-                target = np.asarray(archive["targets"], dtype=np.int64).reshape(
-                    -1, K
-                )
-                weight = np.asarray(archive["weights"], dtype=np.float32).reshape(
-                    -1, K
-                )
-                rows = anchors[selected_positions] - int(
-                    member["compact_start"]
-                )
-                if not np.all(
-                    source[rows]
-                    == anchors[selected_positions, None]
-                ):
-                    raise Round0108Error("R0106 source ordering changed")
-                targets[selected_positions] = target[rows]
-                weights[selected_positions] = weight[rows]
+                targets[selected_positions] = selected_targets
+                weights[selected_positions] = selected_weights
+                counts[selected_positions] = selected_counts
+                filled[selected_positions] = True
             touched[part]["shards"].append(member["artifact"])
     if (
-        np.any(targets < 0)
-        or np.any(targets >= RETAINED_ROWS)
-        or np.any(targets == anchors[:, None])
-        or np.any(np.diff(np.sort(targets, axis=1), axis=1) == 0)
+        not np.all(filled)
+        or np.any(counts < 1)
+        or np.any(counts > K)
+        or np.any(
+            (targets >= RETAINED_ROWS)
+            | ((targets < 0) & (targets != -1))
+        )
+        or np.any(
+            (targets == anchors[:, None])
+            & (targets >= 0)
+        )
     ):
-        raise Round0108Error("R0106 anchor truth is malformed")
+        raise Round0108Error("R0106 anchor memberships are malformed")
+    for position, count in enumerate(counts.tolist()):
+        real = targets[position, :count]
+        if (
+            np.any(real < 0)
+            or len(np.unique(real)) != count
+            or np.any(targets[position, count:] != -1)
+            or np.any(weights[position, count:] != 0)
+        ):
+            raise Round0108Error("R0106 anchor memberships are malformed")
+    touched["membership_accounting"] = {
+        "anchors": len(anchors),
+        "positive_memberships": int(counts.sum()),
+        "zero_memberships_eliminated": int(len(anchors) * K - counts.sum()),
+        "sources_with_eliminated_memberships": int(np.count_nonzero(counts < K)),
+        "minimum_memberships_per_source": int(counts.min()),
+        "padding_target": -1,
+        "padding_weight": 0.0,
+    }
     return targets, weights, touched
 
 
@@ -591,7 +651,7 @@ def run_core_score(
     ):
         raise Round0108Error("R0108 exact high-D truth geometry changed")
     high_radius = high_distances[:, :K_DENSITY].mean(1)
-    graph_recall_at_15 = recall_from_neighbors(
+    graph_membership_recall_at_15 = recall_from_neighbors(
         high15, graph15, truth_k=K
     )
     low_radius = low_distances[:, :K_DENSITY].mean(1)
@@ -776,9 +836,10 @@ def run_core_score(
             "group_centroid_distance_matrix": centroid_distances.tolist(),
             "observed_anchor_map_mixing_k15": observed_mixing.tolist(),
             "graph_mixing_and_hubs": bundle["graph"]["diagnostics"],
-            "r0106_graph_top15_recall_against_exact_high_d_top15": (
-                graph_recall_at_15
+            "r0106_positive_directed_membership_recall_against_exact_high_d_top15": (
+                graph_membership_recall_at_15
             ),
+            "r0106_positive_directed_membership_inputs": graph_truth_inputs,
             "low_dim_exact_search_guard": low_guard,
         },
         "decision": decision,

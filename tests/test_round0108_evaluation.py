@@ -20,12 +20,37 @@ from basemap.round0108_evaluation import (
     projection_metrics,
 )
 from experiments.prepare_round0108_queue import GRAPH_MANIFEST, PART_OUTPUTS
+from experiments.round0108_nodes import _gather_directed_memberships
 
 
 def test_graph_inputs_bind_successful_r0106_attempt() -> None:
     expected_root = "/round-0106/queue-attempt-3/artifacts/"
     assert expected_root in GRAPH_MANIFEST
     assert all(expected_root in path for path in PART_OUTPUTS.values())
+
+
+def test_directed_membership_gather_supports_eliminated_zero_weights() -> None:
+    targets, weights, counts = _gather_directed_memberships(
+        np.asarray([10, 10, 10, 11, 11], dtype=np.int32),
+        np.asarray([1, 2, 3, 4, 5], dtype=np.int32),
+        np.asarray([0.9, 0.5, 0.1, 1.0, 0.2], dtype=np.float32),
+        np.asarray([11, 10], dtype=np.int64),
+    )
+    assert counts.tolist() == [2, 3]
+    assert targets[0, :3].tolist() == [4, 5, -1]
+    assert targets[1, :4].tolist() == [1, 2, 3, -1]
+    assert weights[0, :3].tolist() == pytest.approx([1.0, 0.2, 0.0])
+    assert weights[1, :4].tolist() == pytest.approx([0.9, 0.5, 0.1, 0.0])
+
+
+def test_directed_membership_gather_rejects_missing_anchor_source() -> None:
+    with pytest.raises(Round0108Error):
+        _gather_directed_memberships(
+            np.asarray([10], dtype=np.int32),
+            np.asarray([1], dtype=np.int32),
+            np.asarray([0.9], dtype=np.float32),
+            np.asarray([11], dtype=np.int64),
+        )
 
 
 def _density_cell(point: float, sd: float, null: float) -> dict:
