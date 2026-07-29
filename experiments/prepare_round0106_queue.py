@@ -41,7 +41,9 @@ from experiments.round0105_nodes import _substrate_arrays
 ROUND_ROOT = "/data/latent-basemap/runs/round-0106"
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE_GLOB = os.path.join(LAB_ROOT, "round-0106-*.md")
-R0105_ROOT = "/data/latent-basemap/runs/round-0105/queue/artifacts"
+R0105_ROOT = (
+    "/data/latent-basemap/runs/round-0105/queue-attempt-3/artifacts"
+)
 INDEX = os.path.join(
     R0105_ROOT,
     "retained-index",
