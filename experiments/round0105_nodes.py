@@ -155,7 +155,11 @@ def _gpu_options() -> Any:
 
     options = faiss.GpuClonerOptions()
     options.indicesOptions = faiss.INDICES_64_BIT
-    options.useFloat16 = False
+    # For IndexIVFPQ, GpuClonerOptions.useFloat16 maps to the
+    # GpuIndexIVFPQConfig.useFloat16LookupTables C++ field.  This is required
+    # for PQ96x8 on the local 49,152-byte shared-memory limit; assigning a
+    # Python-only useFloat16LookupTables attribute would be ignored by SWIG.
+    options.useFloat16 = True
     options.usePrecomputed = True
     return options
 
@@ -341,7 +345,8 @@ def run_build_index(
         "faiss_gpu_count": int(faiss.get_num_gpus()),
         "cuda_device": torch.cuda.get_device_name(0),
         "indices": "int64-global-row-id",
-        "use_float16": False,
+        "use_float16_lookup_tables": True,
+        "use_float16_coarse_quantizer": False,
         "use_precomputed": True,
     }
     assembled = faiss.index_gpu_to_cpu(gpu)

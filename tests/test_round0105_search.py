@@ -26,6 +26,7 @@ from basemap.round0105_search import (
 )
 from experiments.round0105_nodes import (
     _clean_search,
+    _gpu_options,
     _normalized_rows,
     _policy_metrics,
     _retained_batch,
@@ -55,6 +56,15 @@ def test_registered_geometry_and_grid_are_fixed() -> None:
     )
     assert GLOBAL_MEAN_FLOOR == 0.90
     assert EVERY_GROUP_MEAN_FLOOR == 0.84
+
+
+def test_gpu_clone_options_support_registered_pq96_on_5090() -> None:
+    options = _gpu_options()
+    assert options.indicesOptions != 0
+    # GpuClonerOptions.useFloat16 is the actual SWIG-backed field that the
+    # IndexIVFPQ cloner maps to GpuIndexIVFPQConfig.useFloat16LookupTables.
+    assert options.useFloat16 is True
+    assert options.usePrecomputed is True
 
 
 def test_registered_samples_reproduce_before_issue() -> None:
