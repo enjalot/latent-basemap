@@ -59,6 +59,8 @@ HELDOUT_TOTAL_ROWS = 50_000
 HELDOUT_CORPUS_ROWS = 49_500
 HELDOUT_QUERY_ROWS = 500
 HELDOUT_SEED = 108
+HELDOUT_REPLACEMENT_SEED_OFFSET = 108_000
+HELDOUT_REPLACEMENT_RESERVE_ROWS = 4_096
 CROSS_ATLAS_CONTROL_SEED = 10_805
 POLISH = "pol_Latn"
 IN_MIX_LANGUAGES = tuple(GROUPS[3:])
@@ -308,6 +310,82 @@ def exact_split_duplicate_diagnostics(
             query_rows_with_exact_corpus_copy
         ),
         "corpus_query_exact_family_disjoint": disjoint,
+    }
+
+
+def exact_reference_copy_mask(
+    reference: np.ndarray,
+    queries: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Return which query rows have an exact stored-byte copy in ``reference``.
+
+    The compact projection is only a candidate index. Every candidate match is
+    verified against the complete row bytes, so fingerprint collisions cannot
+    produce false leakage and no exact copy can be missed.
+    """
+    left = np.asarray(reference)
+    right = np.asarray(queries)
+    if (
+        left.ndim != 2
+        or right.ndim != 2
+        or left.shape[1:] != right.shape[1:]
+        or left.shape[1] <= 0
+        or left.dtype != right.dtype
+        or left.dtype.kind != "f"
+        or left.dtype.itemsize not in {2, 4, 8}
+    ):
+        raise Round0108Error("reference-copy audit inputs are malformed")
+    positions = np.unique(
+        np.linspace(0, left.shape[1] - 1, 32, dtype=np.int64)
+    )
+    result = np.zeros(len(right), dtype=bool)
+    if len(left) == 0 or len(right) == 0:
+        return result, {
+            "identity": "complete stored-row bytes",
+            "candidate_projection_positions": positions.tolist(),
+            "reference_rows": len(left),
+            "query_rows": len(right),
+            "candidate_query_rows": 0,
+            "candidate_row_pairs": 0,
+            "query_rows_with_exact_reference_copy": 0,
+            "exact_reference_family_disjoint": True,
+        }
+
+    uint_dtype = np.dtype(f"u{left.dtype.itemsize}")
+    left_projection = np.ascontiguousarray(left[:, positions]).view(uint_dtype)
+    right_projection = np.ascontiguousarray(right[:, positions]).view(uint_dtype)
+    key_dtype = np.dtype(
+        (np.void, left_projection.dtype.itemsize * left_projection.shape[1])
+    )
+    left_keys = left_projection.view(key_dtype).reshape(-1)
+    right_keys = right_projection.view(key_dtype).reshape(-1)
+    order = np.argsort(left_keys, kind="stable")
+    ordered_keys = left_keys[order]
+    starts = np.searchsorted(ordered_keys, right_keys, side="left")
+    stops = np.searchsorted(ordered_keys, right_keys, side="right")
+    candidate_positions = np.flatnonzero(stops > starts)
+    candidate_pairs = int(np.sum(stops - starts, dtype=np.int64))
+    for query_position in candidate_positions.tolist():
+        query_bytes = np.asarray(right[query_position]).tobytes(order="C")
+        for sorted_position in range(
+            int(starts[query_position]), int(stops[query_position])
+        ):
+            reference_position = int(order[sorted_position])
+            if (
+                np.asarray(left[reference_position]).tobytes(order="C")
+                == query_bytes
+            ):
+                result[query_position] = True
+                break
+    return result, {
+        "identity": "complete stored-row bytes",
+        "candidate_projection_positions": positions.tolist(),
+        "reference_rows": len(left),
+        "query_rows": len(right),
+        "candidate_query_rows": len(candidate_positions),
+        "candidate_row_pairs": candidate_pairs,
+        "query_rows_with_exact_reference_copy": int(result.sum()),
+        "exact_reference_family_disjoint": not bool(np.any(result)),
     }
 
 

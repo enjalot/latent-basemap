@@ -148,6 +148,7 @@ def scan_projection_maps(
         "code": "Common Corpus code",
         "science": "Common Corpus science",
         "latin": "Common Corpus Latin",
+        "pol_Latn": "Held-out Polish",
     }
     queue = _load_json(queue_dir / "queue.json") or {}
     release_sha = queue.get("release_sha") or (queue.get("release") or {}).get("sha")

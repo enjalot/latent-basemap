@@ -36,11 +36,14 @@ from basemap.round0108_evaluation import (
     CALIBRATION_NULL_DRAWS,
     CALIBRATION_NULL_SEED,
     EMBEDDING_PROMPT,
+    HELDOUT_REPLACEMENT_RESERVE_ROWS,
+    HELDOUT_REPLACEMENT_SEED_OFFSET,
     HELDOUT_SEED,
     IN_MIX_LANGUAGES,
     MAP_KEY,
     POLISH,
     ROUND_ID,
+    exact_reference_copy_mask,
     fixed_probe_split,
 )
 from experiments.prepare_round0020_0022_queues import (
@@ -265,8 +268,87 @@ def _selection_artifact(
             row_stop=len(source),
             seed=HELDOUT_SEED + index,
         )
+        original_queries = queries.copy()
+        replacement_mask = np.zeros(len(queries), dtype=bool)
+        if start:
+            query_values = np.asarray(source[queries])
+            training_copies, _training_audit = exact_reference_copy_mask(
+                source[:start], query_values
+            )
+            corpus_copies, _corpus_audit = exact_reference_copy_mask(
+                np.asarray(source[corpus]), query_values
+            )
+            replacement_mask = training_copies | corpus_copies
+            needed = int(replacement_mask.sum())
+            if needed:
+                span = len(source) - start
+                reserve_count = min(HELDOUT_REPLACEMENT_RESERVE_ROWS, span)
+                reserve_rng = np.random.RandomState(
+                    HELDOUT_REPLACEMENT_SEED_OFFSET + HELDOUT_SEED + index
+                )
+                reserve = (
+                    reserve_rng.choice(span, size=reserve_count, replace=False)
+                    .astype(np.int64)
+                    + start
+                )
+                selected_rows = np.concatenate((corpus, queries))
+                reserve = reserve[~np.isin(reserve, selected_rows)]
+                reserve_values = np.asarray(source[reserve])
+                reserve_training_copies, _ = exact_reference_copy_mask(
+                    source[:start], reserve_values
+                )
+                clean_reference = np.concatenate(
+                    (
+                        np.asarray(source[corpus]),
+                        query_values[~replacement_mask],
+                    ),
+                    axis=0,
+                )
+                reserve_panel_copies, _ = exact_reference_copy_mask(
+                    clean_reference, reserve_values
+                )
+                selected_replacements: list[int] = []
+                selected_bytes: set[bytes] = set()
+                for reserve_position in np.flatnonzero(
+                    ~(reserve_training_copies | reserve_panel_copies)
+                ).tolist():
+                    value_bytes = np.asarray(
+                        reserve_values[reserve_position]
+                    ).tobytes(order="C")
+                    if value_bytes in selected_bytes:
+                        continue
+                    selected_bytes.add(value_bytes)
+                    selected_replacements.append(
+                        int(reserve[reserve_position])
+                    )
+                    if len(selected_replacements) == needed:
+                        break
+                if len(selected_replacements) != needed:
+                    raise RuntimeError(
+                        f"{language} duplicate-free query reserve exhausted"
+                    )
+                queries[replacement_mask] = np.asarray(
+                    selected_replacements, dtype=np.int64
+                )
+            final_values = np.asarray(source[queries])
+            final_training_copies, _ = exact_reference_copy_mask(
+                source[:start], final_values
+            )
+            final_corpus_copies, _ = exact_reference_copy_mask(
+                np.asarray(source[corpus]), final_values
+            )
+            if (
+                np.any(final_training_copies)
+                or np.any(final_corpus_copies)
+                or len(np.unique(queries)) != len(queries)
+            ):
+                raise RuntimeError(
+                    f"{language} held-out query family hygiene did not close"
+                )
         arrays[f"{language}__corpus"] = corpus
         arrays[f"{language}__queries"] = queries
+        arrays[f"{language}__original_queries"] = original_queries
+        arrays[f"{language}__query_replacement_mask"] = replacement_mask
     dadabase = np.load(
         DIAGNOSTIC_PATHS["dadabase"], mmap_mode="r", allow_pickle=False
     )
@@ -535,6 +617,7 @@ def prepare_round0108(
             "graph_manifest": GRAPH_MANIFEST,
             "graph_manifest_sha256": graph_signature["sha256"],
             "language_sources": language_sources,
+            "language_training_stops": selected_stops,
             "diagnostic_sources": diagnostics,
             "embedding_prompt": EMBEDDING_PROMPT,
         },
@@ -618,6 +701,11 @@ def prepare_round0108(
             "in_mix_controls": list(IN_MIX_LANGUAGES),
             "corpus_rows": 49_500,
             "query_rows": 500,
+            "query_exact_training_family_copies": 0,
+            "duplicate_replacement_policy": (
+                "fixed selector followed by deterministic reserve replacement "
+                "of exact training-prefix or corpus-family copies"
+            ),
             "polish_recall50_minimum_relative_to_in_mix_median": 0.50,
             "recall50_must_exceed_recall10": True,
         },

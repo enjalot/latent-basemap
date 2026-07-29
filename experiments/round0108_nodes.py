@@ -68,6 +68,7 @@ from basemap.round0108_evaluation import (
     Round0108Error,
     core_geometry_decision,
     exact_cosine_topk,
+    exact_reference_copy_mask,
     exact_split_duplicate_diagnostics,
     headline_ood_decision,
     identity_for_rows,
@@ -1022,13 +1023,35 @@ def run_ood(
             query_rows = np.asarray(
                 selected[f"{language}__queries"], dtype=np.int64
             )
+            original_query_rows = np.asarray(
+                selected[f"{language}__original_queries"], dtype=np.int64
+            )
+            replacement_mask = np.asarray(
+                selected[f"{language}__query_replacement_mask"], dtype=bool
+            )
             source_spec = job["language_sources"][language]
             source_path = str(source_spec["canonical_path"])
             if expected_input_signature(source_path) != dict(source_spec):
                 raise Round0108Error(f"{language} source bytes changed")
-            corpus, queries = _load_selected(
-                source_path, corpus_rows, query_rows
+            source = np.load(source_path, mmap_mode="r", allow_pickle=False)
+            corpus = np.asarray(source[corpus_rows])
+            queries = np.asarray(source[query_rows])
+            training_stop = int(job["language_training_stops"][language])
+            training_copy_mask, training_family_audit = (
+                exact_reference_copy_mask(source[:training_stop], queries)
             )
+            changed_query_rows = original_query_rows != query_rows
+            if (
+                corpus_rows.shape != (HELDOUT_CORPUS_ROWS,)
+                or query_rows.shape != (HELDOUT_QUERY_ROWS,)
+                or original_query_rows.shape != query_rows.shape
+                or replacement_mask.shape != query_rows.shape
+                or not np.array_equal(changed_query_rows, replacement_mask)
+                or np.any(training_copy_mask)
+            ):
+                raise Round0108Error(
+                    f"{language} held-out training-family hygiene changed"
+                )
             report = _probe_score(
                 name=language,
                 corpus=corpus,
@@ -1050,7 +1073,10 @@ def run_ood(
                     "training_membership": (
                         "absent"
                         if language == POLISH
-                        else "rows beyond R0087 selected prefix"
+                        else (
+                            "rows beyond R0087 selected prefix with exact "
+                            "training-family query copies replaced"
+                        )
                     ),
                 },
                 save_coordinates=language == POLISH,
@@ -1058,6 +1084,17 @@ def run_ood(
                     "require-corpus-query-exact-family-disjoint"
                 ),
             )
+            report["training_family_hygiene"] = {
+                **training_family_audit,
+                "training_prefix_rows": training_stop,
+                "original_query_rows": identity_for_rows(original_query_rows),
+                "final_query_rows": identity_for_rows(query_rows),
+                "replacement_mask_sha256": ordered_array_sha256(
+                    replacement_mask
+                ),
+                "replacements": int(replacement_mask.sum()),
+                "passed": not bool(np.any(training_copy_mask)),
+            }
             language_metrics[language] = report["probe"]
             language_artifacts[language] = report
             if language == POLISH:
@@ -1333,6 +1370,10 @@ def run_ood(
     transform_path = os.path.join(
         str(job["transform_output"]), "actual-transform.json"
     )
+    registry_reports = {
+        **diagnostic_reports,
+        POLISH: language_artifacts[POLISH],
+    }
     panel = seal({
         "schema": "universality-panel-v1",
         "round_id": ROUND_ID,
@@ -1352,7 +1393,7 @@ def run_ood(
                 "duplicate_control": report["duplicate_control"],
                 "verdict": "diagnostic-only",
             }
-            for name, report in diagnostic_reports.items()
+            for name, report in registry_reports.items()
         },
         "headline_ood_probe": POLISH,
         "projection_ffr_role": "diagnostic-only",
@@ -1411,7 +1452,7 @@ def _refresh_registry_best_effort(
     map_ids: list[str] = []
     expected_map_id = f"round-{ROUND_ID}-{MAP_KEY}"
     expected_projection_probes = {
-        "dadabase", "fineweb-heldout", "trec-covid"
+        "dadabase", "fineweb-heldout", POLISH, "trec-covid"
     }
     observed_projection_probes: set[str] = set()
     try:
@@ -1648,7 +1689,11 @@ def run_decision(
             (ood.get("diagnostic_map_cards") or {}).get(name, {}).get(
                 "coordinates"
             )
-            for name in ("dadabase", "trec-covid")
+            for name in ("dadabase", "fineweb-heldout", "trec-covid")
+        ) and bool(
+            (ood.get("language_cells") or {}).get(POLISH, {}).get(
+                "coordinates"
+            )
         ),
         "outcome": "accepted" if accepted else "failed-with-diagnostics",
         "universal_ood_claim_made": False,

@@ -14,6 +14,7 @@ from basemap.round0108_evaluation import (
     Round0108Error,
     core_geometry_decision,
     exact_split_duplicate_diagnostics,
+    exact_reference_copy_mask,
     fixed_probe_split,
     headline_ood_decision,
     jina_density_floor,
@@ -127,10 +128,38 @@ def test_exact_duplicate_audit_distinguishes_within_and_cross_split_families(
     assert clean["cross_split_exact_family_count"] == 0
     assert clean["corpus_query_exact_family_disjoint"] is True
 
+
+def test_exact_reference_copy_mask_verifies_full_rows() -> None:
+    reference = np.asarray([
+        [1.0, 2.0, 3.0, 4.0],
+        [5.0, 6.0, 7.0, 8.0],
+    ], dtype=np.float16)
+    queries = np.asarray([
+        [5.0, 6.0, 7.0, 8.0],
+        [1.0, 2.0, 3.0, 9.0],
+    ], dtype=np.float16)
+    copied, receipt = exact_reference_copy_mask(reference, queries)
+    assert copied.tolist() == [True, False]
+    assert receipt["query_rows_with_exact_reference_copy"] == 1
+    assert receipt["exact_reference_family_disjoint"] is False
+
+    empty, empty_receipt = exact_reference_copy_mask(
+        reference[:0], queries
+    )
+    assert not np.any(empty)
+    assert empty_receipt["exact_reference_family_disjoint"] is True
+
     collision = np.zeros((2, 64), dtype=np.float16)
     sampled = set(np.linspace(0, 63, 32, dtype=np.int64).tolist())
     unsampled = next(index for index in range(64) if index not in sampled)
     collision[1, unsampled] = 1
+    copied, receipt = exact_reference_copy_mask(
+        collision[:1], collision[1:]
+    )
+    assert copied.tolist() == [False]
+    assert receipt["candidate_query_rows"] == 1
+    assert receipt["query_rows_with_exact_reference_copy"] == 0
+
     split = exact_split_duplicate_diagnostics(
         collision, np.ones((1, 64), dtype=np.float16)
     )
@@ -380,7 +409,9 @@ def test_registry_view_success_requires_expected_round_map(
                 "kind": "projection-map",
                 "projection": {"probe": probe},
             }
-            for probe in ("dadabase", "fineweb-heldout", "trec-covid")
+            for probe in (
+                "dadabase", "fineweb-heldout", "pol_Latn", "trec-covid"
+            )
         ]
     }
 
