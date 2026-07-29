@@ -74,25 +74,25 @@ def _require_issued_round() -> str:
     return candidates[0]
 
 
-def _require_successful_r0109_terminal(
+def _require_successful_r0110_terminal(
     path: str,
     *,
     expected_sha256: str,
 ) -> dict[str, Any]:
     signature = expected_input_signature(path)
     if signature["sha256"] != expected_sha256:
-        raise RuntimeError("R0109 terminal receipt bytes changed")
+        raise RuntimeError("R0110 terminal receipt bytes changed")
     with open(path, encoding="utf-8") as handle:
         terminal = json.load(handle)
     if (
         terminal.get("schema") != "slim-runner-terminal-v3"
-        or terminal.get("round_id") != "0109"
+        or terminal.get("round_id") != "0110"
         or terminal.get("verdict") != "succeeded"
         or terminal.get("completed_jobs") != terminal.get("required_jobs")
         or terminal.get("release_checkout_unchanged") is not True
         or terminal.get("queue_manifest_unchanged") is not True
     ):
-        raise RuntimeError("R0109 did not reach a clean terminal training run")
+        raise RuntimeError("R0110 did not reach a clean terminal evaluation")
     return signature
 
 
@@ -101,8 +101,8 @@ def prepare_round0111(
     release_sha: str,
     r0107_review_path: str,
     r0107_review_sha256: str,
-    r0109_terminal_path: str,
-    r0109_terminal_sha256: str,
+    r0110_terminal_path: str,
+    r0110_terminal_sha256: str,
     queue_root: str = os.path.join(ROUND_ROOT, "queue"),
 ) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
@@ -123,9 +123,9 @@ def prepare_round0111(
             ),
         ),
     }
-    r0109_terminal = _require_successful_r0109_terminal(
-        r0109_terminal_path,
-        expected_sha256=r0109_terminal_sha256,
+    r0110_terminal = _require_successful_r0110_terminal(
+        r0110_terminal_path,
+        expected_sha256=r0110_terminal_sha256,
     )
     graph_signature = expected_input_signature(GRAPH_MANIFEST)
     graph = load_graph_manifest(
@@ -142,7 +142,7 @@ def prepare_round0111(
     inputs = _dedupe([
         expected_input_signature(round_file),
         *reviews.values(),
-        r0109_terminal,
+        r0110_terminal,
         substrate["signature"],
         substrate["payloads"]["int8"],
         substrate["payloads"]["scales"],
@@ -201,7 +201,7 @@ def prepare_round0111(
         "rows": RETAINED_ROWS,
         "dimension": DIMENSION,
         "seed": SEED,
-        "r0109_terminal_ordering_receipt": r0109_terminal,
+        "r0110_terminal_ordering_receipt": r0110_terminal,
         "graph_manifest": graph_signature,
         "directed_fuzzy_edges": int(manifest["directed_edge_count"]),
         "batch_size": BATCH_SIZE,
@@ -232,8 +232,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--release-sha", required=True)
     parser.add_argument("--r0107-review", required=True)
     parser.add_argument("--r0107-review-sha256", required=True)
-    parser.add_argument("--r0109-terminal", required=True)
-    parser.add_argument("--r0109-terminal-sha256", required=True)
+    parser.add_argument("--r0110-terminal", required=True)
+    parser.add_argument("--r0110-terminal-sha256", required=True)
     parser.add_argument(
         "--queue-root", default=os.path.join(ROUND_ROOT, "queue")
     )
@@ -242,8 +242,8 @@ def main(argv: list[str] | None = None) -> int:
         release_sha=args.release_sha,
         r0107_review_path=args.r0107_review,
         r0107_review_sha256=args.r0107_review_sha256,
-        r0109_terminal_path=args.r0109_terminal,
-        r0109_terminal_sha256=args.r0109_terminal_sha256,
+        r0110_terminal_path=args.r0110_terminal,
+        r0110_terminal_sha256=args.r0110_terminal_sha256,
         queue_root=args.queue_root,
     )
     print(json.dumps({"queue_manifest": path}, indent=2, sort_keys=True))

@@ -13,7 +13,7 @@ from experiments.prepare_round0111_queue import (
     R0106_REVIEW,
     R0106_REVIEW_SHA256,
     SEED,
-    _require_successful_r0109_terminal,
+    _require_successful_r0110_terminal,
 )
 
 
@@ -90,11 +90,11 @@ def test_round0111_wrapper_binds_seed_and_receipt_schemas(
         )
 
 
-def test_r0109_terminal_ordering_requires_clean_success(tmp_path) -> None:
+def test_r0110_terminal_ordering_requires_clean_success(tmp_path) -> None:
     path = tmp_path / "runner-terminal.json"
     terminal = {
         "schema": "slim-runner-terminal-v3",
-        "round_id": "0109",
+        "round_id": "0110",
         "verdict": "succeeded",
         "completed_jobs": ["a"],
         "required_jobs": ["a"],
@@ -103,14 +103,14 @@ def test_r0109_terminal_ordering_requires_clean_success(tmp_path) -> None:
     }
     path.write_text(json.dumps(terminal))
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    assert _require_successful_r0109_terminal(
+    assert _require_successful_r0110_terminal(
         str(path), expected_sha256=digest
     ) == expected_input_signature(path)
     terminal["verdict"] = "failed"
     path.write_text(json.dumps(terminal))
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    with pytest.raises(RuntimeError, match="terminal training"):
-        _require_successful_r0109_terminal(
+    with pytest.raises(RuntimeError, match="terminal evaluation"):
+        _require_successful_r0110_terminal(
             str(path), expected_sha256=digest
         )
 
