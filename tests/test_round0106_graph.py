@@ -19,6 +19,13 @@ from experiments.build_weighted_graph import (
     symmetrize_bucket,
 )
 from experiments.round0106_nodes import _validate_joined_reciprocity
+from experiments.prepare_round0106_queue import (
+    DECISION,
+    INDEX,
+    INDEX_RECEIPT,
+    QUALIFICATION,
+    R0105_ROOT,
+)
 
 
 def test_compact_mapping_handles_contiguous_exclusion_runs():
@@ -46,6 +53,14 @@ def test_parts_close_exact_universe_and_degree():
     assert sum(value["retained_rows"] * K for value in PARTS.values()) == (
         RETAINED_ROWS * K
     )
+
+
+def test_search_inputs_bind_successful_r0105_attempt():
+    assert R0105_ROOT.endswith("/round-0105/queue-attempt-3/artifacts")
+    assert INDEX.startswith(R0105_ROOT + "/")
+    assert INDEX_RECEIPT.startswith(R0105_ROOT + "/")
+    assert QUALIFICATION.startswith(R0105_ROOT + "/")
+    assert DECISION.startswith(R0105_ROOT + "/")
 
 
 def test_performance_streak_ignores_warmup_and_resets_on_recovery():
