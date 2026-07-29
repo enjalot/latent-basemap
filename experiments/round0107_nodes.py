@@ -217,7 +217,12 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         config["optimizer"]["positive_rows_per_update"]
     )
     if (
-        int(runtime["weight_acceptances"]) < expected_positive_draws
+        int(runtime["weight_emitted_draws"]) != expected_positive_draws
+        or int(runtime["weight_acceptances"])
+        != (
+            int(runtime["weight_emitted_draws"])
+            + int(runtime["weight_buffered_draws"])
+        )
         or int(runtime["weight_proposals"]) < int(runtime["weight_acceptances"])
         or not 0 < float(runtime["weight_acceptance_rate"]) <= 1
     ):

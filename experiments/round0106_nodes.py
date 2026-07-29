@@ -37,10 +37,13 @@ from basemap.round0105_search import (
 from basemap.round0106_graph import (
     GRAPH_SCHEMA,
     LOCAL_CONNECTIVITY,
+    MINIMUM_SHARD_SOURCES_PER_SECOND,
     N_NEIGHBORS,
     PAIR_BUCKETS,
     PART_SCHEMA,
     PARTS,
+    PERFORMANCE_SUBFLOOR_PATIENCE,
+    PERFORMANCE_WARMUP_SHARDS,
     RERANK_BATCH_ROWS,
     ROUND_ID,
     SEARCH_BATCH_ROWS,
@@ -52,6 +55,7 @@ from basemap.round0106_graph import (
     membership,
     part_spec,
     seal,
+    update_performance_streak,
     validate_search_artifacts,
 )
 from experiments.build_weighted_graph import (
@@ -615,6 +619,8 @@ def run_build_part(
     width = int(selected["shortlist_width"])
     gpu.nprobe = nprobe
     shard_receipts = []
+    completed_new_shards = 0
+    performance_subfloor_streak = 0
     compact_start = spec["compact_start"]
     compact_stop = spec["compact_stop"]
     for shard, start in enumerate(
@@ -635,12 +641,30 @@ def run_build_part(
             contract_sha256=contract_sha256,
         )
         shard_receipts.append(receipt)
+        rate = float(receipt["performance"]["sources_per_second"])
+        if receipt["resumed"] is not True:
+            completed_new_shards += 1
+            performance_subfloor_streak = update_performance_streak(
+                performance_subfloor_streak,
+                completed_new_shards=completed_new_shards,
+                sources_per_second=rate,
+            )
         print(
             f"R0106 {part} shard {shard + 1}: "
             f"{stop - compact_start:,}/{spec['retained_rows']:,} sources "
-            f"({receipt['performance']['sources_per_second']:.1f} source/s)",
+            f"({rate:.1f} source/s)",
             flush=True,
         )
+        if (
+            performance_subfloor_streak
+            >= PERFORMANCE_SUBFLOOR_PATIENCE
+        ):
+            raise Round0106Error(
+                "R0106 shard throughput stayed below "
+                f"{MINIMUM_SHARD_SOURCES_PER_SECOND:.1f} source/s for "
+                f"{PERFORMANCE_SUBFLOOR_PATIENCE} consecutive post-warmup "
+                "shards"
+            )
     retained_sources = sum(
         int(receipt["retained_sources"]) for receipt in shard_receipts
     )
@@ -708,6 +732,14 @@ def run_build_part(
                 for value in shard_receipts
             ),
             "peak_rss_gib": _peak_rss_gib(),
+            "early_regression_guard": {
+                "warmup_new_shards": PERFORMANCE_WARMUP_SHARDS,
+                "minimum_sources_per_second": (
+                    MINIMUM_SHARD_SOURCES_PER_SECOND
+                ),
+                "subfloor_patience": PERFORMANCE_SUBFLOOR_PATIENCE,
+                "ending_subfloor_streak": performance_subfloor_streak,
+            },
         },
         "training_performed": False,
         "optimizer_updates": 0,
