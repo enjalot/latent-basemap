@@ -4,7 +4,8 @@ R0112 embedded all 2M rows under the model's native 8192-token limit, but its
 last slice failed a diagnostic against historical embeddings produced with an
 explicit 512-token limit.  This module deliberately does not re-embed or
 reinterpret R0112 as successful.  It defines a new, CPU-only evidence product
-over the preserved paired bytes.
+over the preserved paired bytes and binds their actual native-8192 execution
+semantics.
 """
 from __future__ import annotations
 
