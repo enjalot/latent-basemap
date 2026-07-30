@@ -1,0 +1,1418 @@
+"""Execute the paired raw/document Jina map contrast for Round 0113."""
+from __future__ import annotations
+
+import gc
+import math
+import os
+import random
+import resource
+import time
+from collections.abc import Mapping
+from typing import Any
+
+import numpy as np
+
+from basemap.artifact_identity import (
+    expected_input_signature,
+    ordered_array_sha256,
+)
+from basemap.output_safety import (
+    atomic_build_new_file,
+    atomic_save_new_npy,
+    atomic_save_new_npz,
+    atomic_write_new_json,
+    create_fresh_directory,
+)
+from basemap.round0104_training import L2NormalizedArray
+from basemap.round0108_evaluation import exact_reference_copy_mask
+from basemap.round0112_prompt_substrate import (
+    MODEL_ROOT,
+    PROMPT_PREFIX,
+)
+from basemap.round0113_prompt_contrast import (
+    ARMS,
+    ASSEMBLY_SCHEMA,
+    BATCH_SIZE,
+    DECISION_METRICS,
+    DIMENSION,
+    GRAPH_K,
+    GRAPH_MEAN_RECALL_FLOOR,
+    GRAPH_NLIST,
+    GRAPH_NPROBE_GRID,
+    GRAPH_P10_RECALL_FLOOR,
+    GRAPH_QUALITY_ROWS,
+    GRAPH_QUALITY_SEED,
+    GRAPH_SCHEMA,
+    GRAPH_TRAIN_ROWS,
+    GRAPH_TRAIN_SEED,
+    PANEL_ANCHORS,
+    PANEL_SEED,
+    PERFORMANCE_WARMUP_UPDATES,
+    PERFORMANCE_WINDOWS,
+    QUERY_CANDIDATES,
+    QUERY_ROWS,
+    QUERY_SCHEMA,
+    QUERY_SELECTION_SCHEMA,
+    ROUND_ID,
+    SEED,
+    SUCCESSFUL_UPDATES,
+    TRAIN_MINIMUM_UPDATES_PER_S,
+    HostFp16EndpointArray,
+    PromptTrainingInput,
+    Round0113Error,
+    compact_mapping,
+    load_graph,
+    load_substrate_manifest,
+    paired_decision,
+    panel_config,
+    query_candidate_rows,
+    query_source_layout,
+    read_sealed,
+    seal,
+    synchronize_runtime_counters,
+    train_config,
+    verify_signature,
+)
+
+
+RETAINED_ROWS = 1_994_634
+
+
+def _schema(stem: str) -> str:
+    return f"round0113-{stem}-v1"
+
+
+def _faiss_gpu_options(faiss: Any) -> Any:
+    options = faiss.GpuClonerOptions()
+    options.indicesOptions = faiss.INDICES_64_BIT
+    options.useFloat16 = False
+    options.usePrecomputed = True
+    return options
+
+
+def _without_self(
+    rows: np.ndarray, ids: np.ndarray, width: int
+) -> np.ndarray:
+    out = np.empty((len(rows), width), dtype=np.int64)
+    for index, row in enumerate(np.asarray(rows, dtype=np.int64)):
+        kept = row[row != int(ids[index])]
+        if len(kept) < width or len(np.unique(kept[:width])) != width:
+            raise Round0113Error("search did not return enough unique nonself rows")
+        out[index] = kept[:width]
+    return out
+
+
+def _recall_rows(observed: np.ndarray, truth: np.ndarray) -> np.ndarray:
+    return np.asarray(
+        [
+            np.isin(observed[index], truth[index]).sum() / truth.shape[1]
+            for index in range(len(truth))
+        ],
+        dtype=np.float64,
+    )
+
+
+def _recall(high: np.ndarray, low: np.ndarray, k: int) -> float:
+    return float(
+        np.mean(
+            [
+                len(np.intersect1d(high[index, :k], low[index])) / k
+                for index in range(len(high))
+            ]
+        )
+    )
+
+
+def _data_identity(
+    assembly: Mapping[str, Any],
+    *,
+    arm: str,
+) -> dict[str, Any]:
+    return {
+        "kind": "round0113-compact-prompt-array",
+        "shape": [RETAINED_ROWS, DIMENSION],
+        "dtype": np.dtype("<f2").str,
+        "arm": arm,
+        "source": assembly["outputs"][arm],
+        "mapping": assembly["mapping"],
+        "substrate": assembly["substrate"],
+    }
+
+
+def _materialize_normalized(source: np.ndarray) -> np.ndarray:
+    values = np.empty((len(source), DIMENSION), dtype=np.float32)
+    for start in range(0, len(source), 65_536):
+        stop = min(start + 65_536, len(source))
+        block = np.asarray(source[start:stop], dtype=np.float32)
+        norms = np.linalg.norm(block, axis=1, keepdims=True)
+        if (
+            not np.isfinite(block).all()
+            or not np.isfinite(norms).all()
+            or np.any(norms <= 0)
+        ):
+            raise Round0113Error("R0113 source has zero/nonfinite rows")
+        values[start:stop] = block / norms
+    return values
+
+
+def _load_assembly(job: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    path = os.path.join(str(job["assembly_output"]), "assembly-manifest.json")
+    manifest = read_sealed(path, label="R0113 compact assembly")
+    if (
+        manifest.get("schema") != ASSEMBLY_SCHEMA
+        or manifest.get("round_id") != ROUND_ID
+        or int(manifest.get("retained_rows", -1)) != RETAINED_ROWS
+        or set(manifest.get("outputs") or {}) != set(ARMS)
+    ):
+        raise Round0113Error("R0113 compact assembly contract changed")
+    verify_signature(manifest["mapping"], label="R0113 compact mapping")
+    for arm in ARMS:
+        verify_signature(manifest["outputs"][arm], label=f"R0113 {arm} compact input")
+    return manifest, expected_input_signature(path)
+
+
+def _open_compact(
+    assembly: Mapping[str, Any], arm: str
+) -> np.memmap:
+    if arm not in ARMS:
+        raise Round0113Error(f"unknown R0113 arm {arm!r}")
+    path = verify_signature(
+        assembly["outputs"][arm], label=f"R0113 {arm} compact array"
+    )
+    source = np.memmap(
+        path,
+        mode="r",
+        dtype="<f2",
+        shape=(RETAINED_ROWS, DIMENSION),
+    )
+    return source
+
+
+def _write_compact(
+    path: str,
+    *,
+    chunks: list[dict[str, Any]],
+    mapping: np.ndarray,
+) -> None:
+    output = np.memmap(
+        path,
+        mode="w+",
+        dtype="<f2",
+        shape=(RETAINED_ROWS, DIMENSION),
+    )
+    written = 0
+    for chunk_index, signature in enumerate(chunks):
+        start = chunk_index * 25_000
+        stop = start + 25_000
+        left = int(np.searchsorted(mapping, start, side="left"))
+        right = int(np.searchsorted(mapping, stop, side="left"))
+        rows = mapping[left:right] - start
+        values = np.load(
+            str(signature["canonical_path"]), mmap_mode="r", allow_pickle=False
+        )
+        if values.shape != (25_000, DIMENSION) or values.dtype != np.float16:
+            raise Round0113Error("R0112 embedding chunk geometry changed")
+        output[written : written + len(rows)] = values[rows]
+        written += len(rows)
+    if written != RETAINED_ROWS:
+        raise Round0113Error("R0113 compact assembly row count did not close")
+    output.flush()
+    del output
+
+
+def run_assemble(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+    output = create_fresh_directory(
+        job["outputs"][0], label="R0113 compact prompt arrays"
+    )
+    substrate = load_substrate_manifest(
+        str(job["substrate_manifest"]),
+        expected_sha256=str(job["substrate_manifest_sha256"]),
+        verify_chunks=False,
+    )
+    mapping = compact_mapping(substrate["excluded"])
+    mapping_path = os.path.join(output, "compact-to-global.i64.npy")
+    atomic_save_new_npy(mapping_path, mapping, immutable=True)
+    outputs: dict[str, Any] = {}
+    started = time.monotonic()
+    arm_wall: dict[str, float] = {}
+    for arm in ARMS:
+        arm_started = time.monotonic()
+        path = os.path.join(output, f"{arm}-compact.f16")
+        atomic_build_new_file(
+            path,
+            lambda temporary, arm=arm: _write_compact(
+                temporary,
+                chunks=substrate["chunks"][arm],
+                mapping=mapping,
+            ),
+            immutable=True,
+        )
+        signature = expected_input_signature(path)
+        if signature["bytes"] != RETAINED_ROWS * DIMENSION * 2:
+            raise Round0113Error("R0113 compact fp16 byte count changed")
+        outputs[arm] = signature
+        arm_wall[arm] = time.monotonic() - arm_started
+    body = {
+        "schema": ASSEMBLY_SCHEMA,
+        "round_id": ROUND_ID,
+        "release_sha": active["manifest"]["release_sha"],
+        "substrate": substrate["signature"],
+        "selector": substrate["selector"],
+        "source_rows": 2_000_000,
+        "excluded_rows": 5_366,
+        "retained_rows": RETAINED_ROWS,
+        "dimension": DIMENSION,
+        "dtype": np.dtype("<f2").str,
+        "mapping": expected_input_signature(mapping_path),
+        "outputs": outputs,
+        "paired_row_population_identical": True,
+        "training_performed": False,
+        "performance": {
+            "arm_wall_s": arm_wall,
+            "total_wall_s": time.monotonic() - started,
+            "peak_rss_gib": (
+                resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
+            ),
+        },
+    }
+    manifest = seal(body)
+    path = os.path.join(output, "assembly-manifest.json")
+    atomic_write_new_json(path, manifest, immutable=True)
+    return {**manifest, "receipt": expected_input_signature(path)}
+
+
+def run_embed_queries(
+    active: dict[str, Any], job: dict[str, Any]
+) -> dict[str, Any]:
+    import pyarrow.parquet as pq
+
+    from experiments.round0112_nodes import (
+        _encode,
+        _load_model,
+        _normalized_guard,
+        _prompt_equivalence,
+    )
+    from basemap.round0112_prompt_substrate import ordered_text_sha256
+
+    output = create_fresh_directory(
+        job["outputs"][0], label="R0113 dual-prompt heldout query reserve"
+    )
+    rows, selector = query_candidate_rows()
+    layout = query_source_layout(rows)
+    if layout != list(job.get("authenticated_query_layout") or []):
+        raise Round0113Error(
+            "R0113 authenticated query source layout changed"
+        )
+    texts: list[str | None] = [None] * QUERY_CANDIDATES
+    for item in layout:
+        positions = np.flatnonzero(
+            (rows >= int(item["global_row_start"]))
+            & (rows < int(item["global_row_stop"]))
+        )
+        local_rows = (
+            rows[positions]
+            - int(item["global_row_start"])
+            + int(item["shard_row_start"])
+        )
+        column = pq.read_table(
+            str(item["text"]["canonical_path"]), columns=["chunk_text"]
+        ).column("chunk_text")
+        if len(column) != int(item["shard_rows"]):
+            raise Round0113Error("R0113 query text shard changed")
+        values = column.take(local_rows.tolist()).to_pylist()
+        for position, value in zip(positions.tolist(), values, strict=True):
+            texts[position] = value
+    if (
+        any(not isinstance(text, str) for text in texts)
+        or len(texts) != QUERY_CANDIDATES
+    ):
+        raise Round0113Error("R0113 query text fetch is incomplete")
+    exact_texts = [str(text) for text in texts]
+    model, runtime, members = _load_model()
+    equivalence = _prompt_equivalence(model, exact_texts)
+    started = time.monotonic()
+    raw, raw_telemetry = _encode(model, exact_texts)
+    document, document_telemetry = _encode(
+        model, [PROMPT_PREFIX + text for text in exact_texts]
+    )
+    _normalized_guard(raw, label="R0113 raw queries")
+    _normalized_guard(document, label="R0113 document queries")
+    outputs: dict[str, Any] = {}
+    for arm, values in (("raw", raw), ("document", document)):
+        path = os.path.join(output, f"{arm}-query-reserve.f16.npy")
+        atomic_save_new_npy(path, values.astype("<f2"), immutable=True)
+        outputs[arm] = expected_input_signature(path)
+    rows_path = os.path.join(output, "query-global-rows.i64.npy")
+    atomic_save_new_npy(rows_path, rows, immutable=True)
+    body = {
+        "schema": QUERY_SCHEMA,
+        "round_id": ROUND_ID,
+        "release_sha": active["manifest"]["release_sha"],
+        "query_rows": expected_input_signature(rows_path),
+        "ordered_query_rows_sha256": ordered_array_sha256(rows),
+        "selector": selector,
+        "source_layout": layout,
+        "source_text_ordered_sha256": ordered_text_sha256(exact_texts),
+        "document_text_ordered_sha256": ordered_text_sha256(
+            [PROMPT_PREFIX + text for text in exact_texts]
+        ),
+        "model_root": MODEL_ROOT,
+        "model_runtime": runtime,
+        "model_members": members,
+        "prompt_equivalence": equivalence,
+        "outputs": outputs,
+        "output_dtype": np.dtype("<f2").str,
+        "dimension": DIMENSION,
+        "training_performed": False,
+        "performance": {
+            "encode_wall_s": time.monotonic() - started,
+            "raw": raw_telemetry,
+            "document": document_telemetry,
+        },
+    }
+    receipt = seal(body)
+    path = os.path.join(output, "query-reserve-receipt.json")
+    atomic_write_new_json(path, receipt, immutable=True)
+    return {**receipt, "receipt": expected_input_signature(path)}
+
+
+def _load_query_reserve(
+    job: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    path = os.path.join(
+        str(job["query_output"]), "query-reserve-receipt.json"
+    )
+    receipt = read_sealed(path, label="R0113 query reserve")
+    if (
+        receipt.get("schema") != QUERY_SCHEMA
+        or int(receipt.get("dimension", -1)) != DIMENSION
+        or set(receipt.get("outputs") or {}) != set(ARMS)
+    ):
+        raise Round0113Error("R0113 query reserve contract changed")
+    verify_signature(receipt["query_rows"], label="R0113 query global rows")
+    for arm in ARMS:
+        verify_signature(receipt["outputs"][arm], label=f"R0113 {arm} queries")
+    return receipt, expected_input_signature(path)
+
+
+def run_build_graph(
+    active: dict[str, Any], job: dict[str, Any]
+) -> dict[str, Any]:
+    import faiss
+    import umap.umap_ as umap_api
+    from basemap.panel_v2 import (
+        build_hiD_reference,
+        sample_anchors,
+        save_hiD_reference,
+    )
+
+    arm = str(job["arm"])
+    if arm not in ARMS:
+        raise Round0113Error("R0113 graph arm changed")
+    output = create_fresh_directory(
+        job["outputs"][0], label=f"R0113 {arm} graph/reference"
+    )
+    assembly, assembly_signature = _load_assembly(job)
+    query, query_signature = _load_query_reserve(job)
+    source = _open_compact(assembly, arm)
+    started = time.monotonic()
+    X = _materialize_normalized(source)
+    materialize_seconds = time.monotonic() - started
+
+    train_rows = np.sort(
+        np.random.RandomState(GRAPH_TRAIN_SEED)
+        .choice(RETAINED_ROWS, GRAPH_TRAIN_ROWS, replace=False)
+        .astype(np.int64)
+    )
+    quantizer = faiss.IndexFlatIP(DIMENSION)
+    cpu_index = faiss.IndexIVFFlat(
+        quantizer, DIMENSION, GRAPH_NLIST, faiss.METRIC_INNER_PRODUCT
+    )
+    cpu_index.cp.seed = GRAPH_TRAIN_SEED
+    cpu_index.cp.niter = 25
+    cpu_index.cp.spherical = True
+    gpu_resource = faiss.StandardGpuResources()
+    gpu_resource.setTempMemory(1 << 30)
+    index = faiss.index_cpu_to_gpu(
+        gpu_resource, 0, cpu_index, _faiss_gpu_options(faiss)
+    )
+    train_started = time.monotonic()
+    index.train(np.ascontiguousarray(X[train_rows]))
+    train_seconds = time.monotonic() - train_started
+    add_started = time.monotonic()
+    for start in range(0, RETAINED_ROWS, 100_000):
+        index.add(
+            np.ascontiguousarray(X[start : min(start + 100_000, RETAINED_ROWS)])
+        )
+    add_seconds = time.monotonic() - add_started
+    if int(index.ntotal) != RETAINED_ROWS:
+        raise Round0113Error("R0113 IVF row count changed")
+
+    quality_ids = np.sort(
+        np.random.RandomState(GRAPH_QUALITY_SEED)
+        .choice(RETAINED_ROWS, GRAPH_QUALITY_ROWS, replace=False)
+        .astype(np.int64)
+    )
+    exact = faiss.index_cpu_to_gpu(
+        gpu_resource,
+        0,
+        faiss.IndexFlatIP(DIMENSION),
+        _faiss_gpu_options(faiss),
+    )
+    for start in range(0, RETAINED_ROWS, 100_000):
+        exact.add(
+            np.ascontiguousarray(X[start : min(start + 100_000, RETAINED_ROWS)])
+        )
+    _truth_dist, truth_raw = exact.search(
+        np.ascontiguousarray(X[quality_ids]), GRAPH_K
+    )
+    truth = _without_self(truth_raw, quality_ids, GRAPH_K - 1)
+    cells: dict[str, Any] = {}
+    selected_nprobe: int | None = None
+    selected_observed: np.ndarray | None = None
+    for nprobe in GRAPH_NPROBE_GRID:
+        index.nprobe = nprobe
+        cell_started = time.monotonic()
+        _dist, raw = index.search(
+            np.ascontiguousarray(X[quality_ids]), GRAPH_K
+        )
+        cell_wall = time.monotonic() - cell_started
+        observed = _without_self(raw, quality_ids, GRAPH_K - 1)
+        recalls = _recall_rows(observed, truth)
+        passed = bool(
+            recalls.mean() >= GRAPH_MEAN_RECALL_FLOOR
+            and np.percentile(recalls, 10) >= GRAPH_P10_RECALL_FLOOR
+        )
+        cells[str(nprobe)] = {
+            "mean_recall_at_49": float(recalls.mean()),
+            "p10_recall_at_49": float(np.percentile(recalls, 10)),
+            "wall_s": cell_wall,
+            "queries_per_s": GRAPH_QUALITY_ROWS / cell_wall,
+            "passed": passed,
+        }
+        if passed and selected_nprobe is None:
+            selected_nprobe = nprobe
+            selected_observed = observed.copy()
+    del exact
+    if selected_nprobe is None or selected_observed is None:
+        raise Round0113Error(f"R0113 {arm} graph search did not qualify")
+
+    index.nprobe = selected_nprobe
+    neighbors = np.empty((RETAINED_ROWS, GRAPH_K), dtype=np.int32)
+    distances = np.empty((RETAINED_ROWS, GRAPH_K), dtype=np.float32)
+    search_started = time.monotonic()
+    for start in range(0, RETAINED_ROWS, 16_384):
+        stop = min(start + 16_384, RETAINED_ROWS)
+        sims, ids = index.search(np.ascontiguousarray(X[start:stop]), GRAPH_K)
+        if np.any(ids < 0) or np.any(ids >= RETAINED_ROWS):
+            raise Round0113Error("R0113 full graph search returned invalid IDs")
+        neighbors[start:stop] = ids.astype(np.int32, copy=False)
+        distances[start:stop] = np.maximum(0.0, 1.0 - sims).astype(
+            np.float32, copy=False
+        )
+    search_seconds = time.monotonic() - search_started
+
+    fuzzy_started = time.monotonic()
+    graph, _sigmas, _rhos = umap_api.fuzzy_simplicial_set(
+        X,
+        n_neighbors=GRAPH_K,
+        random_state=np.random.RandomState(SEED),
+        metric="cosine",
+        knn_indices=neighbors,
+        knn_dists=distances,
+    )
+    coo = graph.tocoo()
+    sources = np.asarray(coo.row, dtype=np.int32)
+    targets = np.asarray(coo.col, dtype=np.int32)
+    weights = np.asarray(coo.data, dtype=np.float32)
+    fuzzy_seconds = time.monotonic() - fuzzy_started
+    if (
+        len(sources) <= RETAINED_ROWS * (GRAPH_K - 1)
+        or targets.shape != sources.shape
+        or weights.shape != sources.shape
+        or not np.isfinite(weights).all()
+        or np.any(weights <= 0)
+        or np.any(weights > 1)
+    ):
+        raise Round0113Error("R0113 fuzzy graph arrays are invalid")
+    graph_path = os.path.join(output, "edges-k50-fuzzy.npz")
+    atomic_save_new_npz(
+        graph_path,
+        immutable=True,
+        compressed=False,
+        sources=sources,
+        targets=targets,
+        weights=weights,
+        n_nodes=np.asarray(RETAINED_ROWS, dtype=np.int64),
+        k=np.asarray(GRAPH_K, dtype=np.int64),
+    )
+    graph_signature = expected_input_signature(graph_path)
+
+    topology_path = os.path.join(output, "topology-probe.npz")
+    atomic_save_new_npz(
+        topology_path,
+        immutable=True,
+        compressed=False,
+        anchor_compact_ids=quality_ids,
+        exact_neighbors=truth,
+        qualified_ann_neighbors=selected_observed,
+    )
+    cfg = panel_config()
+    anchors = sample_anchors(RETAINED_ROWS, cfg)
+    if not np.array_equal(
+        anchors,
+        np.sort(
+            np.random.RandomState(PANEL_SEED)
+            .choice(RETAINED_ROWS, PANEL_ANCHORS, replace=False)
+            .astype(np.int64)
+        ),
+    ):
+        raise Round0113Error("R0113 panel anchor selector changed")
+    reference = build_hiD_reference(
+        X,
+        anchors,
+        cfg,
+        centroids_by_k=None,
+        data_identity=_data_identity(assembly, arm=arm),
+        convention={
+            "row_order": "R0112 cohort-local representative compact order",
+            "distance": "cosine via fp32-L2-normalized squared L2",
+            "self_exclusion": True,
+            "anchor_namespace": "R0113 compact IDs",
+            "embedding_prompt": arm,
+        },
+    )
+    reference_path = os.path.join(output, "high-d-reference.npz")
+    save_hiD_reference(reference, reference_path)
+
+    query_values = np.load(
+        verify_signature(query["outputs"][arm], label=f"R0113 {arm} query reserve"),
+        mmap_mode="r",
+        allow_pickle=False,
+    )
+    copied, copy_receipt = exact_reference_copy_mask(source, query_values)
+    mask_path = os.path.join(output, "query-training-copy-mask.npy")
+    atomic_save_new_npy(mask_path, copied, immutable=True)
+    body = {
+        "schema": GRAPH_SCHEMA,
+        "round_id": ROUND_ID,
+        "release_sha": active["manifest"]["release_sha"],
+        "arm": arm,
+        "retained_rows": RETAINED_ROWS,
+        "dimension": DIMENSION,
+        "k": GRAPH_K,
+        "directed_edge_count": int(len(sources)),
+        "graph": graph_signature,
+        "assembly": assembly_signature,
+        "compact_mapping": assembly["mapping"],
+        "source": assembly["outputs"][arm],
+        "substrate": assembly["substrate"],
+        "query_reserve": query_signature,
+        "query_training_copy_mask": expected_input_signature(mask_path),
+        "query_training_copy_audit": copy_receipt,
+        "search_qualification": {
+            "index": "GPU IndexIVFFlat/IP",
+            "selected_nprobe": selected_nprobe,
+            "cells": cells,
+            "training_rows_sha256": ordered_array_sha256(train_rows),
+            "quality_rows_sha256": ordered_array_sha256(quality_ids),
+            "mean_recall_floor": GRAPH_MEAN_RECALL_FLOOR,
+            "p10_recall_floor": GRAPH_P10_RECALL_FLOOR,
+        },
+        "topology_probe": expected_input_signature(topology_path),
+        "high_d_reference": expected_input_signature(reference_path),
+        "high_d_reference_key": reference["key"],
+        "high_d_reference_content_sha256": reference["content_sha256"],
+        "paired_graph_policy": {
+            "shared_compact_ids": True,
+            "shared_builder_parameters_and_random_seeds": True,
+            "separate_arm_graph_bytes": True,
+        },
+        "performance": {
+            "materialize_s": materialize_seconds,
+            "ivf_train_s": train_seconds,
+            "ivf_add_s": add_seconds,
+            "full_search_s": search_seconds,
+            "fuzzy_s": fuzzy_seconds,
+            "total_wall_s": time.monotonic() - started,
+        },
+        "training_performed": False,
+    }
+    manifest = seal(body)
+    manifest_path = os.path.join(output, "graph-manifest.json")
+    atomic_write_new_json(manifest_path, manifest, immutable=True)
+    del X, neighbors, distances, sources, targets, weights, graph, coo, source
+    gc.collect()
+    return {**manifest, "receipt": expected_input_signature(manifest_path)}
+
+
+def run_select_queries(
+    active: dict[str, Any], job: dict[str, Any]
+) -> dict[str, Any]:
+    output = create_fresh_directory(
+        job["outputs"][0], label="R0113 matched clean query selection"
+    )
+    query, query_signature = _load_query_reserve(job)
+    rows = np.load(
+        verify_signature(query["query_rows"], label="R0113 query global rows"),
+        mmap_mode="r",
+        allow_pickle=False,
+    )
+    clean = np.ones(QUERY_CANDIDATES, dtype=bool)
+    graph_signatures: dict[str, Any] = {}
+    copy_audits: dict[str, Any] = {}
+    values: dict[str, np.ndarray] = {}
+    for arm in ARMS:
+        graph_path = os.path.join(
+            str(job["graph_outputs"][arm]), "graph-manifest.json"
+        )
+        graph = read_sealed(graph_path, label=f"R0113 {arm} graph")
+        mask = np.load(
+            verify_signature(
+                graph["query_training_copy_mask"],
+                label=f"R0113 {arm} query copy mask",
+            ),
+            allow_pickle=False,
+        )
+        if mask.shape != (QUERY_CANDIDATES,) or mask.dtype != np.bool_:
+            raise Round0113Error("R0113 query copy mask geometry changed")
+        clean &= ~mask
+        graph_signatures[arm] = expected_input_signature(graph_path)
+        copy_audits[arm] = graph["query_training_copy_audit"]
+        values[arm] = np.load(
+            verify_signature(query["outputs"][arm], label=f"R0113 {arm} queries"),
+            mmap_mode="r",
+            allow_pickle=False,
+        )
+    selected: list[int] = []
+    seen = {arm: set() for arm in ARMS}
+    duplicate_rejections = {arm: 0 for arm in ARMS}
+    for position in np.flatnonzero(clean).tolist():
+        keys = {
+            arm: np.asarray(values[arm][position]).tobytes(order="C")
+            for arm in ARMS
+        }
+        duplicated = [arm for arm in ARMS if keys[arm] in seen[arm]]
+        if duplicated:
+            for arm in duplicated:
+                duplicate_rejections[arm] += 1
+            continue
+        for arm in ARMS:
+            seen[arm].add(keys[arm])
+        selected.append(position)
+        if len(selected) == QUERY_ROWS:
+            break
+    positions = np.asarray(selected, dtype=np.int64)
+    if positions.shape != (QUERY_ROWS,):
+        raise Round0113Error("R0113 matched clean query reserve is exhausted")
+    selected_rows = np.asarray(rows[positions], dtype=np.int64)
+    position_path = os.path.join(output, "query-positions.i64.npy")
+    rows_path = os.path.join(output, "query-global-rows.i64.npy")
+    atomic_save_new_npy(position_path, positions, immutable=True)
+    atomic_save_new_npy(rows_path, selected_rows, immutable=True)
+    body = {
+        "schema": QUERY_SELECTION_SCHEMA,
+        "round_id": ROUND_ID,
+        "release_sha": active["manifest"]["release_sha"],
+        "query_reserve": query_signature,
+        "graphs": graph_signatures,
+        "copy_audits": copy_audits,
+        "candidate_rows": QUERY_CANDIDATES,
+        "selected_rows": QUERY_ROWS,
+        "positions": expected_input_signature(position_path),
+        "global_rows": expected_input_signature(rows_path),
+        "ordered_global_rows_sha256": ordered_array_sha256(selected_rows),
+        "training_copy_rejections": int(np.sum(~clean)),
+        "within_reserve_duplicate_rejections": duplicate_rejections,
+        "selection_rule": (
+            "first ascending reserve positions clean against both compact "
+            "training arrays and unique by complete stored row bytes in both arms"
+        ),
+        "selected_before_training": True,
+        "training_performed": False,
+    }
+    receipt = seal(body)
+    path = os.path.join(output, "query-selection.json")
+    atomic_write_new_json(path, receipt, immutable=True)
+    return {**receipt, "receipt": expected_input_signature(path)}
+
+
+def _new_model(config: Mapping[str, Any]):
+    from basemap.pumap.parametric_umap import ParametricUMAP
+
+    model = config["model"]
+    optimizer = config["optimizer"]
+    graph = config["graph"]
+    execution = config["execution"]
+    return ParametricUMAP(
+        n_components=model["output_dimension"],
+        hidden_dim=model["hidden_dimension"],
+        n_layers=model["hidden_layers"],
+        n_neighbors=graph["k"],
+        a=model["a"],
+        b=model["b"],
+        low_dim_kernel=model["low_dim_kernel"],
+        correlation_weight=optimizer["correlation_weight"],
+        learning_rate=optimizer["learning_rate"],
+        n_epochs=2,
+        batch_size=optimizer["batch_size"],
+        device="cuda",
+        use_batchnorm=model["use_batchnorm"],
+        use_dropout=model["use_dropout"],
+        clip_grad_norm=optimizer["clip_grad_norm"],
+        clip_grad_value=None,
+        pos_ratio=optimizer["positive_ratio"],
+        architecture=model["architecture"],
+        correlation_distance_transform="raw",
+        lr_schedule="cosine",
+        warmup_steps=optimizer["warmup_successful_updates"],
+        total_steps_estimate=optimizer["successful_positive_lr_updates"],
+        require_full_budget=True,
+        require_graph_manifest=True,
+        required_input_pipeline=execution["required_pipeline"],
+        use_amp=optimizer["use_amp"],
+        positive_target_mode=optimizer["positive_target_mode"],
+        reject_neighbors=optimizer["reject_neighbors"],
+        anchored_init="none",
+        anchor_hold_weight=0.0,
+        midnear_enabled=False,
+        mn_pairs_per_batch=0,
+        weighted_edge_sampling=optimizer["weighted_edge_sampling"],
+        gpu_resident_data=execution["gpu_resident_data"],
+        gpu_resident_vram_budget_gb=execution[
+            "gpu_resident_vram_budget_gb"
+        ],
+        graph_manifest_path=graph["manifest_path"],
+        graph_manifest_sha256=graph["manifest_sha256"],
+    )
+
+
+def _arm(job: Mapping[str, Any]) -> str:
+    arm = str(job.get("arm") or "")
+    if arm not in ARMS:
+        raise Round0113Error(f"unknown R0113 arm {arm!r}")
+    return arm
+
+
+def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+    import torch
+
+    arm = _arm(job)
+    assembly, assembly_signature = _load_assembly(job)
+    graph_manifest_path = str(job["graph_manifest"])
+    graph_manifest_signature = expected_input_signature(graph_manifest_path)
+    graph = load_graph(
+        graph_manifest_path,
+        expected_sha256=graph_manifest_signature["sha256"],
+        arm=arm,
+    )
+    config, config_sha = train_config(
+        arm,
+        graph_signature=graph["signature"],
+        graph_manifest_signature=graph["manifest_signature"],
+        graph_edges=len(graph["sources"]),
+        retained_rows=graph["n_nodes"],
+    )
+    source = _open_compact(assembly, arm)
+    dataset = HostFp16EndpointArray(
+        source,
+        arm=arm,
+        source_signature=assembly["outputs"][arm],
+        mapping_signature=assembly["mapping"],
+        buffer_rows=BATCH_SIZE,
+    )
+    wrapper = PromptTrainingInput(dataset, graph, arm=arm)
+    output = create_fresh_directory(
+        job["outputs"][0], label=f"R0113 {arm} train output"
+    )
+    config_path = os.path.join(output, "production-config.json")
+    atomic_write_new_json(
+        config_path,
+        {
+            "schema": _schema("production-config"),
+            "round_id": ROUND_ID,
+            "arm": arm,
+            "config": config,
+            "config_sha256": config_sha,
+        },
+        immutable=True,
+    )
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    torch.cuda.manual_seed_all(SEED)
+    torch.cuda.reset_peak_memory_stats("cuda")
+    model = _new_model(config)
+    model._max_train_steps = SUCCESSFUL_UPDATES
+    model._bench_warmup = PERFORMANCE_WARMUP_UPDATES
+    model._perf_profile = True
+    model._perf_floor = config["execution"]["minimum_train_upd_s"]
+    model._perf_warn_rate = config["execution"]["warning_train_upd_s"]
+    model._perf_subfloor_patience = 2
+    model._perf_n_windows = PERFORMANCE_WINDOWS
+    model._abort_on_first_nonfinite = True
+    model._admission_artifact_path = os.path.join(output, "admission.json")
+    started = time.monotonic()
+    model.fit(
+        wrapper,
+        low_memory=True,
+        verbose=False,
+        n_processes=6,
+        random_state=SEED,
+        resample_negatives=False,
+        precomputed_edges_path=graph["signature"]["canonical_path"],
+        use_wandb=False,
+    )
+    wall = time.monotonic() - started
+    accounting = dict(model._train_stats)
+    runtime = wrapper.runtime_stamp()
+    expected_stamp = config["execution"]["expected_pipeline_stamp"]
+    mismatches = {
+        key: {"expected": value, "observed": runtime.get(key)}
+        for key, value in expected_stamp.items()
+        if runtime.get(key) != value
+    }
+    exact = {
+        "lr_horizon": SUCCESSFUL_UPDATES,
+        "positive_lr_optimizer_steps": SUCCESSFUL_UPDATES,
+        "scheduler_steps": SUCCESSFUL_UPDATES,
+        "attempted_batches": SUCCESSFUL_UPDATES,
+        "finite_loss_batches": SUCCESSFUL_UPDATES,
+        "optimizer_steps_attempted": SUCCESSFUL_UPDATES,
+        "optimizer_steps_succeeded": SUCCESSFUL_UPDATES,
+        "amp_overflow_skips": 0,
+        "nonfinite_loss_skips": 0,
+        "nonfinite_gradient_skips": 0,
+        "stop_reason": "lr_horizon",
+        "budget_satisfied": True,
+        "n_pos_edges": len(graph["sources"]),
+    }
+    mismatches.update(
+        {
+            key: {"expected": value, "observed": accounting.get(key)}
+            for key, value in exact.items()
+            if accounting.get(key) != value
+        }
+    )
+    expected_rows = SUCCESSFUL_UPDATES * BATCH_SIZE
+    producer_delta = (
+        int(runtime["host_prefetch_producer_batches"])
+        - int(runtime["host_prefetch_consumer_batches"])
+    )
+    if (
+        int(runtime["source_rows_gathered"]) != expected_rows
+        or int(runtime["destination_rows_gathered"]) != expected_rows
+        or int(runtime["host_prefetch_consumer_batches"]) != SUCCESSFUL_UPDATES
+        or producer_delta not in {0, 1}
+    ):
+        mismatches["endpoint_accounting"] = {
+            "expected_rows": expected_rows,
+            "runtime": runtime,
+        }
+    expected_positive_draws = SUCCESSFUL_UPDATES * POSITIVE_ROWS_PER_UPDATE
+    if (
+        int(runtime["weight_emitted_draws"]) != expected_positive_draws
+        or int(runtime["weight_acceptances"])
+        != (
+            int(runtime["weight_emitted_draws"])
+            + int(runtime["weight_buffered_draws"])
+        )
+        or int(runtime["weight_proposals"]) < int(runtime["weight_acceptances"])
+        or not 0 < float(runtime["weight_acceptance_rate"]) <= 1
+    ):
+        mismatches["weighted_rejection_accounting"] = {
+            "expected_positive_draws": expected_positive_draws,
+            "runtime": runtime,
+        }
+    if mismatches:
+        raise Round0113Error(f"R0113 {arm} train accounting failed: {mismatches}")
+    synchronize_runtime_counters(accounting, runtime)
+    profiler = model._canary_profiler.finalize(
+        bench_seconds=model._bench_seconds,
+        setup_seconds=getattr(model, "_setup_seconds", None),
+    )
+    rate = (
+        (SUCCESSFUL_UPDATES - PERFORMANCE_WARMUP_UPDATES)
+        / model._bench_seconds
+        if model._bench_seconds
+        else 0.0
+    )
+    if profiler.get("aborted") is not False or rate < TRAIN_MINIMUM_UPDATES_PER_S:
+        raise Round0113Error(f"R0113 {arm} performance admission failed")
+    model_path = os.path.join(output, "model.pt")
+    atomic_build_new_file(model_path, model.save, immutable=True)
+    free_bytes, total_bytes = torch.cuda.mem_get_info("cuda")
+    body = {
+        "schema": _schema("train-receipt"),
+        "round_id": ROUND_ID,
+        "arm": arm,
+        "release_sha": active["manifest"]["release_sha"],
+        "production_config": expected_input_signature(config_path),
+        "production_config_sha256": config_sha,
+        "model": expected_input_signature(model_path),
+        "assembly": assembly_signature,
+        "graph_manifest": graph["manifest_signature"],
+        "graph": graph["signature"],
+        "train_accounting": accounting,
+        "exact_execution_receipt": runtime,
+        "performance_profile": profiler,
+        "steady_updates_per_s": rate,
+        "train_wall_s": wall,
+        "train_checks": {
+            "exact_update_closure": True,
+            "zero_numerical_skips": True,
+            "no_pipeline_stamp_drift": True,
+            "endpoint_rows_match_updates": True,
+            "weighted_rejection_accounting_closes": True,
+        },
+        "memory": {
+            "device_total_bytes": int(total_bytes),
+            "post_train_free_bytes": int(free_bytes),
+            "peak_allocated_bytes": int(torch.cuda.max_memory_allocated("cuda")),
+            "peak_reserved_bytes": int(torch.cuda.max_memory_reserved("cuda")),
+        },
+        "training_performed": True,
+        "optimizer_updates": SUCCESSFUL_UPDATES,
+        "map_decision_made": False,
+    }
+    receipt = seal(body)
+    receipt_path = os.path.join(output, "train-receipt.json")
+    atomic_write_new_json(receipt_path, receipt, immutable=True)
+    del model, wrapper, dataset, source, graph
+    torch.cuda.empty_cache()
+    gc.collect()
+    return {**receipt, "receipt": expected_input_signature(receipt_path)}
+
+
+def _authenticate_model(
+    job: Mapping[str, Any],
+) -> tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any]]:
+    arm = _arm(job)
+    assembly, _assembly_signature = _load_assembly(job)
+    graph_manifest_path = str(job["graph_manifest"])
+    graph_manifest_signature = expected_input_signature(graph_manifest_path)
+    graph = load_graph(
+        graph_manifest_path,
+        expected_sha256=graph_manifest_signature["sha256"],
+        arm=arm,
+    )
+    config, config_sha = train_config(
+        arm,
+        graph_signature=graph["signature"],
+        graph_manifest_signature=graph["manifest_signature"],
+        graph_edges=len(graph["sources"]),
+        retained_rows=graph["n_nodes"],
+    )
+    train_path = os.path.join(str(job["train_output"]), "train-receipt.json")
+    train = read_sealed(train_path, label=f"R0113 {arm} train receipt")
+    if (
+        train.get("arm") != arm
+        or train.get("production_config_sha256") != config_sha
+        or train.get("graph_manifest") != graph["manifest_signature"]
+    ):
+        raise Round0113Error(f"R0113 {arm} train/config binding changed")
+    model_path = verify_signature(train["model"], label=f"R0113 {arm} model")
+    from basemap.pumap.parametric_umap import ParametricUMAP
+
+    model = ParametricUMAP.load(model_path, device="cuda")
+    expected = config["model"]
+    observed = {
+        "architecture": model.architecture,
+        "input_dimension": model.input_dim,
+        "hidden_dimension": model.hidden_dim,
+        "hidden_layers": model.n_layers,
+        "output_dimension": model.n_components,
+        "use_batchnorm": model.use_batchnorm,
+        "use_dropout": model.use_dropout,
+        "low_dim_kernel": model.low_dim_kernel,
+        "a": model.a,
+        "b": model.b,
+    }
+    if observed != expected:
+        raise Round0113Error(f"R0113 {arm} model architecture changed")
+    return model, train, assembly, graph
+
+
+def _load_query_selection(
+    job: Mapping[str, Any],
+) -> tuple[dict[str, Any], np.ndarray]:
+    path = os.path.join(
+        str(job["query_selection_output"]), "query-selection.json"
+    )
+    receipt = read_sealed(path, label="R0113 matched query selection")
+    if (
+        receipt.get("schema") != QUERY_SELECTION_SCHEMA
+        or int(receipt.get("selected_rows", -1)) != QUERY_ROWS
+        or receipt.get("selected_before_training") is not True
+    ):
+        raise Round0113Error("R0113 matched query selection changed")
+    positions = np.load(
+        verify_signature(receipt["positions"], label="R0113 query positions"),
+        allow_pickle=False,
+    )
+    if (
+        positions.shape != (QUERY_ROWS,)
+        or positions.dtype != np.int64
+        or np.any(positions[1:] <= positions[:-1])
+    ):
+        raise Round0113Error("R0113 query positions are malformed")
+    return receipt, positions
+
+
+def run_evaluate(
+    active: dict[str, Any], job: dict[str, Any]
+) -> dict[str, Any]:
+    from basemap.panel_v2 import (
+        build_query_truth,
+        cross_knn,
+        ffr_from_neighbors,
+        load_hiD_reference,
+        recall_at_k_from_neighbors,
+        save_query_truth,
+        score_panel,
+    )
+
+    arm = _arm(job)
+    other = "document" if arm == "raw" else "raw"
+    model, train, assembly, graph = _authenticate_model(job)
+    query, query_signature = _load_query_reserve(job)
+    selection, positions = _load_query_selection(job)
+    source = _open_compact(assembly, arm)
+    query_values = {
+        name: np.asarray(
+            np.load(
+                verify_signature(
+                    query["outputs"][name], label=f"R0113 {name} query reserve"
+                ),
+                mmap_mode="r",
+                allow_pickle=False,
+            )[positions],
+            dtype=np.float16,
+        )
+        for name in ARMS
+    }
+    output = create_fresh_directory(
+        job["outputs"][0], label=f"R0113 {arm} evaluation"
+    )
+    started = time.monotonic()
+    coordinates = np.asarray(
+        model.transform(source, batch_size=8192), dtype=np.float32
+    )
+    matched_coordinates = np.asarray(
+        model.transform(query_values[arm], batch_size=8192), dtype=np.float32
+    )
+    cross_coordinates = np.asarray(
+        model.transform(query_values[other], batch_size=8192), dtype=np.float32
+    )
+    if (
+        coordinates.shape != (RETAINED_ROWS, 2)
+        or matched_coordinates.shape != (QUERY_ROWS, 2)
+        or cross_coordinates.shape != (QUERY_ROWS, 2)
+        or not np.isfinite(coordinates).all()
+        or not np.isfinite(matched_coordinates).all()
+        or not np.isfinite(cross_coordinates).all()
+    ):
+        raise Round0113Error(f"R0113 {arm} transform output is invalid")
+    coordinate_paths = {
+        "training": os.path.join(output, "coordinates.npy"),
+        "matched_queries": os.path.join(output, "matched-query-coordinates.npy"),
+        "cross_queries": os.path.join(output, "cross-query-coordinates.npy"),
+    }
+    for key, values in (
+        ("training", coordinates),
+        ("matched_queries", matched_coordinates),
+        ("cross_queries", cross_coordinates),
+    ):
+        atomic_save_new_npy(coordinate_paths[key], values, immutable=True)
+
+    cfg = panel_config()
+    X = L2NormalizedArray(source)
+    reference = load_hiD_reference(
+        graph["manifest"]["high_d_reference"]["canonical_path"],
+        expected_key=graph["manifest"]["high_d_reference_key"],
+    )
+    reference_identity = {
+        "data_identity": _data_identity(assembly, arm=arm),
+        "convention": {
+            "row_order": "R0112 cohort-local representative compact order",
+            "distance": "cosine via fp32-L2-normalized squared L2",
+            "self_exclusion": True,
+            "anchor_namespace": "R0113 compact IDs",
+            "embedding_prompt": arm,
+        },
+    }
+    panel = score_panel(
+        X,
+        coordinates,
+        config=cfg,
+        centroids_by_k=None,
+        hiD_reference=reference,
+        reference_identity=reference_identity,
+        scale_admission=None,
+        provenance={
+            "round_id": ROUND_ID,
+            "arm": arm,
+            "release_sha": active["manifest"]["release_sha"],
+            "train_receipt": expected_input_signature(
+                os.path.join(
+                    str(job["train_output"]), "train-receipt.json"
+                )
+            ),
+            "query_selection": selection["identity_sha256"],
+        },
+    )
+    query_global_rows = np.load(
+        verify_signature(selection["global_rows"], label="R0113 selected query rows"),
+        allow_pickle=False,
+    )
+    truths: dict[str, Any] = {}
+    for role, convention in (("matched", arm), ("cross", other)):
+        values = L2NormalizedArray(query_values[convention])
+        identity = {
+            "schema": "round0113-query-identity-v1",
+            "role": role,
+            "query_embedding_convention": convention,
+            "map_embedding_convention": arm,
+            "global_rows_sha256": ordered_array_sha256(query_global_rows),
+            "ordered_fp16_sha256": ordered_array_sha256(
+                query_values[convention]
+            ),
+            "disjoint_from_training_exact_families": True,
+        }
+        truth = build_query_truth(
+            values,
+            X,
+            cfg=cfg,
+            corpus_identity=_data_identity(assembly, arm=arm),
+            query_identity=identity,
+            k=10,
+        )
+        path = os.path.join(output, f"{role}-query-truth-k10.npz")
+        save_query_truth(truth, path)
+        truths[role] = {
+            "value": truth,
+            "signature": expected_input_signature(path),
+            "identity": identity,
+        }
+    k_fraction = max(cfg.k_hit, int(math.ceil(cfg.frac * RETAINED_ROWS)))
+    projections: dict[str, Any] = {}
+    for role, low_coordinates in (
+        ("matched", matched_coordinates),
+        ("cross", cross_coordinates),
+    ):
+        low_fraction = cross_knn(
+            low_coordinates, coordinates, k_fraction, cfg, hi_dim=False
+        )
+        low10 = low_fraction[:, : cfg.k_hit]
+        high10 = np.asarray(
+            truths[role]["value"]["neighbors"], dtype=np.int64
+        )[:, : cfg.k_hit]
+        low50 = cross_knn(
+            low_coordinates, coordinates, 50, cfg, hi_dim=False
+        )
+        projections[role] = {
+            "ffr": float(
+                ffr_from_neighbors(high10, low_fraction, cfg.k_hit)
+            ),
+            "recall_at_10": float(
+                recall_at_k_from_neighbors(high10, low10, cfg.k_hit)
+            ),
+            "recall_at_50_of_high10": _recall(high10, low50, cfg.k_hit),
+            "queries": QUERY_ROWS,
+            "k_fraction": k_fraction,
+            "truth": truths[role]["signature"],
+            "query_embedding_convention": (
+                arm if role == "matched" else other
+            ),
+        }
+    low51 = cross_knn(
+        np.asarray(coordinates[reference["anchor_ids"]], dtype=np.float32),
+        coordinates,
+        51,
+        cfg,
+        hi_dim=False,
+    )
+    low50 = _without_self(low51, reference["anchor_ids"], 50)
+    transductive_recall50 = _recall(
+        reference["hi_hit"], low50, cfg.k_hit
+    )
+    metrics = {
+        "ffr": float(panel["ffr"]),
+        "density": float(panel["density"]),
+        "recall_at_10": float(panel["recall@k"]),
+        "oos_recall_at_10": projections["matched"]["recall_at_10"],
+        "oos_recall_at_50": projections["matched"][
+            "recall_at_50_of_high10"
+        ],
+    }
+    guards = panel.get("guards") or {}
+    execution_gates = {
+        "finite_noncollapsed_coordinates": bool(
+            guards.get("coords_finite") is True
+            and guards.get("coords_collapsed") is False
+            and guards.get("emb_finite") is True
+            and guards.get("emb_zero_rows") == 0
+        ),
+        "transductive_recall50_gt_recall10": (
+            transductive_recall50 > metrics["recall_at_10"]
+        ),
+        "matched_projection_recall50_gt_recall10": (
+            projections["matched"]["recall_at_50_of_high10"]
+            > projections["matched"]["recall_at_10"]
+        ),
+        "exact_update_closure": bool(
+            (train.get("train_checks") or {}).get("exact_update_closure")
+        ),
+        "zero_numerical_skips": bool(
+            (train.get("train_checks") or {}).get("zero_numerical_skips")
+        ),
+        "no_pipeline_stamp_drift": bool(
+            (train.get("train_checks") or {}).get("no_pipeline_stamp_drift")
+        ),
+    }
+    if not all(np.isfinite(value) for value in metrics.values()):
+        raise Round0113Error(f"R0113 {arm} metrics are nonfinite")
+    body = {
+        "schema": _schema("prompt-arm-score"),
+        "round_id": ROUND_ID,
+        "arm": arm,
+        "release_sha": active["manifest"]["release_sha"],
+        "train_receipt": expected_input_signature(
+            os.path.join(str(job["train_output"]), "train-receipt.json")
+        ),
+        "assembly": train["assembly"],
+        "graph_manifest": graph["manifest_signature"],
+        "query_reserve": query_signature,
+        "query_selection": expected_input_signature(
+            os.path.join(
+                str(job["query_selection_output"]), "query-selection.json"
+            )
+        ),
+        "coordinates": {
+            key: expected_input_signature(path)
+            for key, path in coordinate_paths.items()
+        },
+        "high_d_reference": graph["manifest"]["high_d_reference"],
+        "panel": panel,
+        "transductive_recall_at_50_of_high10": transductive_recall50,
+        "projections": projections,
+        "projection_ffr_role": "diagnostic-only",
+        "metrics": metrics,
+        "execution_gates": execution_gates,
+        "wall_s": time.monotonic() - started,
+    }
+    score = seal(body)
+    path = os.path.join(output, "score.json")
+    atomic_write_new_json(path, score, immutable=True)
+    del model, source, coordinates, X
+    gc.collect()
+    return {**score, "receipt": expected_input_signature(path)}
+
+
+def run_decide(
+    active: dict[str, Any], job: dict[str, Any]
+) -> dict[str, Any]:
+    output = create_fresh_directory(
+        job["outputs"][0], label="R0113 paired prompt decision"
+    )
+    scores: dict[str, Any] = {}
+    score_signatures: dict[str, Any] = {}
+    topology: dict[str, Any] = {}
+    graph_signatures: dict[str, Any] = {}
+    for arm in ARMS:
+        score_path = os.path.join(str(job["score_outputs"][arm]), "score.json")
+        score = read_sealed(score_path, label=f"R0113 {arm} score")
+        if (
+            score.get("arm") != arm
+            or set(score.get("metrics") or {}) != set(DECISION_METRICS)
+        ):
+            raise Round0113Error(f"R0113 {arm} score contract changed")
+        scores[arm] = score
+        score_signatures[arm] = expected_input_signature(score_path)
+        graph_path = os.path.join(
+            str(job["graph_outputs"][arm]), "graph-manifest.json"
+        )
+        graph = read_sealed(graph_path, label=f"R0113 {arm} graph manifest")
+        graph_signatures[arm] = expected_input_signature(graph_path)
+        probe_path = verify_signature(
+            graph["topology_probe"], label=f"R0113 {arm} topology probe"
+        )
+        with np.load(probe_path, allow_pickle=False) as archive:
+            topology[arm] = {
+                name: np.asarray(archive[name])
+                for name in archive.files
+            }
+    if not np.array_equal(
+        topology["raw"]["anchor_compact_ids"],
+        topology["document"]["anchor_compact_ids"],
+    ):
+        raise Round0113Error("R0113 topology anchors differ between arms")
+    exact_overlap = _recall_rows(
+        topology["document"]["exact_neighbors"],
+        topology["raw"]["exact_neighbors"],
+    )
+    ann_overlap = _recall_rows(
+        topology["document"]["qualified_ann_neighbors"],
+        topology["raw"]["qualified_ann_neighbors"],
+    )
+    decision = paired_decision(scores["raw"], scores["document"])
+    released = ["jina-fineweb-2m-prompt-map-contrast-v1"]
+    if decision["passed"]:
+        released.append("jina-fineweb-2m-document-prompt-map-transfer-v1")
+    body = {
+        "schema": _schema("paired-prompt-decision"),
+        "round_id": ROUND_ID,
+        "release_sha": active["manifest"]["release_sha"],
+        "scores": score_signatures,
+        "graphs": graph_signatures,
+        "registered_decision": decision,
+        "topology_shift": {
+            "anchors": GRAPH_QUALITY_ROWS,
+            "k": GRAPH_K - 1,
+            "exact_high_d_neighbor_overlap": {
+                "mean": float(np.mean(exact_overlap)),
+                "p10": float(np.percentile(exact_overlap, 10)),
+                "min": float(np.min(exact_overlap)),
+            },
+            "qualified_ann_neighbor_overlap": {
+                "mean": float(np.mean(ann_overlap)),
+                "p10": float(np.percentile(ann_overlap, 10)),
+                "min": float(np.min(ann_overlap)),
+            },
+        },
+        "capabilities_produced": released,
+        "production_ready": False,
+        "complete_sae_corpus_ready": False,
+        "one_seed_screen": True,
+        "training_performed": True,
+        "optimizer_updates_per_arm": SUCCESSFUL_UPDATES,
+    }
+    receipt = seal(body)
+    path = os.path.join(output, "decision.json")
+    atomic_write_new_json(path, receipt, immutable=True)
+    return {**receipt, "receipt": expected_input_signature(path)}
+
+
+def run_job(
+    active: dict[str, Any],
+    job: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if active.get("manifest", {}).get("round_id") != ROUND_ID:
+        raise Round0113Error("R0113 handler received another queue")
+    selected = job if job is not None else active.get("job") or {}
+    action = selected.get("action")
+    if action == "embed_query_reserve":
+        return run_embed_queries(active, selected)
+    if action == "assemble_compact_arrays":
+        return run_assemble(active, selected)
+    if action == "build_arm_graph":
+        return run_build_graph(active, selected)
+    if action == "select_matched_queries":
+        return run_select_queries(active, selected)
+    if action == "train_arm":
+        return run_train(active, selected)
+    if action == "evaluate_arm":
+        return run_evaluate(active, selected)
+    if action == "decide_prompt_contrast":
+        return run_decide(active, selected)
+    raise Round0113Error(f"unknown R0113 action: {action!r}")
