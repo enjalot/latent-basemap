@@ -223,6 +223,7 @@ def _language_sources(
             continue
         signature = dict(item["shard"])
         signature.pop("rows", None)
+        signature.setdefault("kind", "file")
         sources[str(language)] = signature
         selected_stops[str(language)] = int(item["dataset_row_stop"])
     if set(sources) != set(IN_MIX_LANGUAGES):

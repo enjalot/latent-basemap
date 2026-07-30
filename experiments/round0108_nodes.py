@@ -509,10 +509,20 @@ def _load_graph_truth(
 
 def _family_arrays(path: str) -> tuple[np.ndarray, np.ndarray]:
     with np.load(path, allow_pickle=False) as archive:
-        return (
-            np.asarray(archive["representative_rows"], dtype=np.int64),
-            np.asarray(archive["family_counts"], dtype=np.int64),
+        representatives = np.asarray(
+            archive["representative_rows"], dtype=np.int64
         )
+        counts = np.asarray(archive["family_counts"], dtype=np.int64)
+    if representatives.ndim != 1 or counts.shape != representatives.shape:
+        raise Round0108Error("duplicate family arrays are malformed")
+    order = np.argsort(representatives, kind="stable")
+    representatives = representatives[order]
+    counts = counts[order]
+    if len(representatives) and np.any(
+        representatives[1:] <= representatives[:-1]
+    ):
+        raise Round0108Error("duplicate family arrays are malformed")
+    return representatives, counts
 
 
 def _id_identity(values: np.ndarray) -> dict[str, Any]:

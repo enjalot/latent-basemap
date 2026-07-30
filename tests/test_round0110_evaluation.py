@@ -101,7 +101,7 @@ def test_run_job_rejects_cross_round_dispatch() -> None:
 
 def test_round0110_uses_exact_r0108_selection_path() -> None:
     assert R0108_SELECTION.endswith(
-        "/round-0108/queue/inputs/registered-selections.npz"
+        "/round-0108/queue-attempt-3/inputs/registered-selections.npz"
     )
     assert SEED42_MAP_KEY == "r0107-diverse-jina-25m-seed42"
 
