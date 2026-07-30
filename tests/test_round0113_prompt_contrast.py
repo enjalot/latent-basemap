@@ -145,7 +145,7 @@ def test_prompt_family_union_uses_one_shared_transitive_representative():
         {
             "raw": [[10, 20], [40, 50]],
             "document": [[20, 30], [40, 60]],
-            "text": [[10, 30]],
+            "text": [[10, 20, 30]],
         },
         np.asarray([10, 20, 30, 40, 50, 60, 70], dtype=np.int64),
     )
@@ -154,6 +154,12 @@ def test_prompt_family_union_uses_one_shared_transitive_representative():
         [10, 20, 30],
         [40, 50, 60],
     ]
+    assert report["embedding_family_text_relation"]["raw"] == {
+        "exact_embedding_families": 2,
+        "source_text_explained_families": 1,
+        "cross_source_text_families": 1,
+        "cross_source_text_families_global_rows": [[40, 50]],
+    }
 
 
 def test_text_family_census_verifies_complete_utf8_bytes(tmp_path, monkeypatch):

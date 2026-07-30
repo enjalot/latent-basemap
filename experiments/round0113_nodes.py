@@ -570,6 +570,30 @@ def _union_prompt_exclusions(
         sorted(row for family in union_families for row in family[1:]),
         dtype=np.int64,
     )
+    text_family_by_row: dict[int, int] = {}
+    for family_index, family in enumerate(families_by_arm["text"]):
+        for row in family:
+            text_family_by_row[int(row)] = family_index
+    embedding_text_relations: dict[str, Any] = {}
+    for arm in ARMS:
+        explained: list[list[int]] = []
+        cross_text: list[list[int]] = []
+        for family in families_by_arm[arm]:
+            text_families = {
+                text_family_by_row.get(int(row)) for row in family
+            }
+            target = (
+                explained
+                if len(text_families) == 1 and None not in text_families
+                else cross_text
+            )
+            target.append(family)
+        embedding_text_relations[arm] = {
+            "exact_embedding_families": len(families_by_arm[arm]),
+            "source_text_explained_families": len(explained),
+            "cross_source_text_families": len(cross_text),
+            "cross_source_text_families_global_rows": cross_text,
+        }
     return extra, {
         "selection_rule": (
             "union exact source-text, raw-fp16, and document-fp16 family "
@@ -582,6 +606,7 @@ def _union_prompt_exclusions(
         },
         "union_family_count": len(union_families),
         "union_families_global_rows": union_families,
+        "embedding_family_text_relation": embedding_text_relations,
         "extra_excluded_global_rows": extra.tolist(),
         "extra_excluded_rows": int(len(extra)),
     }
@@ -2396,6 +2421,30 @@ def run_decide(
                 name: np.asarray(archive[name])
                 for name in archive.files
             }
+    if scores["raw"].get("assembly") != scores["document"].get("assembly"):
+        raise Round0113Error("R0113 score populations differ between arms")
+    assembly_path = verify_signature(
+        scores["raw"]["assembly"], label="R0113 decision compact assembly"
+    )
+    assembly = read_sealed(assembly_path, label="R0113 decision compact assembly")
+    discovery_path = verify_signature(
+        assembly["source_prompt_family_discovery"],
+        label="R0113 decision prompt-family discovery",
+    )
+    discovery = read_sealed(
+        discovery_path, label="R0113 decision prompt-family discovery"
+    )
+    discovery_arms = discovery.get("arms") or {}
+    discovery_union = discovery.get("union") or {}
+    if (
+        set(discovery_arms) != {"text", *ARMS}
+        or discovery.get("matched_preregistered_union") is not True
+        or set(
+            discovery_union.get("embedding_family_text_relation") or {}
+        )
+        != set(ARMS)
+    ):
+        raise Round0113Error("R0113 decision canonicalization changed")
     if not np.array_equal(
         topology["raw"]["anchor_compact_ids"],
         topology["document"]["anchor_compact_ids"],
@@ -2440,6 +2489,37 @@ def run_decide(
         "scores": score_signatures,
         "graphs": graph_signatures,
         "registered_decision": decision,
+        "canonicalization": {
+            "role": (
+                "shared population control; cross-source-text embedding "
+                "collisions are representation diagnostics"
+            ),
+            "discovery": expected_input_signature(discovery_path),
+            "mapping": assembly["mapping"],
+            "baseline_retained_rows": discovery["baseline_retained_rows"],
+            "retained_rows": assembly["retained_rows"],
+            "extra_excluded_rows": discovery_union["extra_excluded_rows"],
+            "extra_exclusions_sha256": discovery[
+                "derived_extra_exclusions_sha256"
+            ],
+            "source_family_counts": {
+                source: {
+                    "families": discovery_arms[source][
+                        "exact_nontrivial_family_count"
+                    ],
+                    "rows": discovery_arms[source][
+                        "rows_in_exact_nontrivial_families"
+                    ],
+                    "maximum_family_size": discovery_arms[source][
+                        "maximum_exact_family_size"
+                    ],
+                }
+                for source in ("text", *ARMS)
+            },
+            "embedding_family_text_relation": discovery_union[
+                "embedding_family_text_relation"
+            ],
+        },
         "polish_ood_prompt_contrast": {
             "role": "diagnostic-only; excluded from registered_decision",
             "query_rows": POLISH_QUERY_ROWS,
