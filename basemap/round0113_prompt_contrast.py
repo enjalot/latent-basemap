@@ -25,6 +25,7 @@ from .round0112_prompt_substrate import (
     SUBSTRATE_SCHEMA,
     TEXT_ROOT,
 )
+from .round0114_prompt_recovery import RECOVERY_SCHEMA
 from .round0104_training import source_segments
 
 
@@ -92,12 +93,12 @@ QUERY_SCHEMA = "round0113-dual-prompt-query-reserve-v1"
 QUERY_SELECTION_SCHEMA = "round0113-matched-query-selection-v1"
 BASELINE_EXCLUDED_ROWS = 5_366
 BASELINE_RETAINED_ROWS = ROWS - BASELINE_EXCLUDED_ROWS
-# Finalize both values from the complete R0112 source/raw/document exact-family
+# Finalize both values from the complete recovered source/raw/document exact-family
 # union before issuance. The runtime census must reproduce this exact ordered
 # selector identity without carrying a long row list in executable source.
-PROMPT_UNION_EXTRA_EXCLUDED_ROWS = 0
+PROMPT_UNION_EXTRA_EXCLUDED_ROWS = 873
 PROMPT_UNION_EXTRA_EXCLUSIONS_SHA256 = (
-    "476cbf2e7730ed64d888a6a5c92e140c290581e73cec168af789288bba613668"
+    "aa6f446263e221ac6b127670fd3e6d2912fc481cf366146746a909ec5757d36a"
 )
 EXCLUDED_ROWS = BASELINE_EXCLUDED_ROWS + PROMPT_UNION_EXTRA_EXCLUDED_ROWS
 RETAINED_ROWS = ROWS - EXCLUDED_ROWS
@@ -151,13 +152,17 @@ def load_substrate_manifest(
 ) -> dict[str, Any]:
     signature = expected_input_signature(path)
     if signature["sha256"] != expected_sha256:
-        raise Round0113Error("R0112 substrate manifest bytes changed")
-    manifest = read_sealed(path, label="R0112 dual-prompt substrate")
+        raise Round0113Error("paired substrate manifest bytes changed")
+    manifest = read_sealed(path, label="reviewed dual-prompt substrate")
     conventions = manifest.get("conventions") or {}
     duplicate = manifest.get("duplicate_control") or {}
+    schema_and_round = (manifest.get("schema"), manifest.get("round_id"))
     if (
-        manifest.get("schema") != SUBSTRATE_SCHEMA
-        or manifest.get("round_id") != "0112"
+        schema_and_round
+        not in {
+            (SUBSTRATE_SCHEMA, "0112"),
+            (RECOVERY_SCHEMA, "0114"),
+        }
         or int(manifest.get("row_count", -1)) != ROWS
         or int(manifest.get("dimension", -1)) != DIMENSION
         or set(conventions) != set(ARMS)
@@ -171,10 +176,10 @@ def load_substrate_manifest(
         )
         != 11
     ):
-        raise Round0113Error("R0112 substrate contract changed")
+        raise Round0113Error("paired substrate contract changed")
     selector = dict(duplicate.get("selector") or {})
     selector_path = verify_signature(
-        selector, label="R0112 cohort-local exclusion selector"
+        selector, label="paired cohort-local exclusion selector"
     )
     excluded = np.load(selector_path, mmap_mode="r", allow_pickle=False)
     if (
@@ -184,7 +189,7 @@ def load_substrate_manifest(
         or excluded[-1] >= ROWS
         or np.any(excluded[1:] <= excluded[:-1])
     ):
-        raise Round0113Error("R0112 cohort-local selector bytes changed")
+        raise Round0113Error("paired cohort-local selector bytes changed")
     chunk_signatures: dict[str, list[dict[str, Any]]] = {}
     for arm in ARMS:
         values = [dict(item) for item in conventions[arm]["chunks"]]
@@ -194,9 +199,9 @@ def load_substrate_manifest(
                 not os.path.isfile(path_value)
                 or os.path.getsize(path_value) != int(item.get("bytes", -1))
             ):
-                raise Round0113Error(f"R0112 {arm} chunk missing/wrong size")
+                raise Round0113Error(f"paired {arm} chunk missing/wrong size")
             if verify_chunks and expected_input_signature(path_value) != item:
-                raise Round0113Error(f"R0112 {arm} chunk content changed")
+                raise Round0113Error(f"paired {arm} chunk content changed")
         chunk_signatures[arm] = values
     return {
         "manifest": manifest,

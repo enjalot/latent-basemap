@@ -165,8 +165,8 @@ def _polish_source() -> dict[str, dict[str, Any]]:
 def prepare_round0113(
     *,
     release_sha: str,
-    r0112_review_path: str,
-    r0112_review_sha256: str,
+    r0114_review_path: str,
+    r0114_review_sha256: str,
     substrate_manifest: str,
     substrate_manifest_sha256: str,
     queue_root: str = os.path.join(ROUND_ROOT, "queue"),
@@ -180,12 +180,12 @@ def prepare_round0113(
             expected_sha256=R0104_REVIEW_SHA256,
             capability="capability:jina-full768-host-int8-training-validation-v1",
         ),
-        "0112": _require_review(
-            r0112_review_path,
-            expected_sha256=r0112_review_sha256,
+        "0114": _require_review(
+            r0114_review_path,
+            expected_sha256=r0114_review_sha256,
             capability=(
                 "capability:"
-                "jina-fineweb-2m-dual-prompt-embedding-substrate-v1"
+                "jina-fineweb-2m-dual-prompt-native8192-substrate-v2"
             ),
         ),
     }
@@ -415,10 +415,10 @@ def prepare_round0113(
     queue["schema"] = "round0113-paired-prompt-map-queue-v1"
     queue["repo_root"] = RELEASE_ROOT
     queue["queue_class"] = "gpu-research"
-    queue["required_reviews"] = ["0104", "0112"]
+    queue["required_reviews"] = ["0104", "0114"]
     queue["capability_dependencies"] = [
         "jina-full768-host-int8-training-validation-v1",
-        "jina-fineweb-2m-dual-prompt-embedding-substrate-v1",
+        "jina-fineweb-2m-dual-prompt-native8192-substrate-v2",
     ]
     queue["capabilities_produced"] = [
         "jina-fineweb-2m-prompt-map-contrast-v1",
@@ -429,7 +429,7 @@ def prepare_round0113(
         "rows_stored_per_arm": 2_000_000,
         "retained_representatives_per_arm": RETAINED_ROWS,
         "duplicate_exclusions": EXCLUDED_ROWS,
-        "r0112_baseline_duplicate_exclusions": BASELINE_EXCLUDED_ROWS,
+        "r0114_baseline_duplicate_exclusions": BASELINE_EXCLUDED_ROWS,
         "prompt_union_extra_exclusions": PROMPT_UNION_EXTRA_EXCLUDED_ROWS,
         "prompt_union_extra_exclusions_sha256": (
             PROMPT_UNION_EXTRA_EXCLUSIONS_SHA256
@@ -497,8 +497,8 @@ def prepare_round0113(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-sha", required=True)
-    parser.add_argument("--r0112-review", required=True)
-    parser.add_argument("--r0112-review-sha256", required=True)
+    parser.add_argument("--r0114-review", required=True)
+    parser.add_argument("--r0114-review-sha256", required=True)
     parser.add_argument("--substrate-manifest", required=True)
     parser.add_argument("--substrate-manifest-sha256", required=True)
     parser.add_argument(
@@ -510,8 +510,8 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "queue_manifest": prepare_round0113(
                     release_sha=args.release_sha,
-                    r0112_review_path=args.r0112_review,
-                    r0112_review_sha256=args.r0112_review_sha256,
+                    r0114_review_path=args.r0114_review,
+                    r0114_review_sha256=args.r0114_review_sha256,
                     substrate_manifest=args.substrate_manifest,
                     substrate_manifest_sha256=args.substrate_manifest_sha256,
                     queue_root=args.queue_root,
