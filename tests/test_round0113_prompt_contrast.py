@@ -179,7 +179,7 @@ def test_text_family_census_verifies_complete_utf8_bytes(tmp_path, monkeypatch):
 
 def test_compact_mapping_closes_registered_population():
     excluded = np.arange(5_366, dtype=np.int64)
-    mapping = compact_mapping(excluded)
+    mapping = compact_mapping(excluded, np.empty(0, dtype=np.int64))
     assert mapping.shape == (1_994_634,)
     assert mapping[0] == 5_366
     assert mapping[-1] == 1_999_999

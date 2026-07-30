@@ -90,10 +90,14 @@ QUERY_SCHEMA = "round0113-dual-prompt-query-reserve-v1"
 QUERY_SELECTION_SCHEMA = "round0113-matched-query-selection-v1"
 BASELINE_EXCLUDED_ROWS = 5_366
 BASELINE_RETAINED_ROWS = ROWS - BASELINE_EXCLUDED_ROWS
-# Finalize from the complete R0112 raw/document exact-family union before
-# issuance. The runtime census must reproduce these exact global rows.
-PROMPT_UNION_EXTRA_EXCLUSIONS: tuple[int, ...] = ()
-EXCLUDED_ROWS = BASELINE_EXCLUDED_ROWS + len(PROMPT_UNION_EXTRA_EXCLUSIONS)
+# Finalize both values from the complete R0112 source/raw/document exact-family
+# union before issuance. The runtime census must reproduce this exact ordered
+# selector identity without carrying a long row list in executable source.
+PROMPT_UNION_EXTRA_EXCLUDED_ROWS = 0
+PROMPT_UNION_EXTRA_EXCLUSIONS_SHA256 = (
+    "476cbf2e7730ed64d888a6a5c92e140c290581e73cec168af789288bba613668"
+)
+EXCLUDED_ROWS = BASELINE_EXCLUDED_ROWS + PROMPT_UNION_EXTRA_EXCLUDED_ROWS
 RETAINED_ROWS = ROWS - EXCLUDED_ROWS
 
 NONINFERIORITY_RATIO = 0.97
@@ -216,15 +220,22 @@ def baseline_compact_mapping(excluded: np.ndarray) -> np.ndarray:
     return mapping
 
 
-def compact_mapping(excluded: np.ndarray) -> np.ndarray:
+def compact_mapping(
+    excluded: np.ndarray,
+    prompt_union_extra: np.ndarray,
+) -> np.ndarray:
     baseline = baseline_compact_mapping(excluded)
     dropped = np.asarray(excluded, dtype=np.int64)
-    extra = np.asarray(PROMPT_UNION_EXTRA_EXCLUSIONS, dtype=np.int64)
+    extra = np.asarray(prompt_union_extra, dtype=np.int64)
+    from .artifact_identity import ordered_array_sha256
+
     if (
-        extra.shape != (len(PROMPT_UNION_EXTRA_EXCLUSIONS),)
+        extra.shape != (PROMPT_UNION_EXTRA_EXCLUDED_ROWS,)
         or (len(extra) and np.any(extra[1:] <= extra[:-1]))
         or (len(extra) and (extra[0] < 0 or extra[-1] >= ROWS))
         or np.intersect1d(dropped, extra, assume_unique=True).size
+        or ordered_array_sha256(extra)
+        != PROMPT_UNION_EXTRA_EXCLUSIONS_SHA256
     ):
         raise Round0113Error("R0113 prompt-union selector is malformed")
     mapping = baseline[~np.isin(baseline, extra, assume_unique=True)]

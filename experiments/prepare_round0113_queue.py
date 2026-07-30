@@ -36,6 +36,8 @@ from basemap.round0113_prompt_contrast import (
     POLISH_SOURCE_ROWS,
     POLISH_TEXT_PATH,
     EXCLUDED_ROWS,
+    PROMPT_UNION_EXTRA_EXCLUDED_ROWS,
+    PROMPT_UNION_EXTRA_EXCLUSIONS_SHA256,
     QUERY_CANDIDATES,
     QUERY_ROWS,
     RETAINED_ROWS,
@@ -427,6 +429,10 @@ def prepare_round0113(
         "retained_representatives_per_arm": RETAINED_ROWS,
         "duplicate_exclusions": EXCLUDED_ROWS,
         "r0112_baseline_duplicate_exclusions": BASELINE_EXCLUDED_ROWS,
+        "prompt_union_extra_exclusions": PROMPT_UNION_EXTRA_EXCLUDED_ROWS,
+        "prompt_union_extra_exclusions_sha256": (
+            PROMPT_UNION_EXTRA_EXCLUSIONS_SHA256
+        ),
         "dimension": 768,
         "arms": list(ARMS),
         "graph": {

@@ -55,7 +55,8 @@ from basemap.round0113_prompt_contrast import (
     POLISH_HISTORICAL_EMBEDDING_SHA256,
     POLISH_QUERY_ROWS,
     POLISH_SOURCE_ROWS,
-    PROMPT_UNION_EXTRA_EXCLUSIONS,
+    PROMPT_UNION_EXTRA_EXCLUDED_ROWS,
+    PROMPT_UNION_EXTRA_EXCLUSIONS_SHA256,
     QUERY_CANDIDATES,
     QUERY_ROWS,
     QUERY_SCHEMA,
@@ -696,8 +697,10 @@ def run_assemble(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     derived_extra, union_report = _union_prompt_exclusions(
         families_by_arm, baseline_mapping
     )
-    expected_extra = np.asarray(
-        PROMPT_UNION_EXTRA_EXCLUSIONS, dtype=np.int64
+    derived_extra_sha256 = ordered_array_sha256(derived_extra)
+    matched_preregistered_union = bool(
+        len(derived_extra) == PROMPT_UNION_EXTRA_EXCLUDED_ROWS
+        and derived_extra_sha256 == PROMPT_UNION_EXTRA_EXCLUSIONS_SHA256
     )
     discovery = seal(
         {
@@ -710,10 +713,12 @@ def run_assemble(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
             "source_text_layout": text_layout,
             "arms": family_reports,
             "union": union_report,
-            "expected_extra_excluded_global_rows": expected_extra.tolist(),
-            "matched_preregistered_union": bool(
-                np.array_equal(derived_extra, expected_extra)
+            "derived_extra_exclusions_sha256": derived_extra_sha256,
+            "expected_extra_excluded_rows": PROMPT_UNION_EXTRA_EXCLUDED_ROWS,
+            "expected_extra_exclusions_sha256": (
+                PROMPT_UNION_EXTRA_EXCLUSIONS_SHA256
             ),
+            "matched_preregistered_union": matched_preregistered_union,
             "wall_s": time.monotonic() - discovery_started,
         }
     )
@@ -723,7 +728,7 @@ def run_assemble(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         raise Round0113Error(
             "R0113 complete prompt-family union differs from preregistration"
         )
-    mapping = compact_mapping(substrate["excluded"])
+    mapping = compact_mapping(substrate["excluded"], derived_extra)
     mapping_path = os.path.join(output, "compact-to-global.i64.npy")
     atomic_save_new_npy(mapping_path, mapping, immutable=True)
     outputs: dict[str, Any] = {}
@@ -798,11 +803,13 @@ def run_assemble(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         ),
         "source_rows": 2_000_000,
         "baseline_excluded_rows": BASELINE_EXCLUDED_ROWS,
-        "prompt_union_extra_excluded_rows": len(
-            PROMPT_UNION_EXTRA_EXCLUSIONS
+        "prompt_union_extra_excluded_rows": PROMPT_UNION_EXTRA_EXCLUDED_ROWS,
+        "prompt_union_extra_exclusions_sha256": (
+            PROMPT_UNION_EXTRA_EXCLUSIONS_SHA256
         ),
-        "excluded_rows": BASELINE_EXCLUDED_ROWS
-        + len(PROMPT_UNION_EXTRA_EXCLUSIONS),
+        "excluded_rows": (
+            BASELINE_EXCLUDED_ROWS + PROMPT_UNION_EXTRA_EXCLUDED_ROWS
+        ),
         "retained_rows": RETAINED_ROWS,
         "dimension": DIMENSION,
         "dtype": np.dtype("<f2").str,
