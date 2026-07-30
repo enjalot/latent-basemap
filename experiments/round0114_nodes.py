@@ -85,10 +85,12 @@ def _validate_model_contract() -> dict[str, Any]:
             NATIVE_MAX_SEQ_LENGTH,
             tokenizer_limit,
         ),
-        "model_config": expected_input_signature(model_config_path),
-        "tokenizer_config": expected_input_signature(tokenizer_config_path),
+        "model_config": expected_input_signature(os.path.realpath(model_config_path)),
+        "tokenizer_config": expected_input_signature(
+            os.path.realpath(tokenizer_config_path)
+        ),
         "sentence_transformers_config": expected_input_signature(
-            sentence_config_path
+            os.path.realpath(sentence_config_path)
         ),
     }
 
