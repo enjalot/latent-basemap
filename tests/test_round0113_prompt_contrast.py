@@ -246,6 +246,7 @@ def test_arm_configs_share_recipe_but_bind_separate_graphs():
     assert raw["model"] == document["model"]
     assert raw["optimizer"] == document["optimizer"]
     assert raw["graph"]["sha256"] != document["graph"]["sha256"]
+    assert raw["graph"]["nprobe"] == document["graph"]["nprobe"] == 64
     assert raw["optimizer"]["seed"] == document["optimizer"]["seed"] == 42
     assert (
         raw["execution"]["expected_pipeline_stamp"][

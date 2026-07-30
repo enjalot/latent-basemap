@@ -28,6 +28,7 @@ from basemap.round0113_prompt_contrast import (
     ARMS,
     BASELINE_EXCLUDED_ROWS,
     GRAPH_K,
+    GRAPH_NPROBE,
     NONINFERIORITY_RATIO,
     POLISH_HISTORICAL_EMBEDDING_PATH,
     POLISH_HISTORICAL_EMBEDDING_SHA256,
@@ -437,6 +438,7 @@ def prepare_round0113(
         "arms": list(ARMS),
         "graph": {
             "k": GRAPH_K,
+            "fixed_nprobe": GRAPH_NPROBE,
             "shared_compact_ids": True,
             "separate_graph_bytes": True,
             "identical_builder_parameters_and_seeds": True,

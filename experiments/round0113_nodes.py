@@ -41,6 +41,7 @@ from basemap.round0113_prompt_contrast import (
     GRAPH_K,
     GRAPH_MEAN_RECALL_FLOOR,
     GRAPH_NLIST,
+    GRAPH_NPROBE,
     GRAPH_NPROBE_GRID,
     GRAPH_P10_RECALL_FLOOR,
     GRAPH_QUALITY_ROWS,
@@ -1255,7 +1256,6 @@ def run_build_graph(
     )
     truth = _without_self(truth_raw, quality_ids, GRAPH_K - 1)
     cells: dict[str, Any] = {}
-    selected_nprobe: int | None = None
     selected_observed: np.ndarray | None = None
     for nprobe in GRAPH_NPROBE_GRID:
         index.nprobe = nprobe
@@ -1277,14 +1277,16 @@ def run_build_graph(
             "queries_per_s": GRAPH_QUALITY_ROWS / cell_wall,
             "passed": passed,
         }
-        if passed and selected_nprobe is None:
-            selected_nprobe = nprobe
+        if nprobe == GRAPH_NPROBE:
             selected_observed = observed.copy()
     del exact
-    if selected_nprobe is None or selected_observed is None:
-        raise Round0113Error(f"R0113 {arm} graph search did not qualify")
+    fixed_cell = cells.get(str(GRAPH_NPROBE)) or {}
+    if fixed_cell.get("passed") is not True or selected_observed is None:
+        raise Round0113Error(
+            f"R0113 {arm} fixed-nprobe graph search did not qualify"
+        )
 
-    index.nprobe = selected_nprobe
+    index.nprobe = GRAPH_NPROBE
     neighbors = np.empty((RETAINED_ROWS, GRAPH_K), dtype=np.int32)
     distances = np.empty((RETAINED_ROWS, GRAPH_K), dtype=np.float32)
     search_started = time.monotonic()
@@ -1489,7 +1491,10 @@ def run_build_graph(
         },
         "search_qualification": {
             "index": "GPU IndexIVFFlat/IP",
-            "selected_nprobe": selected_nprobe,
+            "selected_nprobe": GRAPH_NPROBE,
+            "selection_policy": (
+                "fixed shared nprobe for both arms; grid is diagnostic only"
+            ),
             "cells": cells,
             "training_rows_sha256": ordered_array_sha256(train_rows),
             "quality_rows_sha256": ordered_array_sha256(quality_ids),
@@ -1503,6 +1508,7 @@ def run_build_graph(
         "paired_graph_policy": {
             "shared_compact_ids": True,
             "shared_builder_parameters_and_random_seeds": True,
+            "shared_fixed_nprobe": GRAPH_NPROBE,
             "separate_arm_graph_bytes": True,
         },
         "performance": {

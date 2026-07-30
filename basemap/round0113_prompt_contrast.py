@@ -64,6 +64,7 @@ GRAPH_TRAIN_SEED = 113
 GRAPH_QUALITY_ROWS = 4_096
 GRAPH_QUALITY_SEED = 114
 GRAPH_NPROBE_GRID = (16, 32, 64, 128, 256)
+GRAPH_NPROBE = 64
 GRAPH_MEAN_RECALL_FLOOR = 0.90
 GRAPH_P10_RECALL_FLOOR = 0.80
 
@@ -777,6 +778,7 @@ def train_config(
             "manifest_path": str(graph_manifest_signature["canonical_path"]),
             "manifest_sha256": str(graph_manifest_signature["sha256"]),
             "k": GRAPH_K,
+            "nprobe": GRAPH_NPROBE,
             "directed_edges": graph_edges,
             "sampling": "fuzzy-weight-proportional-with-replacement",
             "positive_target_mode": "binary",
@@ -864,6 +866,8 @@ def load_graph(
     if signature["sha256"] != expected_sha256:
         raise Round0113Error(f"R0113 {arm} graph manifest bytes changed")
     manifest = read_sealed(manifest_path, label=f"R0113 {arm} graph manifest")
+    search = manifest.get("search_qualification") or {}
+    fixed_cell = (search.get("cells") or {}).get(str(GRAPH_NPROBE)) or {}
     if (
         arm not in ARMS
         or manifest.get("schema") != GRAPH_SCHEMA
@@ -873,6 +877,8 @@ def load_graph(
         or int(manifest.get("dimension", -1)) != DIMENSION
         or int(manifest.get("k", -1)) != GRAPH_K
         or int(manifest.get("directed_edge_count", -1)) <= 0
+        or int(search.get("selected_nprobe", -1)) != GRAPH_NPROBE
+        or fixed_cell.get("passed") is not True
     ):
         raise Round0113Error(f"R0113 {arm} graph contract changed")
     graph_path = verify_signature(
