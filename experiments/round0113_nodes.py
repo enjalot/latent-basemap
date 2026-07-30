@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import math
 import os
 import random
@@ -32,6 +33,8 @@ from basemap.round0112_prompt_substrate import (
 from basemap.round0113_prompt_contrast import (
     ARMS,
     ASSEMBLY_SCHEMA,
+    BASELINE_EXCLUDED_ROWS,
+    BASELINE_RETAINED_ROWS,
     BATCH_SIZE,
     DECISION_METRICS,
     DIMENSION,
@@ -52,10 +55,12 @@ from basemap.round0113_prompt_contrast import (
     POLISH_HISTORICAL_EMBEDDING_SHA256,
     POLISH_QUERY_ROWS,
     POLISH_SOURCE_ROWS,
+    PROMPT_UNION_EXTRA_EXCLUSIONS,
     QUERY_CANDIDATES,
     QUERY_ROWS,
     QUERY_SCHEMA,
     QUERY_SELECTION_SCHEMA,
+    RETAINED_ROWS,
     ROUND_ID,
     SEED,
     SUCCESSFUL_UPDATES,
@@ -63,6 +68,7 @@ from basemap.round0113_prompt_contrast import (
     HostFp16EndpointArray,
     PromptTrainingInput,
     Round0113Error,
+    baseline_compact_mapping,
     compact_mapping,
     load_graph,
     load_substrate_manifest,
@@ -77,10 +83,6 @@ from basemap.round0113_prompt_contrast import (
     train_config,
     verify_signature,
 )
-
-
-RETAINED_ROWS = 1_994_634
-
 
 def _schema(stem: str) -> str:
     return f"round0113-{stem}-v1"
@@ -250,6 +252,302 @@ def _exact_duplicate_audit(
     }
 
 
+def _exact_families_from_chunks(
+    chunks: list[dict[str, Any]],
+    mapping: np.ndarray,
+) -> tuple[list[list[int]], dict[str, Any]]:
+    """Enumerate complete-byte families on a chunked fp16 population."""
+    compact = np.asarray(mapping, dtype=np.int64)
+    if (
+        len(chunks) != 80
+        or compact.shape != (BASELINE_RETAINED_ROWS,)
+        or np.any(compact[1:] <= compact[:-1])
+    ):
+        raise Round0113Error("R0113 source-family census input is malformed")
+    positions = np.unique(
+        np.linspace(0, DIMENSION - 1, 32, dtype=np.int64)
+    )
+    projection = np.empty(
+        (len(compact), len(positions)), dtype=np.uint16
+    )
+    arrays: list[np.ndarray] = []
+    for chunk_index, signature in enumerate(chunks):
+        values = np.load(
+            str(signature["canonical_path"]), mmap_mode="r", allow_pickle=False
+        )
+        if values.shape != (25_000, DIMENSION) or values.dtype != np.float16:
+            raise Round0113Error("R0113 source-family chunk geometry changed")
+        start = chunk_index * 25_000
+        stop = start + 25_000
+        left = int(np.searchsorted(compact, start, side="left"))
+        right = int(np.searchsorted(compact, stop, side="left"))
+        local = compact[left:right] - start
+        selected = np.ascontiguousarray(
+            np.take(values, positions, axis=1)[local]
+        ).view(np.uint16)
+        projection[left:right] = selected
+        arrays.append(values)
+    key_dtype = np.dtype(
+        (np.void, projection.dtype.itemsize * projection.shape[1])
+    )
+    keys = projection.view(key_dtype).reshape(-1)
+    order = np.argsort(keys, kind="stable")
+    ordered = keys[order]
+    equal = ordered[1:] == ordered[:-1]
+    starts = np.concatenate(
+        (
+            np.asarray([0], dtype=np.int64),
+            np.flatnonzero(~equal).astype(np.int64) + 1,
+        )
+    )
+    stops = np.concatenate(
+        (starts[1:], np.asarray([len(compact)], dtype=np.int64))
+    )
+    repeated = np.flatnonzero(stops - starts > 1)
+    families: list[list[int]] = []
+    collision_splits = 0
+    for group in repeated.tolist():
+        members = order[int(starts[group]) : int(stops[group])]
+        exact: dict[bytes, list[int]] = {}
+        for member in members.tolist():
+            global_row = int(compact[member])
+            chunk_index, local_row = divmod(global_row, 25_000)
+            exact.setdefault(
+                np.asarray(arrays[chunk_index][local_row]).tobytes(order="C"),
+                [],
+            ).append(global_row)
+        collision_splits += max(len(exact) - 1, 0)
+        for family in exact.values():
+            if len(family) >= 2:
+                families.append(sorted(family))
+    families.sort(key=lambda family: (family[0], len(family), family))
+    return families, {
+        "identity": "complete stored fp16 row bytes",
+        "candidate_projection_positions": positions.tolist(),
+        "candidate_repeated_groups": int(len(repeated)),
+        "candidate_collision_splits": int(collision_splits),
+        "exact_nontrivial_family_count": int(len(families)),
+        "rows_in_exact_nontrivial_families": int(
+            sum(len(family) for family in families)
+        ),
+        "maximum_exact_family_size": int(
+            max((len(family) for family in families), default=1)
+        ),
+        "families_global_rows": families,
+    }
+
+
+def _iter_selected_texts(
+    layout: list[dict[str, Any]],
+    selected_global_rows: np.ndarray,
+):
+    """Yield exact source texts for sorted selected rows without full materialization."""
+    import pyarrow.parquet as pq
+
+    selected = np.asarray(selected_global_rows, dtype=np.int64)
+    if (
+        selected.ndim != 1
+        or not len(selected)
+        or np.any(selected[1:] <= selected[:-1])
+    ):
+        raise Round0113Error("R0113 selected text rows are malformed")
+    yielded = 0
+    for item in layout:
+        global_start = int(item["global_row_start"])
+        global_stop = int(item["global_row_stop"])
+        shard_start = int(item["shard_row_start"])
+        shard_stop = int(item["shard_row_stop"])
+        left = int(np.searchsorted(selected, global_start, side="left"))
+        right = int(np.searchsorted(selected, global_stop, side="left"))
+        if right <= left:
+            continue
+        targets = selected[left:right] - global_start + shard_start
+        parquet = pq.ParquetFile(str(item["text"]["canonical_path"]))
+        if int(parquet.metadata.num_rows) != int(item["shard_rows"]):
+            raise Round0113Error("R0113 training text shard rows changed")
+        cursor = 0
+        target_cursor = 0
+        for batch in parquet.iter_batches(
+            batch_size=65_536, columns=["chunk_text"]
+        ):
+            stop = cursor + len(batch)
+            if stop <= shard_start:
+                cursor = stop
+                continue
+            if cursor >= shard_stop:
+                break
+            batch_left = int(
+                np.searchsorted(targets, cursor, side="left")
+            )
+            batch_right = int(
+                np.searchsorted(targets, stop, side="left")
+            )
+            if batch_right > batch_left:
+                local = targets[batch_left:batch_right] - cursor
+                texts = batch.column(0).take(local.tolist()).to_pylist()
+                for offset, text in enumerate(texts, start=batch_left):
+                    if not isinstance(text, str):
+                        raise Round0113Error(
+                            "R0113 training source text is not a string"
+                        )
+                    yield int(selected[left + offset]), text
+                    yielded += 1
+                target_cursor = batch_right
+            cursor = stop
+        if target_cursor != len(targets):
+            raise Round0113Error("R0113 training text shard fetch is incomplete")
+    if yielded != len(selected):
+        raise Round0113Error("R0113 selected training texts did not close")
+
+
+def _exact_text_families(
+    layout: list[dict[str, Any]],
+    mapping: np.ndarray,
+) -> tuple[list[list[int]], dict[str, Any]]:
+    """Enumerate complete UTF-8 source-text families over retained rows."""
+    compact = np.asarray(mapping, dtype=np.int64)
+    if compact.shape != (BASELINE_RETAINED_ROWS,):
+        raise Round0113Error("R0113 text-family mapping is malformed")
+    hashes = np.empty(len(compact), dtype="V32")
+    for index, (global_row, text) in enumerate(
+        _iter_selected_texts(layout, compact)
+    ):
+        if global_row != int(compact[index]):
+            raise Round0113Error("R0113 text-family row order changed")
+        hashes[index] = hashlib.sha256(text.encode("utf-8")).digest()
+    order = np.argsort(hashes, kind="stable")
+    ordered = hashes[order]
+    equal = ordered[1:] == ordered[:-1]
+    starts = np.concatenate(
+        (
+            np.asarray([0], dtype=np.int64),
+            np.flatnonzero(~equal).astype(np.int64) + 1,
+        )
+    )
+    stops = np.concatenate(
+        (starts[1:], np.asarray([len(compact)], dtype=np.int64))
+    )
+    repeated = np.flatnonzero(stops - starts > 1)
+    candidate_compact = np.sort(
+        np.concatenate(
+            [
+                order[int(starts[group]) : int(stops[group])]
+                for group in repeated.tolist()
+            ]
+        )
+        if len(repeated)
+        else np.empty(0, dtype=np.int64)
+    )
+    candidate_globals = compact[candidate_compact]
+    texts_by_row = {
+        global_row: text.encode("utf-8")
+        for global_row, text in _iter_selected_texts(
+            layout, candidate_globals
+        )
+    } if len(candidate_globals) else {}
+    families: list[list[int]] = []
+    collision_splits = 0
+    for group in repeated.tolist():
+        members = compact[
+            order[int(starts[group]) : int(stops[group])]
+        ]
+        exact: dict[bytes, list[int]] = {}
+        for global_row in members.tolist():
+            exact.setdefault(texts_by_row[int(global_row)], []).append(
+                int(global_row)
+            )
+        collision_splits += max(len(exact) - 1, 0)
+        for family in exact.values():
+            if len(family) >= 2:
+                families.append(sorted(family))
+    families.sort(key=lambda family: (family[0], len(family), family))
+    return families, {
+        "identity": "complete source-text UTF-8 bytes",
+        "candidate_hash": "SHA-256 over each complete UTF-8 text",
+        "candidate_repeated_groups": int(len(repeated)),
+        "candidate_collision_splits": int(collision_splits),
+        "exact_nontrivial_family_count": int(len(families)),
+        "rows_in_exact_nontrivial_families": int(
+            sum(len(family) for family in families)
+        ),
+        "maximum_exact_family_size": int(
+            max((len(family) for family in families), default=1)
+        ),
+        "families_global_rows": families,
+    }
+
+
+def _union_prompt_exclusions(
+    families_by_arm: Mapping[str, list[list[int]]],
+    baseline_mapping: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Choose one shared lowest-global-row representative per union family."""
+    family_sources = {"text", *ARMS}
+    if set(families_by_arm) != family_sources:
+        raise Round0113Error("R0113 prompt-family sources are incomplete")
+    retained = np.asarray(baseline_mapping, dtype=np.int64)
+    parent: dict[int, int] = {}
+
+    def find(row: int) -> int:
+        root = parent.setdefault(row, row)
+        while parent[root] != root:
+            root = parent[root]
+        while parent[row] != row:
+            next_row = parent[row]
+            parent[row] = root
+            row = next_row
+        return root
+
+    def union(left: int, right: int) -> None:
+        a = find(left)
+        b = find(right)
+        if a != b:
+            parent[max(a, b)] = min(a, b)
+
+    for families in families_by_arm.values():
+        for family in families:
+            members = sorted(set(int(row) for row in family))
+            positions = np.searchsorted(retained, members)
+            if (
+                len(members) < 2
+                or np.any(positions >= len(retained))
+                or not np.array_equal(retained[positions], members)
+            ):
+                raise Round0113Error(
+                    "R0113 prompt family is outside baseline population"
+                )
+            for row in members[1:]:
+                union(members[0], row)
+    components: dict[int, list[int]] = {}
+    for row in sorted(parent):
+        components.setdefault(find(row), []).append(row)
+    union_families = [
+        sorted(family)
+        for family in components.values()
+        if len(family) >= 2
+    ]
+    union_families.sort(key=lambda family: (family[0], len(family), family))
+    extra = np.asarray(
+        sorted(row for family in union_families for row in family[1:]),
+        dtype=np.int64,
+    )
+    return extra, {
+        "selection_rule": (
+            "union exact source-text, raw-fp16, and document-fp16 family "
+            "relations over R0112 baseline representatives; keep the lowest "
+            "global row per transitive component in both arms"
+        ),
+        "source_family_counts": {
+            source: len(families_by_arm[source])
+            for source in sorted(family_sources)
+        },
+        "union_family_count": len(union_families),
+        "union_families_global_rows": union_families,
+        "extra_excluded_global_rows": extra.tolist(),
+        "extra_excluded_rows": int(len(extra)),
+    }
+
+
 def _data_identity(
     assembly: Mapping[str, Any],
     *,
@@ -293,6 +591,15 @@ def _load_assembly(job: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, An
     ):
         raise Round0113Error("R0113 compact assembly contract changed")
     verify_signature(manifest["mapping"], label="R0113 compact mapping")
+    discovery_path = verify_signature(
+        manifest["source_prompt_family_discovery"],
+        label="R0113 source prompt-family discovery",
+    )
+    discovery = read_sealed(
+        discovery_path, label="R0113 source prompt-family discovery"
+    )
+    if discovery.get("matched_preregistered_union") is not True:
+        raise Round0113Error("R0113 prompt-family discovery changed")
     audit_path = verify_signature(
         manifest["retained_duplicate_audit"],
         label="R0113 retained duplicate audit",
@@ -370,6 +677,52 @@ def run_assemble(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         expected_sha256=str(job["substrate_manifest_sha256"]),
         verify_chunks=False,
     )
+    baseline_mapping = baseline_compact_mapping(substrate["excluded"])
+    discovery_started = time.monotonic()
+    text_layout = list(job.get("source_text_layout") or [])
+    text_families, text_report = _exact_text_families(
+        text_layout, baseline_mapping
+    )
+    families_by_arm: dict[str, list[list[int]]] = {
+        "text": text_families
+    }
+    family_reports: dict[str, Any] = {"text": text_report}
+    for arm in ARMS:
+        families, report = _exact_families_from_chunks(
+            substrate["chunks"][arm], baseline_mapping
+        )
+        families_by_arm[arm] = families
+        family_reports[arm] = report
+    derived_extra, union_report = _union_prompt_exclusions(
+        families_by_arm, baseline_mapping
+    )
+    expected_extra = np.asarray(
+        PROMPT_UNION_EXTRA_EXCLUSIONS, dtype=np.int64
+    )
+    discovery = seal(
+        {
+            "schema": _schema("source-prompt-family-discovery"),
+            "round_id": ROUND_ID,
+            "release_sha": active["manifest"]["release_sha"],
+            "substrate": substrate["signature"],
+            "baseline_selector": substrate["selector"],
+            "baseline_retained_rows": BASELINE_RETAINED_ROWS,
+            "source_text_layout": text_layout,
+            "arms": family_reports,
+            "union": union_report,
+            "expected_extra_excluded_global_rows": expected_extra.tolist(),
+            "matched_preregistered_union": bool(
+                np.array_equal(derived_extra, expected_extra)
+            ),
+            "wall_s": time.monotonic() - discovery_started,
+        }
+    )
+    discovery_path = os.path.join(output, "source-prompt-family-discovery.json")
+    atomic_write_new_json(discovery_path, discovery, immutable=True)
+    if discovery["matched_preregistered_union"] is not True:
+        raise Round0113Error(
+            "R0113 complete prompt-family union differs from preregistration"
+        )
     mapping = compact_mapping(substrate["excluded"])
     mapping_path = os.path.join(output, "compact-to-global.i64.npy")
     atomic_save_new_npy(mapping_path, mapping, immutable=True)
@@ -417,9 +770,9 @@ def run_assemble(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
             "arms": duplicate_audits,
             "shared_population_required": True,
             "policy": (
-                "the shared R0112 selector must leave zero complete-fp16-row "
-                "families in either fresh convention; treatment-induced "
-                "collisions require a new shared union selector"
+                "the preregistered shared source/raw/document union selector "
+                "must leave zero complete-fp16-row families in either fresh "
+                "convention"
             ),
             "passed": all(
                 report["passed_no_retained_exact_duplicates"]
@@ -440,8 +793,16 @@ def run_assemble(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         "release_sha": active["manifest"]["release_sha"],
         "substrate": substrate["signature"],
         "selector": substrate["selector"],
+        "source_prompt_family_discovery": expected_input_signature(
+            discovery_path
+        ),
         "source_rows": 2_000_000,
-        "excluded_rows": 5_366,
+        "baseline_excluded_rows": BASELINE_EXCLUDED_ROWS,
+        "prompt_union_extra_excluded_rows": len(
+            PROMPT_UNION_EXTRA_EXCLUSIONS
+        ),
+        "excluded_rows": BASELINE_EXCLUDED_ROWS
+        + len(PROMPT_UNION_EXTRA_EXCLUSIONS),
         "retained_rows": RETAINED_ROWS,
         "dimension": DIMENSION,
         "dtype": np.dtype("<f2").str,

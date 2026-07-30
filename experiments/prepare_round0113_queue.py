@@ -21,10 +21,12 @@ from basemap.output_safety import (
     ensure_data_directory,
 )
 from basemap.round0112_prompt_substrate import (
+    first2m_layout,
     model_member_signatures,
 )
 from basemap.round0113_prompt_contrast import (
     ARMS,
+    BASELINE_EXCLUDED_ROWS,
     GRAPH_K,
     NONINFERIORITY_RATIO,
     POLISH_HISTORICAL_EMBEDDING_PATH,
@@ -33,8 +35,10 @@ from basemap.round0113_prompt_contrast import (
     POLISH_QUERY_ROWS,
     POLISH_SOURCE_ROWS,
     POLISH_TEXT_PATH,
+    EXCLUDED_ROWS,
     QUERY_CANDIDATES,
     QUERY_ROWS,
+    RETAINED_ROWS,
     ROUND_ID,
     SUCCESSFUL_UPDATES,
     load_substrate_manifest,
@@ -114,6 +118,21 @@ def _query_source_inputs() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     return _dedupe(inputs), layout
 
 
+def _source_text_layout() -> list[dict[str, Any]]:
+    authenticated: list[dict[str, Any]] = []
+    for item in first2m_layout():
+        text = expected_input_signature(str(item["text_path"]))
+        authenticated.append(
+            {
+                key: value
+                for key, value in item.items()
+                if key != "text_path"
+            }
+            | {"text": text}
+        )
+    return authenticated
+
+
 def _polish_source() -> dict[str, dict[str, Any]]:
     source = {
         "historical_embedding": expected_input_signature(
@@ -172,6 +191,7 @@ def prepare_round0113(
         expected_sha256=substrate_manifest_sha256,
         verify_chunks=False,
     )
+    source_text_layout = _source_text_layout()
     base_inputs = _dedupe(
         [
             expected_input_signature(round_file),
@@ -185,6 +205,7 @@ def prepare_round0113(
             *base_inputs,
             *substrate["chunks"]["raw"],
             *substrate["chunks"]["document"],
+            *[item["text"] for item in source_text_layout],
         ]
     )
     query_source_inputs, query_layout = _query_source_inputs()
@@ -244,6 +265,7 @@ def prepare_round0113(
             "p90_wall_s": 900.0,
             "substrate_manifest": substrate_manifest,
             "substrate_manifest_sha256": substrate_manifest_sha256,
+            "source_text_layout": source_text_layout,
             "node_policy": {
                 "gpu_required": False,
                 "training_performed": False,
@@ -402,8 +424,9 @@ def prepare_round0113(
     queue["training_performed"] = True
     queue["scientific_contract"] = {
         "rows_stored_per_arm": 2_000_000,
-        "retained_representatives_per_arm": 1_994_634,
-        "duplicate_exclusions": 5_366,
+        "retained_representatives_per_arm": RETAINED_ROWS,
+        "duplicate_exclusions": EXCLUDED_ROWS,
+        "r0112_baseline_duplicate_exclusions": BASELINE_EXCLUDED_ROWS,
         "dimension": 768,
         "arms": list(ARMS),
         "graph": {

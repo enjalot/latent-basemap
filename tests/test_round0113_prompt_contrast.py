@@ -28,7 +28,9 @@ from basemap.round0113_prompt_contrast import (
 from experiments.round0113_nodes import (
     _exact_duplicate_audit,
     _fetch_parquet_rows,
+    _exact_text_families,
     _require_unique_stored_rows,
+    _union_prompt_exclusions,
 )
 
 
@@ -130,6 +132,49 @@ def test_retained_duplicate_audit_reports_complete_byte_families():
     assert _exact_duplicate_audit(values)[
         "passed_no_retained_exact_duplicates"
     ] is True
+
+
+def test_prompt_family_union_uses_one_shared_transitive_representative():
+    extra, report = _union_prompt_exclusions(
+        {
+            "raw": [[10, 20], [40, 50]],
+            "document": [[20, 30], [40, 60]],
+            "text": [[10, 30]],
+        },
+        np.asarray([10, 20, 30, 40, 50, 60, 70], dtype=np.int64),
+    )
+    np.testing.assert_array_equal(extra, [20, 30, 50, 60])
+    assert report["union_families_global_rows"] == [
+        [10, 20, 30],
+        [40, 50, 60],
+    ]
+
+
+def test_text_family_census_verifies_complete_utf8_bytes(tmp_path, monkeypatch):
+    path = tmp_path / "training-texts.parquet"
+    pq.write_table(
+        pa.table({"chunk_text": ["same", "different", "same", "other"]}),
+        path,
+        row_group_size=2,
+    )
+    layout = [
+        {
+            "global_row_start": 0,
+            "global_row_stop": 4,
+            "shard_row_start": 0,
+            "shard_row_stop": 4,
+            "shard_rows": 4,
+            "text": {"canonical_path": str(path)},
+        }
+    ]
+    import experiments.round0113_nodes as nodes
+
+    monkeypatch.setattr(nodes, "BASELINE_RETAINED_ROWS", 4)
+    families, report = _exact_text_families(
+        layout, np.arange(4, dtype=np.int64)
+    )
+    assert families == [[0, 2]]
+    assert report["exact_nontrivial_family_count"] == 1
 
 
 def test_compact_mapping_closes_registered_population():

@@ -88,6 +88,13 @@ GRAPH_SCHEMA = "round0113-prompt-arm-fuzzy-graph-v1"
 ASSEMBLY_SCHEMA = "round0113-compact-prompt-arrays-v1"
 QUERY_SCHEMA = "round0113-dual-prompt-query-reserve-v1"
 QUERY_SELECTION_SCHEMA = "round0113-matched-query-selection-v1"
+BASELINE_EXCLUDED_ROWS = 5_366
+BASELINE_RETAINED_ROWS = ROWS - BASELINE_EXCLUDED_ROWS
+# Finalize from the complete R0112 raw/document exact-family union before
+# issuance. The runtime census must reproduce these exact global rows.
+PROMPT_UNION_EXTRA_EXCLUSIONS: tuple[int, ...] = ()
+EXCLUDED_ROWS = BASELINE_EXCLUDED_ROWS + len(PROMPT_UNION_EXTRA_EXCLUSIONS)
+RETAINED_ROWS = ROWS - EXCLUDED_ROWS
 
 NONINFERIORITY_RATIO = 0.97
 DECISION_METRICS = (
@@ -149,8 +156,10 @@ def load_substrate_manifest(
         or int(manifest.get("dimension", -1)) != DIMENSION
         or set(conventions) != set(ARMS)
         or any(len((conventions[arm] or {}).get("chunks") or []) != 80 for arm in ARMS)
-        or int(duplicate.get("excluded_exact_copy_rows", -1)) != 5_366
-        or int(duplicate.get("retained_representative_rows", -1)) != 1_994_634
+        or int(duplicate.get("excluded_exact_copy_rows", -1))
+        != BASELINE_EXCLUDED_ROWS
+        or int(duplicate.get("retained_representative_rows", -1))
+        != BASELINE_RETAINED_ROWS
         or (duplicate.get("cohort_reconciliation") or {}).get(
             "outside_representative_rows_restored"
         )
@@ -163,7 +172,7 @@ def load_substrate_manifest(
     )
     excluded = np.load(selector_path, mmap_mode="r", allow_pickle=False)
     if (
-        excluded.shape != (5_366,)
+        excluded.shape != (BASELINE_EXCLUDED_ROWS,)
         or excluded.dtype != np.int64
         or excluded[0] < 0
         or excluded[-1] >= ROWS
@@ -192,19 +201,36 @@ def load_substrate_manifest(
     }
 
 
-def compact_mapping(excluded: np.ndarray) -> np.ndarray:
+def baseline_compact_mapping(excluded: np.ndarray) -> np.ndarray:
     dropped = np.asarray(excluded, dtype=np.int64)
     if (
-        dropped.shape != (5_366,)
+        dropped.shape != (BASELINE_EXCLUDED_ROWS,)
         or np.any(dropped[1:] <= dropped[:-1])
     ):
         raise Round0113Error("R0113 compact selector is malformed")
     keep = np.ones(ROWS, dtype=bool)
     keep[dropped] = False
     mapping = np.flatnonzero(keep).astype(np.int64)
+    if mapping.shape != (BASELINE_RETAINED_ROWS,):
+        raise Round0113Error("R0113 baseline compact mapping did not close")
+    return mapping
+
+
+def compact_mapping(excluded: np.ndarray) -> np.ndarray:
+    baseline = baseline_compact_mapping(excluded)
+    dropped = np.asarray(excluded, dtype=np.int64)
+    extra = np.asarray(PROMPT_UNION_EXTRA_EXCLUSIONS, dtype=np.int64)
     if (
-        mapping.shape != (1_994_634,)
-        or np.intersect1d(mapping, dropped, assume_unique=True).size
+        extra.shape != (len(PROMPT_UNION_EXTRA_EXCLUSIONS),)
+        or (len(extra) and np.any(extra[1:] <= extra[:-1]))
+        or (len(extra) and (extra[0] < 0 or extra[-1] >= ROWS))
+        or np.intersect1d(dropped, extra, assume_unique=True).size
+    ):
+        raise Round0113Error("R0113 prompt-union selector is malformed")
+    mapping = baseline[~np.isin(baseline, extra, assume_unique=True)]
+    if (
+        mapping.shape != (RETAINED_ROWS,)
+        or np.intersect1d(mapping, extra, assume_unique=True).size
     ):
         raise Round0113Error("R0113 compact mapping did not close")
     return mapping
@@ -568,7 +594,7 @@ class PromptTrainingInput:
         self._last_sampler: PromptWeightedJinaSampler | None = None
         if (
             arm not in ARMS
-            or self.shape != (1_994_634, DIMENSION)
+            or self.shape != (RETAINED_ROWS, DIMENSION)
             or int(graph.get("n_nodes", -1)) != len(dataset)
         ):
             raise Round0113Error("R0113 training input geometry changed")
@@ -646,7 +672,7 @@ def train_config(
     graph_edges: int,
     retained_rows: int,
 ) -> tuple[dict[str, Any], str]:
-    if arm not in ARMS or graph_edges <= 0 or retained_rows != 1_994_634:
+    if arm not in ARMS or graph_edges <= 0 or retained_rows != RETAINED_ROWS:
         raise Round0113Error("R0113 train config input is invalid")
     expected_pipeline = {
         "schema": PIPELINE_SCHEMA,
@@ -790,7 +816,7 @@ def load_graph(
         or manifest.get("schema") != GRAPH_SCHEMA
         or manifest.get("round_id") != ROUND_ID
         or manifest.get("arm") != arm
-        or int(manifest.get("retained_rows", -1)) != 1_994_634
+        or int(manifest.get("retained_rows", -1)) != RETAINED_ROWS
         or int(manifest.get("dimension", -1)) != DIMENSION
         or int(manifest.get("k", -1)) != GRAPH_K
         or int(manifest.get("directed_edge_count", -1)) <= 0
@@ -808,7 +834,7 @@ def load_graph(
     )
     if (
         weights is None
-        or int(n_nodes) != 1_994_634
+        or int(n_nodes) != RETAINED_ROWS
         or len(sources) != int(manifest["directed_edge_count"])
     ):
         raise Round0113Error(f"R0113 {arm} graph arrays changed")
