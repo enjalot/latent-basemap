@@ -31,6 +31,7 @@ from .round0104_training import source_segments
 ROUND_ID = "0113"
 ARMS = CONVENTIONS
 SEED = 42
+NEGATIVE_RNG_SEED_OFFSET = 11_300_000
 QUERY_CANDIDATES = 4_096
 QUERY_ROWS = 2_000
 QUERY_SCAN_START = ROWS
@@ -538,7 +539,28 @@ class PromptWeightedJinaSampler(DiverseWeightedJinaSampler):
 
     def __init__(self, *args: Any, arm: str, **kwargs: Any) -> None:
         self.arm = arm
+        random_state = int(kwargs["random_state"])
         super().__init__(*args, **kwargs)
+        self._positive_rng_seed = random_state
+        self._negative_rng_seed = random_state + NEGATIVE_RNG_SEED_OFFSET
+        self._negative_rng = np.random.default_rng(self._negative_rng_seed)
+
+    def _rows(self) -> tuple[np.ndarray, np.ndarray]:
+        edge_ids = self._draw_weighted_edge_ids(self.num_pos)
+        source = np.asarray(self.sources[edge_ids], dtype=np.int64)
+        destination = np.asarray(self.targets[edge_ids], dtype=np.int64)
+        negative_source = self._negative_rng.integers(
+            0, self.n_nodes, size=self.num_neg, dtype=np.int64
+        )
+        offset = self._negative_rng.integers(
+            1, self.n_nodes, size=self.num_neg, dtype=np.int64
+        )
+        return (
+            np.concatenate((source, negative_source)),
+            np.concatenate(
+                (destination, (negative_source + offset) % self.n_nodes)
+            ),
+        )
 
     def execution_stamp(self) -> dict[str, Any]:
         dataset = self.dataset.execution_stamp()
@@ -557,6 +579,12 @@ class PromptWeightedJinaSampler(DiverseWeightedJinaSampler):
             "negative_sampling": (
                 f"uniform-{self.n_nodes}-compact-representatives-nonself"
             ),
+            "rng_stream_policy": (
+                "separate-positive-rejection-and-negative-pair-streams"
+            ),
+            "positive_rng_seed": self._positive_rng_seed,
+            "negative_rng_seed": self._negative_rng_seed,
+            "negative_row_pairs_identical_across_arms": True,
             "graph_degree": "variable-symmetric-fuzzy-k50-topology",
             "host_prefetch": "single-producer-two-pinned-slot",
             "host_prefetch_producer_batches": self._producer_batches,
@@ -702,6 +730,12 @@ def train_config(
         "negative_sampling": (
             f"uniform-{retained_rows}-compact-representatives-nonself"
         ),
+        "rng_stream_policy": (
+            "separate-positive-rejection-and-negative-pair-streams"
+        ),
+        "positive_rng_seed": SEED,
+        "negative_rng_seed": SEED + NEGATIVE_RNG_SEED_OFFSET,
+        "negative_row_pairs_identical_across_arms": True,
         "graph_degree": "variable-symmetric-fuzzy-k50-topology",
         "host_prefetch": "single-producer-two-pinned-slot",
         "endpoint_forward": "fused-source-destination",
@@ -765,6 +799,8 @@ def train_config(
             "batch_size": BATCH_SIZE,
             "positive_ratio": POSITIVE_RATIO,
             "positive_rows_per_update": POSITIVE_ROWS_PER_UPDATE,
+            "positive_rng_seed": SEED,
+            "negative_rng_seed": SEED + NEGATIVE_RNG_SEED_OFFSET,
             "positive_target_mode": "binary",
             "weighted_edge_sampling": True,
             "correlation_weight": 0.0,

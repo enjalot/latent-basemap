@@ -13,6 +13,7 @@ from basemap.round0113_prompt_contrast import (
     HostFp16EndpointArray,
     NONINFERIORITY_RATIO,
     POLISH_QUERY_ROWS_SHA256,
+    PromptWeightedJinaSampler,
     QUERY_CANDIDATES,
     QUERY_SCAN_START,
     Round0113Error,
@@ -246,7 +247,53 @@ def test_arm_configs_share_recipe_but_bind_separate_graphs():
     assert raw["optimizer"] == document["optimizer"]
     assert raw["graph"]["sha256"] != document["graph"]["sha256"]
     assert raw["optimizer"]["seed"] == document["optimizer"]["seed"] == 42
+    assert (
+        raw["execution"]["expected_pipeline_stamp"][
+            "negative_row_pairs_identical_across_arms"
+        ]
+        is True
+    )
     assert raw_digest != document_digest
+
+
+def test_prompt_sampler_keeps_negative_pairs_paired_across_arm_weights():
+    class Dataset:
+        device = "cpu"
+
+        def __len__(self):
+            return 8
+
+        def execution_stamp(self):
+            return {}
+
+    sources = np.arange(8, dtype=np.int32)
+    targets = np.roll(sources, -1)
+    common = {
+        "dataset": Dataset(),
+        "sources": sources,
+        "targets": targets,
+        "n_nodes": 8,
+        "batch_size": 20,
+        "pos_ratio": 0.2,
+        "random_state": 42,
+        "graph_signatures": {},
+    }
+    raw = PromptWeightedJinaSampler(
+        **common, weights=np.ones(8, dtype=np.float32), arm="raw"
+    )
+    document = PromptWeightedJinaSampler(
+        **common,
+        weights=np.linspace(0.1, 1.0, 8, dtype=np.float32),
+        arm="document",
+    )
+    raw_left, raw_right = raw._rows()
+    document_left, document_right = document._rows()
+    np.testing.assert_array_equal(
+        raw_left[raw.num_pos :], document_left[document.num_pos :]
+    )
+    np.testing.assert_array_equal(
+        raw_right[raw.num_pos :], document_right[document.num_pos :]
+    )
 
 
 def test_registered_noninferiority_is_inclusive_and_excludes_projection_ffr():
