@@ -52,6 +52,14 @@ R0106_REVIEW = os.path.join(LAB_ROOT, "review-0106-2026-07-29.md")
 R0106_REVIEW_SHA256 = (
     "f00a8391cc47f038993b40337cbe71e07536d305015597ea2e39eed9ca116e1f"
 )
+R0107_REVIEW = os.path.join(LAB_ROOT, "review-0107-2026-07-30.md")
+R0107_REVIEW_SHA256 = (
+    "efac370df53f11cd50a3aad4fe8e18c9683bc84faa34ba783f5a342fc00a17ba"
+)
+R0109_REVIEWED_GPU_WALL_S = 12_749.54478519503
+R0109_REVIEWED_STEADY_UPDATES_PER_S = 114.68124216308227
+EXPECTED_GPU_WALL_S = R0109_REVIEWED_GPU_WALL_S
+P90_GPU_WALL_S = 14_400.0
 
 
 def _frontmatter_status(path: str) -> str | None:
@@ -163,7 +171,7 @@ def prepare_round0111(
         "outputs": [output],
         "done_marker": os.path.join(artifacts, f"{node_id}.done.json"),
         "expected_inputs": inputs,
-        "p90_wall_s": 18_000.0,
+        "p90_wall_s": P90_GPU_WALL_S,
         "node_policy": {
             "gpu_required": True,
             "training_performed": True,
@@ -216,12 +224,25 @@ def prepare_round0111(
         "minimum_train_updates_per_s": TRAIN_MINIMUM_UPDATES_PER_S,
         "warning_train_updates_per_s": TRAIN_WARNING_UPDATES_PER_S,
         "warmup_updates": PERFORMANCE_WARMUP_UPDATES,
+        "timing_basis": {
+            "reference_round": "0109",
+            "reviewed_gpu_wall_s": R0109_REVIEWED_GPU_WALL_S,
+            "reviewed_gpu_hours": R0109_REVIEWED_GPU_WALL_S / 3_600.0,
+            "reviewed_steady_updates_per_s": (
+                R0109_REVIEWED_STEADY_UPDATES_PER_S
+            ),
+            "expected_gpu_wall_s": EXPECTED_GPU_WALL_S,
+            "p90_gpu_wall_s": P90_GPU_WALL_S,
+        },
         "evaluation": False,
         "map_decision": False,
         "threshold_tuning": False,
     }
     queue["jobs"] = jobs
-    queue["p90_gpu_seconds"] = {node_id: 18_000.0, "total": 18_000.0}
+    queue["p90_gpu_seconds"] = {
+        node_id: P90_GPU_WALL_S,
+        "total": P90_GPU_WALL_S,
+    }
     path = os.path.join(queue_root, "queue.json")
     atomic_write_new_json(path, queue, immutable=True)
     return path
@@ -230,8 +251,10 @@ def prepare_round0111(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-sha", required=True)
-    parser.add_argument("--r0107-review", required=True)
-    parser.add_argument("--r0107-review-sha256", required=True)
+    parser.add_argument("--r0107-review", default=R0107_REVIEW)
+    parser.add_argument(
+        "--r0107-review-sha256", default=R0107_REVIEW_SHA256
+    )
     parser.add_argument("--r0110-terminal", required=True)
     parser.add_argument("--r0110-terminal-sha256", required=True)
     parser.add_argument(

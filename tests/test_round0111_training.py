@@ -9,9 +9,15 @@ from basemap.artifact_identity import expected_input_signature
 from basemap.round0107_training import Round0107Error, train_config
 from experiments import round0111_nodes
 from experiments.prepare_round0111_queue import (
+    EXPECTED_GPU_WALL_S,
     GRAPH_MANIFEST,
+    P90_GPU_WALL_S,
     R0106_REVIEW,
     R0106_REVIEW_SHA256,
+    R0107_REVIEW,
+    R0107_REVIEW_SHA256,
+    R0109_REVIEWED_GPU_WALL_S,
+    R0109_REVIEWED_STEADY_UPDATES_PER_S,
     SEED,
     _require_successful_r0110_terminal,
 )
@@ -115,7 +121,7 @@ def test_r0110_terminal_ordering_requires_clean_success(tmp_path) -> None:
         )
 
 
-def test_round0111_binds_reviewed_graph_and_seed42_review() -> None:
+def test_round0111_binds_current_reviewed_graph_and_seed42_inputs() -> None:
     assert SEED == 44
     assert GRAPH_MANIFEST.endswith(
         "/round-0106/queue-attempt-3/artifacts/"
@@ -124,3 +130,17 @@ def test_round0111_binds_reviewed_graph_and_seed42_review() -> None:
     assert expected_input_signature(R0106_REVIEW)["sha256"] == (
         R0106_REVIEW_SHA256
     )
+    assert expected_input_signature(R0107_REVIEW)["sha256"] == (
+        R0107_REVIEW_SHA256
+    )
+
+
+def test_round0111_timing_uses_reviewed_seed43_measurement() -> None:
+    assert R0109_REVIEWED_GPU_WALL_S == pytest.approx(
+        3.541540220887508 * 3_600.0
+    )
+    assert R0109_REVIEWED_STEADY_UPDATES_PER_S == pytest.approx(
+        114.68124216308227
+    )
+    assert EXPECTED_GPU_WALL_S == R0109_REVIEWED_GPU_WALL_S
+    assert R0109_REVIEWED_GPU_WALL_S < P90_GPU_WALL_S < 4.01 * 3_600.0
