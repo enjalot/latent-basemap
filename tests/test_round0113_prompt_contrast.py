@@ -30,6 +30,7 @@ from basemap.round0113_prompt_contrast import (
     validate_seal,
 )
 from experiments.round0113_nodes import (
+    _data_identity,
     _exact_duplicate_audit,
     _fetch_parquet_rows,
     _exact_text_families,
@@ -219,6 +220,30 @@ def test_compact_mapping_closes_registered_population(monkeypatch):
     assert mapping[0] == 5_366
     assert mapping[-1] == 1_999_999
     assert not np.isin(extra, mapping).any()
+
+
+def test_data_identity_uses_panel_v2_ordered_shard_contract():
+    assembly = {
+        "outputs": {
+            "raw": _signature("/data/raw-compact.f16", "a"),
+            "document": _signature("/data/document-compact.f16", "b"),
+        },
+        "mapping": _signature("/data/compact-to-global.i64.npy", "c"),
+        "substrate": _signature("/data/native8192-substrate-v2.json", "d"),
+    }
+    identity = _data_identity(assembly, arm="raw")
+    assert set(identity) == {"kind", "shape", "dtype", "shards"}
+    assert identity["kind"] == "ordered_shards"
+    assert identity["shape"] == [RETAINED_ROWS, DIMENSION]
+    assert identity["dtype"] == "<f2"
+    assert identity["shards"] == [
+        {
+            "position": 0,
+            "name": "raw-compact.f16",
+            "bytes": 1,
+            "sha256": "a" * 64,
+        }
+    ]
 
 
 def test_fp16_endpoint_gather_preserves_requested_pairs():

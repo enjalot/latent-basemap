@@ -90,6 +90,13 @@ def _schema(stem: str) -> str:
     return f"round0113-{stem}-v1"
 
 
+def _execution_round_id(active: Mapping[str, Any]) -> str:
+    round_id = str((active.get("manifest") or {}).get("round_id", ""))
+    if round_id not in {ROUND_ID, "0115"}:
+        raise Round0113Error("R0113 scientific handler received another queue")
+    return round_id
+
+
 def _faiss_gpu_options(faiss: Any) -> Any:
     options = faiss.GpuClonerOptions()
     options.indicesOptions = faiss.INDICES_64_BIT
@@ -617,14 +624,20 @@ def _data_identity(
     *,
     arm: str,
 ) -> dict[str, Any]:
+    source = assembly["outputs"][arm]
     return {
-        "kind": "round0113-compact-prompt-array",
+        "kind": "ordered_shards",
         "shape": [RETAINED_ROWS, DIMENSION],
         "dtype": np.dtype("<f2").str,
-        "arm": arm,
-        "source": assembly["outputs"][arm],
-        "mapping": assembly["mapping"],
-        "substrate": assembly["substrate"],
+        "shards": [
+            {
+                "position": 0,
+                "name": os.path.basename(str(source["canonical_path"])),
+                "bytes": int(signature["bytes"]),
+                "sha256": str(signature["sha256"]),
+            }
+            for signature in (source,)
+        ],
     }
 
 
@@ -1539,7 +1552,7 @@ def run_build_graph(
     atomic_save_new_npy(polish_mask_path, polish_copied, immutable=True)
     body = {
         "schema": GRAPH_SCHEMA,
-        "round_id": ROUND_ID,
+        "round_id": _execution_round_id(active),
         "release_sha": active["manifest"]["release_sha"],
         "arm": arm,
         "retained_rows": RETAINED_ROWS,
@@ -1729,7 +1742,7 @@ def run_select_queries(
     atomic_save_new_npy(rows_path, selected_rows, immutable=True)
     body = {
         "schema": QUERY_SELECTION_SCHEMA,
-        "round_id": ROUND_ID,
+        "round_id": _execution_round_id(active),
         "release_sha": active["manifest"]["release_sha"],
         "query_reserve": query_signature,
         "graphs": graph_signatures,
@@ -1851,7 +1864,7 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         config_path,
         {
             "schema": _schema("production-config"),
-            "round_id": ROUND_ID,
+            "round_id": _execution_round_id(active),
             "arm": arm,
             "config": config,
             "config_sha256": config_sha,
@@ -1965,7 +1978,7 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     free_bytes, total_bytes = torch.cuda.mem_get_info("cuda")
     body = {
         "schema": _schema("train-receipt"),
-        "round_id": ROUND_ID,
+        "round_id": _execution_round_id(active),
         "arm": arm,
         "release_sha": active["manifest"]["release_sha"],
         "production_config": expected_input_signature(config_path),
@@ -2207,7 +2220,7 @@ def run_evaluate(
         reference_identity=reference_identity,
         scale_admission=None,
         provenance={
-            "round_id": ROUND_ID,
+            "round_id": _execution_round_id(active),
             "arm": arm,
             "release_sha": active["manifest"]["release_sha"],
             "train_receipt": expected_input_signature(
@@ -2399,7 +2412,7 @@ def run_evaluate(
         raise Round0113Error(f"R0113 {arm} Polish metrics are nonfinite")
     body = {
         "schema": _schema("prompt-arm-score"),
-        "round_id": ROUND_ID,
+        "round_id": _execution_round_id(active),
         "arm": arm,
         "release_sha": active["manifest"]["release_sha"],
         "train_receipt": expected_input_signature(
@@ -2558,7 +2571,7 @@ def run_decide(
         released.append("jina-fineweb-2m-document-prompt-map-transfer-v1")
     body = {
         "schema": _schema("paired-prompt-decision"),
-        "round_id": ROUND_ID,
+        "round_id": _execution_round_id(active),
         "release_sha": active["manifest"]["release_sha"],
         "scores": score_signatures,
         "graphs": graph_signatures,
@@ -2630,8 +2643,7 @@ def run_job(
     active: dict[str, Any],
     job: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if active.get("manifest", {}).get("round_id") != ROUND_ID:
-        raise Round0113Error("R0113 handler received another queue")
+    _execution_round_id(active)
     selected = job if job is not None else active.get("job") or {}
     action = selected.get("action")
     if action == "embed_query_reserve":
