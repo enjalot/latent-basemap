@@ -1399,118 +1399,110 @@ def run_evaluate(
         verify_signature(selection["global_rows"], label="R0113 selected query rows"),
         allow_pickle=False,
     )
-    truths: dict[str, Any] = {}
-    for role, convention in (("matched", arm), ("cross", other)):
-        values = L2NormalizedArray(query_values[convention])
-        identity = {
-            "schema": "round0113-query-identity-v1",
-            "role": role,
-            "query_embedding_convention": convention,
-            "map_embedding_convention": arm,
-            "global_rows_sha256": ordered_array_sha256(query_global_rows),
-            "ordered_fp16_sha256": ordered_array_sha256(
-                query_values[convention]
-            ),
-            "disjoint_from_training_exact_families": True,
-        }
-        truth = build_query_truth(
-            values,
-            X,
-            cfg=cfg,
-            corpus_identity=_data_identity(assembly, arm=arm),
-            query_identity=identity,
-            k=10,
-        )
-        path = os.path.join(output, f"{role}-query-truth-k10.npz")
-        save_query_truth(truth, path)
-        truths[role] = {
-            "value": truth,
-            "signature": expected_input_signature(path),
-            "identity": identity,
-        }
-    k_fraction = max(cfg.k_hit, int(math.ceil(cfg.frac * RETAINED_ROWS)))
-    projections: dict[str, Any] = {}
-    for role, low_coordinates in (
-        ("matched", matched_coordinates),
-        ("cross", cross_coordinates),
-    ):
-        low_fraction = cross_knn(
-            low_coordinates, coordinates, k_fraction, cfg, hi_dim=False
-        )
-        low10 = low_fraction[:, : cfg.k_hit]
-        high10 = np.asarray(
-            truths[role]["value"]["neighbors"], dtype=np.int64
-        )[:, : cfg.k_hit]
-        low50 = cross_knn(
-            low_coordinates, coordinates, 50, cfg, hi_dim=False
-        )
-        projections[role] = {
-            "ffr": float(
-                ffr_from_neighbors(high10, low_fraction, cfg.k_hit)
-            ),
-            "recall_at_10": float(
-                recall_at_k_from_neighbors(high10, low10, cfg.k_hit)
-            ),
-            "recall_at_50_of_high10": _recall(high10, low50, cfg.k_hit),
-            "queries": QUERY_ROWS,
-            "k_fraction": k_fraction,
-            "truth": truths[role]["signature"],
-            "query_embedding_convention": (
-                arm if role == "matched" else other
-            ),
-        }
     polish_global_rows = np.load(
         verify_signature(
             polish["query_rows"], label="R0113 Polish selected query rows"
         ),
         allow_pickle=False,
     )
-    polish_truths: dict[str, Any] = {}
-    for role, convention in (("matched", arm), ("cross", other)):
-        values = L2NormalizedArray(polish_values[convention])
-        identity = {
-            "schema": "round0113-polish-query-identity-v1",
-            "role": role,
-            "source": "fineweb2-pol_Latn-chunked-500",
-            "query_embedding_convention": convention,
-            "map_embedding_convention": arm,
-            "source_rows_sha256": ordered_array_sha256(polish_global_rows),
-            "ordered_fp16_sha256": ordered_array_sha256(
-                polish_values[convention]
-            ),
-            "disjoint_from_training_complete_stored_rows": True,
-        }
-        truth = build_query_truth(
-            values,
-            X,
-            cfg=cfg,
-            corpus_identity=_data_identity(assembly, arm=arm),
-            query_identity=identity,
-            k=10,
+    cells = (
+        (
+            "fineweb",
+            "matched",
+            arm,
+            query_values[arm],
+            matched_coordinates,
+            ordered_array_sha256(query_global_rows),
+        ),
+        (
+            "fineweb",
+            "cross",
+            other,
+            query_values[other],
+            cross_coordinates,
+            ordered_array_sha256(query_global_rows),
+        ),
+        (
+            "pol_Latn",
+            "matched",
+            arm,
+            polish_values[arm],
+            polish_matched_coordinates,
+            ordered_array_sha256(polish_global_rows),
+        ),
+        (
+            "pol_Latn",
+            "cross",
+            other,
+            polish_values[other],
+            polish_cross_coordinates,
+            ordered_array_sha256(polish_global_rows),
+        ),
+    )
+    cell_identities: list[dict[str, Any]] = []
+    cell_ranges: dict[tuple[str, str], tuple[int, int]] = {}
+    cursor = 0
+    for source_name, role, convention, values, _low, rows_sha in cells:
+        stop = cursor + len(values)
+        cell_ranges[(source_name, role)] = (cursor, stop)
+        cell_identities.append(
+            {
+                "source": source_name,
+                "role": role,
+                "query_embedding_convention": convention,
+                "map_embedding_convention": arm,
+                "row_range": [cursor, stop],
+                "source_rows_sha256": rows_sha,
+                "ordered_fp16_sha256": ordered_array_sha256(values),
+                "disjoint_from_training_complete_stored_rows": True,
+            }
         )
-        path = os.path.join(output, f"polish-{role}-query-truth-k10.npz")
-        save_query_truth(truth, path)
-        polish_truths[role] = {
-            "value": truth,
-            "signature": expected_input_signature(path),
-            "identity": identity,
-        }
-    polish_projections: dict[str, Any] = {}
-    for role, low_coordinates in (
-        ("matched", polish_matched_coordinates),
-        ("cross", polish_cross_coordinates),
+        cursor = stop
+    combined_values = np.concatenate(
+        [np.asarray(cell[3], dtype=np.float16) for cell in cells], axis=0
+    )
+    combined_low = np.concatenate(
+        [np.asarray(cell[4], dtype=np.float32) for cell in cells], axis=0
+    )
+    expected_combined_rows = 2 * QUERY_ROWS + 2 * POLISH_QUERY_ROWS
+    if (
+        cursor != expected_combined_rows
+        or combined_values.shape != (expected_combined_rows, DIMENSION)
+        or combined_low.shape != (expected_combined_rows, 2)
     ):
-        low_fraction = cross_knn(
-            low_coordinates, coordinates, k_fraction, cfg, hi_dim=False
-        )
+        raise Round0113Error("R0113 combined query panel did not close")
+    query_identity = {
+        "schema": "round0113-combined-query-identity-v1",
+        "ordered_cells": cell_identities,
+        "ordered_combined_fp16_sha256": ordered_array_sha256(combined_values),
+    }
+    truth = build_query_truth(
+        L2NormalizedArray(combined_values),
+        X,
+        cfg=cfg,
+        corpus_identity=_data_identity(assembly, arm=arm),
+        query_identity=query_identity,
+        k=10,
+    )
+    truth_path = os.path.join(output, "combined-query-truth-k10.npz")
+    save_query_truth(truth, truth_path)
+    truth_signature = expected_input_signature(truth_path)
+    high10_all = np.asarray(truth["neighbors"], dtype=np.int64)
+    k_fraction = max(cfg.k_hit, int(math.ceil(cfg.frac * RETAINED_ROWS)))
+    low_fraction_all = cross_knn(
+        combined_low, coordinates, k_fraction, cfg, hi_dim=False
+    )
+    low50_all = cross_knn(
+        combined_low, coordinates, 50, cfg, hi_dim=False
+    )
+    projections: dict[str, Any] = {}
+    polish_projections: dict[str, Any] = {}
+    for source_name, role, convention, values, _low, _rows_sha in cells:
+        start, stop = cell_ranges[(source_name, role)]
+        high10 = high10_all[start:stop, : cfg.k_hit]
+        low_fraction = low_fraction_all[start:stop]
         low10 = low_fraction[:, : cfg.k_hit]
-        high10 = np.asarray(
-            polish_truths[role]["value"]["neighbors"], dtype=np.int64
-        )[:, : cfg.k_hit]
-        low50 = cross_knn(
-            low_coordinates, coordinates, 50, cfg, hi_dim=False
-        )
-        polish_projections[role] = {
+        report = {
             "ffr": float(
                 ffr_from_neighbors(high10, low_fraction, cfg.k_hit)
             ),
@@ -1518,15 +1510,16 @@ def run_evaluate(
                 recall_at_k_from_neighbors(high10, low10, cfg.k_hit)
             ),
             "recall_at_50_of_high10": _recall(
-                high10, low50, cfg.k_hit
+                high10, low50_all[start:stop], cfg.k_hit
             ),
-            "queries": POLISH_QUERY_ROWS,
+            "queries": len(values),
             "k_fraction": k_fraction,
-            "truth": polish_truths[role]["signature"],
-            "query_embedding_convention": (
-                arm if role == "matched" else other
-            ),
+            "truth": truth_signature,
+            "truth_row_range": [start, stop],
+            "query_embedding_convention": convention,
         }
+        target = projections if source_name == "fineweb" else polish_projections
+        target[role] = report
     low51 = cross_knn(
         np.asarray(coordinates[reference["anchor_ids"]], dtype=np.float32),
         coordinates,
@@ -1602,6 +1595,8 @@ def run_evaluate(
             for key, path in coordinate_paths.items()
         },
         "high_d_reference": graph["manifest"]["high_d_reference"],
+        "combined_query_truth": truth_signature,
+        "combined_query_identity": query_identity,
         "panel": panel,
         "transductive_recall_at_50_of_high10": transductive_recall50,
         "projections": projections,
