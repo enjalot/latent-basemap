@@ -306,7 +306,8 @@ def prepare_round0115(
                 "scientific_contract_unchanged": True,
                 "only_code_change": (
                     "encode panel-v2 data identity with its strict "
-                    "ordered_shards schema"
+                    "ordered_shards schema and import the existing "
+                    "weighted-positive accounting constant"
                 ),
             },
             "scientific_contract": {
