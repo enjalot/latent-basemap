@@ -10,6 +10,8 @@ import re
 import sys
 from typing import Any
 
+import numpy as np
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from basemap.artifact_identity import expected_input_signature
@@ -25,6 +27,12 @@ from basemap.round0113_prompt_contrast import (
     ARMS,
     GRAPH_K,
     NONINFERIORITY_RATIO,
+    POLISH_HISTORICAL_EMBEDDING_PATH,
+    POLISH_HISTORICAL_EMBEDDING_SHA256,
+    POLISH_HISTORICAL_MANIFEST_PATH,
+    POLISH_QUERY_ROWS,
+    POLISH_SOURCE_ROWS,
+    POLISH_TEXT_PATH,
     QUERY_CANDIDATES,
     QUERY_ROWS,
     ROUND_ID,
@@ -106,6 +114,32 @@ def _query_source_inputs() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     return _dedupe(inputs), layout
 
 
+def _polish_source() -> dict[str, dict[str, Any]]:
+    source = {
+        "historical_embedding": expected_input_signature(
+            POLISH_HISTORICAL_EMBEDDING_PATH
+        ),
+        "manifest": expected_input_signature(POLISH_HISTORICAL_MANIFEST_PATH),
+        "text": expected_input_signature(POLISH_TEXT_PATH),
+    }
+    historical = source["historical_embedding"]
+    if historical["sha256"] != POLISH_HISTORICAL_EMBEDDING_SHA256:
+        raise RuntimeError("R0113 Polish historical embedding bytes changed")
+    values = np.load(
+        POLISH_HISTORICAL_EMBEDDING_PATH, mmap_mode="r", allow_pickle=False
+    )
+    if (
+        values.shape != (POLISH_SOURCE_ROWS, 768)
+        or values.dtype != np.float16
+    ):
+        raise RuntimeError("R0113 Polish historical embedding geometry changed")
+    import pyarrow.parquet as pq
+
+    if int(pq.ParquetFile(POLISH_TEXT_PATH).metadata.num_rows) != POLISH_SOURCE_ROWS:
+        raise RuntimeError("R0113 Polish source text row count changed")
+    return source
+
+
 def prepare_round0113(
     *,
     release_sha: str,
@@ -154,7 +188,10 @@ def prepare_round0113(
         ]
     )
     query_source_inputs, query_layout = _query_source_inputs()
-    query_inputs = _dedupe([*base_inputs, *query_source_inputs])
+    polish_source = _polish_source()
+    query_inputs = _dedupe(
+        [*base_inputs, *query_source_inputs, *polish_source.values()]
+    )
 
     queue_root = create_fresh_directory(
         queue_root, label="R0113 paired prompt-map queue"
@@ -186,11 +223,12 @@ def prepare_round0113(
             ),
             "expected_inputs": query_inputs,
             "authenticated_query_layout": query_layout,
-            "p90_wall_s": 300.0,
+            "p90_wall_s": 600.0,
             "node_policy": {
                 "gpu_required": True,
                 "training_performed": False,
             },
+            "polish_source": polish_source,
         },
         {
             "id": "assemble_compact_prompt_arrays",
@@ -301,7 +339,7 @@ def prepare_round0113(
                     artifacts, f"evaluate_{arm}_map.done.json"
                 ),
                 "expected_inputs": base_inputs,
-                "p90_wall_s": 900.0,
+                "p90_wall_s": 1_200.0,
                 "arm": arm,
                 "assembly_output": assembly_output,
                 "query_output": query_output,
@@ -382,6 +420,8 @@ def prepare_round0113(
             "clean_in_both_arms_before_training": True,
             "matched_projection_primary": True,
             "cross_convention_projection_diagnostic": True,
+            "polish_ood_queries": POLISH_QUERY_ROWS,
+            "polish_ood_prompt_contrast": "diagnostic-only",
         },
         "decision_metrics": [
             "ffr",
@@ -398,14 +438,14 @@ def prepare_round0113(
     }
     queue["jobs"] = jobs
     queue["p90_gpu_seconds"] = {
-        "embed_dual_prompt_query_reserve": 300.0,
+        "embed_dual_prompt_query_reserve": 600.0,
         "build_raw_graph": 600.0,
         "build_document_graph": 600.0,
         "train_raw_map": 5_400.0,
         "train_document_map": 5_400.0,
-        "evaluate_raw_map": 900.0,
-        "evaluate_document_map": 900.0,
-        "total": 14_100.0,
+        "evaluate_raw_map": 1_200.0,
+        "evaluate_document_map": 1_200.0,
+        "total": 15_000.0,
     }
     path = os.path.join(queue_root, "queue.json")
     atomic_write_new_json(path, queue, immutable=True)

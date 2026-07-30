@@ -3,6 +3,8 @@ from __future__ import annotations
 import copy
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from basemap.round0113_prompt_contrast import (
@@ -10,16 +12,22 @@ from basemap.round0113_prompt_contrast import (
     DIMENSION,
     HostFp16EndpointArray,
     NONINFERIORITY_RATIO,
+    POLISH_QUERY_ROWS_SHA256,
     QUERY_CANDIDATES,
     QUERY_SCAN_START,
     Round0113Error,
     compact_mapping,
     paired_decision,
+    polish_query_rows,
     query_candidate_rows,
     query_source_layout,
     seal,
     train_config,
     validate_seal,
+)
+from experiments.round0113_nodes import (
+    _fetch_parquet_rows,
+    _require_unique_stored_rows,
 )
 
 
@@ -69,6 +77,39 @@ def test_query_source_layout_binds_only_the_consumed_shard():
     assert layout[0]["global_row_stop"] == int(rows[-1]) + 1
     assert layout[0]["embedding"]["sha256"]
     assert layout[0]["text"]["sha256"]
+
+
+def test_polish_ood_query_panel_reproduces_round0108():
+    rows = polish_query_rows()
+    assert rows.shape == (500,)
+    assert rows[0] == 24_263
+    assert rows[-1] == 1_999_953
+    assert POLISH_QUERY_ROWS_SHA256 == (
+        "ae06ba5dd3e5ce3b1aafd18604b80c8d8575ea45a367f68871be6c80a99aa36b"
+    )
+
+
+def test_sparse_parquet_text_fetch_preserves_requested_order(tmp_path):
+    path = tmp_path / "texts.parquet"
+    pq.write_table(
+        pa.table({"chunk_text": ["zero", "one", "two", "three", "four"]}),
+        path,
+        row_group_size=2,
+    )
+    assert _fetch_parquet_rows(
+        str(path), np.asarray([1, 4], dtype=np.int64), expected_rows=5
+    ) == ["one", "four"]
+
+
+def test_polish_stored_row_uniqueness_guard_uses_complete_fp16_bytes():
+    values = np.zeros((3, DIMENSION), dtype=np.float32)
+    values[0, 0] = 1
+    values[1, 1] = 1
+    values[2, 2] = 1
+    _require_unique_stored_rows(values, label="unique fixture")
+    values[2] = values[1]
+    with pytest.raises(Round0113Error, match="exact repeated rows"):
+        _require_unique_stored_rows(values, label="duplicate fixture")
 
 
 def test_compact_mapping_closes_registered_population():

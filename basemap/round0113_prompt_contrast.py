@@ -35,6 +35,26 @@ QUERY_CANDIDATES = 4_096
 QUERY_ROWS = 2_000
 QUERY_SCAN_START = ROWS
 QUERY_SCAN_LIMIT = ROWS + 25_000
+POLISH_SOURCE_ROWS = 2_000_000
+POLISH_QUERY_ROWS = 500
+POLISH_QUERY_SEED = 127
+POLISH_TEXT_PATH = (
+    "/data/chunks/fineweb2-pol_Latn-chunked-500/train/000_00000.parquet"
+)
+POLISH_HISTORICAL_EMBEDDING_PATH = (
+    "/data/embeddings/fineweb2-pol_Latn-chunked-500-jina-v5-nano/"
+    "train/000_00000.npy"
+)
+POLISH_HISTORICAL_EMBEDDING_SHA256 = (
+    "fac550b9a21409da7372c9f876761e059ea99f653db95e885f998f31e265b62f"
+)
+POLISH_HISTORICAL_MANIFEST_PATH = (
+    "/data/embeddings/fineweb2-pol_Latn-chunked-500-jina-v5-nano/"
+    "manifest.json"
+)
+POLISH_QUERY_ROWS_SHA256 = (
+    "ae06ba5dd3e5ce3b1aafd18604b80c8d8575ea45a367f68871be6c80a99aa36b"
+)
 
 GRAPH_K = 50
 GRAPH_NLIST = 8_192
@@ -308,6 +328,22 @@ def query_source_layout(rows: np.ndarray) -> list[dict[str, Any]]:
     if not np.all(coverage):
         raise Round0113Error("R0113 query source layout does not cover reserve")
     return layout
+
+
+def polish_query_rows() -> np.ndarray:
+    """Reproduce R0108's fixed 500-query held-out Polish panel."""
+    selected = np.random.RandomState(POLISH_QUERY_SEED).choice(
+        POLISH_SOURCE_ROWS, size=50_000, replace=False
+    ).astype(np.int64)
+    rows = np.sort(selected[49_500:])
+    from .artifact_identity import ordered_array_sha256
+
+    if (
+        rows.shape != (POLISH_QUERY_ROWS,)
+        or ordered_array_sha256(rows) != POLISH_QUERY_ROWS_SHA256
+    ):
+        raise Round0113Error("R0113 Polish query selector changed")
+    return rows
 
 
 class HostFp16EndpointArray:

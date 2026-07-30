@@ -49,6 +49,9 @@ from basemap.round0113_prompt_contrast import (
     PANEL_SEED,
     PERFORMANCE_WARMUP_UPDATES,
     PERFORMANCE_WINDOWS,
+    POLISH_HISTORICAL_EMBEDDING_SHA256,
+    POLISH_QUERY_ROWS,
+    POLISH_SOURCE_ROWS,
     QUERY_CANDIDATES,
     QUERY_ROWS,
     QUERY_SCHEMA,
@@ -65,6 +68,7 @@ from basemap.round0113_prompt_contrast import (
     load_substrate_manifest,
     paired_decision,
     panel_config,
+    polish_query_rows,
     query_candidate_rows,
     query_source_layout,
     read_sealed,
@@ -121,6 +125,54 @@ def _recall(high: np.ndarray, low: np.ndarray, k: int) -> float:
             ]
         )
     )
+
+
+def _fetch_parquet_rows(
+    path: str,
+    rows: np.ndarray,
+    *,
+    expected_rows: int,
+) -> list[str]:
+    """Stream one text column and retain only requested ordered positions."""
+    import pyarrow.parquet as pq
+
+    requested = np.asarray(rows, dtype=np.int64)
+    if (
+        requested.ndim != 1
+        or not len(requested)
+        or np.any(requested[1:] <= requested[:-1])
+        or requested[0] < 0
+        or requested[-1] >= expected_rows
+    ):
+        raise Round0113Error("R0113 parquet row request is malformed")
+    parquet = pq.ParquetFile(path)
+    if int(parquet.metadata.num_rows) != expected_rows:
+        raise Round0113Error("R0113 parquet source row count changed")
+    output: list[str | None] = [None] * len(requested)
+    cursor = 0
+    for batch in parquet.iter_batches(batch_size=65_536, columns=["chunk_text"]):
+        stop = cursor + len(batch)
+        left = int(np.searchsorted(requested, cursor, side="left"))
+        right = int(np.searchsorted(requested, stop, side="left"))
+        if right > left:
+            local = requested[left:right] - cursor
+            values = batch.column(0).take(local.tolist()).to_pylist()
+            for index, value in enumerate(values, start=left):
+                output[index] = value
+        cursor = stop
+    if (
+        cursor != expected_rows
+        or any(not isinstance(value, str) for value in output)
+    ):
+        raise Round0113Error("R0113 parquet text fetch did not close")
+    return [str(value) for value in output]
+
+
+def _require_unique_stored_rows(values: np.ndarray, *, label: str) -> None:
+    stored = np.ascontiguousarray(values.astype("<f2", copy=False))
+    keys = stored.view(np.dtype((np.void, stored.shape[1] * stored.dtype.itemsize)))
+    if len(np.unique(keys)) != len(stored):
+        raise Round0113Error(f"R0113 {label} contains exact repeated rows")
 
 
 def _data_identity(
@@ -284,9 +336,8 @@ def run_assemble(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
 def run_embed_queries(
     active: dict[str, Any], job: dict[str, Any]
 ) -> dict[str, Any]:
-    import pyarrow.parquet as pq
-
     from experiments.round0112_nodes import (
+        _cosine_rows,
         _encode,
         _load_model,
         _normalized_guard,
@@ -314,12 +365,11 @@ def run_embed_queries(
             - int(item["global_row_start"])
             + int(item["shard_row_start"])
         )
-        column = pq.read_table(
-            str(item["text"]["canonical_path"]), columns=["chunk_text"]
-        ).column("chunk_text")
-        if len(column) != int(item["shard_rows"]):
-            raise Round0113Error("R0113 query text shard changed")
-        values = column.take(local_rows.tolist()).to_pylist()
+        values = _fetch_parquet_rows(
+            str(item["text"]["canonical_path"]),
+            local_rows,
+            expected_rows=int(item["shard_rows"]),
+        )
         for position, value in zip(positions.tolist(), values, strict=True):
             texts[position] = value
     if (
@@ -328,6 +378,31 @@ def run_embed_queries(
     ):
         raise Round0113Error("R0113 query text fetch is incomplete")
     exact_texts = [str(text) for text in texts]
+    polish_source = dict(job.get("polish_source") or {})
+    if set(polish_source) != {"historical_embedding", "manifest", "text"}:
+        raise Round0113Error("R0113 Polish source binding is incomplete")
+    historical_signature = dict(polish_source["historical_embedding"])
+    historical_path = str(historical_signature.get("canonical_path") or "")
+    if (
+        historical_signature.get("sha256")
+        != POLISH_HISTORICAL_EMBEDDING_SHA256
+        or not os.path.isfile(historical_path)
+        or os.path.getsize(historical_path)
+        != int(historical_signature.get("bytes", -1))
+    ):
+        raise Round0113Error("R0113 Polish historical source changed")
+    historical = np.load(historical_path, mmap_mode="r", allow_pickle=False)
+    if (
+        historical.shape != (POLISH_SOURCE_ROWS, DIMENSION)
+        or historical.dtype != np.float16
+    ):
+        raise Round0113Error("R0113 Polish historical geometry changed")
+    polish_rows = polish_query_rows()
+    polish_texts = _fetch_parquet_rows(
+        str(polish_source["text"]["canonical_path"]),
+        polish_rows,
+        expected_rows=POLISH_SOURCE_ROWS,
+    )
     model, runtime, members = _load_model()
     equivalence = _prompt_equivalence(model, exact_texts)
     started = time.monotonic()
@@ -335,15 +410,46 @@ def run_embed_queries(
     document, document_telemetry = _encode(
         model, [PROMPT_PREFIX + text for text in exact_texts]
     )
+    polish_raw, polish_raw_telemetry = _encode(model, polish_texts)
+    polish_document, polish_document_telemetry = _encode(
+        model, [PROMPT_PREFIX + text for text in polish_texts]
+    )
     _normalized_guard(raw, label="R0113 raw queries")
     _normalized_guard(document, label="R0113 document queries")
+    _normalized_guard(polish_raw, label="R0113 raw Polish queries")
+    _normalized_guard(polish_document, label="R0113 document Polish queries")
+    polish_historical_cosines = _cosine_rows(
+        polish_raw,
+        np.asarray(historical[polish_rows], dtype=np.float32),
+    )
+    if (
+        float(np.mean(polish_historical_cosines)) < 0.98
+        or float(np.min(polish_historical_cosines)) < 0.95
+    ):
+        raise Round0113Error(
+            "R0113 Polish fresh-raw row alignment guard failed"
+        )
+    _require_unique_stored_rows(polish_raw, label="raw Polish query panel")
+    _require_unique_stored_rows(
+        polish_document, label="document Polish query panel"
+    )
     outputs: dict[str, Any] = {}
     for arm, values in (("raw", raw), ("document", document)):
         path = os.path.join(output, f"{arm}-query-reserve.f16.npy")
         atomic_save_new_npy(path, values.astype("<f2"), immutable=True)
         outputs[arm] = expected_input_signature(path)
+    polish_outputs: dict[str, Any] = {}
+    for arm, values in (
+        ("raw", polish_raw),
+        ("document", polish_document),
+    ):
+        path = os.path.join(output, f"{arm}-polish-queries.f16.npy")
+        atomic_save_new_npy(path, values.astype("<f2"), immutable=True)
+        polish_outputs[arm] = expected_input_signature(path)
     rows_path = os.path.join(output, "query-global-rows.i64.npy")
     atomic_save_new_npy(rows_path, rows, immutable=True)
+    polish_rows_path = os.path.join(output, "polish-query-rows.i64.npy")
+    atomic_save_new_npy(polish_rows_path, polish_rows, immutable=True)
     body = {
         "schema": QUERY_SCHEMA,
         "round_id": ROUND_ID,
@@ -361,6 +467,35 @@ def run_embed_queries(
         "model_members": members,
         "prompt_equivalence": equivalence,
         "outputs": outputs,
+        "ood": {
+            "pol_Latn": {
+                "role": "diagnostic-only",
+                "historical_source": historical_signature,
+                "source_manifest": polish_source["manifest"],
+                "source_text": polish_source["text"],
+                "query_rows": expected_input_signature(polish_rows_path),
+                "ordered_query_rows_sha256": ordered_array_sha256(
+                    polish_rows
+                ),
+                "source_text_ordered_sha256": ordered_text_sha256(
+                    polish_texts
+                ),
+                "document_text_ordered_sha256": ordered_text_sha256(
+                    [PROMPT_PREFIX + text for text in polish_texts]
+                ),
+                "outputs": polish_outputs,
+                "raw_embedding": polish_raw_telemetry,
+                "document_embedding": polish_document_telemetry,
+                "historical_raw_alignment": {
+                    "mean_cosine": float(np.mean(polish_historical_cosines)),
+                    "minimum_cosine": float(np.min(polish_historical_cosines)),
+                    "mean_floor": 0.98,
+                    "minimum_floor": 0.95,
+                    "passed": True,
+                },
+                "complete_stored_rows_unique_in_each_arm": True,
+            }
+        },
         "output_dtype": np.dtype("<f2").str,
         "dimension": DIMENSION,
         "training_performed": False,
@@ -368,6 +503,8 @@ def run_embed_queries(
             "encode_wall_s": time.monotonic() - started,
             "raw": raw_telemetry,
             "document": document_telemetry,
+            "polish_raw": polish_raw_telemetry,
+            "polish_document": polish_document_telemetry,
         },
     }
     receipt = seal(body)
@@ -383,15 +520,27 @@ def _load_query_reserve(
         str(job["query_output"]), "query-reserve-receipt.json"
     )
     receipt = read_sealed(path, label="R0113 query reserve")
+    polish = (receipt.get("ood") or {}).get("pol_Latn") or {}
     if (
         receipt.get("schema") != QUERY_SCHEMA
         or int(receipt.get("dimension", -1)) != DIMENSION
         or set(receipt.get("outputs") or {}) != set(ARMS)
+        or polish.get("role") != "diagnostic-only"
+        or set(polish.get("outputs") or {}) != set(ARMS)
     ):
         raise Round0113Error("R0113 query reserve contract changed")
     verify_signature(receipt["query_rows"], label="R0113 query global rows")
     for arm in ARMS:
         verify_signature(receipt["outputs"][arm], label=f"R0113 {arm} queries")
+        verify_signature(
+            polish["outputs"][arm], label=f"R0113 {arm} Polish queries"
+        )
+    polish_rows = np.load(
+        verify_signature(polish["query_rows"], label="R0113 Polish query rows"),
+        allow_pickle=False,
+    )
+    if not np.array_equal(polish_rows, polish_query_rows()):
+        raise Round0113Error("R0113 Polish query rows changed")
     return receipt, expected_input_signature(path)
 
 
@@ -590,9 +739,30 @@ def run_build_graph(
         mmap_mode="r",
         allow_pickle=False,
     )
-    copied, copy_receipt = exact_reference_copy_mask(source, query_values)
+    polish = query["ood"]["pol_Latn"]
+    polish_values = np.load(
+        verify_signature(
+            polish["outputs"][arm], label=f"R0113 {arm} Polish queries"
+        ),
+        mmap_mode="r",
+        allow_pickle=False,
+    )
+    combined_queries = np.concatenate((query_values, polish_values), axis=0)
+    combined_copied, combined_copy_receipt = exact_reference_copy_mask(
+        source, combined_queries
+    )
+    copied = combined_copied[:QUERY_CANDIDATES]
+    polish_copied = combined_copied[QUERY_CANDIDATES:]
     mask_path = os.path.join(output, "query-training-copy-mask.npy")
     atomic_save_new_npy(mask_path, copied, immutable=True)
+    if np.any(polish_copied):
+        raise Round0113Error(
+            f"R0113 {arm} Polish diagnostic leaks a training row"
+        )
+    polish_mask_path = os.path.join(
+        output, "polish-query-training-copy-mask.npy"
+    )
+    atomic_save_new_npy(polish_mask_path, polish_copied, immutable=True)
     body = {
         "schema": GRAPH_SCHEMA,
         "round_id": ROUND_ID,
@@ -609,7 +779,23 @@ def run_build_graph(
         "substrate": assembly["substrate"],
         "query_reserve": query_signature,
         "query_training_copy_mask": expected_input_signature(mask_path),
-        "query_training_copy_audit": copy_receipt,
+        "query_training_copy_audit": {
+            "identity": "complete stored-row bytes",
+            "query_rows": QUERY_CANDIDATES,
+            "query_rows_with_exact_reference_copy": int(copied.sum()),
+            "exact_reference_family_disjoint": not bool(np.any(copied)),
+            "combined_audit": combined_copy_receipt,
+        },
+        "polish_query_training_copy_mask": expected_input_signature(
+            polish_mask_path
+        ),
+        "polish_query_training_copy_audit": {
+            "identity": "complete stored-row bytes",
+            "query_rows": POLISH_QUERY_ROWS,
+            "query_rows_with_exact_reference_copy": int(polish_copied.sum()),
+            "exact_reference_family_disjoint": True,
+            "combined_audit": combined_copy_receipt,
+        },
         "search_qualification": {
             "index": "GPU IndexIVFFlat/IP",
             "selected_nprobe": selected_nprobe,
@@ -676,6 +862,21 @@ def run_select_queries(
         )
         if mask.shape != (QUERY_CANDIDATES,) or mask.dtype != np.bool_:
             raise Round0113Error("R0113 query copy mask geometry changed")
+        polish_mask = np.load(
+            verify_signature(
+                graph["polish_query_training_copy_mask"],
+                label=f"R0113 {arm} Polish query copy mask",
+            ),
+            allow_pickle=False,
+        )
+        if (
+            polish_mask.shape != (POLISH_QUERY_ROWS,)
+            or polish_mask.dtype != np.bool_
+            or np.any(polish_mask)
+        ):
+            raise Round0113Error(
+                "R0113 Polish query/training disjointness changed"
+            )
         clean &= ~mask
         graph_signatures[arm] = expected_input_signature(graph_path)
         copy_audits[arm] = graph["query_training_copy_audit"]
@@ -1091,6 +1292,21 @@ def run_evaluate(
         )
         for name in ARMS
     }
+    polish = query["ood"]["pol_Latn"]
+    polish_values = {
+        name: np.asarray(
+            np.load(
+                verify_signature(
+                    polish["outputs"][name],
+                    label=f"R0113 {name} Polish queries",
+                ),
+                mmap_mode="r",
+                allow_pickle=False,
+            ),
+            dtype=np.float16,
+        )
+        for name in ARMS
+    }
     output = create_fresh_directory(
         job["outputs"][0], label=f"R0113 {arm} evaluation"
     )
@@ -1104,24 +1320,42 @@ def run_evaluate(
     cross_coordinates = np.asarray(
         model.transform(query_values[other], batch_size=8192), dtype=np.float32
     )
+    polish_matched_coordinates = np.asarray(
+        model.transform(polish_values[arm], batch_size=8192), dtype=np.float32
+    )
+    polish_cross_coordinates = np.asarray(
+        model.transform(polish_values[other], batch_size=8192), dtype=np.float32
+    )
     if (
         coordinates.shape != (RETAINED_ROWS, 2)
         or matched_coordinates.shape != (QUERY_ROWS, 2)
         or cross_coordinates.shape != (QUERY_ROWS, 2)
+        or polish_matched_coordinates.shape != (POLISH_QUERY_ROWS, 2)
+        or polish_cross_coordinates.shape != (POLISH_QUERY_ROWS, 2)
         or not np.isfinite(coordinates).all()
         or not np.isfinite(matched_coordinates).all()
         or not np.isfinite(cross_coordinates).all()
+        or not np.isfinite(polish_matched_coordinates).all()
+        or not np.isfinite(polish_cross_coordinates).all()
     ):
         raise Round0113Error(f"R0113 {arm} transform output is invalid")
     coordinate_paths = {
         "training": os.path.join(output, "coordinates.npy"),
         "matched_queries": os.path.join(output, "matched-query-coordinates.npy"),
         "cross_queries": os.path.join(output, "cross-query-coordinates.npy"),
+        "polish_matched_queries": os.path.join(
+            output, "polish-matched-query-coordinates.npy"
+        ),
+        "polish_cross_queries": os.path.join(
+            output, "polish-cross-query-coordinates.npy"
+        ),
     }
     for key, values in (
         ("training", coordinates),
         ("matched_queries", matched_coordinates),
         ("cross_queries", cross_coordinates),
+        ("polish_matched_queries", polish_matched_coordinates),
+        ("polish_cross_queries", polish_cross_coordinates),
     ):
         atomic_save_new_npy(coordinate_paths[key], values, immutable=True)
 
@@ -1225,6 +1459,74 @@ def run_evaluate(
                 arm if role == "matched" else other
             ),
         }
+    polish_global_rows = np.load(
+        verify_signature(
+            polish["query_rows"], label="R0113 Polish selected query rows"
+        ),
+        allow_pickle=False,
+    )
+    polish_truths: dict[str, Any] = {}
+    for role, convention in (("matched", arm), ("cross", other)):
+        values = L2NormalizedArray(polish_values[convention])
+        identity = {
+            "schema": "round0113-polish-query-identity-v1",
+            "role": role,
+            "source": "fineweb2-pol_Latn-chunked-500",
+            "query_embedding_convention": convention,
+            "map_embedding_convention": arm,
+            "source_rows_sha256": ordered_array_sha256(polish_global_rows),
+            "ordered_fp16_sha256": ordered_array_sha256(
+                polish_values[convention]
+            ),
+            "disjoint_from_training_complete_stored_rows": True,
+        }
+        truth = build_query_truth(
+            values,
+            X,
+            cfg=cfg,
+            corpus_identity=_data_identity(assembly, arm=arm),
+            query_identity=identity,
+            k=10,
+        )
+        path = os.path.join(output, f"polish-{role}-query-truth-k10.npz")
+        save_query_truth(truth, path)
+        polish_truths[role] = {
+            "value": truth,
+            "signature": expected_input_signature(path),
+            "identity": identity,
+        }
+    polish_projections: dict[str, Any] = {}
+    for role, low_coordinates in (
+        ("matched", polish_matched_coordinates),
+        ("cross", polish_cross_coordinates),
+    ):
+        low_fraction = cross_knn(
+            low_coordinates, coordinates, k_fraction, cfg, hi_dim=False
+        )
+        low10 = low_fraction[:, : cfg.k_hit]
+        high10 = np.asarray(
+            polish_truths[role]["value"]["neighbors"], dtype=np.int64
+        )[:, : cfg.k_hit]
+        low50 = cross_knn(
+            low_coordinates, coordinates, 50, cfg, hi_dim=False
+        )
+        polish_projections[role] = {
+            "ffr": float(
+                ffr_from_neighbors(high10, low_fraction, cfg.k_hit)
+            ),
+            "recall_at_10": float(
+                recall_at_k_from_neighbors(high10, low10, cfg.k_hit)
+            ),
+            "recall_at_50_of_high10": _recall(
+                high10, low50, cfg.k_hit
+            ),
+            "queries": POLISH_QUERY_ROWS,
+            "k_fraction": k_fraction,
+            "truth": polish_truths[role]["signature"],
+            "query_embedding_convention": (
+                arm if role == "matched" else other
+            ),
+        }
     low51 = cross_knn(
         np.asarray(coordinates[reference["anchor_ids"]], dtype=np.float32),
         coordinates,
@@ -1272,6 +1574,13 @@ def run_evaluate(
     }
     if not all(np.isfinite(value) for value in metrics.values()):
         raise Round0113Error(f"R0113 {arm} metrics are nonfinite")
+    if not all(
+        np.isfinite(float(value))
+        for report in polish_projections.values()
+        for key, value in report.items()
+        if key in {"ffr", "recall_at_10", "recall_at_50_of_high10"}
+    ):
+        raise Round0113Error(f"R0113 {arm} Polish metrics are nonfinite")
     body = {
         "schema": _schema("prompt-arm-score"),
         "round_id": ROUND_ID,
@@ -1296,6 +1605,31 @@ def run_evaluate(
         "panel": panel,
         "transductive_recall_at_50_of_high10": transductive_recall50,
         "projections": projections,
+        "ood": {
+            "pol_Latn": {
+                "role": (
+                    "diagnostic-only; measures attachment to the 2M FineWeb "
+                    "atlas and cannot alter the prompt-transfer gate"
+                ),
+                "query_source": polish["source_text"],
+                "query_rows": polish["query_rows"],
+                "projections": polish_projections,
+                "matched_recall50_to_fineweb_oos_ratio": (
+                    polish_projections["matched"][
+                        "recall_at_50_of_high10"
+                    ]
+                    / projections["matched"]["recall_at_50_of_high10"]
+                    if projections["matched"]["recall_at_50_of_high10"] > 0
+                    else None
+                ),
+                "matched_recall50_gt_recall10": (
+                    polish_projections["matched"][
+                        "recall_at_50_of_high10"
+                    ]
+                    > polish_projections["matched"]["recall_at_10"]
+                ),
+            }
+        },
         "projection_ffr_role": "diagnostic-only",
         "metrics": metrics,
         "execution_gates": execution_gates,
@@ -1325,6 +1659,7 @@ def run_decide(
         if (
             score.get("arm") != arm
             or set(score.get("metrics") or {}) != set(DECISION_METRICS)
+            or "pol_Latn" not in (score.get("ood") or {})
         ):
             raise Round0113Error(f"R0113 {arm} score contract changed")
         scores[arm] = score
@@ -1356,6 +1691,26 @@ def run_decide(
         topology["raw"]["qualified_ann_neighbors"],
     )
     decision = paired_decision(scores["raw"], scores["document"])
+    polish_contrast: dict[str, Any] = {}
+    for role in ("matched", "cross"):
+        polish_contrast[role] = {}
+        for metric in ("ffr", "recall_at_10", "recall_at_50_of_high10"):
+            raw_value = float(
+                scores["raw"]["ood"]["pol_Latn"]["projections"][role][metric]
+            )
+            document_value = float(
+                scores["document"]["ood"]["pol_Latn"]["projections"][role][
+                    metric
+                ]
+            )
+            polish_contrast[role][metric] = {
+                "raw": raw_value,
+                "document": document_value,
+                "document_minus_raw": document_value - raw_value,
+                "document_to_raw_ratio": (
+                    document_value / raw_value if raw_value != 0 else None
+                ),
+            }
     released = ["jina-fineweb-2m-prompt-map-contrast-v1"]
     if decision["passed"]:
         released.append("jina-fineweb-2m-document-prompt-map-transfer-v1")
@@ -1366,6 +1721,11 @@ def run_decide(
         "scores": score_signatures,
         "graphs": graph_signatures,
         "registered_decision": decision,
+        "polish_ood_prompt_contrast": {
+            "role": "diagnostic-only; excluded from registered_decision",
+            "query_rows": POLISH_QUERY_ROWS,
+            "matched_and_cross_convention": polish_contrast,
+        },
         "topology_shift": {
             "anchors": GRAPH_QUALITY_ROWS,
             "k": GRAPH_K - 1,
