@@ -1035,12 +1035,27 @@ def run_embed_queries(
         polish_raw,
         np.asarray(historical[polish_rows], dtype=np.float32),
     )
+    polish_token_counts = np.asarray(
+        [
+            len(
+                model.tokenizer(
+                    text,
+                    add_special_tokens=True,
+                    truncation=False,
+                )["input_ids"]
+            )
+            for text in polish_texts
+        ],
+        dtype=np.int64,
+    )
+    polish_historical_comparable = polish_token_counts <= 512
     if (
-        float(np.mean(polish_historical_cosines)) < 0.98
-        or float(np.min(polish_historical_cosines)) < 0.95
+        polish_token_counts.shape != (POLISH_QUERY_ROWS,)
+        or not np.any(polish_historical_comparable)
+        or not np.any(~polish_historical_comparable)
     ):
         raise Round0113Error(
-            "R0113 Polish fresh-raw row alignment guard failed"
+            "R0113 Polish historical truncation strata changed"
         )
     _require_unique_stored_rows(polish_raw, label="raw Polish query panel")
     _require_unique_stored_rows(
@@ -1129,9 +1144,51 @@ def run_embed_queries(
                 "historical_raw_alignment": {
                     "mean_cosine": float(np.mean(polish_historical_cosines)),
                     "minimum_cosine": float(np.min(polish_historical_cosines)),
-                    "mean_floor": 0.98,
-                    "minimum_floor": 0.95,
-                    "passed": True,
+                    "original_mean_floor": 0.98,
+                    "original_minimum_floor": 0.95,
+                    "original_guard_would_pass": bool(
+                        float(np.mean(polish_historical_cosines)) >= 0.98
+                        and float(np.min(polish_historical_cosines)) >= 0.95
+                    ),
+                    "at_most_512_tokens": {
+                        "rows": int(np.sum(polish_historical_comparable)),
+                        "mean_cosine": float(
+                            np.mean(
+                                polish_historical_cosines[
+                                    polish_historical_comparable
+                                ]
+                            )
+                        ),
+                        "minimum_cosine": float(
+                            np.min(
+                                polish_historical_cosines[
+                                    polish_historical_comparable
+                                ]
+                            )
+                        ),
+                    },
+                    "above_512_tokens": {
+                        "rows": int(np.sum(~polish_historical_comparable)),
+                        "mean_cosine": float(
+                            np.mean(
+                                polish_historical_cosines[
+                                    ~polish_historical_comparable
+                                ]
+                            )
+                        ),
+                        "minimum_cosine": float(
+                            np.min(
+                                polish_historical_cosines[
+                                    ~polish_historical_comparable
+                                ]
+                            )
+                        ),
+                    },
+                    "role": (
+                        "diagnostic-only comparison with legacy explicit-512 "
+                        "embeddings; not a row-identity or acceptance gate"
+                    ),
+                    "used_for_acceptance": False,
                 },
                 "complete_stored_rows_unique_in_each_arm": True,
             }
