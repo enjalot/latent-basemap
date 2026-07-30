@@ -1195,10 +1195,27 @@ def _load_query_reserve(
     ):
         raise Round0113Error("R0113 query source-text hash identity changed")
     for arm in ARMS:
-        verify_signature(receipt["outputs"][arm], label=f"R0113 {arm} queries")
-        verify_signature(
+        fineweb_path = verify_signature(
+            receipt["outputs"][arm], label=f"R0113 {arm} queries"
+        )
+        polish_path = verify_signature(
             polish["outputs"][arm], label=f"R0113 {arm} Polish queries"
         )
+        fineweb_values = np.load(
+            fineweb_path, mmap_mode="r", allow_pickle=False
+        )
+        polish_values = np.load(
+            polish_path, mmap_mode="r", allow_pickle=False
+        )
+        if (
+            fineweb_values.shape != (QUERY_CANDIDATES, DIMENSION)
+            or fineweb_values.dtype != np.float16
+            or polish_values.shape != (POLISH_QUERY_ROWS, DIMENSION)
+            or polish_values.dtype != np.float16
+        ):
+            raise Round0113Error(
+                f"R0113 {arm} query embedding geometry changed"
+            )
     polish_rows = np.load(
         verify_signature(polish["query_rows"], label="R0113 Polish query rows"),
         allow_pickle=False,
