@@ -60,6 +60,39 @@ def _read_json(path: str) -> dict[str, Any]:
         return json.load(handle)
 
 
+def _validate_model_contract() -> dict[str, Any]:
+    model_config_path = os.path.join(MODEL_ROOT, "config.json")
+    tokenizer_config_path = os.path.join(MODEL_ROOT, "tokenizer_config.json")
+    sentence_config_path = os.path.join(
+        MODEL_ROOT,
+        "config_sentence_transformers.json",
+    )
+    model_config = _read_json(model_config_path)
+    tokenizer_config = _read_json(tokenizer_config_path)
+    sentence_config = _read_json(sentence_config_path)
+    tokenizer_limit = int(tokenizer_config.get("model_max_length", -1))
+    if (
+        int(model_config.get("max_position_embeddings", -1))
+        != NATIVE_MAX_SEQ_LENGTH
+        or tokenizer_limit < NATIVE_MAX_SEQ_LENGTH
+        or sentence_config.get("prompts")
+        != {"query": "Query: ", "document": PROMPT_PREFIX}
+        or sentence_config.get("default_prompt_name") is not None
+    ):
+        raise Round0114Error("R0114 native model/prompt contract changed")
+    return {
+        "resolved_sentence_transformers_max_seq_length": min(
+            NATIVE_MAX_SEQ_LENGTH,
+            tokenizer_limit,
+        ),
+        "model_config": expected_input_signature(model_config_path),
+        "tokenizer_config": expected_input_signature(tokenizer_config_path),
+        "sentence_transformers_config": expected_input_signature(
+            sentence_config_path
+        ),
+    }
+
+
 def _cosine_rows(left: np.ndarray, right: np.ndarray) -> np.ndarray:
     a = np.asarray(left, dtype=np.float32)
     b = np.asarray(right, dtype=np.float32)
@@ -226,6 +259,7 @@ def run_recover(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     failure = _read_json(SOURCE_FAILED_PATH)
     validate_source_terminal(terminal)
     validate_source_failure(failure)
+    model_contract = _validate_model_contract()
 
     output = create_fresh_directory(
         job["outputs"][0],
@@ -284,6 +318,7 @@ def run_recover(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
             "native_max_seq_length": NATIVE_MAX_SEQ_LENGTH,
             "historical_max_seq_length": HISTORICAL_MAX_SEQ_LENGTH,
             "output_dtype": OUTPUT_DTYPE.str,
+            "runtime_resolution": model_contract,
         },
         "paired_invariant": {
             "same_ordered_text_rows": True,
