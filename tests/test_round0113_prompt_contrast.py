@@ -26,6 +26,7 @@ from basemap.round0113_prompt_contrast import (
     validate_seal,
 )
 from experiments.round0113_nodes import (
+    _exact_duplicate_audit,
     _fetch_parquet_rows,
     _require_unique_stored_rows,
 )
@@ -110,6 +111,25 @@ def test_polish_stored_row_uniqueness_guard_uses_complete_fp16_bytes():
     values[2] = values[1]
     with pytest.raises(Round0113Error, match="exact repeated rows"):
         _require_unique_stored_rows(values, label="duplicate fixture")
+
+
+def test_retained_duplicate_audit_reports_complete_byte_families():
+    values = np.zeros((4, 64), dtype=np.float16)
+    values[0, 0] = values[2, 0] = 1
+    values[1, 1] = 1
+    values[3, 3] = 1
+    report = _exact_duplicate_audit(
+        values, mapping=np.asarray([10, 11, 12, 13], dtype=np.int64)
+    )
+    assert report["exact_nontrivial_family_count"] == 1
+    assert report["rows_in_exact_nontrivial_families"] == 2
+    assert report["example_global_families"] == [[10, 12]]
+    assert report["passed_no_retained_exact_duplicates"] is False
+
+    values[2, 2] = 1
+    assert _exact_duplicate_audit(values)[
+        "passed_no_retained_exact_duplicates"
+    ] is True
 
 
 def test_compact_mapping_closes_registered_population():

@@ -175,6 +175,81 @@ def _require_unique_stored_rows(values: np.ndarray, *, label: str) -> None:
         raise Round0113Error(f"R0113 {label} contains exact repeated rows")
 
 
+def _exact_duplicate_audit(
+    source: np.ndarray,
+    *,
+    mapping: np.ndarray | None = None,
+) -> dict[str, Any]:
+    """Find complete-byte duplicate families via a lossless candidate index."""
+    values = np.asarray(source)
+    if (
+        values.ndim != 2
+        or not len(values)
+        or values.shape[1] <= 0
+        or values.dtype != np.float16
+    ):
+        raise Round0113Error("R0113 duplicate-audit source is malformed")
+    if mapping is not None:
+        global_rows = np.asarray(mapping, dtype=np.int64)
+        if global_rows.shape != (len(values),):
+            raise Round0113Error("R0113 duplicate-audit mapping is malformed")
+    else:
+        global_rows = np.arange(len(values), dtype=np.int64)
+    positions = np.unique(
+        np.linspace(0, values.shape[1] - 1, 32, dtype=np.int64)
+    )
+    projection = np.ascontiguousarray(values[:, positions]).view(np.uint16)
+    key_dtype = np.dtype(
+        (np.void, projection.dtype.itemsize * projection.shape[1])
+    )
+    keys = projection.view(key_dtype).reshape(-1)
+    order = np.argsort(keys, kind="stable")
+    ordered = keys[order]
+    equal = ordered[1:] == ordered[:-1]
+    starts = np.concatenate(
+        (
+            np.asarray([0], dtype=np.int64),
+            np.flatnonzero(~equal).astype(np.int64) + 1,
+        )
+    )
+    stops = np.concatenate(
+        (starts[1:], np.asarray([len(values)], dtype=np.int64))
+    )
+    repeated = np.flatnonzero(stops - starts > 1)
+    exact_families = 0
+    exact_rows = 0
+    maximum_family = 1
+    collision_splits = 0
+    examples: list[list[int]] = []
+    for group in repeated.tolist():
+        members = order[int(starts[group]) : int(stops[group])]
+        exact: dict[bytes, list[int]] = {}
+        for member in members.tolist():
+            exact.setdefault(
+                np.asarray(values[member]).tobytes(order="C"), []
+            ).append(member)
+        collision_splits += max(len(exact) - 1, 0)
+        for family in exact.values():
+            if len(family) < 2:
+                continue
+            exact_families += 1
+            exact_rows += len(family)
+            maximum_family = max(maximum_family, len(family))
+            if len(examples) < 16:
+                examples.append(global_rows[family].astype(int).tolist())
+    return {
+        "identity": "complete stored fp16 row bytes",
+        "candidate_projection_positions": positions.tolist(),
+        "candidate_repeated_groups": int(len(repeated)),
+        "candidate_collision_splits": int(collision_splits),
+        "exact_nontrivial_family_count": int(exact_families),
+        "rows_in_exact_nontrivial_families": int(exact_rows),
+        "maximum_exact_family_size": int(maximum_family),
+        "example_global_families": examples,
+        "passed_no_retained_exact_duplicates": exact_families == 0,
+    }
+
+
 def _data_identity(
     assembly: Mapping[str, Any],
     *,
@@ -218,6 +293,20 @@ def _load_assembly(job: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, An
     ):
         raise Round0113Error("R0113 compact assembly contract changed")
     verify_signature(manifest["mapping"], label="R0113 compact mapping")
+    audit_path = verify_signature(
+        manifest["retained_duplicate_audit"],
+        label="R0113 retained duplicate audit",
+    )
+    audit = read_sealed(audit_path, label="R0113 retained duplicate audit")
+    if (
+        audit.get("passed") is not True
+        or set(audit.get("arms") or {}) != set(ARMS)
+        or any(
+            report.get("passed_no_retained_exact_duplicates") is not True
+            for report in audit["arms"].values()
+        )
+    ):
+        raise Round0113Error("R0113 retained duplicate audit changed")
     for arm in ARMS:
         verify_signature(manifest["outputs"][arm], label=f"R0113 {arm} compact input")
     return manifest, expected_input_signature(path)
@@ -304,6 +393,47 @@ def run_assemble(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
             raise Round0113Error("R0113 compact fp16 byte count changed")
         outputs[arm] = signature
         arm_wall[arm] = time.monotonic() - arm_started
+    audit_started = time.monotonic()
+    duplicate_audits: dict[str, Any] = {}
+    for arm in ARMS:
+        source = np.memmap(
+            str(outputs[arm]["canonical_path"]),
+            mode="r",
+            dtype="<f2",
+            shape=(RETAINED_ROWS, DIMENSION),
+        )
+        duplicate_audits[arm] = _exact_duplicate_audit(
+            source, mapping=mapping
+        )
+        del source
+        gc.collect()
+    audit = seal(
+        {
+            "schema": _schema("retained-duplicate-audit"),
+            "round_id": ROUND_ID,
+            "release_sha": active["manifest"]["release_sha"],
+            "selector": substrate["selector"],
+            "mapping": expected_input_signature(mapping_path),
+            "arms": duplicate_audits,
+            "shared_population_required": True,
+            "policy": (
+                "the shared R0112 selector must leave zero complete-fp16-row "
+                "families in either fresh convention; treatment-induced "
+                "collisions require a new shared union selector"
+            ),
+            "passed": all(
+                report["passed_no_retained_exact_duplicates"]
+                for report in duplicate_audits.values()
+            ),
+            "wall_s": time.monotonic() - audit_started,
+        }
+    )
+    audit_path = os.path.join(output, "retained-duplicate-audit.json")
+    atomic_write_new_json(audit_path, audit, immutable=True)
+    if audit["passed"] is not True:
+        raise Round0113Error(
+            "R0113 shared selector leaves retained exact duplicates"
+        )
     body = {
         "schema": ASSEMBLY_SCHEMA,
         "round_id": ROUND_ID,
@@ -317,6 +447,7 @@ def run_assemble(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         "dtype": np.dtype("<f2").str,
         "mapping": expected_input_signature(mapping_path),
         "outputs": outputs,
+        "retained_duplicate_audit": expected_input_signature(audit_path),
         "paired_row_population_identical": True,
         "training_performed": False,
         "performance": {

@@ -250,6 +250,9 @@ def prepare_round0113(
             },
         },
     ]
+    # Prove the raw-derived selector also removes any prompt-induced exact
+    # collisions before the first GPU-required node.
+    jobs.reverse()
     for arm in ARMS:
         jobs.append(
             {
