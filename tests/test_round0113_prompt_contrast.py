@@ -7,6 +7,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+import basemap.round0113_prompt_contrast as prompt_contract
+from basemap.artifact_identity import ordered_array_sha256
 from basemap.round0113_prompt_contrast import (
     DECISION_METRICS,
     DIMENSION,
@@ -16,6 +18,7 @@ from basemap.round0113_prompt_contrast import (
     PromptWeightedJinaSampler,
     QUERY_CANDIDATES,
     QUERY_SCAN_START,
+    RETAINED_ROWS,
     Round0113Error,
     compact_mapping,
     paired_decision,
@@ -193,12 +196,23 @@ def test_sorted_text_hash_membership_finds_exact_training_copies():
     np.testing.assert_array_equal(observed, [False, True, True])
 
 
-def test_compact_mapping_closes_registered_population():
+def test_compact_mapping_closes_registered_population(monkeypatch):
     excluded = np.arange(5_366, dtype=np.int64)
-    mapping = compact_mapping(excluded, np.empty(0, dtype=np.int64))
-    assert mapping.shape == (1_994_634,)
+    extra = np.asarray([6_000, 7_000], dtype=np.int64)
+    monkeypatch.setattr(
+        prompt_contract, "PROMPT_UNION_EXTRA_EXCLUDED_ROWS", len(extra)
+    )
+    monkeypatch.setattr(
+        prompt_contract,
+        "PROMPT_UNION_EXTRA_EXCLUSIONS_SHA256",
+        ordered_array_sha256(extra),
+    )
+    monkeypatch.setattr(prompt_contract, "RETAINED_ROWS", 1_994_632)
+    mapping = compact_mapping(excluded, extra)
+    assert mapping.shape == (1_994_632,)
     assert mapping[0] == 5_366
     assert mapping[-1] == 1_999_999
+    assert not np.isin(extra, mapping).any()
 
 
 def test_fp16_endpoint_gather_preserves_requested_pairs():
@@ -231,7 +245,7 @@ def test_arm_configs_share_recipe_but_bind_separate_graphs():
         graph_signature=_signature("/data/raw-graph.npz", "a"),
         graph_manifest_signature=_signature("/data/raw-manifest.json", "b"),
         graph_edges=123,
-        retained_rows=1_994_634,
+        retained_rows=RETAINED_ROWS,
     )
     document, document_digest = train_config(
         "document",
@@ -240,7 +254,7 @@ def test_arm_configs_share_recipe_but_bind_separate_graphs():
             "/data/document-manifest.json", "d"
         ),
         graph_edges=123,
-        retained_rows=1_994_634,
+        retained_rows=RETAINED_ROWS,
     )
     assert raw["paired_invariant"] == document["paired_invariant"]
     assert raw["model"] == document["model"]
