@@ -30,6 +30,8 @@ from experiments.round0113_nodes import (
     _fetch_parquet_rows,
     _exact_text_families,
     _require_unique_stored_rows,
+    _sorted_hash_membership,
+    _text_row_hashes,
     _union_prompt_exclusions,
 )
 
@@ -170,11 +172,24 @@ def test_text_family_census_verifies_complete_utf8_bytes(tmp_path, monkeypatch):
     import experiments.round0113_nodes as nodes
 
     monkeypatch.setattr(nodes, "BASELINE_RETAINED_ROWS", 4)
-    families, report = _exact_text_families(
+    families, report, hashes = _exact_text_families(
         layout, np.arange(4, dtype=np.int64)
     )
     assert families == [[0, 2]]
     assert report["exact_nontrivial_family_count"] == 1
+    np.testing.assert_array_equal(
+        hashes, _text_row_hashes(["same", "different", "same", "other"])
+    )
+
+
+def test_sorted_text_hash_membership_finds_exact_training_copies():
+    reference = np.sort(
+        _text_row_hashes(["alpha", "beta", "gamma"]), kind="stable"
+    )
+    observed = _sorted_hash_membership(
+        reference, _text_row_hashes(["other", "beta", "alpha"])
+    )
+    np.testing.assert_array_equal(observed, [False, True, True])
 
 
 def test_compact_mapping_closes_registered_population():

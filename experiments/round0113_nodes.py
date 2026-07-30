@@ -178,6 +178,43 @@ def _require_unique_stored_rows(values: np.ndarray, *, label: str) -> None:
         raise Round0113Error(f"R0113 {label} contains exact repeated rows")
 
 
+def _text_row_hashes(texts: list[str]) -> np.ndarray:
+    """Return one complete UTF-8 SHA-256 identity per ordered source text."""
+    hashes = np.empty(len(texts), dtype="V32")
+    for index, text in enumerate(texts):
+        hashes[index] = hashlib.sha256(text.encode("utf-8")).digest()
+    return hashes
+
+
+def _sorted_hash_membership(
+    sorted_reference: np.ndarray,
+    queries: np.ndarray,
+) -> np.ndarray:
+    reference = np.asarray(sorted_reference)
+    values = np.asarray(queries)
+    if (
+        reference.ndim != 1
+        or values.ndim != 1
+        or reference.dtype != np.dtype("V32")
+        or values.dtype != np.dtype("V32")
+        or not np.array_equal(
+            reference, np.sort(reference, kind="stable")
+        )
+        or (
+            len(reference) > 1
+            and np.any(reference[1:] == reference[:-1])
+        )
+    ):
+        raise Round0113Error("R0113 source-text hash index is malformed")
+    positions = np.searchsorted(reference, values)
+    present = positions < len(reference)
+    if np.any(present):
+        present[present] = (
+            reference[positions[present]] == values[present]
+        )
+    return present
+
+
 def _exact_duplicate_audit(
     source: np.ndarray,
     *,
@@ -404,7 +441,7 @@ def _iter_selected_texts(
 def _exact_text_families(
     layout: list[dict[str, Any]],
     mapping: np.ndarray,
-) -> tuple[list[list[int]], dict[str, Any]]:
+) -> tuple[list[list[int]], dict[str, Any], np.ndarray]:
     """Enumerate complete UTF-8 source-text families over retained rows."""
     compact = np.asarray(mapping, dtype=np.int64)
     if compact.shape != (BASELINE_RETAINED_ROWS,):
@@ -475,7 +512,7 @@ def _exact_text_families(
             max((len(family) for family in families), default=1)
         ),
         "families_global_rows": families,
-    }
+    }, hashes
 
 
 def _union_prompt_exclusions(
@@ -592,6 +629,25 @@ def _load_assembly(job: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, An
     ):
         raise Round0113Error("R0113 compact assembly contract changed")
     verify_signature(manifest["mapping"], label="R0113 compact mapping")
+    text_hash_index_path = verify_signature(
+        manifest["source_text_hash_index"],
+        label="R0113 compact source-text hash index",
+    )
+    text_hash_index = np.load(
+        text_hash_index_path, mmap_mode="r", allow_pickle=False
+    )
+    if (
+        text_hash_index.shape != (RETAINED_ROWS,)
+        or text_hash_index.dtype != np.dtype("V32")
+        or not np.array_equal(
+            text_hash_index, np.sort(text_hash_index, kind="stable")
+        )
+        or (
+            len(text_hash_index) > 1
+            and np.any(text_hash_index[1:] == text_hash_index[:-1])
+        )
+    ):
+        raise Round0113Error("R0113 compact source-text hash index changed")
     discovery_path = verify_signature(
         manifest["source_prompt_family_discovery"],
         label="R0113 source prompt-family discovery",
@@ -681,7 +737,7 @@ def run_assemble(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     baseline_mapping = baseline_compact_mapping(substrate["excluded"])
     discovery_started = time.monotonic()
     text_layout = list(job.get("source_text_layout") or [])
-    text_families, text_report = _exact_text_families(
+    text_families, text_report, baseline_text_hashes = _exact_text_families(
         text_layout, baseline_mapping
     )
     families_by_arm: dict[str, list[list[int]]] = {
@@ -731,6 +787,31 @@ def run_assemble(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     mapping = compact_mapping(substrate["excluded"], derived_extra)
     mapping_path = os.path.join(output, "compact-to-global.i64.npy")
     atomic_save_new_npy(mapping_path, mapping, immutable=True)
+    mapping_positions = np.searchsorted(baseline_mapping, mapping)
+    if (
+        np.any(mapping_positions >= len(baseline_mapping))
+        or not np.array_equal(baseline_mapping[mapping_positions], mapping)
+    ):
+        raise Round0113Error("R0113 final source-text mapping changed")
+    retained_text_hashes = np.sort(
+        baseline_text_hashes[mapping_positions], kind="stable"
+    )
+    if (
+        retained_text_hashes.shape != (RETAINED_ROWS,)
+        or (
+            len(retained_text_hashes) > 1
+            and np.any(retained_text_hashes[1:] == retained_text_hashes[:-1])
+        )
+    ):
+        raise Round0113Error(
+            "R0113 shared selector leaves exact source-text duplicates"
+        )
+    text_hash_index_path = os.path.join(
+        output, "source-text-sha256-sorted.v32.npy"
+    )
+    atomic_save_new_npy(
+        text_hash_index_path, retained_text_hashes, immutable=True
+    )
     outputs: dict[str, Any] = {}
     started = time.monotonic()
     arm_wall: dict[str, float] = {}
@@ -814,6 +895,13 @@ def run_assemble(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         "dimension": DIMENSION,
         "dtype": np.dtype("<f2").str,
         "mapping": expected_input_signature(mapping_path),
+        "source_text_hash_index": expected_input_signature(
+            text_hash_index_path
+        ),
+        "source_text_hash_identity": (
+            "sorted unique SHA-256 over each retained complete source-text "
+            "UTF-8 byte string"
+        ),
         "outputs": outputs,
         "retained_duplicate_audit": expected_input_signature(audit_path),
         "paired_row_population_identical": True,
@@ -932,6 +1020,12 @@ def run_embed_queries(
     _require_unique_stored_rows(
         polish_document, label="document Polish query panel"
     )
+    fineweb_text_hashes = _text_row_hashes(exact_texts)
+    polish_text_hashes = _text_row_hashes(polish_texts)
+    if len(np.unique(polish_text_hashes)) != POLISH_QUERY_ROWS:
+        raise Round0113Error(
+            "R0113 Polish diagnostic contains exact repeated source text"
+        )
     outputs: dict[str, Any] = {}
     for arm, values in (("raw", raw), ("document", document)):
         path = os.path.join(output, f"{arm}-query-reserve.f16.npy")
@@ -949,6 +1043,18 @@ def run_embed_queries(
     atomic_save_new_npy(rows_path, rows, immutable=True)
     polish_rows_path = os.path.join(output, "polish-query-rows.i64.npy")
     atomic_save_new_npy(polish_rows_path, polish_rows, immutable=True)
+    fineweb_text_hash_path = os.path.join(
+        output, "query-source-text-sha256.v32.npy"
+    )
+    polish_text_hash_path = os.path.join(
+        output, "polish-source-text-sha256.v32.npy"
+    )
+    atomic_save_new_npy(
+        fineweb_text_hash_path, fineweb_text_hashes, immutable=True
+    )
+    atomic_save_new_npy(
+        polish_text_hash_path, polish_text_hashes, immutable=True
+    )
     body = {
         "schema": QUERY_SCHEMA,
         "round_id": ROUND_ID,
@@ -958,6 +1064,12 @@ def run_embed_queries(
         "selector": selector,
         "source_layout": layout,
         "source_text_ordered_sha256": ordered_text_sha256(exact_texts),
+        "source_text_row_hashes": expected_input_signature(
+            fineweb_text_hash_path
+        ),
+        "source_text_row_hash_identity": (
+            "SHA-256 over each complete source-text UTF-8 byte string"
+        ),
         "document_text_ordered_sha256": ordered_text_sha256(
             [PROMPT_PREFIX + text for text in exact_texts]
         ),
@@ -978,6 +1090,9 @@ def run_embed_queries(
                 ),
                 "source_text_ordered_sha256": ordered_text_sha256(
                     polish_texts
+                ),
+                "source_text_row_hashes": expected_input_signature(
+                    polish_text_hash_path
                 ),
                 "document_text_ordered_sha256": ordered_text_sha256(
                     [PROMPT_PREFIX + text for text in polish_texts]
@@ -1029,6 +1144,30 @@ def _load_query_reserve(
     ):
         raise Round0113Error("R0113 query reserve contract changed")
     verify_signature(receipt["query_rows"], label="R0113 query global rows")
+    fineweb_text_hashes = np.load(
+        verify_signature(
+            receipt["source_text_row_hashes"],
+            label="R0113 FineWeb query source-text hashes",
+        ),
+        mmap_mode="r",
+        allow_pickle=False,
+    )
+    polish_text_hashes = np.load(
+        verify_signature(
+            polish["source_text_row_hashes"],
+            label="R0113 Polish query source-text hashes",
+        ),
+        mmap_mode="r",
+        allow_pickle=False,
+    )
+    if (
+        fineweb_text_hashes.shape != (QUERY_CANDIDATES,)
+        or fineweb_text_hashes.dtype != np.dtype("V32")
+        or polish_text_hashes.shape != (POLISH_QUERY_ROWS,)
+        or polish_text_hashes.dtype != np.dtype("V32")
+        or len(np.unique(polish_text_hashes)) != POLISH_QUERY_ROWS
+    ):
+        raise Round0113Error("R0113 query source-text hash identity changed")
     for arm in ARMS:
         verify_signature(receipt["outputs"][arm], label=f"R0113 {arm} queries")
         verify_signature(
@@ -1250,8 +1389,40 @@ def run_build_graph(
     combined_copied, combined_copy_receipt = exact_reference_copy_mask(
         source, combined_queries
     )
-    copied = combined_copied[:QUERY_CANDIDATES]
-    polish_copied = combined_copied[QUERY_CANDIDATES:]
+    training_text_hashes = np.load(
+        verify_signature(
+            assembly["source_text_hash_index"],
+            label="R0113 retained training source-text hashes",
+        ),
+        mmap_mode="r",
+        allow_pickle=False,
+    )
+    query_text_hashes = np.load(
+        verify_signature(
+            query["source_text_row_hashes"],
+            label="R0113 FineWeb query source-text hashes",
+        ),
+        mmap_mode="r",
+        allow_pickle=False,
+    )
+    polish_text_hashes = np.load(
+        verify_signature(
+            polish["source_text_row_hashes"],
+            label="R0113 Polish query source-text hashes",
+        ),
+        mmap_mode="r",
+        allow_pickle=False,
+    )
+    text_copied = _sorted_hash_membership(
+        training_text_hashes, query_text_hashes
+    )
+    polish_text_copied = _sorted_hash_membership(
+        training_text_hashes, polish_text_hashes
+    )
+    embedding_copied = combined_copied[:QUERY_CANDIDATES]
+    polish_embedding_copied = combined_copied[QUERY_CANDIDATES:]
+    copied = embedding_copied | text_copied
+    polish_copied = polish_embedding_copied | polish_text_copied
     mask_path = os.path.join(output, "query-training-copy-mask.npy")
     atomic_save_new_npy(mask_path, copied, immutable=True)
     if np.any(polish_copied):
@@ -1279,21 +1450,39 @@ def run_build_graph(
         "query_reserve": query_signature,
         "query_training_copy_mask": expected_input_signature(mask_path),
         "query_training_copy_audit": {
-            "identity": "complete stored-row bytes",
+            "identity": (
+                "union complete stored-embedding-row bytes and complete "
+                "source-text UTF-8 bytes"
+            ),
             "query_rows": QUERY_CANDIDATES,
-            "query_rows_with_exact_reference_copy": int(copied.sum()),
-            "exact_reference_family_disjoint": not bool(np.any(copied)),
-            "combined_audit": combined_copy_receipt,
+            "query_rows_with_exact_embedding_copy": int(
+                embedding_copied.sum()
+            ),
+            "query_rows_with_exact_source_text_copy": int(
+                text_copied.sum()
+            ),
+            "query_rows_rejected_by_union": int(copied.sum()),
+            "exact_training_identity_disjoint": not bool(np.any(copied)),
+            "embedding_audit": combined_copy_receipt,
         },
         "polish_query_training_copy_mask": expected_input_signature(
             polish_mask_path
         ),
         "polish_query_training_copy_audit": {
-            "identity": "complete stored-row bytes",
+            "identity": (
+                "union complete stored-embedding-row bytes and complete "
+                "source-text UTF-8 bytes"
+            ),
             "query_rows": POLISH_QUERY_ROWS,
-            "query_rows_with_exact_reference_copy": int(polish_copied.sum()),
-            "exact_reference_family_disjoint": True,
-            "combined_audit": combined_copy_receipt,
+            "query_rows_with_exact_embedding_copy": int(
+                polish_embedding_copied.sum()
+            ),
+            "query_rows_with_exact_source_text_copy": int(
+                polish_text_copied.sum()
+            ),
+            "query_rows_rejected_by_union": int(polish_copied.sum()),
+            "exact_training_identity_disjoint": True,
+            "embedding_audit": combined_copy_receipt,
         },
         "search_qualification": {
             "index": "GPU IndexIVFFlat/IP",
@@ -1386,19 +1575,39 @@ def run_select_queries(
         )
     selected: list[int] = []
     seen = {arm: set() for arm in ARMS}
+    text_hashes = np.load(
+        verify_signature(
+            query["source_text_row_hashes"],
+            label="R0113 FineWeb query source-text hashes",
+        ),
+        mmap_mode="r",
+        allow_pickle=False,
+    )
+    if (
+        text_hashes.shape != (QUERY_CANDIDATES,)
+        or text_hashes.dtype != np.dtype("V32")
+    ):
+        raise Round0113Error("R0113 FineWeb query text hashes changed")
+    seen_texts: set[bytes] = set()
     duplicate_rejections = {arm: 0 for arm in ARMS}
+    text_duplicate_rejections = 0
     for position in np.flatnonzero(clean).tolist():
         keys = {
             arm: np.asarray(values[arm][position]).tobytes(order="C")
             for arm in ARMS
         }
+        text_key = np.asarray(text_hashes[position]).tobytes(order="C")
         duplicated = [arm for arm in ARMS if keys[arm] in seen[arm]]
-        if duplicated:
+        duplicated_text = text_key in seen_texts
+        if duplicated or duplicated_text:
             for arm in duplicated:
                 duplicate_rejections[arm] += 1
+            if duplicated_text:
+                text_duplicate_rejections += 1
             continue
         for arm in ARMS:
             seen[arm].add(keys[arm])
+        seen_texts.add(text_key)
         selected.append(position)
         if len(selected) == QUERY_ROWS:
             break
@@ -1424,9 +1633,13 @@ def run_select_queries(
         "ordered_global_rows_sha256": ordered_array_sha256(selected_rows),
         "training_copy_rejections": int(np.sum(~clean)),
         "within_reserve_duplicate_rejections": duplicate_rejections,
+        "within_reserve_exact_text_duplicate_rejections": (
+            text_duplicate_rejections
+        ),
         "selection_rule": (
             "first ascending reserve positions clean against both compact "
-            "training arrays and unique by complete stored row bytes in both arms"
+            "training populations, unique by complete source-text bytes, and "
+            "unique by complete stored embedding-row bytes in both arms"
         ),
         "selected_before_training": True,
         "training_performed": False,

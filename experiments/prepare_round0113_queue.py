@@ -450,6 +450,14 @@ def prepare_round0113(
             "reserve": QUERY_CANDIDATES,
             "selected": QUERY_ROWS,
             "clean_in_both_arms_before_training": True,
+            "training_disjointness": [
+                "complete source-text UTF-8 bytes",
+                "complete stored embedding-row bytes",
+            ],
+            "within_panel_uniqueness": [
+                "complete source-text UTF-8 bytes",
+                "complete stored embedding-row bytes in both arms",
+            ],
             "matched_projection_primary": True,
             "cross_convention_projection_diagnostic": True,
             "polish_ood_queries": POLISH_QUERY_ROWS,
