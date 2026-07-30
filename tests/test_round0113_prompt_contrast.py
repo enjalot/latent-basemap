@@ -8,6 +8,7 @@ import pyarrow.parquet as pq
 import pytest
 
 import basemap.round0113_prompt_contrast as prompt_contract
+import experiments.round0113_nodes as nodes
 from basemap.artifact_identity import ordered_array_sha256
 from basemap.panel_v2 import _validate_matrix_identity
 from basemap.round0113_prompt_contrast import (
@@ -246,6 +247,14 @@ def test_data_identity_uses_panel_v2_ordered_shard_contract():
         }
     ]
     assert _validate_matrix_identity(identity) == (RETAINED_ROWS, DIMENSION)
+
+
+def test_training_accounting_positive_rows_constant_matches_contract():
+    assert (
+        nodes.POSITIVE_ROWS_PER_UPDATE
+        == prompt_contract.POSITIVE_ROWS_PER_UPDATE
+    )
+    assert nodes.POSITIVE_ROWS_PER_UPDATE == 409
 
 
 def test_fp16_endpoint_gather_preserves_requested_pairs():
