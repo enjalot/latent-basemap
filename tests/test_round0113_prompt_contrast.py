@@ -40,6 +40,7 @@ from experiments.round0113_nodes import (
     _sorted_hash_membership,
     _text_row_hashes,
     _union_prompt_exclusions,
+    _weighted_rejection_accounting_mismatch,
 )
 
 
@@ -255,6 +256,43 @@ def test_training_accounting_positive_rows_constant_matches_contract():
         == prompt_contract.POSITIVE_ROWS_PER_UPDATE
     )
     assert nodes.POSITIVE_ROWS_PER_UPDATE == 409
+
+
+def test_weighted_rejection_accounting_allows_one_speculative_prefetch_batch():
+    consumed = (
+        prompt_contract.SUCCESSFUL_UPDATES
+        * prompt_contract.POSITIVE_ROWS_PER_UPDATE
+    )
+    runtime = {
+        "weight_emitted_draws": consumed,
+        "weight_buffered_draws": 14,
+        "weight_acceptances": consumed + 14,
+        "weight_proposals": consumed + 100,
+        "weight_acceptance_rate": 0.5,
+    }
+    assert (
+        _weighted_rejection_accounting_mismatch(runtime, producer_delta=0)
+        is None
+    )
+
+    runtime["weight_emitted_draws"] = (
+        consumed + prompt_contract.POSITIVE_ROWS_PER_UPDATE
+    )
+    runtime["weight_acceptances"] = (
+        runtime["weight_emitted_draws"] + runtime["weight_buffered_draws"]
+    )
+    runtime["weight_proposals"] = runtime["weight_acceptances"] + 100
+    assert (
+        _weighted_rejection_accounting_mismatch(runtime, producer_delta=1)
+        is None
+    )
+
+    problem = _weighted_rejection_accounting_mismatch(
+        runtime, producer_delta=0
+    )
+    assert problem is not None
+    assert problem["expected_consumed_positive_draws"] == consumed
+    assert problem["expected_emitted_positive_draws"] == consumed
 
 
 def test_fp16_endpoint_gather_preserves_requested_pairs():

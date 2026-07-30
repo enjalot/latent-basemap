@@ -1829,6 +1829,35 @@ def _arm(job: Mapping[str, Any]) -> str:
     return arm
 
 
+def _weighted_rejection_accounting_mismatch(
+    runtime: Mapping[str, Any],
+    *,
+    producer_delta: int,
+) -> dict[str, Any] | None:
+    expected_emitted_positive_draws = (
+        SUCCESSFUL_UPDATES + producer_delta
+    ) * POSITIVE_ROWS_PER_UPDATE
+    if (
+        int(runtime["weight_emitted_draws"]) != expected_emitted_positive_draws
+        or int(runtime["weight_acceptances"])
+        != (
+            int(runtime["weight_emitted_draws"])
+            + int(runtime["weight_buffered_draws"])
+        )
+        or int(runtime["weight_proposals"]) < int(runtime["weight_acceptances"])
+        or not 0 < float(runtime["weight_acceptance_rate"]) <= 1
+    ):
+        return {
+            "expected_emitted_positive_draws": expected_emitted_positive_draws,
+            "expected_consumed_positive_draws": (
+                SUCCESSFUL_UPDATES * POSITIVE_ROWS_PER_UPDATE
+            ),
+            "producer_delta": producer_delta,
+            "runtime": runtime,
+        }
+    return None
+
+
 def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     import torch
 
@@ -1945,21 +1974,12 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
             "expected_rows": expected_rows,
             "runtime": runtime,
         }
-    expected_positive_draws = SUCCESSFUL_UPDATES * POSITIVE_ROWS_PER_UPDATE
-    if (
-        int(runtime["weight_emitted_draws"]) != expected_positive_draws
-        or int(runtime["weight_acceptances"])
-        != (
-            int(runtime["weight_emitted_draws"])
-            + int(runtime["weight_buffered_draws"])
-        )
-        or int(runtime["weight_proposals"]) < int(runtime["weight_acceptances"])
-        or not 0 < float(runtime["weight_acceptance_rate"]) <= 1
-    ):
-        mismatches["weighted_rejection_accounting"] = {
-            "expected_positive_draws": expected_positive_draws,
-            "runtime": runtime,
-        }
+    weighted_mismatch = _weighted_rejection_accounting_mismatch(
+        runtime,
+        producer_delta=producer_delta,
+    )
+    if weighted_mismatch is not None:
+        mismatches["weighted_rejection_accounting"] = weighted_mismatch
     if mismatches:
         raise Round0113Error(f"R0113 {arm} train accounting failed: {mismatches}")
     synchronize_runtime_counters(accounting, runtime)
