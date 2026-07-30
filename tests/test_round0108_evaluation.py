@@ -22,7 +22,10 @@ from basemap.round0108_evaluation import (
     projection_metrics,
 )
 from experiments.prepare_round0108_queue import GRAPH_MANIFEST, PART_OUTPUTS
-from experiments.round0108_nodes import _gather_directed_memberships
+from experiments.round0108_nodes import (
+    _family_arrays,
+    _gather_directed_memberships,
+)
 
 
 def test_graph_inputs_bind_successful_r0106_attempt() -> None:
@@ -242,6 +245,25 @@ def test_family_size_lookup_defaults_singletons_and_maps_representatives() -> No
             np.asarray([10, 5], dtype=np.int64),
             counts,
         )
+
+
+def test_family_array_loader_sorts_representatives(tmp_path: Path) -> None:
+    path = tmp_path / "families.npz"
+    np.savez(
+        path,
+        representative_rows=np.asarray([10, 2, 7], dtype=np.int64),
+        family_counts=np.asarray([3, 11, 5], dtype=np.int64),
+    )
+
+    representatives, counts = _family_arrays(str(path))
+
+    assert representatives.tolist() == [2, 7, 10]
+    assert counts.tolist() == [11, 5, 3]
+    assert map_family_sizes(
+        np.asarray([2, 7, 8, 10], dtype=np.int64),
+        representatives,
+        counts,
+    ).tolist() == [11, 5, 1, 3]
 
 
 def test_map_registry_discovers_explicit_round0108_atlas(
