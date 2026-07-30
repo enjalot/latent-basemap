@@ -580,7 +580,9 @@ class PromptWeightedJinaSampler(DiverseWeightedJinaSampler):
             "weight_rejection_iterations": self._rejection_iterations,
             "valid_canonical_edge_count": self.n_pos,
             "compact_retained_rows": self.n_nodes,
-            "multiplicity_policy": "cohort-local-representative-only",
+            "multiplicity_policy": (
+                "shared-source-raw-document-union-representative-only"
+            ),
             "graph": self.graph_signatures,
             **dataset,
         }
@@ -711,7 +713,9 @@ def train_config(
         "weight_uniform_dtype": np.dtype("float64").str,
         "valid_canonical_edge_count": graph_edges,
         "compact_retained_rows": retained_rows,
-        "multiplicity_policy": "cohort-local-representative-only",
+        "multiplicity_policy": (
+            "shared-source-raw-document-union-representative-only"
+        ),
         "source_representation": f"{arm}-fp16",
     }
     config = {
@@ -729,7 +733,9 @@ def train_config(
             "rows": retained_rows,
             "dimension": DIMENSION,
             "representation": f"fresh-local-{arm}-fp16",
-            "multiplicity_policy": "cohort-local-representative-only",
+            "multiplicity_policy": (
+                "shared-source-raw-document-union-representative-only"
+            ),
         },
         "graph": {
             "path": str(graph_signature["canonical_path"]),

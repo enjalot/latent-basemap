@@ -1362,7 +1362,10 @@ def run_build_graph(
         centroids_by_k=None,
         data_identity=_data_identity(assembly, arm=arm),
         convention={
-            "row_order": "R0112 cohort-local representative compact order",
+            "row_order": (
+                "R0113 shared source/raw/document union-representative "
+                "compact order"
+            ),
             "distance": "cosine via fp32-L2-normalized squared L2",
             "self_exclusion": True,
             "anchor_namespace": "R0113 compact IDs",
@@ -2080,7 +2083,10 @@ def run_evaluate(
     reference_identity = {
         "data_identity": _data_identity(assembly, arm=arm),
         "convention": {
-            "row_order": "R0112 cohort-local representative compact order",
+            "row_order": (
+                "R0113 shared source/raw/document union-representative "
+                "compact order"
+            ),
             "distance": "cosine via fp32-L2-normalized squared L2",
             "self_exclusion": True,
             "anchor_namespace": "R0113 compact IDs",
