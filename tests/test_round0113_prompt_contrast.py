@@ -9,6 +9,7 @@ import pytest
 
 import basemap.round0113_prompt_contrast as prompt_contract
 from basemap.artifact_identity import ordered_array_sha256
+from basemap.panel_v2 import _validate_matrix_identity
 from basemap.round0113_prompt_contrast import (
     DECISION_METRICS,
     DIMENSION,
@@ -244,6 +245,7 @@ def test_data_identity_uses_panel_v2_ordered_shard_contract():
             "sha256": "a" * 64,
         }
     ]
+    assert _validate_matrix_identity(identity) == (RETAINED_ROWS, DIMENSION)
 
 
 def test_fp16_endpoint_gather_preserves_requested_pairs():

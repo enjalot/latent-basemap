@@ -866,6 +866,7 @@ def load_graph(
     *,
     expected_sha256: str,
     arm: str,
+    execution_round_id: str = ROUND_ID,
 ) -> dict[str, Any]:
     signature = expected_input_signature(manifest_path)
     if signature["sha256"] != expected_sha256:
@@ -876,7 +877,7 @@ def load_graph(
     if (
         arm not in ARMS
         or manifest.get("schema") != GRAPH_SCHEMA
-        or manifest.get("round_id") != ROUND_ID
+        or manifest.get("round_id") != execution_round_id
         or manifest.get("arm") != arm
         or int(manifest.get("retained_rows", -1)) != RETAINED_ROWS
         or int(manifest.get("dimension", -1)) != DIMENSION

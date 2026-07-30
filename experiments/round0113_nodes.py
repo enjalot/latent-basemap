@@ -1839,6 +1839,7 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         graph_manifest_path,
         expected_sha256=graph_manifest_signature["sha256"],
         arm=arm,
+        execution_round_id=_execution_round_id(active),
     )
     config, config_sha = train_config(
         arm,
@@ -2019,6 +2020,7 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
 
 
 def _authenticate_model(
+    active: Mapping[str, Any],
     job: Mapping[str, Any],
 ) -> tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any]]:
     arm = _arm(job)
@@ -2029,6 +2031,7 @@ def _authenticate_model(
         graph_manifest_path,
         expected_sha256=graph_manifest_signature["sha256"],
         arm=arm,
+        execution_round_id=_execution_round_id(active),
     )
     config, config_sha = train_config(
         arm,
@@ -2108,7 +2111,7 @@ def run_evaluate(
 
     arm = _arm(job)
     other = "document" if arm == "raw" else "raw"
-    model, train, assembly, graph = _authenticate_model(job)
+    model, train, assembly, graph = _authenticate_model(active, job)
     query, query_signature = _load_query_reserve(job)
     selection, positions = _load_query_selection(job)
     source = _open_compact(assembly, arm)
