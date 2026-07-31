@@ -757,6 +757,7 @@ class PairedHostWeightedJinaSampler:
         graph_signature: Mapping[str, Any],
         graph_manifest_signature: Mapping[str, Any],
         arm: str,
+        expected_rows: int = ROWS,
     ) -> None:
         import torch
 
@@ -773,6 +774,7 @@ class PairedHostWeightedJinaSampler:
         self.graph_signature = dict(graph_signature)
         self.graph_manifest_signature = dict(graph_manifest_signature)
         self.arm = arm
+        self.expected_rows = int(expected_rows)
         self.device = dataset.device
         self.batch_no = 0
         self._prefetch_executor: concurrent.futures.ThreadPoolExecutor | None = None
@@ -781,8 +783,9 @@ class PairedHostWeightedJinaSampler:
         self._consumer_batches = 0
         if (
             arm not in ARMS
-            or len(dataset) != ROWS
-            or self.n_nodes != ROWS
+            or self.expected_rows < 2
+            or len(dataset) != self.expected_rows
+            or self.n_nodes != self.expected_rows
             or self.sources.ndim != 1
             or self.targets.shape != self.sources.shape
             or self.weights.shape != self.sources.shape
@@ -790,8 +793,8 @@ class PairedHostWeightedJinaSampler:
             or self.num_neg <= 0
             or self.sources.min(initial=0) < 0
             or self.targets.min(initial=0) < 0
-            or self.sources.max(initial=0) >= ROWS
-            or self.targets.max(initial=0) >= ROWS
+            or self.sources.max(initial=0) >= self.expected_rows
+            or self.targets.max(initial=0) >= self.expected_rows
             or not np.isfinite(self.weights).all()
             or np.any(self.weights <= 0)
         ):
