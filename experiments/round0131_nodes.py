@@ -52,7 +52,8 @@ from basemap.round0131_runtime_factorial import (
     PERFORMANCE_WINDOWS,
     PIPELINES,
     POSITIVE_R0125_OUTCOMES,
-    R0125_RELEASE_SHA,
+    R0125_EVALUATION_RELEASE_SHA,
+    R0125_TRAIN_RELEASE_SHA,
     RESIDENT_FUSED,
     RESIDENT_SEPARATE,
     ROUND_ID,
@@ -134,6 +135,12 @@ def _validate_environment(active: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _validate_positive_trigger(job: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    if (
+        job.get("r0125_evaluation_release_sha")
+        != R0125_EVALUATION_RELEASE_SHA
+        or job.get("r0125_train_release_sha") != R0125_TRAIN_RELEASE_SHA
+    ):
+        raise Round0131Error("R0125 dual-release lineage changed")
     decision_signature = dict(job.get("r0125_decision") or {})
     decision_path = str(decision_signature.get("canonical_path") or "")
     if expected_input_signature(decision_path) != decision_signature:
@@ -143,6 +150,7 @@ def _validate_positive_trigger(job: Mapping[str, Any]) -> tuple[dict[str, Any], 
     if (
         decision.get("schema") != "round0125-device-host-runtime-decision-v1"
         or decision.get("round_id") != "0125"
+        or decision.get("release_sha") != R0125_EVALUATION_RELEASE_SHA
         or decision.get("outcome") not in POSITIVE_R0125_OUTCOMES
         or selector.get("outcome") != decision.get("outcome")
         or selector.get("execution_valid") is not True
@@ -168,7 +176,7 @@ def _r0125_train_contract(train: Mapping[str, Any], *, arm: str) -> bool:
         train.get("schema") == R0125_TRAIN_SCHEMA
         and train.get("round_id") == "0125"
         and train.get("arm") == arm
-        and train.get("release_sha") == R0125_RELEASE_SHA
+        and train.get("release_sha") == R0125_TRAIN_RELEASE_SHA
         and isinstance(checks, Mapping)
         and set(checks) == R0125_TRAIN_CHECK_KEYS
         and all(checks.values())
@@ -208,7 +216,7 @@ def _authenticate_r0125_endpoints(
     if (
         panel.get("schema") != "round0125-matched-runtime-density-panel-v1"
         or panel.get("round_id") != "0125"
-        or panel.get("release_sha") != R0125_RELEASE_SHA
+        or panel.get("release_sha") != R0125_EVALUATION_RELEASE_SHA
         or set(cells) != endpoint_arms
         or panel.get("train_receipts") != train_signatures
         or any(
@@ -234,7 +242,7 @@ def _authenticate_r0125_endpoints(
             score.get("schema") != "round0125-native-runtime-arm-score-v1"
             or score.get("round_id") != "0125"
             or score.get("arm") != arm
-            or score.get("release_sha") != R0125_RELEASE_SHA
+            or score.get("release_sha") != R0125_EVALUATION_RELEASE_SHA
             or score.get("train_receipt") != train_signatures[arm]
             or score.get("shared_evidence") != shared_signature
             or not isinstance(score.get("execution_gates"), Mapping)
@@ -467,6 +475,8 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
         "release_sha": active["manifest"]["release_sha"],
         "r0125_positive_outcome": trigger["outcome"],
         "r0125_decision": trigger_signature,
+        "r0125_evaluation_release_sha": R0125_EVALUATION_RELEASE_SHA,
+        "r0125_train_release_sha": R0125_TRAIN_RELEASE_SHA,
         "production_config": expected_input_signature(config_path),
         "production_config_sha256": config_sha,
         "causal_invariant_sha256": config["causal_invariant_sha256"],
@@ -819,6 +829,8 @@ def run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
         "release_sha": active["manifest"]["release_sha"],
         "r0125_positive_outcome": trigger["outcome"],
         "r0125_decision": trigger_signature,
+        "r0125_evaluation_release_sha": R0125_EVALUATION_RELEASE_SHA,
+        "r0125_train_release_sha": R0125_TRAIN_RELEASE_SHA,
         "r0125_matched_panel": r0125_panel_signature,
         "r0125_matched_arrays": r0125_arrays_signature,
         "r0125_native_scores": dict(job["r0125_native_scores"]),
@@ -962,6 +974,8 @@ def run_decision(active: dict[str, Any], job: dict[str, Any]) -> None:
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
         "r0125_decision": trigger_signature,
+        "r0125_evaluation_release_sha": R0125_EVALUATION_RELEASE_SHA,
+        "r0125_train_release_sha": R0125_TRAIN_RELEASE_SHA,
         "runtime_component_panel": panel_signature,
         "r0125_train_receipts": dict(job["r0125_train_receipts"]),
         "r0125_train_configs": dict(job["r0125_train_configs"]),

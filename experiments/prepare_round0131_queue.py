@@ -32,7 +32,8 @@ from basemap.round0131_runtime_factorial import (
     CAPABILITY,
     PIPELINES,
     POSITIVE_R0125_OUTCOMES,
-    R0125_RELEASE_SHA,
+    R0125_EVALUATION_RELEASE_SHA,
+    R0125_TRAIN_RELEASE_SHA,
     ROUND_ID,
 )
 from experiments.prepare_round0020_0022_queues import LAB_ROOT, _base_manifest, _dedupe
@@ -45,6 +46,8 @@ RUN_ENVIRONMENT_PREFIX = os.path.join(RELEASE_ROOT, ".venv")
 RUN_PYTHON = os.path.join(RUN_ENVIRONMENT_PREFIX, "bin", "python")
 ROUND_FILE_GLOB = os.path.join(LAB_ROOT, "round-0131-*.md")
 R0125_CAPABILITY = "jina-fineweb-2m-runtime-path-density-bridge-v1"
+R0125_CORRECTED_RESULT = "result-0125-2026-07-31-01.md"
+R0125_CORRECTED_REVIEW = "review-0125-2026-07-31-01.md"
 R0125_TRAIN_CHECK_KEYS = {
     "exact_update_closure",
     "zero_numerical_skips",
@@ -94,6 +97,22 @@ def _job(queue: Mapping[str, Any], *, action: str) -> dict[str, Any]:
     return dict(jobs[0])
 
 
+def _require_corrected_document_names(
+    review_path: str, result_name: str
+) -> None:
+    """Accept only the registered second R0125 result/review sequence."""
+
+    if (
+        os.path.basename(review_path) != R0125_CORRECTED_REVIEW
+        or os.path.basename(result_name) != result_name
+        or result_name != R0125_CORRECTED_RESULT
+    ):
+        raise RuntimeError(
+            "R0131 requires the exact sequence-suffixed corrected R0125 "
+            "result and review"
+        )
+
+
 def _read_json(path: str, *, label: str, sealed: bool = False) -> dict[str, Any]:
     with open(path, encoding="utf-8") as handle:
         value = json.load(handle)
@@ -106,15 +125,14 @@ def _accepted_r0125(review_path: str) -> dict[str, Any]:
     review_signature = expected_input_signature(review_path)
     review, review_text = _document(review_path)
     result_name = str(review.get("result") or "")
+    _require_corrected_document_names(review_path, result_name)
     if (
         review.get("round_id") != "0125"
         or review.get("status") != "accepted"
-        or review.get("verified_release_commit") != R0125_RELEASE_SHA
+        or review.get("verified_release_commit")
+        != R0125_EVALUATION_RELEASE_SHA
         or f"capability:{R0125_CAPABILITY}"
         not in _frontmatter_list(review, "releases", label="R0125 review")
-        or os.path.basename(result_name) != result_name
-        or re.fullmatch(r"result-0125-[0-9]{4}-[0-9]{2}-[0-9]{2}\.md", result_name)
-        is None
     ):
         raise RuntimeError("R0125 review is not accepted and exact")
     result_path = os.path.join(os.path.dirname(review_path), result_name)
@@ -131,12 +149,12 @@ def _accepted_r0125(review_path: str) -> dict[str, Any]:
         queue_path,
         terminal_path,
         round_id="0125",
-        expected_release_sha=R0125_RELEASE_SHA,
+        expected_release_sha=R0125_EVALUATION_RELEASE_SHA,
     )
     if (
         result.get("round_id") != "0125"
         or result.get("status") != "complete"
-        or result.get("release_commit") != R0125_RELEASE_SHA
+        or result.get("release_commit") != R0125_EVALUATION_RELEASE_SHA
         or review.get("result_sha256") != result_signature["sha256"]
         or result.get("queue_manifest_sha256") != queue_signature["sha256"]
         or R0125_CAPABILITY
@@ -144,7 +162,17 @@ def _accepted_r0125(review_path: str) -> dict[str, Any]:
             result, "capabilities_produced", label="R0125 result"
         )
         or queue.get("round_id") != "0125"
-        or queue.get("release_sha") != R0125_RELEASE_SHA
+        or queue.get("release_sha") != R0125_EVALUATION_RELEASE_SHA
+        or queue.get("schema")
+        != "round0125-eval-only-setup-correction-queue-v1"
+        or queue.get("training_performed") is not False
+        or (queue.get("correction_attempt") or {}).get("prior_release_sha")
+        != R0125_TRAIN_RELEASE_SHA
+        or any(
+            (node.get("node_policy") or {}).get("training_performed") is not False
+            or node.get("action") == "train"
+            for node in queue.get("jobs") or []
+        )
     ):
         raise RuntimeError("R0125 review/result/queue closure changed")
     decision_job = _job(queue, action="decide")
@@ -161,7 +189,7 @@ def _accepted_r0125(review_path: str) -> dict[str, Any]:
     if (
         decision.get("schema") != "round0125-device-host-runtime-decision-v1"
         or decision.get("round_id") != "0125"
-        or decision.get("release_sha") != R0125_RELEASE_SHA
+        or decision.get("release_sha") != R0125_EVALUATION_RELEASE_SHA
         or decision.get("outcome") not in POSITIVE_R0125_OUTCOMES
         or (decision.get("selector") or {}).get("execution_valid") is not True
         or decision.get("capabilities_produced") != [R0125_CAPABILITY]
@@ -170,7 +198,7 @@ def _accepted_r0125(review_path: str) -> dict[str, Any]:
         or not all(decision["execution_checks"].values())
         or panel.get("schema") != "round0125-matched-runtime-density-panel-v1"
         or panel.get("round_id") != "0125"
-        or panel.get("release_sha") != R0125_RELEASE_SHA
+        or panel.get("release_sha") != R0125_EVALUATION_RELEASE_SHA
         or decision.get("matched_density_panel") != panel_signature
         or expected_input_signature(arrays_signature.get("canonical_path", ""))
         != arrays_signature
@@ -203,7 +231,7 @@ def _accepted_r0125(review_path: str) -> dict[str, Any]:
         if (
             score.get("schema") != "round0125-native-runtime-arm-score-v1"
             or score.get("round_id") != "0125"
-            or score.get("release_sha") != R0125_RELEASE_SHA
+            or score.get("release_sha") != R0125_EVALUATION_RELEASE_SHA
             or score.get("arm") != arm
             or expected_input_signature(train_signature.get("canonical_path", ""))
             != train_signature
@@ -234,7 +262,7 @@ def _accepted_r0125(review_path: str) -> dict[str, Any]:
         if (
             train.get("schema") != "round0125-runtime-arm-train-receipt-v1"
             or train.get("round_id") != "0125"
-            or train.get("release_sha") != R0125_RELEASE_SHA
+            or train.get("release_sha") != R0125_TRAIN_RELEASE_SHA
             or train.get("arm") != arm
             or not isinstance(checks, Mapping)
             or set(checks) != R0125_TRAIN_CHECK_KEYS
@@ -289,6 +317,8 @@ def _accepted_r0125(review_path: str) -> dict[str, Any]:
         "train_configs": config_signatures,
         "endpoint_environment_freeze_sha256": next(iter(environment_hashes)),
         "endpoint_initial_model_state_sha256": next(iter(initial_hashes)),
+        "evaluation_release_sha": R0125_EVALUATION_RELEASE_SHA,
+        "train_release_sha": R0125_TRAIN_RELEASE_SHA,
         "outcome": decision["outcome"],
         "shared_output": str((queue.get("jobs") or [])[0].get("shared_output")),
         "calibration": dict(panel_job.get("r0108_calibration") or {}),
@@ -397,6 +427,8 @@ def prepare_round0131(
             "r0125_native_scores": evidence["native_scores"],
             "r0125_train_receipts": evidence["train_receipts"],
             "r0125_train_configs": evidence["train_configs"],
+            "r0125_evaluation_release_sha": evidence["evaluation_release_sha"],
+            "r0125_train_release_sha": evidence["train_release_sha"],
             **extra,
         }
         if arm is not None:
@@ -476,6 +508,14 @@ def prepare_round0131(
             ],
             "r0125_endpoint_train_receipts": evidence["train_receipts"],
             "r0125_endpoint_train_configs": evidence["train_configs"],
+            "r0125_release_lineage": {
+                "accepted_review_result_queue_terminal_scores_panel_decision": (
+                    evidence["evaluation_release_sha"]
+                ),
+                "reused_train_config_model_artifacts": evidence[
+                    "train_release_sha"
+                ],
+            },
             "required_cross_round_invariants": [
                 "all-four update-0 model hashes equal",
                 "all-four environment freezes equal",

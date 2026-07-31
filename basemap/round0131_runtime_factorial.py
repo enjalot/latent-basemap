@@ -48,7 +48,13 @@ from .round0125_runtime_bridge import (
 
 ROUND_ID = "0131"
 CAPABILITY = "jina-fineweb-2m-runtime-component-localization-v1"
-R0125_RELEASE_SHA = "ff5dfcde5632257aac355008a70bc330bab26bee"
+# R0125's accepted correction has two deliberately distinct release identities:
+# the eval-only queue produced the reviewed scores/panel/decision, while its
+# endpoint train/config/model artifacts remain byte-exact outputs of the first
+# queue.  Keep both names explicit so no consumer can silently relabel the old
+# trained endpoints as outputs of the corrected evaluator.
+R0125_EVALUATION_RELEASE_SHA = "3c4ab1204339d346afd7e97a564fbd6ab331c034"
+R0125_TRAIN_RELEASE_SHA = "ff5dfcde5632257aac355008a70bc330bab26bee"
 RESIDENT_FUSED = "numpy_device_fused"
 RESIDENT_SEPARATE = "numpy_device_separate"
 ARMS = (RESIDENT_FUSED, RESIDENT_SEPARATE)

@@ -32,7 +32,7 @@ from basemap.round0131_runtime_factorial import (
     select_outcome,
     train_config,
 )
-from experiments import round0131_nodes
+from experiments import prepare_round0131_queue, round0131_nodes
 from experiments.smoke_round0131_cpu import run_smoke
 
 
@@ -97,6 +97,31 @@ def test_registered_positive_r0125_outcomes_are_exact():
         "device-path-restores-density-without-native-regression-at-seed42",
         "device-path-restores-density-but-regresses-native-panel-at-seed42",
     }
+
+
+def test_r0125_corrected_document_sequence_is_exact():
+    prepare_round0131_queue._require_corrected_document_names(
+        "/labs/review-0125-2026-07-31-01.md",
+        "result-0125-2026-07-31-01.md",
+    )
+    for review, result in (
+        (
+            "/labs/review-0125-2026-07-31.md",
+            "result-0125-2026-07-31.md",
+        ),
+        (
+            "/labs/review-0125-2026-07-31-01.md",
+            "result-0125-2026-07-31.md",
+        ),
+        (
+            "/labs/review-0125-2026-08-01-01.md",
+            "result-0125-2026-08-01-01.md",
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="exact sequence-suffixed"):
+            prepare_round0131_queue._require_corrected_document_names(
+                review, result
+            )
 
 
 def test_train_configs_change_only_forward_arm_execution_fields(tmp_path):
@@ -413,6 +438,94 @@ def _write_sealed(path, body):
     return expected_input_signature(str(path))
 
 
+def _positive_r0125_decision(*, release_sha: str) -> dict:
+    return {
+        "schema": "round0125-device-host-runtime-decision-v1",
+        "round_id": "0125",
+        "release_sha": release_sha,
+        "outcome": POSITIVE,
+        "selector": {"outcome": POSITIVE, "execution_valid": True},
+        "capabilities_produced": [
+            "jina-fineweb-2m-runtime-path-density-bridge-v1"
+        ],
+        "sampler_only_cause_claimed": False,
+        "residency_only_cause_claimed": False,
+    }
+
+
+def _r0125_trigger_job(decision_signature):
+    return {
+        "r0125_decision": decision_signature,
+        "r0125_evaluation_release_sha": (
+            round0131_nodes.R0125_EVALUATION_RELEASE_SHA
+        ),
+        "r0125_train_release_sha": round0131_nodes.R0125_TRAIN_RELEASE_SHA,
+    }
+
+
+def test_positive_trigger_authenticates_corrected_evaluation_release(tmp_path):
+    decision_path = tmp_path / "decision.json"
+    signature = _write_sealed(
+        decision_path,
+        _positive_r0125_decision(
+            release_sha=round0131_nodes.R0125_EVALUATION_RELEASE_SHA
+        ),
+    )
+    decision, observed_signature = round0131_nodes._validate_positive_trigger(
+        _r0125_trigger_job(signature)
+    )
+    assert decision["release_sha"] == round0131_nodes.R0125_EVALUATION_RELEASE_SHA
+    assert observed_signature == signature
+
+
+def test_positive_trigger_rejects_old_or_relabelled_release(tmp_path):
+    decision_path = tmp_path / "old-decision.json"
+    signature = _write_sealed(
+        decision_path,
+        _positive_r0125_decision(
+            release_sha=round0131_nodes.R0125_TRAIN_RELEASE_SHA
+        ),
+    )
+    with pytest.raises(Round0131Error, match="eligible positive branch"):
+        round0131_nodes._validate_positive_trigger(
+            _r0125_trigger_job(signature)
+        )
+
+    corrected_path = tmp_path / "corrected-decision.json"
+    corrected = _write_sealed(
+        corrected_path,
+        _positive_r0125_decision(
+            release_sha=round0131_nodes.R0125_EVALUATION_RELEASE_SHA
+        ),
+    )
+    relabelled_job = _r0125_trigger_job(corrected)
+    relabelled_job["r0125_train_release_sha"] = (
+        round0131_nodes.R0125_EVALUATION_RELEASE_SHA
+    )
+    with pytest.raises(Round0131Error, match="dual-release lineage"):
+        round0131_nodes._validate_positive_trigger(relabelled_job)
+
+
+def test_endpoint_train_contract_requires_original_artifact_release():
+    train = {
+        "schema": "round0125-runtime-arm-train-receipt-v1",
+        "round_id": "0125",
+        "arm": HOST_ARM,
+        "release_sha": round0131_nodes.R0125_TRAIN_RELEASE_SHA,
+        "train_checks": {
+            key: True for key in round0131_nodes.R0125_TRAIN_CHECK_KEYS
+        },
+    }
+    assert round0131_nodes._r0125_train_contract(train, arm=HOST_ARM)
+    assert not round0131_nodes._r0125_train_contract(
+        {
+            **train,
+            "release_sha": round0131_nodes.R0125_EVALUATION_RELEASE_SHA,
+        },
+        arm=HOST_ARM,
+    )
+
+
 def _endpoint_chain(tmp_path, monkeypatch):
     graph = _signature("/sealed/graph.npz", "a")
     manifest = _signature("/sealed/graph.manifest.json", "b")
@@ -444,7 +557,7 @@ def _endpoint_chain(tmp_path, monkeypatch):
                 "schema": "round0125-runtime-arm-train-receipt-v1",
                 "round_id": "0125",
                 "arm": arm,
-                "release_sha": round0131_nodes.R0125_RELEASE_SHA,
+                "release_sha": round0131_nodes.R0125_TRAIN_RELEASE_SHA,
                 "production_config": config_signatures[arm],
                 "production_config_sha256": config_sha,
                 "causal_invariant_sha256": config["causal_invariant_sha256"],
@@ -467,7 +580,7 @@ def _endpoint_chain(tmp_path, monkeypatch):
                 "schema": "round0125-native-runtime-arm-score-v1",
                 "round_id": "0125",
                 "arm": arm,
-                "release_sha": round0131_nodes.R0125_RELEASE_SHA,
+                "release_sha": round0131_nodes.R0125_EVALUATION_RELEASE_SHA,
                 "train_receipt": train_signatures[arm],
                 "shared_evidence": shared_signature,
                 "execution_gates": {
@@ -481,7 +594,7 @@ def _endpoint_chain(tmp_path, monkeypatch):
         {
             "schema": "round0125-matched-runtime-density-panel-v1",
             "round_id": "0125",
-            "release_sha": round0131_nodes.R0125_RELEASE_SHA,
+            "release_sha": round0131_nodes.R0125_EVALUATION_RELEASE_SHA,
             "cells": {
                 arm: {"train_receipt": train_signatures[arm]}
                 for arm in (HOST_ARM, DEVICE_ARM)
@@ -517,6 +630,10 @@ def _endpoint_chain(tmp_path, monkeypatch):
         "r0125_panel": panel_signature,
         "r0125_train_receipts": train_signatures,
         "r0125_train_configs": config_signatures,
+        "r0125_evaluation_release_sha": (
+            round0131_nodes.R0125_EVALUATION_RELEASE_SHA
+        ),
+        "r0125_train_release_sha": round0131_nodes.R0125_TRAIN_RELEASE_SHA,
     }
     return active, job, decision
 
@@ -543,7 +660,7 @@ def test_native_score_cannot_rebind_an_endpoint_train(tmp_path, monkeypatch):
             "schema": "round0125-native-runtime-arm-score-v1",
             "round_id": "0125",
             "arm": HOST_ARM,
-            "release_sha": round0131_nodes.R0125_RELEASE_SHA,
+            "release_sha": round0131_nodes.R0125_EVALUATION_RELEASE_SHA,
             "train_receipt": job["r0125_train_receipts"][DEVICE_ARM],
             "shared_evidence": _signature("/sealed/shared.json", "c"),
             "execution_gates": {
@@ -566,7 +683,7 @@ def test_matched_panel_cannot_rebind_an_endpoint_train(tmp_path, monkeypatch):
         {
             "schema": "round0125-matched-runtime-density-panel-v1",
             "round_id": "0125",
-            "release_sha": round0131_nodes.R0125_RELEASE_SHA,
+            "release_sha": round0131_nodes.R0125_EVALUATION_RELEASE_SHA,
             "cells": {
                 arm: {"train_receipt": rebound[arm]}
                 for arm in (HOST_ARM, DEVICE_ARM)
