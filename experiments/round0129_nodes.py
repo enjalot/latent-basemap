@@ -53,13 +53,17 @@ from basemap.round0129_degree_replicate import (
     DIAGNOSTIC_SCHEMA,
     NATIVE_DENSITY_SCHEMA,
     PRODUCTION_CONFIG_SCHEMA,
+    R0117_RELEASE_SHA,
+    R0117_TORCH_VERSION,
     ROUND_ID,
     TRAIN_RECEIPT_SCHEMA,
     TRAINING_SEED,
     Round0129Error,
     config_equivalence,
+    deterministic_seed43_reconstruction,
     load_k15_graph,
     train_config,
+    verify_seed43_initial_state,
     verify_graph_provenance,
 )
 from experiments import round0113_nodes as prompt_nodes
@@ -83,7 +87,7 @@ def _graph(job: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
 
 def _r0117_control_config(
     job: Mapping[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     train_path = str(job["r0117_control_train_receipt"])
     train = read_sealed(train_path, label="R0117 raw seed-43 train")
     config_path = verify_signature(
@@ -92,13 +96,68 @@ def _r0117_control_config(
     with open(config_path, encoding="utf-8") as handle:
         receipt = json.load(handle)
     config = receipt.get("config")
-    if not isinstance(config, Mapping):
-        raise Round0129Error("R0117 production config is missing")
-    return dict(config), expected_input_signature(config_path)
+    baseline = ((train.get("performance_profile") or {}).get("baseline_key") or {})
+    if (
+        not isinstance(config, Mapping)
+        or str(job.get("r0117_release_sha") or "") != R0117_RELEASE_SHA
+        or train.get("release_sha") != R0117_RELEASE_SHA
+        or baseline.get("torch") != R0117_TORCH_VERSION
+    ):
+        raise Round0129Error("R0117 production config/environment is missing")
+    return (
+        dict(config),
+        expected_input_signature(config_path),
+        {
+            "r0117_train_receipt": expected_input_signature(train_path),
+            "release_sha": train.get("release_sha"),
+            "torch": baseline.get("torch"),
+            "cuda": baseline.get("cuda"),
+            "driver": baseline.get("driver"),
+            "compute_capability": baseline.get("compute_capability"),
+            "historical_pre_update_model_state_stored": False,
+        },
+    )
 
 
-def _new_model(config: Mapping[str, Any]):
-    model = bridge_nodes._new_model(config)
+def _model_class(expected_reconstruction: Mapping[str, Any]) -> type:
+    from basemap.pumap.parametric_umap import ParametricUMAP
+
+    expected = dict(expected_reconstruction)
+
+    class Round0129ParametricUMAP(ParametricUMAP):
+        def _init_model(self, input_dim: int) -> None:
+            super()._init_model(input_dim)
+            actual = verify_seed43_initial_state(
+                self.model,
+                expected_reconstruction=expected,
+            )
+            self._initial_model_state_receipt = {
+                **actual,
+                "capture_hook": (
+                    "round-specific ParametricUMAP._init_model override after "
+                    "graph/input admission and before optimizer construction"
+                ),
+            }
+
+    return Round0129ParametricUMAP
+
+
+def _new_model(
+    config: Mapping[str, Any],
+    *,
+    expected_reconstruction: Mapping[str, Any],
+):
+    # Execute the exact R0117 `_new_model` source while temporarily selecting a
+    # subclass whose sole purpose is the pre-optimizer state capture hook.
+    import basemap.pumap.parametric_umap as pumap_module
+
+    original = pumap_module.ParametricUMAP
+    pumap_module.ParametricUMAP = _model_class(expected_reconstruction)
+    try:
+        model = prompt_nodes._new_model(config)
+    finally:
+        pumap_module.ParametricUMAP = original
+    model.n_epochs = int(config["execution"]["training_loop_plan"]["n_epochs"])
     return model
 
 
@@ -118,9 +177,16 @@ def run_train(
         graph_edges=len(graph["sources"]),
         retained_rows=graph["n_nodes"],
     )
-    control_config, control_config_signature = _r0117_control_config(job)
+    (
+        control_config,
+        control_config_signature,
+        r0117_environment,
+    ) = _r0117_control_config(job)
     equivalence = config_equivalence(
         treatment=config, control=control_config
+    )
+    reconstruction = deterministic_seed43_reconstruction(
+        r0117_torch_version=str(r0117_environment["torch"])
     )
     source = prompt_nodes._open_compact(assembly, ARM)
     dataset = HostFp16EndpointArray(
@@ -146,6 +212,8 @@ def run_train(
             "config_sha256": config_sha,
             "r0117_control_config": control_config_signature,
             "config_equivalence": equivalence,
+            "r0117_constructor_environment": r0117_environment,
+            "deterministic_initial_state_reconstruction": reconstruction,
         },
         immutable=True,
     )
@@ -154,7 +222,10 @@ def run_train(
     torch.manual_seed(TRAINING_SEED)
     torch.cuda.manual_seed_all(TRAINING_SEED)
     torch.cuda.reset_peak_memory_stats("cuda")
-    model = _new_model(config)
+    model = _new_model(
+        config,
+        expected_reconstruction=reconstruction,
+    )
     model._max_train_steps = SUCCESSFUL_UPDATES
     model._bench_warmup = PERFORMANCE_WARMUP_UPDATES
     model._perf_profile = True
@@ -178,6 +249,18 @@ def run_train(
     wall = time.monotonic() - started
     accounting = dict(model._train_stats)
     runtime = wrapper.runtime_stamp()
+    initial_state = getattr(model, "_initial_model_state_receipt", None)
+    if not isinstance(initial_state, Mapping):
+        raise Round0129Error("R0129 pre-update initial-state hook did not run")
+    if (
+        initial_state.get("observed_sha256")
+        != reconstruction["observed_sha256"]
+        or initial_state.get("captured_before_optimizer_construction_and_update_zero")
+        is not True
+        or initial_state.get("historical_evidence_kind")
+        != "deterministic-reconstruction-not-original-reviewed-receipt"
+    ):
+        raise Round0129Error("R0129 pre-update initial-state receipt changed")
     synchronize_runtime_counters(accounting, runtime)
     expected_stamp = config["execution"]["expected_pipeline_stamp"]
     bridge_nodes._verify_train_accounting(
@@ -217,6 +300,8 @@ def run_train(
         "graph_provenance": provenance,
         "r0117_control_config": control_config_signature,
         "config_equivalence": equivalence,
+        "r0117_constructor_environment": r0117_environment,
+        "initial_model_state": dict(initial_state),
         "train_accounting": accounting,
         "exact_execution_receipt": runtime,
         "performance_profile": profiler,
@@ -228,7 +313,8 @@ def run_train(
             "no_pipeline_stamp_drift": True,
             "endpoint_rows_match_updates": True,
             "weighted_rejection_accounting_closes": True,
-            "graph_only_config_equivalence": True,
+            "graph_only_treatment_isolation": True,
+            "actual_pre_update_initial_state_captured": True,
         },
         "memory": {
             "device_total_bytes": int(total_bytes),
@@ -263,8 +349,15 @@ def _authenticate_model(
         graph_edges=len(graph["sources"]),
         retained_rows=graph["n_nodes"],
     )
-    control_config, control_config_signature = _r0117_control_config(job)
+    (
+        control_config,
+        control_config_signature,
+        r0117_environment,
+    ) = _r0117_control_config(job)
     equivalence = config_equivalence(treatment=config, control=control_config)
+    reconstruction = deterministic_seed43_reconstruction(
+        r0117_torch_version=str(r0117_environment["torch"])
+    )
     train_path = os.path.join(str(job["train_output"]), "train-receipt.json")
     train = read_sealed(train_path, label="R0129 treatment train")
     config_path = verify_signature(
@@ -275,6 +368,7 @@ def _authenticate_model(
     runtime = train.get("exact_execution_receipt")
     accounting = train.get("train_accounting")
     checks = train.get("train_checks")
+    initial_state = train.get("initial_model_state")
     if (
         train.get("schema") != TRAIN_RECEIPT_SCHEMA
         or train.get("round_id") != ROUND_ID
@@ -288,11 +382,22 @@ def _authenticate_model(
         or train.get("graph_provenance") != provenance
         or train.get("r0117_control_config") != control_config_signature
         or train.get("config_equivalence") != equivalence
+        or train.get("r0117_constructor_environment") != r0117_environment
+        or not isinstance(initial_state, Mapping)
+        or initial_state.get("observed_sha256")
+        != reconstruction["observed_sha256"]
+        or initial_state.get("same_release_reconstruction") != reconstruction
+        or initial_state.get("captured_before_optimizer_construction_and_update_zero")
+        is not True
+        or initial_state.get("actual_historical_r0117_bytes_claimed") is not False
         or production.get("schema") != PRODUCTION_CONFIG_SCHEMA
         or production.get("round_id") != ROUND_ID
         or production.get("config") != config
         or production.get("config_sha256") != config_sha
         or production.get("config_equivalence") != equivalence
+        or production.get("r0117_constructor_environment") != r0117_environment
+        or production.get("deterministic_initial_state_reconstruction")
+        != reconstruction
         or train.get("optimizer_updates") != SUCCESSFUL_UPDATES
         or not isinstance(runtime, Mapping)
         or not isinstance(accounting, Mapping)
@@ -580,7 +685,14 @@ def run_native_density(
         "bootstrap_diagnostics": bootstrap,
         "arrays": expected_input_signature(arrays_path),
         "changed_factor": "fuzzy graph neighbor degree only",
-        "config_and_sampling_law_equivalent": True,
+        "non_graph_config_equal": True,
+        "sampling_mechanism_equal_conditioned_on_graph": True,
+        "positive_edge_distribution_equal": False,
+        "registered_distributional_intervention": (
+            "weighted graph topology/edge population/weights induced by k49-to-k15"
+        ),
+        "negative_sampling_distribution_equal": True,
+        "identical_realized_negative_pairs_claimed": False,
         "identical_realized_edge_draws_claimed": False,
         "core_and_ood_diagnostics_registered_role": "diagnostic-only",
         "legacy_density_floor_used": False,
@@ -623,6 +735,13 @@ def run_decision(
         "no_pipeline_stamp_drift",
     }
     gates = diagnostics.get("execution_gates")
+    isolation = train.get("config_equivalence")
+    initial_state = train.get("initial_model_state")
+    initial_state_contract = (
+        isolation.get("initial_state_contract")
+        if isinstance(isolation, Mapping)
+        else None
+    )
     if (
         trigger.get("schema") != R0124_DECISION_SCHEMA
         or (trigger.get("registered_selector") or {}).get("outcome")
@@ -635,9 +754,31 @@ def run_decision(
         or diagnostics.get("release_sha") != active["manifest"]["release_sha"]
         or train.get("schema") != TRAIN_RECEIPT_SCHEMA
         or train.get("round_id") != ROUND_ID
-        or train.get("config_equivalence", {}).get(
-            "identical_realized_edge_draws_claimed"
+        or not isinstance(isolation, Mapping)
+        or not isinstance(initial_state, Mapping)
+        or not isinstance(initial_state_contract, Mapping)
+        or initial_state.get("observed_sha256")
+        != initial_state_contract.get("expected_sha256")
+        or initial_state.get("parameter_count")
+        != initial_state_contract.get("parameter_count")
+        or initial_state.get(
+            "captured_before_optimizer_construction_and_update_zero"
         )
+        is not True
+        or initial_state.get("actual_historical_r0117_bytes_claimed") is not False
+        or initial_state.get("historical_evidence_kind")
+        != "deterministic-reconstruction-not-original-reviewed-receipt"
+        or isolation.get(
+            "sampling_mechanism_equal_conditioned_on_graph"
+        )
+        is not True
+        or isolation.get("positive_edge_distribution_equal")
+        is not False
+        or isolation.get("negative_sampling_distribution_equal")
+        is not True
+        or isolation.get("identical_realized_negative_pairs_claimed")
+        is not False
+        or isolation.get("identical_realized_edge_draws_claimed")
         is not False
         or density.get("treatment", {}).get("diagnostics")
         != expected_input_signature(diagnostic_path)
@@ -676,11 +817,13 @@ def run_decision(
         "cross_seed_interpretation": interpretation,
         "causal_claim": (
             "within the exact accepted raw 2M seed-43 recipe, the registered "
-            "difference is graph degree/topology; configuration and sampling "
-            "law are equivalent, while realized weighted edge draws are not "
-            "claimed identical"
+            "intervention changes weighted graph topology, edge population, "
+            "weights, and therefore the positive categorical distribution; "
+            "non-graph config and the sampler mechanism conditioned on its "
+            "graph are equal, with no cross-run realized-draw claim"
         ),
         "config_equivalence": train["config_equivalence"],
+        "initial_model_state": train["initial_model_state"],
         "diagnostic_metrics": diagnostics["metrics"],
         "polish_ood": diagnostics["ood"]["pol_Latn"],
         "diagnostics_can_rescue_or_fail_selector": False,

@@ -17,13 +17,21 @@ from basemap.round0124_degree_bridge import (
 )
 from basemap.round0129_degree_replicate import (
     GRAPH_PROVENANCE_SCHEMA,
+    R0117_R0129_INIT_MODEL_SOURCE_SHA256,
+    R0117_R0129_MLP_GIT_BLOB_SHA1,
+    R0117_R0129_NEW_MODEL_SOURCE_SHA256,
+    SEED43_INITIAL_STATE_SHA256,
+    SEED43_PARAMETER_COUNT,
     TRAINING_SEED,
     Round0129Error,
     config_equivalence,
+    constructor_source_identity,
+    deterministic_seed43_reconstruction,
     train_config,
+    verify_seed43_initial_state,
     verify_graph_provenance,
 )
-from experiments import prepare_round0129_queue, round0113_nodes
+from experiments import prepare_round0129_queue, round0113_nodes, round0129_nodes
 
 
 R0115_GRAPH = (
@@ -54,8 +62,69 @@ def test_seed43_config_is_graph_only_against_exact_r0117_control():
     assert treatment["optimizer"]["positive_rng_seed"] == TRAINING_SEED
     assert treatment["graph"]["k"] == 15
     assert control_receipt["config"]["graph"]["k"] == 50
-    assert proof["sampling_law_equal_after_graph_fields"] is True
+    assert proof["non_graph_config_equal"] is True
+    assert proof["sampling_mechanism_equal_conditioned_on_graph"] is True
+    assert proof["positive_edge_distribution_equal"] is False
+    assert proof["negative_sampling_distribution_equal"] is True
+    assert proof["identical_realized_negative_pairs_claimed"] is False
     assert proof["identical_realized_edge_draws_claimed"] is False
+    assert not any("sampling_law" in key for key in proof)
+
+
+def test_constructor_identity_and_seed43_reconstruction_are_exact():
+    identity = constructor_source_identity()
+    assert identity["mlp_module_git_blob_sha1"] == (
+        R0117_R0129_MLP_GIT_BLOB_SHA1
+    )
+    assert identity["new_model_source"]["sha256"] == (
+        R0117_R0129_NEW_MODEL_SOURCE_SHA256
+    )
+    assert identity["init_model_source"]["sha256"] == (
+        R0117_R0129_INIT_MODEL_SOURCE_SHA256
+    )
+    assert identity["full_core_blob_identity_claimed"] is False
+    reconstruction = deterministic_seed43_reconstruction(
+        r0117_torch_version="2.11.0+cu128"
+    )
+    assert reconstruction["observed_sha256"] == SEED43_INITIAL_STATE_SHA256
+    assert reconstruction["parameter_count"] == SEED43_PARAMETER_COUNT
+    assert reconstruction["historical_evidence_kind"] == (
+        "deterministic-reconstruction-not-original-reviewed-receipt"
+    )
+    assert reconstruction["r0117_original_pre_update_model_receipt_exists"] is False
+
+
+def test_actual_pre_update_hook_captures_and_mutation_fails():
+    import torch
+
+    reconstruction = deterministic_seed43_reconstruction(
+        r0117_torch_version="2.11.0+cu128"
+    )
+    treatment_graph = read_sealed(R0124_GRAPH, label="R0124 k15 graph")
+    treatment, _sha = train_config(
+        graph_signature=treatment_graph["graph"],
+        graph_manifest_signature=expected_input_signature(R0124_GRAPH),
+        graph_edges=int(treatment_graph["directed_edge_count"]),
+        retained_rows=int(treatment_graph["retained_rows"]),
+    )
+    torch.manual_seed(TRAINING_SEED)
+    model = round0129_nodes._new_model(
+        treatment,
+        expected_reconstruction=reconstruction,
+    )
+    model.device = "cpu"
+    model._init_model(768)
+    receipt = model._initial_model_state_receipt
+    assert receipt["observed_sha256"] == SEED43_INITIAL_STATE_SHA256
+    assert receipt["captured_before_optimizer_construction_and_update_zero"] is True
+    with torch.no_grad():
+        first = next(model.model.parameters())
+        first.view(-1)[0] += 1
+    with pytest.raises(Round0129Error, match="initial model state changed"):
+        verify_seed43_initial_state(
+            model.model,
+            expected_reconstruction=reconstruction,
+        )
 
 
 def test_prompt_panel_registers_r0129_seed43_without_fallback():

@@ -520,8 +520,17 @@ def prepare_round0129(
                 },
                 "training_seed": TRAINING_SEED,
                 "successful_updates": SUCCESSFUL_UPDATES,
-                "config_and_sampling_law_equivalent": True,
+                "non_graph_config_equal": True,
+                "sampling_mechanism_equal_conditioned_on_graph": True,
+                "positive_edge_distribution_equal": False,
+                "registered_distributional_intervention": (
+                    "weighted graph topology/edge population/weights induced "
+                    "by k49-to-k15"
+                ),
+                "negative_sampling_distribution_equal": True,
+                "identical_realized_negative_pairs_claimed": False,
                 "identical_realized_draws_claimed": False,
+                "actual_pre_update_initial_state_hook_required": True,
                 "native_reference": "exact R0115/R0117 4,000-anchor high-D reference",
                 "paired_bootstrap": {
                     "draws": BOOTSTRAP_DRAWS,
