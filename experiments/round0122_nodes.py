@@ -54,6 +54,22 @@ R0119_PANEL_SHA256 = (
 R0119_DECISION_SHA256 = (
     "26b8550c415ef0e1eac3af6a05abc5e32bdea657a1a23d1ab27a8909d5fcead1"
 )
+R0115_RELEASE_SHA = "3b6ed28e1801e13228c78e05cf992a30e398a678"
+R0115_REVIEW_SHA256 = (
+    "cbc6ad74773624a0fd8ea966f5a1e9cd37be120b554a0ca56c28011720d3bb02"
+)
+R0115_RESULT_SHA256 = (
+    "7e2a28c703dc3b793ce38fb47badc4471ca66b94ba6b7836242cd68e7dc2dba6"
+)
+R0115_NATIVE_SCORE_SHA256 = (
+    "e6bb7bed64e88efccf24d2addc46c692d5aa4195e48f13cc1e83d81ac4131f11"
+)
+R0115_NATIVE_HIGH_D_REFERENCE_SHA256 = (
+    "f64be840213652410460731ef9a08d9537367f11e87f8a8656e85d1c988cba8b"
+)
+R0115_NATIVE_HIGH_D_REFERENCE_KEY = (
+    "4d36b010b3fdc3169db8ceed6c61a7233bdbc4180ecedc39b26010976fcae4b3"
+)
 R0104_MODEL_SHA256 = {
     "r0104_fp16_seed42_full_transform": (
         "36a7fb86784b6a891f7c73b83d008aead320a7729eea913efc117e4bcd5b3e08"
@@ -443,6 +459,84 @@ def _replay_bundle(
     }
 
 
+def _native_r0115_context(
+    job: Mapping[str, Any],
+    *,
+    r0119_cells: Mapping[str, Any],
+) -> dict[str, Any]:
+    review_signature = expected_input_signature(
+        str(job["r0115_accepted_review"]["canonical_path"])
+    )
+    result_signature = expected_input_signature(
+        str(job["r0115_accepted_result"]["canonical_path"])
+    )
+    score, score_signature = _read_json_signature(
+        job["r0115_native_score"],
+        label="R0115 native raw score",
+        sealed=True,
+    )
+    high_d_reference = expected_input_signature(
+        str(job["r0115_native_high_d_reference"]["canonical_path"])
+    )
+    metrics = score.get("metrics")
+    panel = score.get("panel")
+    provenance = (
+        panel.get("provenance")
+        if isinstance(panel, Mapping)
+        else None
+    )
+    r0119_seed42 = r0119_cells.get("current_2m_seed42")
+    if (
+        review_signature != dict(job["r0115_accepted_review"])
+        or review_signature["sha256"] != R0115_REVIEW_SHA256
+        or result_signature != dict(job["r0115_accepted_result"])
+        or result_signature["sha256"] != R0115_RESULT_SHA256
+        or score_signature["sha256"] != R0115_NATIVE_SCORE_SHA256
+        or high_d_reference
+        != dict(job["r0115_native_high_d_reference"])
+        or high_d_reference["sha256"]
+        != R0115_NATIVE_HIGH_D_REFERENCE_SHA256
+        or score.get("schema") != "round0113-prompt-arm-score-v1"
+        or score.get("round_id") != "0115"
+        or score.get("arm") != "raw"
+        or not isinstance(metrics, Mapping)
+        or metrics.get("density") != 0.2304
+        or not isinstance(panel, Mapping)
+        or panel.get("schema") != "panel_v2"
+        or panel.get("density") != 0.2304
+        or panel.get("k_density") != 15
+        or not isinstance(provenance, Mapping)
+        or provenance.get("round_id") != "0115"
+        or provenance.get("release_sha") != R0115_RELEASE_SHA
+        or provenance.get("hiD_reference_reused") is not True
+        or provenance.get("hiD_reference_key")
+        != R0115_NATIVE_HIGH_D_REFERENCE_KEY
+        or score.get("high_d_reference") != high_d_reference
+        or not isinstance(r0119_seed42, Mapping)
+        or provenance.get("train_receipt")
+        != r0119_seed42.get("train_receipt")
+    ):
+        raise Round0122Error("accepted R0115 native density lineage changed")
+    return {
+        "accepted_review": review_signature,
+        "accepted_result": result_signature,
+        "score": score_signature,
+        "high_d_reference": high_d_reference,
+        "high_d_reference_key": R0115_NATIVE_HIGH_D_REFERENCE_KEY,
+        "reported_density": float(metrics["density"]),
+        "numerically_clears_r0119_floor": (
+            float(metrics["density"]) >= REGISTERED_FLOOR
+        ),
+        "same_matched_r0040_universe_and_scorer": False,
+        "selector_input": False,
+        "interpretation": (
+            "the accepted R0115 native panel passes numerically; "
+            "R0122 is calibration/representation-transfer localization, "
+            "not proof of bad native training geometry"
+        ),
+    }
+
+
 def run_score(
     active: Mapping[str, Any],
     job: Mapping[str, Any],
@@ -467,6 +561,9 @@ def run_score(
         anchors=anchors,
         global_rows=global_rows,
         high_radius=high_radius,
+    )
+    native_r0115_context = _native_r0115_context(
+        job, r0119_cells=r0119_cells
     )
     r0104_specs = job.get("r0104_model_bundles")
     replay_specs = job.get("r0119_replay_model_bundles")
@@ -557,16 +654,7 @@ def run_score(
             "floor_changed_or_tuned": False,
         },
         "new_cells": cells,
-        "native_r0115_context": {
-            "reported_density": 0.2304,
-            "numerically_clears_r0119_floor": 0.2304 >= REGISTERED_FLOOR,
-            "same_matched_r0040_universe_and_scorer": False,
-            "interpretation": (
-                "the accepted R0115 native panel passes numerically; "
-                "R0122 is calibration/representation-transfer localization, "
-                "not proof of bad native training geometry"
-            ),
-        },
+        "native_r0115_context": native_r0115_context,
         "arrays": expected_input_signature(arrays_path),
         "training_performed": False,
         "single_factor_cause_claimed": False,
@@ -596,6 +684,7 @@ def run_decision(
     reused = (
         score.get("r0119_reused_evidence") or {}
     ).get("historical_and_direct_cells")
+    native_r0115 = score.get("native_r0115_context")
     if (
         score.get("schema") != SCORE_SCHEMA
         or score.get("round_id") != ROUND_ID
@@ -604,6 +693,11 @@ def run_decision(
         or tuple(new_cells) != NEW_CELL_ORDER
         or not isinstance(reused, Mapping)
         or set(reused) != set(R0119_REUSED_CELL_ORDER)
+        or not isinstance(native_r0115, Mapping)
+        or native_r0115.get("reported_density") != 0.2304
+        or native_r0115.get("selector_input") is not False
+        or native_r0115.get("high_d_reference_key")
+        != R0115_NATIVE_HIGH_D_REFERENCE_KEY
         or score.get("training_performed") is not False
     ):
         raise Round0122Error("R0122 density bridge panel changed")
@@ -716,8 +810,11 @@ def run_decision(
             else []
         ),
         "single_factor_cause_localized": False,
-        "native_r0115_density": 0.2304,
-        "native_r0115_density_numerically_clears_floor": True,
+        "native_r0115_density": native_r0115["reported_density"],
+        "native_r0115_density_numerically_clears_floor": (
+            native_r0115["numerically_clears_r0119_floor"]
+        ),
+        "native_r0115_context_is_selector_input": False,
         "native_training_geometry_declared_bad": False,
         "role": (
             "calibration/representation-transfer localization only; the "

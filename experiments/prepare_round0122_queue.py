@@ -35,6 +35,12 @@ from experiments.round0122_nodes import (
     DECISION_SCHEMA,
     NEW_CELL_ORDER,
     R0104_MODEL_SHA256,
+    R0115_NATIVE_HIGH_D_REFERENCE_KEY,
+    R0115_NATIVE_HIGH_D_REFERENCE_SHA256,
+    R0115_NATIVE_SCORE_SHA256,
+    R0115_RELEASE_SHA,
+    R0115_RESULT_SHA256,
+    R0115_REVIEW_SHA256,
     R0119_DECISION_SCHEMA,
     R0119_DECISION_SHA256,
     R0119_PANEL_SHA256,
@@ -73,6 +79,14 @@ R0104_BUNDLE_PATHS = {
         os.path.join(R0104_ROOT, "int8_treatment", "train"),
     ),
 }
+R0115_NATIVE_SCORE = (
+    "/data/latent-basemap/runs/round-0115/queue-attempt-2/artifacts/"
+    "raw/evaluation/score.json"
+)
+R0115_NATIVE_HIGH_D_REFERENCE = (
+    "/data/latent-basemap/runs/round-0115/queue-attempt-2/artifacts/"
+    "raw/graph/high-d-reference.npz"
+)
 
 R0119_QUEUE = "/data/latent-basemap/runs/round-0119/queue/queue.json"
 R0119_TERMINAL = (
@@ -255,6 +269,7 @@ def _r0119_inputs(
     if any(key not in by_key for key in replay_keys):
         raise RuntimeError("R0119 direct replay bundles are missing")
     replay_bundles = [by_key[key] for key in replay_keys]
+    r0115_native = _r0115_native_evidence(replay_bundles[0])
 
     panel_signature = expected_input_signature(R0119_PANEL)
     decision_signature = expected_input_signature(R0119_DECISION)
@@ -325,6 +340,105 @@ def _r0119_inputs(
         "lineage": dict(lineage),
         "calibration": dict(calibration),
         "replay_bundles": replay_bundles,
+        "r0115_native": r0115_native,
+    }
+
+
+def _r0115_native_evidence(
+    seed42_bundle: Mapping[str, Any],
+) -> dict[str, Any]:
+    review_signature = dict(seed42_bundle.get("accepted_review") or {})
+    result_signature = dict(seed42_bundle.get("accepted_result") or {})
+    if (
+        expected_input_signature(review_signature.get("canonical_path", ""))
+        != review_signature
+        or review_signature.get("sha256") != R0115_REVIEW_SHA256
+        or expected_input_signature(result_signature.get("canonical_path", ""))
+        != result_signature
+        or result_signature.get("sha256") != R0115_RESULT_SHA256
+        or seed42_bundle.get("reviewed_capability")
+        != "capability:jina-fineweb-2m-prompt-map-contrast-v1"
+    ):
+        raise RuntimeError("R0119 does not bind exact accepted R0115 lineage")
+    review_frontmatter, _ = _document(review_signature["canonical_path"])
+    result_frontmatter, result_text = _document(
+        result_signature["canonical_path"]
+    )
+    if (
+        review_frontmatter.get("round_id") != "0115"
+        or review_frontmatter.get("status") != "accepted"
+        or review_frontmatter.get("result_sha256")
+        != result_signature["sha256"]
+        or review_frontmatter.get("verified_release_commit")
+        != R0115_RELEASE_SHA
+        or "capability:jina-fineweb-2m-prompt-map-contrast-v1"
+        not in _frontmatter_list(
+            review_frontmatter,
+            "releases",
+            label="R0115 review",
+        )
+        or result_frontmatter.get("round_id") != "0115"
+        or result_frontmatter.get("status") != "complete"
+        or result_frontmatter.get("release_commit") != R0115_RELEASE_SHA
+        or "jina-fineweb-2m-prompt-map-contrast-v1"
+        not in _frontmatter_list(
+            result_frontmatter,
+            "capabilities_produced",
+            label="R0115 result",
+        )
+    ):
+        raise RuntimeError("transitive R0115 review/result closure changed")
+
+    score_signature = expected_input_signature(R0115_NATIVE_SCORE)
+    high_d_reference = expected_input_signature(
+        R0115_NATIVE_HIGH_D_REFERENCE
+    )
+    if (
+        score_signature["sha256"] != R0115_NATIVE_SCORE_SHA256
+        or high_d_reference["sha256"]
+        != R0115_NATIVE_HIGH_D_REFERENCE_SHA256
+        or score_signature["sha256"] not in result_text
+        or high_d_reference["sha256"] not in result_text
+    ):
+        raise RuntimeError("R0115 native score/reference evidence changed")
+    with open(R0115_NATIVE_SCORE, encoding="utf-8") as handle:
+        score = json.load(handle)
+    validate_seal(score, label="R0115 native raw score")
+    metrics = score.get("metrics")
+    panel = score.get("panel")
+    provenance = (
+        panel.get("provenance")
+        if isinstance(panel, Mapping)
+        else None
+    )
+    if (
+        score.get("schema") != "round0113-prompt-arm-score-v1"
+        or score.get("round_id") != "0115"
+        or score.get("arm") != "raw"
+        or score.get("high_d_reference") != high_d_reference
+        or not isinstance(metrics, Mapping)
+        or metrics.get("density") != 0.2304
+        or not isinstance(panel, Mapping)
+        or panel.get("schema") != "panel_v2"
+        or panel.get("density") != 0.2304
+        or panel.get("k_density") != 15
+        or not isinstance(provenance, Mapping)
+        or provenance.get("round_id") != "0115"
+        or provenance.get("release_sha") != R0115_RELEASE_SHA
+        or provenance.get("hiD_reference_reused") is not True
+        or provenance.get("hiD_reference_key")
+        != R0115_NATIVE_HIGH_D_REFERENCE_KEY
+        or provenance.get("train_receipt")
+        != seed42_bundle.get("train_receipt")
+    ):
+        raise RuntimeError("R0115 native score semantics changed")
+    return {
+        "accepted_review": review_signature,
+        "accepted_result": result_signature,
+        "score": score_signature,
+        "high_d_reference": high_d_reference,
+        "reported_density": float(metrics["density"]),
+        "high_d_reference_key": R0115_NATIVE_HIGH_D_REFERENCE_KEY,
     }
 
 
@@ -388,6 +502,15 @@ def prepare_round0122(
         ],
         r0119["panel"],
         r0119["decision"],
+        *[
+            r0119["r0115_native"][field]
+            for field in (
+                "accepted_review",
+                "accepted_result",
+                "score",
+                "high_d_reference",
+            )
+        ],
         *lineage_signatures,
         *[
             dict(bundle[field])
@@ -427,6 +550,16 @@ def prepare_round0122(
             "r0108_calibration": r0119["calibration"],
             "r0119_panel": r0119["panel"],
             "r0119_decision": r0119["decision"],
+            "r0115_accepted_review": r0119["r0115_native"][
+                "accepted_review"
+            ],
+            "r0115_accepted_result": r0119["r0115_native"][
+                "accepted_result"
+            ],
+            "r0115_native_score": r0119["r0115_native"]["score"],
+            "r0115_native_high_d_reference": r0119["r0115_native"][
+                "high_d_reference"
+            ],
             "r0104_model_bundles": r0104_bundles,
             "r0119_replay_model_bundles": r0119["replay_bundles"],
         },
@@ -448,6 +581,10 @@ def prepare_round0122(
                 evidence["0119"]["result"],
                 r0119["panel"],
                 r0119["decision"],
+                r0119["r0115_native"]["accepted_review"],
+                r0119["r0115_native"]["accepted_result"],
+                r0119["r0115_native"]["score"],
+                r0119["r0115_native"]["high_d_reference"],
             ]),
             "p90_wall_s": 30.0,
             "node_policy": {
@@ -524,8 +661,16 @@ def prepare_round0122(
             "single_factor_cause_localized": False,
             "native_r0115_density_context": {
                 "reported_density": 0.2304,
+                "accepted_score_sha256": R0115_NATIVE_SCORE_SHA256,
+                "accepted_high_d_reference_sha256": (
+                    R0115_NATIVE_HIGH_D_REFERENCE_SHA256
+                ),
+                "accepted_high_d_reference_key": (
+                    R0115_NATIVE_HIGH_D_REFERENCE_KEY
+                ),
                 "numerically_clears_r0119_floor": True,
                 "same_matched_universe_and_scorer": False,
+                "selector_input": False,
                 "role": (
                     "this is calibration/representation-transfer "
                     "localization, not proof of bad native training geometry"

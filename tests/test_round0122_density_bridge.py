@@ -130,6 +130,24 @@ def test_density_bridge_cpu_smoke_transforms_full_source_before_selection(
             direct_cells,
         ),
     )
+    monkeypatch.setattr(
+        round0122_nodes,
+        "_native_r0115_context",
+        lambda *_args, **_kwargs: {
+            "accepted_review": _signature("/smoke/r0115-review", 94),
+            "accepted_result": _signature("/smoke/r0115-result", 95),
+            "score": _signature("/smoke/r0115-score", 96),
+            "high_d_reference": _signature("/smoke/r0115-reference", 97),
+            "high_d_reference_key": (
+                round0122_nodes.R0115_NATIVE_HIGH_D_REFERENCE_KEY
+            ),
+            "reported_density": 0.2304,
+            "numerically_clears_r0119_floor": True,
+            "same_matched_r0040_universe_and_scorer": False,
+            "selector_input": False,
+            "interpretation": "native context only",
+        },
+    )
     models = {
         key: _FakeModel(index)
         for index, key in enumerate(round0122_nodes.NEW_CELL_ORDER)
@@ -301,6 +319,14 @@ def _decision_score(
                 },
             }
         },
+        "native_r0115_context": {
+            "high_d_reference_key": (
+                round0122_nodes.R0115_NATIVE_HIGH_D_REFERENCE_KEY
+            ),
+            "reported_density": 0.2304,
+            "numerically_clears_r0119_floor": True,
+            "selector_input": False,
+        },
     })
 
 
@@ -371,6 +397,104 @@ def test_storage_diagnostic_never_replaces_fp16_boundary(
     assert decision["storage_sensitive_diagnostic"][
         "diagnostic_only"
     ] is True
+
+
+def test_native_r0115_context_binds_score_reference_and_train_lineage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    review_path = tmp_path / "review.md"
+    result_path = tmp_path / "result.md"
+    reference_path = tmp_path / "high-d-reference.npz"
+    review_path.write_text("accepted review", encoding="utf-8")
+    result_path.write_text("accepted result", encoding="utf-8")
+    reference_path.write_bytes(b"high-d-reference")
+    review = expected_input_signature(str(review_path))
+    result = expected_input_signature(str(result_path))
+    reference = expected_input_signature(str(reference_path))
+    train = _signature("/smoke/r0115.train", 101)
+    release = "c" * 40
+    reference_key = "d" * 64
+    score_path = tmp_path / "score.json"
+    score = _write_json(
+        score_path,
+        seal({
+            "schema": "round0113-prompt-arm-score-v1",
+            "round_id": "0115",
+            "arm": "raw",
+            "metrics": {"density": 0.2304},
+            "high_d_reference": reference,
+            "panel": {
+                "schema": "panel_v2",
+                "density": 0.2304,
+                "k_density": 15,
+                "provenance": {
+                    "round_id": "0115",
+                    "release_sha": release,
+                    "hiD_reference_reused": True,
+                    "hiD_reference_key": reference_key,
+                    "train_receipt": train,
+                },
+            },
+        }),
+    )
+    monkeypatch.setattr(round0122_nodes, "R0115_RELEASE_SHA", release)
+    monkeypatch.setattr(
+        round0122_nodes, "R0115_REVIEW_SHA256", review["sha256"]
+    )
+    monkeypatch.setattr(
+        round0122_nodes, "R0115_RESULT_SHA256", result["sha256"]
+    )
+    monkeypatch.setattr(
+        round0122_nodes, "R0115_NATIVE_SCORE_SHA256", score["sha256"]
+    )
+    monkeypatch.setattr(
+        round0122_nodes,
+        "R0115_NATIVE_HIGH_D_REFERENCE_SHA256",
+        reference["sha256"],
+    )
+    monkeypatch.setattr(
+        round0122_nodes,
+        "R0115_NATIVE_HIGH_D_REFERENCE_KEY",
+        reference_key,
+    )
+    job = {
+        "r0115_accepted_review": review,
+        "r0115_accepted_result": result,
+        "r0115_native_score": score,
+        "r0115_native_high_d_reference": reference,
+    }
+    context = round0122_nodes._native_r0115_context(
+        job,
+        r0119_cells={
+            "current_2m_seed42": {"train_receipt": train},
+        },
+    )
+    assert context["reported_density"] == 0.2304
+    assert context["score"] == score
+    assert context["high_d_reference"] == reference
+    assert context["selector_input"] is False
+
+    changed = json.loads(score_path.read_text(encoding="utf-8"))
+    changed["metrics"]["density"] = 0.1
+    changed = seal({
+        key: value
+        for key, value in changed.items()
+        if key != "identity_sha256"
+    })
+    changed_signature = _write_json(score_path, changed)
+    monkeypatch.setattr(
+        round0122_nodes,
+        "R0115_NATIVE_SCORE_SHA256",
+        changed_signature["sha256"],
+    )
+    with pytest.raises(round0122_nodes.Round0122Error, match="lineage changed"):
+        round0122_nodes._native_r0115_context(
+            {**job, "r0115_native_score": changed_signature},
+            r0119_cells={
+                "current_2m_seed42": {"train_receipt": train},
+            },
+        )
 
 
 def test_authenticate_r0104_binds_model_and_actual_pipeline(
