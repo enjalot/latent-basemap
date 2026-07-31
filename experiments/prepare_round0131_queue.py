@@ -51,6 +51,10 @@ R0125_CORRECTED_REVIEW = "review-0125-2026-07-31-01.md"
 R0125_CORRECTED_QUEUE = (
     "/data/latent-basemap/runs/round-0125/queue-attempt-2/queue.json"
 )
+R0125_ROUND_DOCUMENT = os.path.join(LAB_ROOT, "round-0125-2026-07-31.md")
+R0125_ROUND_SHA256 = (
+    "3ef62cda7a2b98972d4651a7bf8bee6ac6423b103952f3daf3b355b07cba8b53"
+)
 R0125_TRAIN_CHECK_KEYS = {
     "exact_update_closure",
     "zero_numerical_skips",
@@ -116,6 +120,29 @@ def _require_corrected_document_names(
         )
 
 
+def _require_current_r0125_round_closure(
+    review: Mapping[str, Any],
+    result: Mapping[str, Any],
+    queue: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind the correction evidence to the current append-only contract."""
+
+    round_signature = expected_input_signature(R0125_ROUND_DOCUMENT)
+    if round_signature["sha256"] != R0125_ROUND_SHA256:
+        raise RuntimeError("current append-only R0125 round document changed")
+    round_name = os.path.basename(R0125_ROUND_DOCUMENT)
+    if (
+        review.get("round") != round_name
+        or review.get("round_sha256") != R0125_ROUND_SHA256
+        or result.get("round") != round_name
+        or queue.get("round_sha256") != R0125_ROUND_SHA256
+    ):
+        raise RuntimeError(
+            "R0125 correction review/result/queue round binding changed"
+        )
+    return round_signature
+
+
 def _read_json(path: str, *, label: str, sealed: bool = False) -> dict[str, Any]:
     with open(path, encoding="utf-8") as handle:
         value = json.load(handle)
@@ -151,6 +178,7 @@ def _accepted_r0125(review_path: str) -> dict[str, Any]:
         )
     queue_signature = expected_input_signature(queue_path)
     queue = _read_json(queue_path, label="R0125 queue")
+    round_signature = _require_current_r0125_round_closure(review, result, queue)
     terminal_path = os.path.join(os.path.dirname(queue_path), "runner-terminal.json")
     terminal = _clean_terminal(
         queue_path,
@@ -322,6 +350,7 @@ def _accepted_r0125(review_path: str) -> dict[str, Any]:
             raise RuntimeError("R0125 inherited input is missing/wrong size")
         inherited_inputs.append(dict(signature))
     return {
+        "round": round_signature,
         "review": review_signature,
         "result": result_signature,
         "queue": queue_signature,
@@ -386,6 +415,7 @@ def prepare_round0131(
         expected_input_signature(round_file),
         smoke,
         *smoke_sources,
+        evidence["round"],
         evidence["review"],
         evidence["result"],
         evidence["queue"],

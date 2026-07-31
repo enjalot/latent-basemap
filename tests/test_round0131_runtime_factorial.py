@@ -124,6 +124,75 @@ def test_r0125_corrected_document_sequence_is_exact():
             )
 
 
+def _round_closure_fixture(tmp_path, monkeypatch):
+    round_path = tmp_path / "round-0125-2026-07-31.md"
+    round_path.write_text("issued append-only R0125\n", encoding="utf-8")
+    signature = expected_input_signature(str(round_path))
+    monkeypatch.setattr(
+        prepare_round0131_queue, "R0125_ROUND_DOCUMENT", str(round_path)
+    )
+    monkeypatch.setattr(
+        prepare_round0131_queue,
+        "R0125_ROUND_SHA256",
+        signature["sha256"],
+    )
+    return (
+        round_path,
+        signature,
+        {
+            "round": round_path.name,
+            "round_sha256": signature["sha256"],
+        },
+        {"round": round_path.name},
+        {"round_sha256": signature["sha256"]},
+    )
+
+
+def test_current_r0125_round_closure_returns_inheritable_signature(
+    tmp_path, monkeypatch
+):
+    _path, signature, review, result, queue = _round_closure_fixture(
+        tmp_path, monkeypatch
+    )
+    assert prepare_round0131_queue._require_current_r0125_round_closure(
+        review, result, queue
+    ) == signature
+
+
+@pytest.mark.parametrize(
+    ("document", "field", "changed"),
+    [
+        ("review", "round", "round-0125-wrong.md"),
+        ("review", "round_sha256", "0" * 64),
+        ("result", "round", "round-0125-wrong.md"),
+        ("queue", "round_sha256", "0" * 64),
+    ],
+)
+def test_each_r0125_evidence_round_binding_drift_fails_closed(
+    tmp_path, monkeypatch, document, field, changed
+):
+    _path, _signature, review, result, queue = _round_closure_fixture(
+        tmp_path, monkeypatch
+    )
+    documents = {"review": review, "result": result, "queue": queue}
+    documents[document][field] = changed
+    with pytest.raises(RuntimeError, match="round binding changed"):
+        prepare_round0131_queue._require_current_r0125_round_closure(
+            review, result, queue
+        )
+
+
+def test_current_r0125_round_byte_drift_fails_closed(tmp_path, monkeypatch):
+    round_path, _signature, review, result, queue = _round_closure_fixture(
+        tmp_path, monkeypatch
+    )
+    round_path.write_text("mutated append-only R0125\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="append-only R0125 round document"):
+        prepare_round0131_queue._require_current_r0125_round_closure(
+            review, result, queue
+        )
+
+
 def test_train_configs_change_only_forward_arm_execution_fields(tmp_path):
     graph = _graph(tmp_path)
     configs = {
