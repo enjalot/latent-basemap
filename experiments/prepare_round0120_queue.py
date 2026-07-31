@@ -53,6 +53,8 @@ from experiments.prepare_round0020_0022_queues import (
 
 ROUND_ROOT = "/data/latent-basemap/runs/round-0120"
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
+RUN_ENVIRONMENT_PREFIX = os.path.join(RELEASE_ROOT, ".venv")
+RUN_PYTHON = os.path.join(RUN_ENVIRONMENT_PREFIX, "bin", "python")
 ROUND_FILE_GLOB = os.path.join(LAB_ROOT, "round-0120-*.md")
 OUTPUT_NAMESPACE = "canonical-jina-document-pile-native8192-v1"
 R0116_RELEASE_SHA = "b850bfa7cc4f5d85767e3a629ceefae4f897cda6"
@@ -78,6 +80,22 @@ REVIEW_DEFAULTS = {
         "capability:jina-fineweb-2m-dual-prompt-native8192-substrate-v2",
     ),
 }
+
+
+def _require_dedicated_run_environment() -> None:
+    """Fail before queue creation unless preparation uses the run venv."""
+    observed_python = os.path.abspath(sys.executable)
+    observed_prefix = os.path.abspath(sys.prefix)
+    if (
+        observed_python != RUN_PYTHON
+        or observed_prefix != RUN_ENVIRONMENT_PREFIX
+    ):
+        raise RuntimeError(
+            "R0120 queue preparation must use the dedicated run "
+            f"environment: python={RUN_PYTHON}, "
+            f"prefix={RUN_ENVIRONMENT_PREFIX}; observed "
+            f"python={observed_python}, prefix={observed_prefix}"
+        )
 
 
 def _frontmatter_status(path: str) -> str | None:
@@ -251,6 +269,7 @@ def prepare_round0120(
 ) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0120 release SHA must be one full commit")
+    _require_dedicated_run_environment()
     round_file = _require_issued_round()
     rehearsal = rehearse_round0120_inputs()
     if rehearsal["disk"]["passed"] is not True:

@@ -12,6 +12,40 @@ from basemap.artifact_identity import expected_input_signature
 from experiments import prepare_round0120_queue as prepare
 
 
+def test_preparer_accepts_exact_dedicated_run_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(prepare.sys, "executable", prepare.RUN_PYTHON)
+    monkeypatch.setattr(
+        prepare.sys, "prefix", prepare.RUN_ENVIRONMENT_PREFIX
+    )
+    prepare._require_dedicated_run_environment()
+
+
+@pytest.mark.parametrize(
+    ("python_executable", "python_prefix"),
+    [
+        (
+            "/home/enjalot/code/latent-basemap/.venv/bin/python",
+            prepare.RUN_ENVIRONMENT_PREFIX,
+        ),
+        (
+            prepare.RUN_PYTHON,
+            "/home/enjalot/code/latent-basemap/.venv",
+        ),
+    ],
+)
+def test_preparer_rejects_wrong_interpreter_or_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    python_executable: str,
+    python_prefix: str,
+) -> None:
+    monkeypatch.setattr(prepare.sys, "executable", python_executable)
+    monkeypatch.setattr(prepare.sys, "prefix", python_prefix)
+    with pytest.raises(RuntimeError, match="dedicated run environment"):
+        prepare._require_dedicated_run_environment()
+
+
 def test_work_ranges_are_balanced_gap_free_and_payload_is_exact() -> None:
     cursor = 0
     for node_id, start, stop in contract.WORK_RANGES:
