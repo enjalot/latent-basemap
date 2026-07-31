@@ -20,4 +20,3 @@ def run_job(
     if selected.get("action") != "build_graph":
         raise Round0049Error("R0050 accepts only the graph-build action")
     return run_build_graph(active, selected)
-

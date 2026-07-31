@@ -398,6 +398,7 @@ def _exact_truth(
     scales: np.ndarray,
     excluded: np.ndarray,
     sample: np.ndarray,
+    k: int = K,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     import torch
     import torch.nn.functional as functional
@@ -413,13 +414,13 @@ def _exact_truth(
         _normalized_rows(encoded, scales, sample)
     ).to(device)
     best_values = torch.full(
-        (len(sample), K + 1),
+        (len(sample), k + 1),
         -torch.inf,
         dtype=torch.float32,
         device=device,
     )
     best_ids = torch.full(
-        (len(sample), K + 1),
+        (len(sample), k + 1),
         -1,
         dtype=torch.int64,
         device=device,
@@ -448,7 +449,7 @@ def _exact_truth(
                     similarity[rows, columns] = -torch.inf
                 local_values, local_positions = torch.topk(
                     similarity,
-                    min(K + 1, len(ids)),
+                    min(k + 1, len(ids)),
                     dim=1,
                     largest=True,
                     sorted=True,
@@ -459,7 +460,7 @@ def _exact_truth(
                 merged_ids = torch.cat((best_ids, local_ids), dim=1)
                 best_values, order = torch.topk(
                     merged_values,
-                    K + 1,
+                    k + 1,
                     dim=1,
                     largest=True,
                     sorted=True,
@@ -478,8 +479,8 @@ def _exact_truth(
                     order,
                 )
         values = best_values.cpu().numpy()
-        neighbors = best_ids[:, :K].cpu().numpy().astype(np.int64, copy=False)
-        margins = values[:, K - 1] - values[:, K]
+        neighbors = best_ids[:, :k].cpu().numpy().astype(np.int64, copy=False)
+        margins = values[:, k - 1] - values[:, k]
         ties = np.abs(margins) <= BOUNDARY_TIE_ATOL
         if (
             np.any(neighbors < 0)
@@ -554,16 +555,17 @@ def _exact_rerank(
     shortlist: np.ndarray,
     encoded: np.ndarray,
     scales: np.ndarray,
+    k: int = K,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     query = np.asarray(queries, dtype=np.float32)
     candidates = np.asarray(shortlist, dtype=np.int64)
     if (
         query.shape != (len(candidates), DIMENSION)
         or candidates.ndim != 2
-        or candidates.shape[1] < K
+        or candidates.shape[1] < k
     ):
         raise Round0105Error("exact-rerank inputs have invalid geometry")
-    output = np.empty((len(query), K), dtype=np.int64)
+    output = np.empty((len(query), k), dtype=np.int64)
     started = time.monotonic()
     for start in range(0, len(query), RERANK_BATCH_ROWS):
         stop = min(start + RERANK_BATCH_ROWS, len(query))
@@ -586,14 +588,14 @@ def _exact_rerank(
             optimize=True,
         )
         scores /= norms
-        order = np.argsort(-scores, axis=1, kind="stable")[:, :K]
+        order = np.argsort(-scores, axis=1, kind="stable")[:, :k]
         output[start:stop] = np.take_along_axis(ids, order, axis=1)
     if np.any(np.diff(np.sort(output, axis=1), axis=1) == 0):
         raise Round0105Error("exact-rerank output contains duplicates")
     return output, {
         "wall_seconds": time.monotonic() - started,
         "shortlist_width": int(candidates.shape[1]),
-        "selected_neighbors": K,
+        "selected_neighbors": k,
         "batch_rows": RERANK_BATCH_ROWS,
         "score_dtype": "float32",
         "vector_source": "native-int8-plus-fp16-scale",
@@ -611,6 +613,7 @@ def _search_and_rerank(
     excluded: np.ndarray,
     encoded: np.ndarray,
     scales: np.ndarray,
+    k: int = K,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     gpu.nprobe = nprobe
     started = time.monotonic()
@@ -624,6 +627,7 @@ def _search_and_rerank(
         shortlist=shortlist,
         encoded=encoded,
         scales=scales,
+        k=k,
     )
     return selected, {
         "search_seconds": search_seconds,

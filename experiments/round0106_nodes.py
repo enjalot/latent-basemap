@@ -10,6 +10,7 @@ import shutil
 import tempfile
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -78,6 +79,59 @@ FINAL_SCAN_ROWS = 25_000_000
 ASSEMBLY_WORKERS = 8
 
 
+@dataclass(frozen=True)
+class GraphNodeContract:
+    round_id: str
+    k: int
+    n_neighbors: int
+    shard_schema: str
+    part_schema: str
+    graph_schema: str
+
+    def __post_init__(self) -> None:
+        if (
+            not self.round_id
+            or self.k < 1
+            or self.n_neighbors != self.k + 1
+            or not self.shard_schema
+            or not self.part_schema
+            or not self.graph_schema
+        ):
+            raise Round0106Error("graph-node contract is malformed")
+
+
+R0106_GRAPH_CONTRACT = GraphNodeContract(
+    round_id=ROUND_ID,
+    k=K,
+    n_neighbors=N_NEIGHBORS,
+    shard_schema=SHARD_SCHEMA,
+    part_schema=PART_SCHEMA,
+    graph_schema=GRAPH_SCHEMA,
+)
+
+
+def graph_node_contract(job: Mapping[str, Any]) -> GraphNodeContract:
+    value = job.get("graph_node_contract")
+    if value is None:
+        return R0106_GRAPH_CONTRACT
+    if not isinstance(value, Mapping):
+        raise Round0106Error("graph_node_contract must be a mapping")
+    expected = {
+        "round_id", "k", "n_neighbors", "shard_schema", "part_schema",
+        "graph_schema",
+    }
+    if set(value) != expected:
+        raise Round0106Error("graph_node_contract fields changed")
+    return GraphNodeContract(
+        round_id=str(value["round_id"]),
+        k=int(value["k"]),
+        n_neighbors=int(value["n_neighbors"]),
+        shard_schema=str(value["shard_schema"]),
+        part_schema=str(value["part_schema"]),
+        graph_schema=str(value["graph_schema"]),
+    )
+
+
 def _peak_rss_gib() -> float:
     return float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) / (1024 ** 2)
 
@@ -124,6 +178,7 @@ def _gpu_exact_rerank(
     shortlist: np.ndarray,
     encoded: np.ndarray,
     scales: np.ndarray,
+    k: int = K,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Exact native-vector cosine rerank on GPU, returning distances too."""
     import torch
@@ -134,12 +189,12 @@ def _gpu_exact_rerank(
         query.ndim != 2
         or query.shape != (len(candidates), DIMENSION)
         or candidates.ndim != 2
-        or candidates.shape[1] < K
+        or candidates.shape[1] < k
     ):
         raise Round0106Error("R0106 exact-rerank inputs have invalid geometry")
     device = torch.device("cuda")
-    selected = np.empty((len(query), K), dtype=np.int64)
-    distances = np.empty((len(query), K), dtype=np.float32)
+    selected = np.empty((len(query), k), dtype=np.int64)
+    distances = np.empty((len(query), k), dtype=np.float32)
     started = time.monotonic()
     transfer_seconds = 0.0
     compute_seconds = 0.0
@@ -190,7 +245,7 @@ def _gpu_exact_rerank(
                     raise Round0106Error("R0106 exact cosine scores are nonfinite")
                 order = torch.argsort(
                     scores, dim=1, descending=True, stable=True
-                )[:, :K]
+                )[:, :k]
                 chosen_scores = torch.gather(scores, 1, order)
                 chosen_ids = torch.gather(
                     torch.from_numpy(ids).to(device), 1, order
@@ -226,7 +281,7 @@ def _gpu_exact_rerank(
         "host_to_device_seconds": transfer_seconds,
         "gpu_compute_seconds": compute_seconds,
         "shortlist_width": int(candidates.shape[1]),
-        "selected_neighbors": K,
+        "selected_neighbors": k,
         "batch_rows": RERANK_BATCH_ROWS,
         "score_dtype": "float32",
         "stored_vector_dtype": "int8-plus-fp16-scale",
@@ -243,6 +298,7 @@ def _validate_directed_memberships(
     sources: np.ndarray,
     targets: np.ndarray,
     weights: np.ndarray,
+    k: int = K,
 ) -> dict[str, int]:
     """Validate positive memberships as a subset of the fixed kNN topology."""
     source_rows = np.asarray(rows, dtype=np.int64)
@@ -250,10 +306,10 @@ def _validate_directed_memberships(
     edge_sources = np.asarray(sources)
     edge_targets = np.asarray(targets)
     edge_weights = np.asarray(weights)
-    knn_edges = len(source_rows) * K
+    knn_edges = len(source_rows) * k
     if (
         source_rows.ndim != 1
-        or knn_targets.shape != (len(source_rows), K)
+        or knn_targets.shape != (len(source_rows), k)
         or edge_sources.ndim != 1
         or edge_targets.ndim != 1
         or edge_weights.ndim != 1
@@ -299,7 +355,7 @@ def _validate_directed_memberships(
     )
     if (
         np.any(counts < 1)
-        or np.any(counts > K)
+        or np.any(counts > k)
         or not np.all(target_matches == 1)
         or len(np.unique(keys)) != len(keys)
     ):
@@ -308,7 +364,7 @@ def _validate_directed_memberships(
         "knn_edges": knn_edges,
         "directed_edges": len(edge_weights),
         "zero_memberships_eliminated": knn_edges - len(edge_weights),
-        "sources_with_eliminated_memberships": int(np.count_nonzero(counts < K)),
+        "sources_with_eliminated_memberships": int(np.count_nonzero(counts < k)),
         "minimum_memberships_per_source": int(counts.min()),
     }
 
@@ -327,6 +383,7 @@ def _validate_shard(
     compact_start: int,
     compact_stop: int,
     contract_sha256: str,
+    contract: GraphNodeContract = R0106_GRAPH_CONTRACT,
 ) -> dict[str, Any] | None:
     if os.path.exists(artifact) != os.path.exists(receipt_path):
         raise Round0106Error(f"incomplete R0106 shard pair: {artifact}")
@@ -339,8 +396,8 @@ def _validate_shard(
         if key != "identity_sha256"
     }
     expected = {
-        "schema": SHARD_SCHEMA,
-        "round_id": ROUND_ID,
+        "schema": contract.shard_schema,
+        "round_id": contract.round_id,
         "part": part,
         "shard": shard,
         "compact_start": compact_start,
@@ -358,7 +415,7 @@ def _validate_shard(
         targets = archive["targets"]
         weights = archive["weights"]
         retained_sources = compact_stop - compact_start
-        knn_edges = retained_sources * K
+        knn_edges = retained_sources * contract.k
         directed_edges = int(receipt.get("directed_edges", -1))
         zero_memberships = int(
             receipt.get("zero_memberships_eliminated", -1)
@@ -396,14 +453,14 @@ def _validate_shard(
         )
         if (
             np.any(counts < 1)
-            or np.any(counts > K)
+            or np.any(counts > contract.k)
             or len(np.unique(keys)) != len(keys)
             or int(receipt.get("minimum_memberships_per_source", -1))
             != int(counts.min())
             or int(
                 receipt.get("sources_with_eliminated_memberships", -1)
             )
-            != int(np.count_nonzero(counts < K))
+            != int(np.count_nonzero(counts < contract.k))
         ):
             raise Round0106Error(f"R0106 shard arrays changed: {artifact}")
     return receipt
@@ -422,6 +479,7 @@ def _write_shard(
     scales: np.ndarray,
     output: str,
     contract_sha256: str,
+    contract: GraphNodeContract = R0106_GRAPH_CONTRACT,
 ) -> dict[str, Any]:
     artifact, receipt_path = _shard_paths(output, shard)
     prior = _validate_shard(
@@ -432,14 +490,15 @@ def _write_shard(
         compact_start=compact_start,
         compact_stop=compact_stop,
         contract_sha256=contract_sha256,
+        contract=contract,
     )
     if prior is not None:
         return {**prior, "resumed": True}
     started = time.monotonic()
     rows = np.arange(compact_start, compact_stop, dtype=np.int64)
     global_rows = compact_to_global(rows, excluded)
-    all_targets = np.empty((len(rows), K), dtype=np.int32)
-    all_distances = np.empty((len(rows), K), dtype=np.float32)
+    all_targets = np.empty((len(rows), contract.k), dtype=np.int32)
+    all_distances = np.empty((len(rows), contract.k), dtype=np.float32)
     search_seconds = 0.0
     rerank_seconds = 0.0
     transfer_seconds = 0.0
@@ -465,6 +524,7 @@ def _write_shard(
             shortlist=shortlist,
             encoded=encoded,
             scales=scales,
+            k=contract.k,
         )
         all_targets[offset:stop] = global_to_compact(
             selected_global, excluded
@@ -479,10 +539,14 @@ def _write_shard(
         or np.any(np.diff(np.sort(all_targets, axis=1), axis=1) == 0)
     ):
         raise Round0106Error("R0106 selected topology is not distinct/nonself")
-    knn_indices = np.empty((len(rows), N_NEIGHBORS), dtype=np.int32)
+    knn_indices = np.empty(
+        (len(rows), contract.n_neighbors), dtype=np.int32
+    )
     knn_indices[:, 0] = rows.astype(np.int32)
     knn_indices[:, 1:] = all_targets
-    knn_distances = np.zeros((len(rows), N_NEIGHBORS), dtype=np.float32)
+    knn_distances = np.zeros(
+        (len(rows), contract.n_neighbors), dtype=np.float32
+    )
     knn_distances[:, 1:] = all_distances
     (
         sources,
@@ -494,7 +558,7 @@ def _write_shard(
     ) = fuzzy_directed_from_knn(
         knn_indices,
         knn_distances,
-        N_NEIGHBORS,
+        contract.n_neighbors,
         local_connectivity=LOCAL_CONNECTIVITY,
     )
     expected_targets = all_targets.reshape(-1)
@@ -504,6 +568,7 @@ def _write_shard(
         sources=sources,
         targets=targets,
         weights=weights,
+        k=contract.k,
     )
     audit_offsets = np.unique(
         np.linspace(0, len(rows) - 1, min(len(rows), 32)).astype(np.int64)
@@ -518,7 +583,7 @@ def _write_shard(
     )
     audit_target_vectors = _normalized_rows(
         encoded, scales, audit_targets_global
-    ).reshape(len(audit_offsets), K, DIMENSION)
+    ).reshape(len(audit_offsets), contract.k, DIMENSION)
     audit_distances = 1.0 - np.einsum(
         "bd,bkd->bk",
         audit_source_vectors,
@@ -535,7 +600,7 @@ def _write_shard(
         )
     )
     audit_knn_indices = np.empty(
-        (len(audit_offsets), N_NEIGHBORS), dtype=np.int32
+        (len(audit_offsets), contract.n_neighbors), dtype=np.int32
     )
     audit_knn_indices[:, 0] = rows[audit_offsets].astype(np.int32)
     audit_knn_indices[:, 1:] = audit_targets_compact.astype(np.int32)
@@ -551,7 +616,7 @@ def _write_shard(
     ) = fuzzy_directed_from_knn(
         audit_knn_indices,
         audit_knn_distances,
-        N_NEIGHBORS,
+        contract.n_neighbors,
         local_connectivity=LOCAL_CONNECTIVITY,
     )
     audit_source_ids = rows[audit_offsets].astype(np.int32)
@@ -587,7 +652,7 @@ def _write_shard(
     ) = fuzzy_directed_from_knn(
         audit_knn_indices,
         cpu_knn_distances,
-        N_NEIGHBORS,
+        contract.n_neighbors,
         local_connectivity=LOCAL_CONNECTIVITY,
     )
     cpu_fuzzy_topology_matches = (
@@ -620,8 +685,8 @@ def _write_shard(
         weights=weights,
     )
     body = {
-        "schema": SHARD_SCHEMA,
-        "round_id": ROUND_ID,
+        "schema": contract.shard_schema,
+        "round_id": contract.round_id,
         "part": part,
         "shard": shard,
         "compact_start": compact_start,
@@ -631,8 +696,8 @@ def _write_shard(
         "contract_sha256": contract_sha256,
         "retained_sources": len(rows),
         **membership_closure,
-        "k_real": K,
-        "n_neighbors_including_self": N_NEIGHBORS,
+        "k_real": contract.k,
+        "n_neighbors_including_self": contract.n_neighbors,
         "local_connectivity": LOCAL_CONNECTIVITY,
         "exact_rerank": True,
         "distance_dtype": "float32",
@@ -705,10 +770,12 @@ def _part_contract(
     release_sha: str,
     search: Mapping[str, Any],
     substrate_signature: Mapping[str, Any],
+    contract: GraphNodeContract = R0106_GRAPH_CONTRACT,
+    graph_quality_admission: Mapping[str, Any] | None = None,
 ) -> str:
-    return sha256_bytes(canonical_json({
-        "schema": PART_SCHEMA,
-        "round_id": ROUND_ID,
+    body = {
+        "schema": contract.part_schema,
+        "round_id": contract.round_id,
         "release_sha": release_sha,
         "part": part,
         "part_spec": part_spec(part),
@@ -718,11 +785,14 @@ def _part_contract(
             for key in ("index", "index_receipt", "qualification", "decision")
         },
         "selected": search["selected"],
-        "k": K,
-        "n_neighbors_including_self": N_NEIGHBORS,
+        "k": contract.k,
+        "n_neighbors_including_self": contract.n_neighbors,
         "local_connectivity": LOCAL_CONNECTIVITY,
         "shard_rows": SHARD_ROWS,
-    }))
+    }
+    if graph_quality_admission is not None:
+        body["graph_quality_admission"] = dict(graph_quality_admission)
+    return sha256_bytes(canonical_json(body))
 
 
 def run_build_part(
@@ -732,6 +802,7 @@ def run_build_part(
     import faiss
     import torch
 
+    contract = graph_node_contract(job)
     part = str(job["part"])
     spec = part_spec(part)
     output = ensure_data_directory(
@@ -739,11 +810,18 @@ def run_build_part(
     )
     completed_path = os.path.join(output, "part-receipt.json")
     substrate, excluded, encoded, scales, search = _load_search(active, job)
+    graph_quality_admission = job.get("graph_quality_admission")
+    if graph_quality_admission is not None and not isinstance(
+        graph_quality_admission, Mapping
+    ):
+        raise Round0106Error("graph_quality_admission must be a signature")
     contract_sha256 = _part_contract(
         part=part,
         release_sha=active["manifest"]["release_sha"],
         search=search,
         substrate_signature=substrate["signature"],
+        contract=contract,
+        graph_quality_admission=graph_quality_admission,
     )
     if os.path.exists(completed_path):
         completed = _load_json(completed_path)
@@ -753,7 +831,7 @@ def run_build_part(
             if key != "identity_sha256"
         }
         if (
-            completed.get("schema") != PART_SCHEMA
+            completed.get("schema") != contract.part_schema
             or completed.get("part") != part
             or completed.get("contract_sha256") != contract_sha256
             or completed.get("identity_sha256")
@@ -794,6 +872,7 @@ def run_build_part(
             scales=scales,
             output=output,
             contract_sha256=contract_sha256,
+            contract=contract,
         )
         shard_receipts.append(receipt)
         rate = float(receipt["performance"]["sources_per_second"])
@@ -835,14 +914,14 @@ def run_build_part(
     )
     if (
         retained_sources != spec["retained_rows"]
-        or knn_edges != spec["retained_rows"] * K
+        or knn_edges != spec["retained_rows"] * contract.k
         or directed_edges + zero_memberships_eliminated != knn_edges
         or directed_edges < retained_sources
     ):
         raise Round0106Error(f"R0106 {part} source/edge closure failed")
-    receipt = seal({
-        "schema": PART_SCHEMA,
-        "round_id": ROUND_ID,
+    receipt_body = {
+        "schema": contract.part_schema,
+        "round_id": contract.round_id,
         "release_sha": active["manifest"]["release_sha"],
         "part": part,
         "part_spec": spec,
@@ -884,10 +963,11 @@ def run_build_part(
             "exact_rerank": "native-int8-plus-fp16-scale-cosine-fp32",
             "exact_rerank_device": "cuda:0",
             "tf32": False,
-            "selected_neighbors": K,
+            "selected_neighbors": contract.k,
             "distance": "one-minus-exact-cosine-fp32",
             "fuzzy": (
-                "umap-smooth_knn_dist-n16-local_connectivity1-directed"
+                f"umap-smooth_knn_dist-n{contract.n_neighbors}-"
+                "local_connectivity1-directed"
             ),
         },
         "performance": {
@@ -918,7 +998,12 @@ def run_build_part(
         "training_performed": False,
         "optimizer_updates": 0,
         "map_decision_made": False,
-    })
+    }
+    if graph_quality_admission is not None:
+        receipt_body["graph_quality_admission"] = dict(
+            graph_quality_admission
+        )
+    receipt = seal(receipt_body)
     atomic_write_new_json(completed_path, receipt, immutable=True)
     del gpu, resources, index, encoded, scales
     gc.collect()
@@ -931,6 +1016,7 @@ def _validate_part_receipt(
     *,
     expected_sha256: str | None,
     part: str,
+    contract: GraphNodeContract = R0106_GRAPH_CONTRACT,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     path = os.path.join(output, "part-receipt.json")
     signature = expected_input_signature(path)
@@ -944,13 +1030,14 @@ def _validate_part_receipt(
     }
     spec = part_spec(part)
     if (
-        receipt.get("schema") != PART_SCHEMA
-        or receipt.get("round_id") != ROUND_ID
+        receipt.get("schema") != contract.part_schema
+        or receipt.get("round_id") != contract.round_id
         or receipt.get("part") != part
         or receipt.get("part_spec") != spec
         or receipt.get("identity_sha256") != sha256_bytes(canonical_json(body))
         or int(receipt.get("retained_sources", -1)) != spec["retained_rows"]
-        or int(receipt.get("knn_edges", -1)) != spec["retained_rows"] * K
+        or int(receipt.get("knn_edges", -1))
+        != spec["retained_rows"] * contract.k
         or int(receipt.get("directed_edges", -1))
         + int(receipt.get("zero_memberships_eliminated", -1))
         != int(receipt.get("knn_edges", -1))
@@ -959,7 +1046,7 @@ def _validate_part_receipt(
         or int(receipt.get("sources_with_eliminated_memberships", -1))
         > spec["retained_rows"]
         or int(receipt.get("minimum_memberships_per_source", -1)) < 1
-        or int(receipt.get("minimum_memberships_per_source", -1)) > K
+        or int(receipt.get("minimum_memberships_per_source", -1)) > contract.k
     ):
         raise Round0106Error(f"R0106 {part} part receipt contract changed")
     for member in receipt.get("shards") or []:
@@ -1326,6 +1413,7 @@ def run_assemble(
     active: Mapping[str, Any],
     job: Mapping[str, Any],
 ) -> dict[str, Any]:
+    contract = graph_node_contract(job)
     started = time.monotonic()
     output = ensure_data_directory(
         str(job["outputs"][0]), label="R0106 graph assembly"
@@ -1339,7 +1427,7 @@ def run_assemble(
             if key != "identity_sha256"
         }
         if (
-            manifest.get("schema") != GRAPH_SCHEMA
+            manifest.get("schema") != contract.graph_schema
             or manifest.get("identity_sha256")
             != sha256_bytes(canonical_json(body))
         ):
@@ -1357,9 +1445,27 @@ def run_assemble(
             root,
             expected_sha256=expected_part_hashes.get(part),
             part=part,
+            contract=contract,
         )
         part_values[part] = (root, receipt)
         part_signatures[part] = signature
+    quality_admissions = {
+        canonical_json(receipt["graph_quality_admission"]): dict(
+            receipt["graph_quality_admission"]
+        )
+        for _root, receipt in part_values.values()
+        if receipt.get("graph_quality_admission") is not None
+    }
+    if len(quality_admissions) > 1:
+        raise Round0106Error("graph parts disagree on quality admission")
+    if quality_admissions and any(
+        receipt.get("graph_quality_admission") is None
+        for _root, receipt in part_values.values()
+    ):
+        raise Round0106Error("only some graph parts bind quality admission")
+    graph_quality_admission = (
+        next(iter(quality_admissions.values())) if quality_admissions else None
+    )
     knn_edge_count = sum(
         int(receipt["knn_edges"]) for _root, receipt in part_values.values()
     )
@@ -1372,7 +1478,7 @@ def run_assemble(
         for _root, receipt in part_values.values()
     )
     if (
-        knn_edge_count != RETAINED_ROWS * K
+        knn_edge_count != RETAINED_ROWS * contract.k
         or forward_membership_count + zero_memberships_eliminated
         != knn_edge_count
     ):
@@ -1380,16 +1486,21 @@ def run_assemble(
     substrate, excluded, _encoded, _scales = _substrate_arrays()
     labels_signature = substrate["manifest"]["outputs"]["labels"]
     _validate_signature(labels_signature, label="R0103 labels")
-    assembly_contract = sha256_bytes(canonical_json({
-        "schema": GRAPH_SCHEMA,
-        "round_id": ROUND_ID,
+    assembly_contract_body = {
+        "schema": contract.graph_schema,
+        "round_id": contract.round_id,
         "release_sha": active["manifest"]["release_sha"],
         "parts": part_signatures,
         "retained_rows": RETAINED_ROWS,
-        "k": K,
+        "k": contract.k,
         "pair_buckets": PAIR_BUCKETS,
         "symmetrization": "a+b-a*b-set-op-mix-ratio-1",
-    }))
+    }
+    if graph_quality_admission is not None:
+        assembly_contract_body["graph_quality_admission"] = (
+            graph_quality_admission
+        )
+    assembly_contract = sha256_bytes(canonical_json(assembly_contract_body))
     forward_buckets = _partition_forward_edges(
         output=output,
         parts=part_values,
@@ -1426,16 +1537,16 @@ def run_assemble(
         join_stats["n_edges"]
     ):
         raise Round0106Error("R0106 final edge count disagrees with join")
-    manifest = seal({
-        "schema": GRAPH_SCHEMA,
-        "round_id": ROUND_ID,
+    manifest_body = {
+        "schema": contract.graph_schema,
+        "round_id": contract.round_id,
         "release_sha": active["manifest"]["release_sha"],
         "contract_sha256": assembly_contract,
         "row_count": ROW_COUNT,
         "retained_rows": RETAINED_ROWS,
         "dimension": DIMENSION,
-        "k_real": K,
-        "n_neighbors_including_self": N_NEIGHBORS,
+        "k_real": contract.k,
+        "n_neighbors_including_self": contract.n_neighbors,
         "local_connectivity": LOCAL_CONNECTIVITY,
         "part_receipts": part_signatures,
         "substrate": substrate["signature"],
@@ -1448,7 +1559,7 @@ def run_assemble(
             "weights": weights_signature,
         },
         "knn_topology": {
-            "distinct_nonself_neighbors_per_source": K,
+            "distinct_nonself_neighbors_per_source": contract.k,
             "knn_edge_count": knn_edge_count,
             "source_coverage_complete": True,
         },
@@ -1484,7 +1595,10 @@ def run_assemble(
         "training_performed": False,
         "optimizer_updates": 0,
         "map_decision_made": False,
-    })
+    }
+    if graph_quality_admission is not None:
+        manifest_body["graph_quality_admission"] = graph_quality_admission
+    manifest = seal(manifest_body)
     atomic_write_new_json(
         final_manifest_path, manifest, immutable=True
     )
@@ -1498,8 +1612,11 @@ def run_job(
     active: dict[str, Any],
     job: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    if active.get("manifest", {}).get("round_id") != ROUND_ID or job is None:
+    if job is None:
         raise Round0106Error("R0106 handler requires its exact round/job")
+    contract = graph_node_contract(job)
+    if active.get("manifest", {}).get("round_id") != contract.round_id:
+        raise Round0106Error("graph handler received another round")
     action = job.get("action")
     if action == "build_part":
         return run_build_part(active, job)
