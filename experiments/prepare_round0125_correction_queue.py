@@ -91,6 +91,47 @@ PRIOR_DONE_MARKERS = {
 PRIOR_FAILED_MARKER = os.path.join(
     PRIOR_ARTIFACT_ROOT, "score_device_treatment.failed.json"
 )
+PRIOR_EXPECTED_SHA256 = {
+    PRIOR_DONE_MARKERS["train_device_treatment"]: (
+        "1ed1c8993f61b57cec9b363ad17138b55cb93bdb82eec8ae5dcff79294115126"
+    ),
+    PRIOR_DONE_MARKERS["train_host_control"]: (
+        "b000844d7c6e386c0d9b55e230db266fda627b356ee9ab9dc87a1f6d4d5f324e"
+    ),
+    PRIOR_DONE_MARKERS["transform_device_treatment"]: (
+        "2fab371abb53262bf6f1f493c6192deae5b8e0b64fe4ed98ecdf7a9d43eca476"
+    ),
+    PRIOR_FAILED_MARKER: (
+        "fa5b4b3a0f864a816d3ceb802441671e6cec5311676347728dbbec3bedbc84af"
+    ),
+    os.path.join(PRIOR_TRAIN_OUTPUTS[DEVICE_ARM], "production-config.json"): (
+        "63fb2b70fe265f0260cb7d6000850e0ad9f9ff8e84df62158c17c11a0118d180"
+    ),
+    os.path.join(PRIOR_TRAIN_OUTPUTS[DEVICE_ARM], "model.pt"): (
+        "030d9508356d023b0ea2cf38d8da7165dd78f0c3712da6d13c70805f1a9e6ae8"
+    ),
+    os.path.join(PRIOR_TRAIN_OUTPUTS[DEVICE_ARM], "train-receipt.json"): (
+        "27789f13cd179d540548f9bad620bee7979155ae90b38ab2bdf103226007117f"
+    ),
+    os.path.join(PRIOR_TRAIN_OUTPUTS[HOST_ARM], "production-config.json"): (
+        "90d546c799d36c4bb6c48007b9c72f55d32726ce6f010d1dd0c13d5286e63f1e"
+    ),
+    os.path.join(PRIOR_TRAIN_OUTPUTS[HOST_ARM], "model.pt"): (
+        "36a7fb86784b6a891f7c73b83d008aead320a7729eea913efc117e4bcd5b3e08"
+    ),
+    os.path.join(PRIOR_TRAIN_OUTPUTS[HOST_ARM], "train-receipt.json"): (
+        "230046e8468f565632136009798034575a839be5a2bd194bee45492972f10d77"
+    ),
+    os.path.join(PRIOR_DEVICE_TRANSFORM, "coordinates.npy"): (
+        "0ebf483e55697388bf8d5d7e5e54fa0fce6bf70c86edd4c5dc549e49d7188c04"
+    ),
+    os.path.join(PRIOR_DEVICE_TRANSFORM, "oos-query-coordinates.npy"): (
+        "d049efd4509cdc5283529b1ba8fc2556ec2699defa87e0cb61aee9ad9d89976d"
+    ),
+    os.path.join(PRIOR_DEVICE_TRANSFORM, "transform-receipt.json"): (
+        "e4001f7f510c762d299a402ce6bd20e6a1dcbacc9d5c012b082b1db117e4cf12"
+    ),
+}
 
 
 def _read_json(path: str) -> dict[str, Any]:
@@ -99,6 +140,13 @@ def _read_json(path: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise RuntimeError(f"expected a JSON object at {path}")
     return value
+
+
+def _prior_exact_signature(path: str) -> dict[str, Any]:
+    signature = expected_input_signature(path)
+    if signature["sha256"] != PRIOR_EXPECTED_SHA256.get(path):
+        raise RuntimeError(f"R0125 prior artifact bytes changed: {path}")
+    return signature
 
 
 def _prior_attempt_inputs() -> list[dict[str, Any]]:
@@ -145,7 +193,7 @@ def _prior_attempt_inputs() -> list[dict[str, Any]]:
             or marker.get("release_sha") != ORIGINAL_RELEASE_SHA
         ):
             raise RuntimeError(f"R0125 prior done marker {node} changed")
-        signatures.append(expected_input_signature(path))
+        signatures.append(_prior_exact_signature(path))
     failed = _read_json(PRIOR_FAILED_MARKER)
     if (
         failed.get("schema") != "slim-runner-failed-v2"
@@ -156,7 +204,7 @@ def _prior_attempt_inputs() -> list[dict[str, Any]]:
         not in str(failed.get("log_tail") or "")
     ):
         raise RuntimeError("R0125 setup-class failed marker changed")
-    signatures.append(expected_input_signature(PRIOR_FAILED_MARKER))
+    signatures.append(_prior_exact_signature(PRIOR_FAILED_MARKER))
 
     artifact_files = [
         *[
@@ -173,18 +221,30 @@ def _prior_attempt_inputs() -> list[dict[str, Any]]:
         os.path.join(PRIOR_DEVICE_TRANSFORM, "transform-receipt.json"),
     ]
     for path in artifact_files:
-        signatures.append(expected_input_signature(path))
+        signatures.append(_prior_exact_signature(path))
 
     for arm in ARMS:
         receipt = _read_json(
             os.path.join(PRIOR_TRAIN_OUTPUTS[arm], "train-receipt.json")
         )
         validate_seal(receipt, label=f"prior R0125 {arm} train")
+        train_checks = receipt.get("train_checks")
         if (
-            receipt.get("round_id") != "0125"
+            receipt.get("schema") != "round0125-runtime-arm-train-receipt-v1"
+            or receipt.get("round_id") != "0125"
             or receipt.get("arm") != arm
             or receipt.get("release_sha") != ORIGINAL_RELEASE_SHA
-            or not all((receipt.get("train_checks") or {}).values())
+            or not isinstance(train_checks, Mapping)
+            or set(train_checks)
+            != {
+                "exact_update_closure",
+                "zero_numerical_skips",
+                "no_pipeline_stamp_drift",
+                "endpoint_rows_match_registered_path",
+                "bounded_stream_trace_complete",
+                "initial_model_state_stamped",
+            }
+            or not all(train_checks.values())
             or (receipt.get("train_accounting") or {}).get(
                 "positive_lr_optimizer_steps"
             )
@@ -196,7 +256,8 @@ def _prior_attempt_inputs() -> list[dict[str, Any]]:
     )
     validate_seal(transform, label="prior R0125 device transform")
     if (
-        transform.get("round_id") != "0125"
+        transform.get("schema") != "round0125-native-transform-receipt-v1"
+        or transform.get("round_id") != "0125"
         or transform.get("arm") != DEVICE_ARM
         or transform.get("release_sha") != ORIGINAL_RELEASE_SHA
         or transform.get("finite") is not True
