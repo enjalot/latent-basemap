@@ -93,7 +93,7 @@ def _schema(stem: str) -> str:
 
 def _execution_round_id(active: Mapping[str, Any]) -> str:
     round_id = str((active.get("manifest") or {}).get("round_id", ""))
-    if round_id not in {ROUND_ID, "0115", "0117"}:
+    if round_id not in {ROUND_ID, "0115", "0117", "0124", "0129"}:
         raise Round0113Error("R0113 scientific handler received another queue")
     return round_id
 
@@ -102,7 +102,17 @@ def _training_seed(
     active: Mapping[str, Any], job: Mapping[str, Any]
 ) -> int:
     round_id = _execution_round_id(active)
-    registered = {ROUND_ID: SEED, "0115": SEED, "0117": 43}[round_id]
+    # R0124/R0129 reuse the prompt panel through a queue-local authenticated
+    # model adapter.  They keep the original seed-42 bridge and its seed-43
+    # replicate explicit here so the shared evaluator cannot silently fall
+    # back to the R0113 default.
+    registered = {
+        ROUND_ID: SEED,
+        "0115": SEED,
+        "0117": 43,
+        "0124": SEED,
+        "0129": 43,
+    }[round_id]
     observed = job.get("training_seed", registered)
     if isinstance(observed, bool):
         raise Round0113Error("registered prompt training seed changed")
