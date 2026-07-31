@@ -462,6 +462,25 @@ def test_correction_queue_reserves_only_the_original_cap_residual() -> None:
     )
 
 
+def test_correction_queue_rejects_reused_artifact_byte_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from experiments import prepare_round0125_correction_queue as correction
+
+    artifact = tmp_path / "prior-train-receipt.json"
+    artifact.write_bytes(b"sealed prior evidence")
+    original = expected_input_signature(str(artifact))
+    monkeypatch.setattr(
+        correction,
+        "PRIOR_EXPECTED_SHA256",
+        {str(artifact): original["sha256"]},
+    )
+    assert correction._prior_exact_signature(str(artifact)) == original
+    artifact.write_bytes(b"hand-minted replacement")
+    with pytest.raises(RuntimeError, match="prior artifact bytes changed"):
+        correction._prior_exact_signature(str(artifact))
+
+
 def test_queue_preparation_refuses_wrong_python_before_writes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
