@@ -561,19 +561,20 @@ class CompactInt8DequantizedArray:
         )
         self.mapping = mapping
         if (
-            mapping.shape != (RETAINED_ROWS,)
+            mapping.ndim != 1
+            or len(mapping) not in {RETAINED_ROWS, 12_474_331}
             or mapping.dtype != np.int64
             or int(mapping[0]) < 0
             or int(mapping[-1]) >= ROW_COUNT
             or np.any(mapping[1:] <= mapping[:-1])
         ):
             raise Round0108Error("R0106 compact mapping is malformed")
-        self.shape = (RETAINED_ROWS, DIMENSION)
+        self.shape = (len(mapping), DIMENSION)
         self.dtype = np.dtype("float32")
         self.substrate = substrate
 
     def __len__(self) -> int:
-        return RETAINED_ROWS
+        return len(self.mapping)
 
     def __getitem__(self, key: Any) -> np.ndarray:
         scalar = isinstance(key, (int, np.integer))

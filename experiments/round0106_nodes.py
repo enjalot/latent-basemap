@@ -77,6 +77,13 @@ from experiments.round0105_nodes import (
 
 FINAL_SCAN_ROWS = 25_000_000
 ASSEMBLY_WORKERS = 8
+_R0132_RETAINED_ROWS = 12_474_331
+_R0132_PARTS = ("groups-a", "groups-b", "groups-c")
+
+
+def _require_registered_universe(universe_rows: int) -> None:
+    if int(universe_rows) not in {RETAINED_ROWS, _R0132_RETAINED_ROWS}:
+        raise Round0106Error("shared graph helper universe is not registered")
 
 
 @dataclass(frozen=True)
@@ -299,8 +306,10 @@ def _validate_directed_memberships(
     targets: np.ndarray,
     weights: np.ndarray,
     k: int = K,
+    universe_rows: int = RETAINED_ROWS,
 ) -> dict[str, int]:
     """Validate positive memberships as a subset of the fixed kNN topology."""
+    _require_registered_universe(universe_rows)
     source_rows = np.asarray(rows, dtype=np.int64)
     knn_targets = np.asarray(all_targets, dtype=np.int32)
     edge_sources = np.asarray(sources)
@@ -350,7 +359,7 @@ def _validate_directed_memberships(
     ).sum(axis=1)
     counts = np.bincount(source_offsets, minlength=len(source_rows))
     keys = (
-        edge_sources.astype(np.uint64) * np.uint64(RETAINED_ROWS)
+        edge_sources.astype(np.uint64) * np.uint64(universe_rows)
         + edge_targets.astype(np.uint64)
     )
     if (
@@ -384,7 +393,11 @@ def _validate_shard(
     compact_stop: int,
     contract_sha256: str,
     contract: GraphNodeContract = R0106_GRAPH_CONTRACT,
+    universe_rows: int = RETAINED_ROWS,
 ) -> dict[str, Any] | None:
+    _require_registered_universe(universe_rows)
+    if universe_rows == _R0132_RETAINED_ROWS and contract.round_id != "0132":
+        raise Round0106Error("half-universe graph helper requires R0132 contract")
     if os.path.exists(artifact) != os.path.exists(receipt_path):
         raise Round0106Error(f"incomplete R0106 shard pair: {artifact}")
     if not os.path.exists(artifact):
@@ -438,7 +451,7 @@ def _validate_shard(
             or np.any(sources < compact_start)
             or np.any(sources >= compact_stop)
             or np.any(targets < 0)
-            or np.any(targets >= RETAINED_ROWS)
+            or np.any(targets >= universe_rows)
             or np.any(sources == targets)
             or np.any(sources[1:] < sources[:-1])
         ):
@@ -448,7 +461,7 @@ def _validate_shard(
             minlength=retained_sources,
         )
         keys = (
-            sources.astype(np.uint64) * np.uint64(RETAINED_ROWS)
+            sources.astype(np.uint64) * np.uint64(universe_rows)
             + targets.astype(np.uint64)
         )
         if (
@@ -480,6 +493,7 @@ def _write_shard(
     output: str,
     contract_sha256: str,
     contract: GraphNodeContract = R0106_GRAPH_CONTRACT,
+    universe_rows: int = RETAINED_ROWS,
 ) -> dict[str, Any]:
     artifact, receipt_path = _shard_paths(output, shard)
     prior = _validate_shard(
@@ -491,6 +505,7 @@ def _write_shard(
         compact_stop=compact_stop,
         contract_sha256=contract_sha256,
         contract=contract,
+        universe_rows=universe_rows,
     )
     if prior is not None:
         return {**prior, "resumed": True}
@@ -569,6 +584,7 @@ def _write_shard(
         targets=targets,
         weights=weights,
         k=contract.k,
+        universe_rows=universe_rows,
     )
     audit_offsets = np.unique(
         np.linspace(0, len(rows) - 1, min(len(rows), 32)).astype(np.int64)
@@ -1060,7 +1076,18 @@ def _partition_forward_edges(
     output: str,
     parts: Mapping[str, tuple[str, Mapping[str, Any]]],
     contract_sha256: str,
+    part_order: tuple[str, ...] = tuple(PARTS),
+    universe_rows: int = RETAINED_ROWS,
 ) -> str:
+    _require_registered_universe(universe_rows)
+    if (
+        (universe_rows == RETAINED_ROWS and part_order != tuple(PARTS))
+        or (
+            universe_rows == _R0132_RETAINED_ROWS
+            and part_order != _R0132_PARTS
+        )
+    ):
+        raise Round0106Error("shared graph helper part policy is not registered")
     final = os.path.join(output, "forward-buckets")
     receipt_path = os.path.join(final, "_DONE.json")
     if os.path.exists(receipt_path):
@@ -1094,7 +1121,7 @@ def _partition_forward_edges(
     shard_count = 0
     record_count = 0
     try:
-        for part in PARTS:
+        for part in part_order:
             root, receipt = parts[part]
             for member in receipt["shards"]:
                 path = str(member["artifact"]["canonical_path"])
@@ -1105,7 +1132,7 @@ def _partition_forward_edges(
                     low = np.minimum(sources, targets)
                     high = np.maximum(sources, targets)
                     buckets = _pair_bucket(
-                        low, high, RETAINED_ROWS, PAIR_BUCKETS
+                        low, high, universe_rows, PAIR_BUCKETS
                     )
                     order = np.argsort(buckets, kind="stable")
                     sorted_buckets = buckets[order]
@@ -1230,8 +1257,10 @@ def _validate_joined_reciprocity(
     *,
     joined: str,
     counts: list[int],
+    universe_rows: int = RETAINED_ROWS,
 ) -> dict[str, Any]:
     """Full bucket-local proof that every final edge has one equal reverse."""
+    _require_registered_universe(universe_rows)
     checked = 0
     for bucket, expected_count in enumerate(counts):
         path = os.path.join(joined, f"part-{bucket:04d}.npz")
@@ -1243,13 +1272,13 @@ def _validate_joined_reciprocity(
             raise Round0106Error(
                 f"R0106 joined bucket {bucket} count changed"
             )
-        keys = sources.astype(np.uint64) * np.uint64(RETAINED_ROWS)
+        keys = sources.astype(np.uint64) * np.uint64(universe_rows)
         keys += targets.astype(np.uint64)
         if len(keys) > 1 and np.any(keys[1:] <= keys[:-1]):
             raise Round0106Error(
                 f"R0106 joined bucket {bucket} keys are not unique/sorted"
             )
-        reverse = targets.astype(np.uint64) * np.uint64(RETAINED_ROWS)
+        reverse = targets.astype(np.uint64) * np.uint64(universe_rows)
         reverse += sources.astype(np.uint64)
         positions = np.searchsorted(keys, reverse)
         bounded = positions < len(keys)

@@ -41,9 +41,44 @@ PIPELINE_SCHEMA = "round0107-host-weighted-jina-diverse-pipeline-v1"
 SAMPLER_CLASS = "DiverseWeightedJinaSampler"
 TRAIN_RECEIPT_SCHEMA = "round0107-diverse-jina-train-receipt-v1"
 
+_R0132_RETAINED_ROWS = 12_474_331
+_R0132_PIPELINE = "host_weighted_jina_diverse_12p5m"
+_R0132_PIPELINE_SCHEMA = "round0132-host-weighted-jina-diverse-pipeline-v1"
+_R0132_POSITIVE_DESTINATION_POLICY = (
+    "R0132-global-half-retained-fuzzy-tconorm-graph"
+)
+
 
 class Round0107Error(RuntimeError):
     """The R0107 training contract was violated."""
+
+
+def _validate_legacy_or_r0132_variant(
+    *,
+    rows: int,
+    pipeline: str,
+    pipeline_schema: str,
+    sampler_class: str,
+    positive_destination_policy: str,
+    require_registered_rows: bool = True,
+) -> None:
+    """Keep the shared R0107 surface closed to its one reviewed extension."""
+    legacy = (
+        (not require_registered_rows or int(rows) == RETAINED_ROWS)
+        and str(pipeline) == PIPELINE
+        and str(pipeline_schema) == PIPELINE_SCHEMA
+        and str(sampler_class) == SAMPLER_CLASS
+    )
+    r0132 = (
+        int(rows) == _R0132_RETAINED_ROWS
+        and str(pipeline) == _R0132_PIPELINE
+        and str(pipeline_schema) == _R0132_PIPELINE_SCHEMA
+        and str(sampler_class) == SAMPLER_CLASS
+        and str(positive_destination_policy)
+        == _R0132_POSITIVE_DESTINATION_POLICY
+    )
+    if not (legacy or r0132):
+        raise Round0107Error("training pipeline variant is not registered")
 
 
 def seal(body: Mapping[str, Any]) -> dict[str, Any]:
@@ -91,6 +126,7 @@ def load_graph_manifest(
     expected_graph_schema: str = GRAPH_SCHEMA,
     expected_graph_round_id: str = "0106",
     expected_k_real: int = N_NEIGHBORS - 1,
+    expected_retained_rows: int = RETAINED_ROWS,
     successful_updates: int | None = None,
 ) -> dict[str, Any]:
     signature = expected_input_signature(path)
@@ -103,7 +139,7 @@ def load_graph_manifest(
     if (
         manifest.get("schema") != expected_graph_schema
         or manifest.get("round_id") != expected_graph_round_id
-        or int(manifest.get("retained_rows", -1)) != RETAINED_ROWS
+        or int(manifest.get("retained_rows", -1)) != expected_retained_rows
         or int(manifest.get("dimension", -1)) != DIMENSION
         or int(manifest.get("k_real", -1)) != expected_k_real
         or int(manifest.get("n_neighbors_including_self", -1))
@@ -137,7 +173,7 @@ def load_graph_manifest(
         or arrays["targets"].dtype != np.int32
         or arrays["weights"].shape != (edges,)
         or arrays["weights"].dtype != np.float32
-        or arrays["mapping"].shape != (RETAINED_ROWS,)
+        or arrays["mapping"].shape != (expected_retained_rows,)
         or arrays["mapping"].dtype != np.int64
     ):
         raise Round0107Error("R0106 graph arrays changed geometry")
@@ -163,18 +199,19 @@ class CompactMappedInt8Array:
             source.ndim != 2
             or source.shape[1] != DIMENSION
             or source.dtype != np.int8
-            or mapping.shape != (RETAINED_ROWS,)
+            or mapping.ndim != 1
+            or len(mapping) < 2
             or mapping.dtype != np.int64
         ):
             raise Round0107Error("R0107 compact feature view is malformed")
         self.source = source
         self.mapping = mapping
-        self.shape = (RETAINED_ROWS, DIMENSION)
+        self.shape = (len(mapping), DIMENSION)
         self.ndim = 2
         self.dtype = np.dtype("int8")
 
     def __len__(self) -> int:
-        return RETAINED_ROWS
+        return len(self.mapping)
 
     def __getitem__(self, key: Any) -> np.ndarray:
         return self.source[self.mapping[key]]
@@ -250,6 +287,9 @@ class DiverseWeightedJinaSampler:
         pos_ratio: float,
         random_state: int,
         graph_signatures: Mapping[str, Any],
+        pipeline: str = PIPELINE,
+        pipeline_schema: str = PIPELINE_SCHEMA,
+        sampler_class: str = SAMPLER_CLASS,
         positive_destination_policy: str = (
             "R0106-global-retained-fuzzy-tconorm-graph"
         ),
@@ -268,9 +308,20 @@ class DiverseWeightedJinaSampler:
         self.num_neg = self.batch_size - self.num_pos
         self.rng = np.random.default_rng(int(random_state))
         self.graph_signatures = dict(graph_signatures)
+        self.pipeline = str(pipeline)
+        self.pipeline_schema = str(pipeline_schema)
+        self.sampler_class = str(sampler_class)
         self.positive_destination_policy = str(positive_destination_policy)
         self.graph_degree = str(graph_degree)
         self.device = dataset.device
+        _validate_legacy_or_r0132_variant(
+            rows=self.n_nodes,
+            pipeline=self.pipeline,
+            pipeline_schema=self.pipeline_schema,
+            sampler_class=self.sampler_class,
+            positive_destination_policy=self.positive_destination_policy,
+            require_registered_rows=False,
+        )
         self.batch_no = 0
         self._prefetch_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._prefetch_future: concurrent.futures.Future[tuple[int, int]] | None = None
@@ -415,16 +466,16 @@ class DiverseWeightedJinaSampler:
     def execution_stamp(self) -> dict[str, Any]:
         dataset = self.dataset.execution_stamp()
         return {
-            "schema": PIPELINE_SCHEMA,
-            "pipeline": PIPELINE,
-            "sampler_class": SAMPLER_CLASS,
+            "schema": self.pipeline_schema,
+            "pipeline": self.pipeline,
+            "sampler_class": self.sampler_class,
             "positive_sampling": (
                 "fuzzy_weight_proportional_with_replacement_via_exact_"
                 "uniform_envelope_rejection"
             ),
             "positive_destination_policy": self.positive_destination_policy,
             "negative_sampling": (
-                "uniform-24,948,663-compact-retained-rows-nonself"
+                f"uniform-{self.n_nodes:,}-compact-retained-rows-nonself"
             ),
             "graph_degree": self.graph_degree,
             "host_prefetch": "single-producer-two-pinned-slot",
@@ -465,6 +516,8 @@ class Round0107TrainingInput:
         graph: Mapping[str, Any],
         *,
         required_pipeline: str,
+        pipeline_schema: str = PIPELINE_SCHEMA,
+        sampler_class: str = SAMPLER_CLASS,
         positive_destination_policy: str = (
             "R0106-global-retained-fuzzy-tconorm-graph"
         ),
@@ -473,12 +526,24 @@ class Round0107TrainingInput:
         self.dataset = dataset
         self.graph = dict(graph)
         self.required_pipeline = required_pipeline
+        self.pipeline_schema = str(pipeline_schema)
+        self.sampler_class = str(sampler_class)
         self.positive_destination_policy = str(positive_destination_policy)
         self.graph_degree = str(graph_degree)
         self.shape = dataset.shape
         self._last_sampler: DiverseWeightedJinaSampler | None = None
-        if self.shape != (RETAINED_ROWS, DIMENSION):
+        if (
+            len(dataset) < 2
+            or self.shape != (len(dataset), DIMENSION)
+        ):
             raise Round0107Error("R0107 training input geometry changed")
+        _validate_legacy_or_r0132_variant(
+            rows=len(dataset),
+            pipeline=self.required_pipeline,
+            pipeline_schema=self.pipeline_schema,
+            sampler_class=self.sampler_class,
+            positive_destination_policy=self.positive_destination_policy,
+        )
 
     def __len__(self) -> int:
         return len(self.dataset)
@@ -508,7 +573,7 @@ class Round0107TrainingInput:
             or not weighted_edge_sampling
             or reject_neighbors
             or required_input_pipeline != self.required_pipeline
-            or self.required_pipeline != PIPELINE
+            or not self.required_pipeline
         ):
             raise Round0107Error("R0107 trainer pipeline request changed")
         sampler = DiverseWeightedJinaSampler(
@@ -516,11 +581,14 @@ class Round0107TrainingInput:
             sources=self.graph["sources"],
             targets=self.graph["targets"],
             weights=self.graph["weights"],
-            n_nodes=RETAINED_ROWS,
+            n_nodes=len(self.dataset),
             batch_size=batch_size,
             pos_ratio=pos_ratio,
             random_state=random_state,
             graph_signatures=self.graph["graph_signatures"],
+            pipeline=self.required_pipeline,
+            pipeline_schema=self.pipeline_schema,
+            sampler_class=self.sampler_class,
             positive_destination_policy=getattr(
                 self,
                 "positive_destination_policy",
@@ -561,9 +629,28 @@ def train_config(
         "R0106-global-retained-fuzzy-tconorm-graph"
     ),
     graph_degree: str = "variable-symmetric-fuzzy-k15-topology",
+    compact_retained_rows: int = RETAINED_ROWS,
+    pipeline: str = PIPELINE,
+    pipeline_schema: str = PIPELINE_SCHEMA,
+    sampler_class: str = SAMPLER_CLASS,
 ) -> tuple[dict[str, Any], str]:
-    if seed < 0 or not schema or n_neighbors_including_self < 2:
+    if (
+        seed < 0
+        or not schema
+        or n_neighbors_including_self < 2
+        or compact_retained_rows < 2
+        or not pipeline
+        or not pipeline_schema
+        or not sampler_class
+    ):
         raise Round0107Error("diverse-Jina train identity is invalid")
+    _validate_legacy_or_r0132_variant(
+        rows=compact_retained_rows,
+        pipeline=pipeline,
+        pipeline_schema=pipeline_schema,
+        sampler_class=sampler_class,
+        positive_destination_policy=positive_destination_policy,
+    )
     edges = int(graph_manifest["directed_edge_count"])
     updates = (
         successful_update_target(edges)
@@ -572,16 +659,16 @@ def train_config(
     if updates <= 0:
         raise Round0107Error("diverse-Jina update target must be positive")
     expected_pipeline = {
-        "schema": PIPELINE_SCHEMA,
-        "pipeline": PIPELINE,
-        "sampler_class": SAMPLER_CLASS,
+        "schema": pipeline_schema,
+        "pipeline": pipeline,
+        "sampler_class": sampler_class,
         "positive_sampling": (
             "fuzzy_weight_proportional_with_replacement_via_exact_"
             "uniform_envelope_rejection"
         ),
         "positive_destination_policy": positive_destination_policy,
         "negative_sampling": (
-            "uniform-24,948,663-compact-retained-rows-nonself"
+            f"uniform-{compact_retained_rows:,}-compact-retained-rows-nonself"
         ),
         "graph_degree": graph_degree,
         "host_prefetch": "single-producer-two-pinned-slot",
@@ -593,13 +680,13 @@ def train_config(
         "weight_sampler": "uniform-envelope-rejection-max-weight-one",
         "weight_uniform_dtype": WEIGHT_UNIFORM_DTYPE.str,
         "valid_canonical_edge_count": edges,
-        "compact_retained_rows": RETAINED_ROWS,
+        "compact_retained_rows": compact_retained_rows,
         "source_representation": "int8-treatment",
     }
     config = {
         "schema": schema,
         "input": {
-            "rows": RETAINED_ROWS,
+            "rows": compact_retained_rows,
             "dimension": DIMENSION,
             "representation": "signed-int8-plus-exact-fp16-row-scale",
             "compact_mapping": graph_manifest["compact_mapping"],
@@ -643,7 +730,7 @@ def train_config(
         },
         "execution": {
             "device_count": 1,
-            "required_pipeline": PIPELINE,
+            "required_pipeline": pipeline,
             "gpu_resident_data": False,
             "gpu_resident_vram_budget_gb": 0.0,
             "minimum_train_upd_s": TRAIN_MINIMUM_UPDATES_PER_S,

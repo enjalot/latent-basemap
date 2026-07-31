@@ -159,7 +159,13 @@ def run_train_contract(
     wrapper = Round0107TrainingInput(
         dataset,
         graph_view,
-        required_pipeline=PIPELINE,
+        required_pipeline=str(config["execution"]["required_pipeline"]),
+        pipeline_schema=str(
+            config["execution"]["expected_pipeline_stamp"]["schema"]
+        ),
+        sampler_class=str(
+            config["execution"]["expected_pipeline_stamp"]["sampler_class"]
+        ),
         **dict(training_input_kwargs or {}),
     )
     output = create_fresh_directory(
