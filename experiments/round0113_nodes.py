@@ -93,9 +93,39 @@ def _schema(stem: str) -> str:
 
 def _execution_round_id(active: Mapping[str, Any]) -> str:
     round_id = str((active.get("manifest") or {}).get("round_id", ""))
-    if round_id not in {ROUND_ID, "0115"}:
+    if round_id not in {ROUND_ID, "0115", "0117"}:
         raise Round0113Error("R0113 scientific handler received another queue")
     return round_id
+
+
+def _training_seed(
+    active: Mapping[str, Any], job: Mapping[str, Any]
+) -> int:
+    round_id = _execution_round_id(active)
+    registered = {ROUND_ID: SEED, "0115": SEED, "0117": 43}[round_id]
+    observed = job.get("training_seed", registered)
+    if isinstance(observed, bool):
+        raise Round0113Error("registered prompt training seed changed")
+    try:
+        observed = int(observed)
+    except (TypeError, ValueError) as error:
+        raise Round0113Error(
+            "registered prompt training seed changed"
+        ) from error
+    if observed != registered:
+        raise Round0113Error("registered prompt training seed changed")
+    return observed
+
+
+def _graph_execution_round_id(
+    active: Mapping[str, Any], job: Mapping[str, Any]
+) -> str:
+    execution_round_id = _execution_round_id(active)
+    registered = "0115" if execution_round_id == "0117" else execution_round_id
+    observed = str(job.get("graph_execution_round_id", registered))
+    if observed != registered:
+        raise Round0113Error("registered prompt graph provenance changed")
+    return observed
 
 
 def _faiss_gpu_options(faiss: Any) -> Any:
@@ -1862,6 +1892,7 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     import torch
 
     arm = _arm(job)
+    training_seed = _training_seed(active, job)
     assembly, assembly_signature = _load_assembly(job)
     graph_manifest_path = str(job["graph_manifest"])
     graph_manifest_signature = expected_input_signature(graph_manifest_path)
@@ -1869,7 +1900,7 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         graph_manifest_path,
         expected_sha256=graph_manifest_signature["sha256"],
         arm=arm,
-        execution_round_id=_execution_round_id(active),
+        execution_round_id=_graph_execution_round_id(active, job),
     )
     config, config_sha = train_config(
         arm,
@@ -1877,6 +1908,7 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         graph_manifest_signature=graph["manifest_signature"],
         graph_edges=len(graph["sources"]),
         retained_rows=graph["n_nodes"],
+        seed=training_seed,
     )
     source = _open_compact(assembly, arm)
     dataset = HostFp16EndpointArray(
@@ -1902,10 +1934,10 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         },
         immutable=True,
     )
-    random.seed(SEED)
-    np.random.seed(SEED)
-    torch.manual_seed(SEED)
-    torch.cuda.manual_seed_all(SEED)
+    random.seed(training_seed)
+    np.random.seed(training_seed)
+    torch.manual_seed(training_seed)
+    torch.cuda.manual_seed_all(training_seed)
     torch.cuda.reset_peak_memory_stats("cuda")
     model = _new_model(config)
     model._max_train_steps = SUCCESSFUL_UPDATES
@@ -1923,7 +1955,7 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         low_memory=True,
         verbose=False,
         n_processes=6,
-        random_state=SEED,
+        random_state=training_seed,
         resample_negatives=False,
         precomputed_edges_path=graph["signature"]["canonical_path"],
         use_wandb=False,
@@ -2002,6 +2034,7 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         "schema": _schema("train-receipt"),
         "round_id": _execution_round_id(active),
         "arm": arm,
+        "training_seed": training_seed,
         "release_sha": active["manifest"]["release_sha"],
         "production_config": expected_input_signature(config_path),
         "production_config_sha256": config_sha,
@@ -2045,6 +2078,7 @@ def _authenticate_model(
     job: Mapping[str, Any],
 ) -> tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any]]:
     arm = _arm(job)
+    training_seed = _training_seed(active, job)
     assembly, _assembly_signature = _load_assembly(job)
     graph_manifest_path = str(job["graph_manifest"])
     graph_manifest_signature = expected_input_signature(graph_manifest_path)
@@ -2052,7 +2086,7 @@ def _authenticate_model(
         graph_manifest_path,
         expected_sha256=graph_manifest_signature["sha256"],
         arm=arm,
-        execution_round_id=_execution_round_id(active),
+        execution_round_id=_graph_execution_round_id(active, job),
     )
     config, config_sha = train_config(
         arm,
@@ -2060,11 +2094,13 @@ def _authenticate_model(
         graph_manifest_signature=graph["manifest_signature"],
         graph_edges=len(graph["sources"]),
         retained_rows=graph["n_nodes"],
+        seed=training_seed,
     )
     train_path = os.path.join(str(job["train_output"]), "train-receipt.json")
     train = read_sealed(train_path, label=f"R0113 {arm} train receipt")
     if (
         train.get("arm") != arm
+        or int(train.get("training_seed", SEED)) != training_seed
         or train.get("production_config_sha256") != config_sha
         or train.get("graph_manifest") != graph["manifest_signature"]
     ):
@@ -2131,6 +2167,7 @@ def run_evaluate(
     )
 
     arm = _arm(job)
+    training_seed = _training_seed(active, job)
     other = "document" if arm == "raw" else "raw"
     model, train, assembly, graph = _authenticate_model(active, job)
     query, query_signature = _load_query_reserve(job)
@@ -2438,6 +2475,7 @@ def run_evaluate(
         "schema": _schema("prompt-arm-score"),
         "round_id": _execution_round_id(active),
         "arm": arm,
+        "training_seed": training_seed,
         "release_sha": active["manifest"]["release_sha"],
         "train_receipt": expected_input_signature(
             os.path.join(str(job["train_output"]), "train-receipt.json")
@@ -2504,6 +2542,7 @@ def run_decide(
     output = create_fresh_directory(
         job["outputs"][0], label="R0113 paired prompt decision"
     )
+    training_seed = _training_seed(active, job)
     scores: dict[str, Any] = {}
     score_signatures: dict[str, Any] = {}
     topology: dict[str, Any] = {}
@@ -2513,6 +2552,7 @@ def run_decide(
         score = read_sealed(score_path, label=f"R0113 {arm} score")
         if (
             score.get("arm") != arm
+            or int(score.get("training_seed", SEED)) != training_seed
             or set(score.get("metrics") or {}) != set(DECISION_METRICS)
             or "pol_Latn" not in (score.get("ood") or {})
         ):
@@ -2590,13 +2630,50 @@ def run_decide(
                     document_value / raw_value if raw_value != 0 else None
                 ),
             }
-    released = ["jina-fineweb-2m-prompt-map-contrast-v1"]
-    if decision["passed"]:
-        released.append("jina-fineweb-2m-document-prompt-map-transfer-v1")
+    execution_round_id = _execution_round_id(active)
+    cross_seed_evidence = None
+    if execution_round_id == "0117":
+        prior_path = str(job.get("prior_decision") or "")
+        prior_signature = expected_input_signature(prior_path)
+        prior = read_sealed(prior_path, label="R0115 paired prompt decision")
+        prior_registered = prior.get("registered_decision") or {}
+        if (
+            prior.get("round_id") != "0115"
+            or prior_signature.get("sha256")
+            != str(job.get("prior_decision_sha256") or "")
+            or prior_registered.get("passed") is not False
+        ):
+            raise Round0113Error("R0117 seed-42 decision provenance changed")
+        seed43_passed = bool(decision["passed"])
+        cross_seed_evidence = {
+            "seed42": {
+                "seed": 42,
+                "decision": prior_signature,
+                "document_noninferior": False,
+            },
+            "seed43": {
+                "seed": training_seed,
+                "document_noninferior": seed43_passed,
+            },
+            "verdict": (
+                "confirmed-negative-two-seed"
+                if not seed43_passed
+                else "seed-sensitive-mixed"
+            ),
+            "two_seed_document_noninferiority": False,
+        }
+        released = ["jina-fineweb-2m-prompt-map-seed43-contrast-v1"]
+    else:
+        released = ["jina-fineweb-2m-prompt-map-contrast-v1"]
+        if decision["passed"]:
+            released.append(
+                "jina-fineweb-2m-document-prompt-map-transfer-v1"
+            )
     body = {
         "schema": _schema("paired-prompt-decision"),
         "round_id": _execution_round_id(active),
         "release_sha": active["manifest"]["release_sha"],
+        "training_seed": training_seed,
         "scores": score_signatures,
         "graphs": graph_signatures,
         "registered_decision": decision,
@@ -2651,9 +2728,13 @@ def run_decide(
             },
         },
         "capabilities_produced": released,
+        "cross_seed_evidence": cross_seed_evidence,
         "production_ready": False,
         "complete_sae_corpus_ready": False,
-        "one_seed_screen": True,
+        "one_seed_screen": execution_round_id != "0117",
+        "replication_seed": (
+            training_seed if execution_round_id == "0117" else None
+        ),
         "training_performed": True,
         "optimizer_updates_per_arm": SUCCESSFUL_UPDATES,
     }

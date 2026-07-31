@@ -746,8 +746,16 @@ def train_config(
     graph_manifest_signature: Mapping[str, Any],
     graph_edges: int,
     retained_rows: int,
+    seed: int = SEED,
 ) -> tuple[dict[str, Any], str]:
-    if arm not in ARMS or graph_edges <= 0 or retained_rows != RETAINED_ROWS:
+    if (
+        arm not in ARMS
+        or graph_edges <= 0
+        or retained_rows != RETAINED_ROWS
+        or isinstance(seed, bool)
+        or not isinstance(seed, int)
+        or seed < 0
+    ):
         raise Round0113Error("R0113 train config input is invalid")
     expected_pipeline = {
         "schema": PIPELINE_SCHEMA,
@@ -767,8 +775,8 @@ def train_config(
         "rng_stream_policy": (
             "separate-positive-rejection-and-negative-pair-streams"
         ),
-        "positive_rng_seed": SEED,
-        "negative_rng_seed": SEED + NEGATIVE_RNG_SEED_OFFSET,
+        "positive_rng_seed": seed,
+        "negative_rng_seed": seed + NEGATIVE_RNG_SEED_OFFSET,
         "negative_row_pairs_identical_across_arms": True,
         "graph_degree": "variable-symmetric-fuzzy-k50-topology",
         "host_prefetch": "single-producer-two-pinned-slot",
@@ -792,7 +800,7 @@ def train_config(
         "paired_invariant": {
             "rows": retained_rows,
             "dimension": DIMENSION,
-            "seed": SEED,
+            "seed": seed,
             "successful_positive_lr_updates": SUCCESSFUL_UPDATES,
             "graph_policy": "separate bytes; identical builder/parameters/seeds",
             "sampler": SAMPLER_CLASS,
@@ -829,13 +837,13 @@ def train_config(
             "b": 1.0,
         },
         "optimizer": {
-            "seed": SEED,
+            "seed": seed,
             "learning_rate": 0.001,
             "batch_size": BATCH_SIZE,
             "positive_ratio": POSITIVE_RATIO,
             "positive_rows_per_update": POSITIVE_ROWS_PER_UPDATE,
-            "positive_rng_seed": SEED,
-            "negative_rng_seed": SEED + NEGATIVE_RNG_SEED_OFFSET,
+            "positive_rng_seed": seed,
+            "negative_rng_seed": seed + NEGATIVE_RNG_SEED_OFFSET,
             "positive_target_mode": "binary",
             "weighted_edge_sampling": True,
             "correlation_weight": 0.0,
