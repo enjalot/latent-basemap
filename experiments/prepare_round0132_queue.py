@@ -18,6 +18,7 @@ from basemap.output_safety import (
     create_fresh_directory,
     ensure_data_directory,
 )
+from basemap.round0036_pipeline import CoordinateStream, Round0036Error
 from basemap.round0104_training import validate_substrate_manifest
 from basemap.round0105_search import ELIGIBILITY_PATH
 from basemap.round0132_scale_bridge import (
@@ -25,8 +26,10 @@ from basemap.round0132_scale_bridge import (
     DENSITY_BOOTSTRAP_DRAWS,
     DENSITY_BOOTSTRAP_SEED,
     DENSITY_CI_LEVEL,
+    DENSITY_COMPARISON_ATOL,
     DENSITY_NONINFERIORITY_MARGIN,
     FFR_ALLOWED_DECREASE,
+    FULL_RETAINED_ROWS,
     GRAPH_K,
     HALF_RETAINED_ROWS,
     METRIC_RETENTION,
@@ -69,6 +72,7 @@ FULL_TRAIN_OUTPUT = (
     "/data/latent-basemap/runs/round-0107/queue/artifacts/"
     "train-diverse-jina-25m"
 )
+FULL_MODEL = os.path.join(FULL_TRAIN_OUTPUT, "model.pt")
 R0108_ROOT = "/data/latent-basemap/runs/round-0108/queue-attempt-3"
 R0108_QUEUE = os.path.join(R0108_ROOT, "queue.json")
 R0108_TERMINAL = os.path.join(R0108_ROOT, "runner-terminal.json")
@@ -171,6 +175,13 @@ def _require_issued_round() -> str:
     return candidates[0]
 
 
+def _require_round_release(round_file: str, release_sha: str) -> None:
+    if _frontmatter(round_file).get("base_commit") != release_sha:
+        raise RuntimeError(
+            "R0132 issued round base_commit must equal the materialized release SHA"
+        )
+
+
 def _require_review(
     path: str,
     *,
@@ -205,11 +216,88 @@ def _require_clean_r0108() -> tuple[dict[str, Any], dict[str, Any]]:
         or terminal.get("round_id") != "0108"
         or terminal.get("verdict") != "succeeded"
         or terminal.get("completed_jobs") != terminal.get("required_jobs")
+        or terminal.get("queue_manifest_sha256") != queue_signature["sha256"]
+        or terminal.get("queue_manifest_sha256_at_finish")
+        != queue_signature["sha256"]
         or terminal.get("queue_manifest_unchanged") is not True
         or terminal.get("release_checkout_unchanged") is not True
     ):
         raise RuntimeError("R0108 is not a clean accepted execution")
     return queue_signature, terminal_signature
+
+
+def _accepted_transform_signatures(
+    transform_root: str = R0108_TRANSFORM,
+    *,
+    expected_rows: int = FULL_RETAINED_ROWS,
+    expected_members: int = 5,
+) -> list[dict[str, Any]]:
+    """Authenticate and bind the receipt plus every coordinate-stream member."""
+    receipt_path = os.path.join(transform_root, "actual-transform.json")
+    try:
+        receipt_signature = expected_input_signature(receipt_path)
+        stream = CoordinateStream(
+            transform_root,
+            expected_receipt_sha256=receipt_signature["sha256"],
+        )
+    except (OSError, Round0036Error, ValueError) as exc:
+        raise RuntimeError(
+            "accepted R0108 coordinate stream failed authentication"
+        ) from exc
+    expected_paths = [
+        os.path.realpath(
+            os.path.join(
+                transform_root,
+                f"chunk-{index:05d}",
+                "coordinates.npy",
+            )
+        )
+        for index in range(expected_members)
+    ]
+    if (
+        len(stream) != expected_rows
+        or len(stream.shard_paths) != expected_members
+        or [os.path.realpath(path) for path in stream.shard_paths]
+        != expected_paths
+    ):
+        raise RuntimeError("accepted R0108 coordinate stream coverage changed")
+    return _dedupe([
+        receipt_signature,
+        *(expected_input_signature(path) for path in stream.shard_paths),
+    ])
+
+
+def _accepted_control_signatures(
+    *,
+    full_graph_manifest: str = FULL_GRAPH_MANIFEST,
+    full_mapping: str = FULL_MAPPING,
+    full_train_output: str = FULL_TRAIN_OUTPUT,
+    selection_path: str = R0108_SELECTION,
+    calibration_path: str = R0108_CALIBRATION,
+    transform_root: str = R0108_TRANSFORM,
+    expected_transform_rows: int = FULL_RETAINED_ROWS,
+    expected_transform_members: int = 5,
+) -> list[dict[str, Any]]:
+    """Return every immutable accepted-25M control input for queue binding."""
+    direct_paths = [
+        full_graph_manifest,
+        full_mapping,
+        os.path.join(full_train_output, "train-receipt.json"),
+        os.path.join(full_train_output, "production-config.json"),
+        os.path.join(full_train_output, "model.pt"),
+        selection_path,
+        calibration_path,
+    ]
+    try:
+        direct = [expected_input_signature(path) for path in direct_paths]
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("accepted 25M control input is missing or invalid") from exc
+    transform = _accepted_transform_signatures(
+        transform_root,
+        expected_rows=expected_transform_rows,
+        expected_members=expected_transform_members,
+    )
+    return _dedupe([*direct, *transform])
 
 
 def _job(
@@ -250,6 +338,7 @@ def prepare_round0132(
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0132 release SHA must be one full commit")
     round_file = _require_issued_round()
+    _require_round_release(round_file, release_sha)
     reviews = {
         round_id: _require_review(
             os.path.join(LAB_ROOT, name),
@@ -291,24 +380,14 @@ def prepare_round0132(
 
     full_graph = expected_input_signature(FULL_GRAPH_MANIFEST)
     full_mapping = expected_input_signature(FULL_MAPPING)
-    full_train_receipt = expected_input_signature(
-        os.path.join(FULL_TRAIN_OUTPUT, "train-receipt.json")
-    )
-    full_config = expected_input_signature(
-        os.path.join(FULL_TRAIN_OUTPUT, "production-config.json")
-    )
     selection = expected_input_signature(R0108_SELECTION)
-    calibration = expected_input_signature(R0108_CALIBRATION)
-    full_transform_receipt = expected_input_signature(R0108_TRANSFORM_RECEIPT)
-    accepted_controls = _dedupe([
-        full_graph,
-        full_mapping,
-        full_train_receipt,
-        full_config,
-        selection,
-        calibration,
-        full_transform_receipt,
-    ])
+    accepted_controls = _accepted_control_signatures()
+    full_transform_receipt = next(
+        signature
+        for signature in accepted_controls
+        if os.path.realpath(signature["canonical_path"])
+        == os.path.realpath(R0108_TRANSFORM_RECEIPT)
+    )
 
     subset_output = os.path.join(artifacts, "half-subset")
     index_output = os.path.join(artifacts, "half-search-index")
@@ -552,6 +631,8 @@ def prepare_round0132(
             "density_bootstrap_seed": DENSITY_BOOTSTRAP_SEED,
             "density_ci_level": DENSITY_CI_LEVEL,
             "density_noninferiority_margin": DENSITY_NONINFERIORITY_MARGIN,
+            "density_comparison_atol": DENSITY_COMPARISON_ATOL,
+            "native_global_ffr": "registered noninferiority gate",
             "ffr_allowed_decrease": FFR_ALLOWED_DECREASE,
             "recall_retention": METRIC_RETENTION,
         },
@@ -561,7 +642,7 @@ def prepare_round0132(
                 "Polish recall50 retains 0.97",
                 "median 19 in-mix language recall50 retains 0.97",
             ],
-            "projection_ffr": "diagnostic-only",
+            "ood_projection_ffr": "diagnostic-only",
             "trec-covid": "diagnostic-only",
             "dadabase": "diagnostic-only",
         },
@@ -575,6 +656,9 @@ def prepare_round0132(
         ],
         "decision_schema": DECISION_SCHEMA,
         "atlas_quality_or_production_claim": False,
+        "one_seed_limitation": (
+            "seed-42 matched contrast only; no seed-variance robustness claim"
+        ),
         "conditional_branch_evidence_is_dependency": False,
     }
     queue["gpu_hours"] = {

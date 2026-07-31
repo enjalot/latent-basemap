@@ -10,6 +10,11 @@ import numpy as np
 import pytest
 
 from basemap.round0105_search import GROUPS, RETAINED_ROWS
+from basemap.round0036_pipeline import (
+    COORDINATE_SCHEMA,
+    TRANSFORM_SCHEMA,
+    seal as coordinate_seal,
+)
 from basemap.panel_v2 import PanelV2Config, score_panel
 from basemap.round0107_training import (
     BATCH_SIZE,
@@ -25,6 +30,8 @@ from basemap.artifact_identity import (
 from basemap.round0132_scale_bridge import (
     DENSITY_BOOTSTRAP_DRAWS,
     DENSITY_BOOTSTRAP_SEED,
+    DENSITY_COMPARISON_ATOL,
+    DENSITY_NONINFERIORITY_MARGIN,
     FULL_RETAINED_ROWS,
     GRAPH_K,
     HALF_RETAINED_ROWS,
@@ -41,11 +48,13 @@ from basemap.round0132_scale_bridge import (
     Round0132Error,
     assert_no_conditional_branch_dependency,
     coverage_aligned_updates,
+    density_ci_classification,
     group_part_specs,
     largest_remainder_quotas,
     noninferiority_checks,
     paired_density_bootstrap,
     qualification_metrics,
+    recall50_at_least_recall10,
     scale_policy_decision,
     seal,
     select_lowest_sha256_rank,
@@ -60,9 +69,16 @@ from experiments.prepare_round0132_queue import (
     GPU_HOURS_P90,
     P90_GPU_TOTAL_SECONDS,
     REVIEW_DEFAULTS,
+    _accepted_control_signatures,
+    _accepted_transform_signatures,
+    _require_clean_r0108,
     _require_issued_round,
+    _require_round_release,
 )
-from experiments.round0132_nodes import _authenticate_native_selector
+from experiments.round0132_nodes import (
+    _authenticate_native_selector,
+    _native_ffr_truth_hits,
+)
 
 
 def _balanced_counts() -> dict[str, int]:
@@ -188,6 +204,20 @@ def test_density_bootstrap_uses_paired_draws_and_registered_selector():
     assert result["paired_bootstrap_draws"] == DENSITY_BOOTSTRAP_DRAWS
     assert result["paired_bootstrap_seed"] == DENSITY_BOOTSTRAP_SEED
     assert len(result["bootstrap_deltas"]) == DENSITY_BOOTSTRAP_DRAWS
+    assert result["comparison_atol"] == DENSITY_COMPARISON_ATOL
+
+
+def test_density_margin_comparisons_are_inclusive_with_registered_tolerance():
+    boundary = -DENSITY_NONINFERIORITY_MARGIN
+    assert density_ci_classification(
+        boundary - DENSITY_COMPARISON_ATOL, boundary + 0.01
+    ) == "noninferior"
+    assert density_ci_classification(
+        boundary - 0.01, boundary + DENSITY_COMPARISON_ATOL
+    ) == "materially-worse"
+    assert density_ci_classification(
+        boundary - 0.01, boundary + 0.01
+    ) == "inconclusive"
 
 
 def _quality(*, passed: bool = True) -> dict:
@@ -231,9 +261,16 @@ def test_decision_branch_order_is_frozen(validity, density, quality, expected):
     )
     assert result["outcome"] == expected
     assert result["stale_absolute_jina_floor_role"] == "diagnostic-only"
-    assert result["projection_ffr_role"] == "diagnostic-only"
+    assert result["native_global_ffr_role"] == "registered-noninferiority-gate"
+    assert result["ood_projection_ffr_role"] == "diagnostic-only"
     assert result["trec_covid_role"] == "diagnostic-only"
     assert result["dadabase_role"] == "diagnostic-only"
+    assert "seed-42" in result["one_seed_limitation"]
+    assert result["capabilities_produced"] == (
+        []
+        if expected == OUTCOME_INVALID
+        else ["jina-diverse-12p5m-25m-scale-policy-geometry-v1"]
+    )
     assert "not a pure-N effect" in result["estimand"]
 
 
@@ -287,6 +324,19 @@ def test_noninferiority_uses_exact_native_and_ood_margins():
     assert failed["passed"] is False
 
 
+def test_ood_recall_order_is_inclusive_and_has_no_absolute_polish_floor():
+    cells = [
+        {"recall_at_10": 0.90, "recall_at_50_of_high10": 0.95},
+        # Equality is a valid wider-neighborhood invariant, including for a
+        # very low held-out Polish cell relative to an in-mix population.
+        {"recall_at_10": 0.001, "recall_at_50_of_high10": 0.001},
+    ]
+    assert recall50_at_least_recall10(cells) is True
+    assert recall50_at_least_recall10([
+        {"recall_at_10": 0.002, "recall_at_50_of_high10": 0.001}
+    ]) is False
+
+
 def test_r0132_has_no_conditional_branch_dependency():
     assert set(REVIEW_DEFAULTS) == {
         "0087", "0103", "0105", "0106", "0107", "0108", "0118", "0119"
@@ -317,6 +367,153 @@ def test_draft_or_multiple_round_files_cannot_materialize(monkeypatch, tmp_path)
     second.write_text("---\nstatus: issued\n---\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="found 2"):
         _require_issued_round()
+
+
+def test_issued_round_release_must_match_materialized_commit(tmp_path):
+    path = tmp_path / "round.md"
+    path.write_text(
+        f"---\nbase_commit: {'a' * 40}\nstatus: issued\n---\n",
+        encoding="utf-8",
+    )
+    _require_round_release(str(path), "a" * 40)
+    with pytest.raises(RuntimeError, match="base_commit"):
+        _require_round_release(str(path), "b" * 40)
+
+
+@pytest.mark.parametrize("field", [
+    "queue_manifest_sha256",
+    "queue_manifest_sha256_at_finish",
+])
+def test_r0108_terminal_binds_queue_bytes_at_start_and_finish(
+    monkeypatch, tmp_path, field
+):
+    import experiments.prepare_round0132_queue as prepare
+
+    queue = tmp_path / "queue.json"
+    queue.write_text(json.dumps({"round_id": "0108"}), encoding="utf-8")
+    queue_sha = expected_input_signature(str(queue))["sha256"]
+    terminal = tmp_path / "runner-terminal.json"
+    body = {
+        "round_id": "0108",
+        "verdict": "succeeded",
+        "completed_jobs": 2,
+        "required_jobs": 2,
+        "queue_manifest_sha256": queue_sha,
+        "queue_manifest_sha256_at_finish": queue_sha,
+        "queue_manifest_unchanged": True,
+        "release_checkout_unchanged": True,
+    }
+    terminal.write_text(json.dumps(body), encoding="utf-8")
+    monkeypatch.setattr(prepare, "R0108_QUEUE", str(queue))
+    monkeypatch.setattr(prepare, "R0108_TERMINAL", str(terminal))
+    _require_clean_r0108()
+    body[field] = "f" * 64
+    terminal.write_text(json.dumps(body), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="clean accepted"):
+        _require_clean_r0108()
+
+
+def _accepted_control_fixture(tmp_path: Path) -> dict[str, Path]:
+    direct = {
+        name: tmp_path / name
+        for name in (
+            "graph.json",
+            "mapping.npy",
+            "selection.npz",
+            "calibration.json",
+        )
+    }
+    for path in direct.values():
+        path.write_bytes(path.name.encode("utf-8"))
+    train = tmp_path / "train"
+    train.mkdir()
+    for name in ("train-receipt.json", "production-config.json", "model.pt"):
+        (train / name).write_bytes(name.encode("utf-8"))
+
+    transform = tmp_path / "coordinates"
+    transform.mkdir()
+    members = []
+    for index in range(5):
+        chunk = transform / f"chunk-{index:05d}"
+        chunk.mkdir()
+        path = chunk / "coordinates.npy"
+        np.save(path, np.asarray([[index, index + 1]], dtype=np.float32))
+        signature = expected_input_signature(str(path))
+        members.append({
+            "chunk_index": index,
+            "global_row_start": index,
+            "global_row_stop": index + 1,
+            "bytes": signature["bytes"],
+            "sha256": signature["sha256"],
+        })
+    receipt = coordinate_seal({
+        "schema": TRANSFORM_SCHEMA,
+        "row_accounting": {"all_rows": 5},
+        "coordinate_stream": {
+            "schema": COORDINATE_SCHEMA,
+            "row_count": 5,
+            "dimension": 2,
+            "dtype": "<f4",
+            "ordered_chunks": members,
+        },
+    })
+    (transform / "actual-transform.json").write_text(
+        json.dumps(receipt), encoding="utf-8"
+    )
+    return {**direct, "train": train, "transform": transform}
+
+
+def test_accepted_controls_bind_model_and_all_five_coordinate_members(tmp_path):
+    fixture = _accepted_control_fixture(tmp_path)
+    signatures = _accepted_control_signatures(
+        full_graph_manifest=str(fixture["graph.json"]),
+        full_mapping=str(fixture["mapping.npy"]),
+        full_train_output=str(fixture["train"]),
+        selection_path=str(fixture["selection.npz"]),
+        calibration_path=str(fixture["calibration.json"]),
+        transform_root=str(fixture["transform"]),
+        expected_transform_rows=5,
+        expected_transform_members=5,
+    )
+    paths = {Path(item["canonical_path"]) for item in signatures}
+    assert fixture["train"] / "model.pt" in paths
+    assert {
+        fixture["transform"] / f"chunk-{index:05d}" / "coordinates.npy"
+        for index in range(5)
+    } <= paths
+    assert fixture["transform"] / "actual-transform.json" in paths
+
+
+@pytest.mark.parametrize("failure", ["missing", "wrong-bytes"])
+def test_accepted_transform_members_fail_closed(tmp_path, failure):
+    fixture = _accepted_control_fixture(tmp_path)
+    member = fixture["transform"] / "chunk-00003" / "coordinates.npy"
+    if failure == "missing":
+        member.unlink()
+    else:
+        np.save(member, np.asarray([[99, 100]], dtype=np.float32))
+    with pytest.raises(RuntimeError, match="failed authentication"):
+        _accepted_transform_signatures(
+            str(fixture["transform"]),
+            expected_rows=5,
+            expected_members=5,
+        )
+
+
+def test_accepted_controls_fail_closed_when_model_is_missing(tmp_path):
+    fixture = _accepted_control_fixture(tmp_path)
+    (fixture["train"] / "model.pt").unlink()
+    with pytest.raises(RuntimeError, match="missing or invalid"):
+        _accepted_control_signatures(
+            full_graph_manifest=str(fixture["graph.json"]),
+            full_mapping=str(fixture["mapping.npy"]),
+            full_train_output=str(fixture["train"]),
+            selection_path=str(fixture["selection.npz"]),
+            calibration_path=str(fixture["calibration.json"]),
+            transform_root=str(fixture["transform"]),
+            expected_transform_rows=5,
+            expected_transform_members=5,
+        )
 
 
 class _StampDataset:
@@ -569,6 +766,9 @@ def _native_selector_fixture(tmp_path: Path):
         treatment_low_radius=treatment_radius,
         control_low_neighbors_top50=low,
         treatment_low_neighbors_top50=low,
+        native_fraction_k=np.asarray(12_475, dtype=np.int64),
+        control_ffr_truth_hits=np.ones((rows, 10), dtype=bool),
+        treatment_ffr_truth_hits=np.ones((rows, 10), dtype=bool),
         family_sizes=np.ones(rows, dtype=np.int64),
         density_bootstrap_deltas=deltas,
     )
@@ -576,10 +776,12 @@ def _native_selector_fixture(tmp_path: Path):
         "arrays": expected_input_signature(str(path)),
         "density_selector": density,
         "control_12p5m": {
+            "global_ffr": 1.0,
             "global_recall_at_10": 1.0,
             "global_recall_at_50_of_high10": 1.0,
         },
         "treatment_25m_on_u12": {
+            "global_ffr": 1.0,
             "global_recall_at_10": 1.0,
             "global_recall_at_50_of_high10": 1.0,
         },
@@ -591,6 +793,9 @@ def test_terminal_density_selector_recomputes_from_bound_arrays(tmp_path: Path):
     authenticated = _authenticate_native_selector(native)
     assert authenticated["density_selector_recomputed"] is True
     assert authenticated["density_classification"] == "noninferior"
+    assert authenticated[
+        "native_global_ffr_recomputed_from_per_anchor_evidence"
+    ] is True
 
 
 def test_terminal_density_selector_rejects_minted_classification(tmp_path: Path):
@@ -598,6 +803,23 @@ def test_terminal_density_selector_rejects_minted_classification(tmp_path: Path)
     native["density_selector"]["classification"] = "materially-worse"
     with pytest.raises(Round0132Error, match="does not recompute"):
         _authenticate_native_selector(native)
+
+
+def test_terminal_native_selector_rejects_minted_global_ffr_scalar(tmp_path: Path):
+    native = _native_selector_fixture(tmp_path)
+    native["treatment_25m_on_u12"]["global_ffr"] = 0.999
+    with pytest.raises(Round0132Error, match="recall/FFR does not recompute"):
+        _authenticate_native_selector(native)
+
+
+def test_native_ffr_membership_evidence_exactly_recomputes_per_truth_hit():
+    high10 = np.asarray([[2, 4, 6, 8, 10, 12, 14, 16, 18, 20]])
+    low = np.arange(60, dtype=np.int64)[None, :]
+    low[0, [2, 4, 6]] = np.asarray([2, 4, 999])
+    hits = _native_ffr_truth_hits(high10, low, fraction_k=50)
+    expected = np.isin(high10[0], low[0, :50])
+    np.testing.assert_array_equal(hits[0], expected)
+    assert float(hits.mean()) == pytest.approx(float(expected.mean()))
 
 
 def test_cpu_train_seal_reload_transform_panel_smoke(monkeypatch, tmp_path: Path):

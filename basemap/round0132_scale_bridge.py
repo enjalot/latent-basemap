@@ -62,6 +62,7 @@ DENSITY_BOOTSTRAP_DRAWS = 1_000
 DENSITY_BOOTSTRAP_SEED = 13_207
 DENSITY_CI_LEVEL = 0.99
 DENSITY_NONINFERIORITY_MARGIN = 0.03
+DENSITY_COMPARISON_ATOL = 1e-12
 METRIC_RETENTION = 0.97
 FFR_ALLOWED_DECREASE = 0.02
 
@@ -70,6 +71,7 @@ OUTCOME_DENSITY_REGRESSION = "25m-scale-density-regression-localized"
 OUTCOME_QUALITY_REGRESSION = "25m-scale-quality-or-ood-regression"
 OUTCOME_INCONCLUSIVE = "12p5m-to-25m-scale-effect-inconclusive"
 OUTCOME_INVALID = "invalid-execution"
+SCALE_POLICY_CAPABILITY = "jina-diverse-12p5m-25m-scale-policy-geometry-v1"
 
 
 class Round0132Error(RuntimeError):
@@ -545,14 +547,7 @@ def paired_density_bootstrap(
     alpha = (1.0 - DENSITY_CI_LEVEL) / 2.0
     low, high_ci = np.quantile(deltas, [alpha, 1.0 - alpha])
     delta = treatment_value - control_value
-    noninferior = bool(low >= -DENSITY_NONINFERIORITY_MARGIN)
-    materially_worse = bool(high_ci <= -DENSITY_NONINFERIORITY_MARGIN)
-    if noninferior:
-        classification = "noninferior"
-    elif materially_worse:
-        classification = "materially-worse"
-    else:
-        classification = "inconclusive"
+    classification = density_ci_classification(float(low), float(high_ci))
     return {
         "control_12p5m_density": control_value,
         "treatment_25m_density": treatment_value,
@@ -562,9 +557,24 @@ def paired_density_bootstrap(
         "paired_bootstrap_seed": seed,
         "paired_bootstrap_ci_level": DENSITY_CI_LEVEL,
         "noninferiority_margin": DENSITY_NONINFERIORITY_MARGIN,
+        "comparison_atol": DENSITY_COMPARISON_ATOL,
         "classification": classification,
         "bootstrap_deltas": deltas,
     }
+
+
+def density_ci_classification(low: float, high: float) -> str:
+    """Classify the registered density CI with inclusive 1e-12 tolerance."""
+    low_value = _finite_metric(low, label="density CI lower bound")
+    high_value = _finite_metric(high, label="density CI upper bound")
+    if low_value > high_value:
+        raise Round0132Error("density CI bounds changed order")
+    boundary = -DENSITY_NONINFERIORITY_MARGIN
+    if low_value >= boundary - DENSITY_COMPARISON_ATOL:
+        return "noninferior"
+    if high_value <= boundary + DENSITY_COMPARISON_ATOL:
+        return "materially-worse"
+    return "inconclusive"
 
 
 def _finite_metric(value: Any, *, label: str) -> float:
@@ -640,6 +650,33 @@ def noninferiority_checks(
     return {"checks": checks, "passed": all(checks.values()), "metrics": metrics}
 
 
+def recall50_at_least_recall10(
+    cells: Sequence[Mapping[str, Any]],
+) -> bool:
+    """Return the inclusive recall-order validity invariant for every cell.
+
+    This is deliberately an internal-consistency check, not an absolute OOD
+    quality floor.  A low-recall held-out population remains valid evidence as
+    long as its wider neighborhood cannot recover fewer registered neighbors
+    than its narrower neighborhood.
+    """
+    if not cells:
+        return False
+    for cell in cells:
+        try:
+            recall10 = float(cell["recall_at_10"])
+            recall50 = float(cell["recall_at_50_of_high10"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if (
+            not math.isfinite(recall10)
+            or not math.isfinite(recall50)
+            or recall50 < recall10
+        ):
+            return False
+    return True
+
+
 def scale_policy_decision(
     *,
     validity_checks: Mapping[str, bool],
@@ -672,12 +709,19 @@ def scale_policy_decision(
             "and coverage-aligned horizon; not a pure-N effect"
         ),
         "stale_absolute_jina_floor_role": "diagnostic-only",
-        "projection_ffr_role": "diagnostic-only",
+        "native_global_ffr_role": "registered-noninferiority-gate",
+        "ood_projection_ffr_role": "diagnostic-only",
         "trec_covid_role": "diagnostic-only",
         "dadabase_role": "diagnostic-only",
         "atlas_quality_released": False,
         "universal_ood_claimed": False,
         "production_or_prompt_claimed": False,
+        "one_seed_limitation": (
+            "seed-42 matched contrast only; no seed-variance robustness claim"
+        ),
+        "capabilities_produced": (
+            [] if outcome == OUTCOME_INVALID else [SCALE_POLICY_CAPABILITY]
+        ),
     }
 
 

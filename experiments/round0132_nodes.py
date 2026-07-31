@@ -113,6 +113,7 @@ from basemap.round0132_scale_bridge import (
     noninferiority_checks,
     paired_density_bootstrap,
     qualification_metrics,
+    recall50_at_least_recall10,
     scale_policy_decision,
     seal,
     select_lowest_sha256_rank,
@@ -1257,7 +1258,13 @@ def _native_metrics(
     anchors: np.ndarray,
     high10: np.ndarray,
     config: Any,
-) -> tuple[dict[str, float], np.ndarray, np.ndarray, dict[str, Any]]:
+) -> tuple[
+    dict[str, float],
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    dict[str, Any],
+]:
     from basemap.panel_v2 import _self_knn
 
     fraction_k = max(K_LOW_MAX, int(math.ceil(FRACTION * len(coordinates))))
@@ -1278,7 +1285,57 @@ def _native_metrics(
         "global_recall_at_10": float(raw["recall_at_10"]),
         "global_recall_at_50_of_high10": float(raw["recall_at_50_of_high10"]),
     }
-    return metrics, distances[:, :K_DENSITY].mean(1), low[:, :K_LOW_MAX], guard
+    ffr_truth_hits = _native_ffr_truth_hits(high10, low, fraction_k=fraction_k)
+    if not math.isclose(
+        metrics["global_ffr"],
+        float(ffr_truth_hits.mean()),
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    ):
+        raise Round0132Error("R0132 native global FFR evidence disagrees")
+    return (
+        metrics,
+        distances[:, :K_DENSITY].mean(1),
+        low[:, :K_LOW_MAX],
+        ffr_truth_hits,
+        guard,
+    )
+
+
+def _native_ffr_truth_hits(
+    high10: np.ndarray,
+    low_neighbors: np.ndarray,
+    *,
+    fraction_k: int,
+) -> np.ndarray:
+    """Preserve the per-anchor truth membership needed to recompute FFR.
+
+    The full ~0.1%-width neighbor matrix is unnecessarily large.  This exact
+    boolean membership matrix is sufficient evidence for the registered global
+    FFR scalar while remaining tiny and auditable at the terminal decision.
+    """
+    truth = np.asarray(high10, dtype=np.int64)
+    low = np.asarray(low_neighbors, dtype=np.int64)
+    if (
+        truth.ndim != 2
+        or truth.shape[1] != K_HIT
+        or low.ndim != 2
+        or low.shape[0] != truth.shape[0]
+        or fraction_k < K_LOW_MAX
+        or low.shape[1] < fraction_k
+    ):
+        raise Round0132Error("R0132 native global FFR inputs are malformed")
+    hits = np.empty(truth.shape, dtype=bool)
+    # Bound the temporary broadcast to roughly 32 MB at production width.
+    block_rows = max(1, 32_000_000 // (K_HIT * fraction_k))
+    for start in range(0, len(truth), block_rows):
+        stop = min(start + block_rows, len(truth))
+        hits[start:stop] = np.any(
+            truth[start:stop, :, None]
+            == low[start:stop, None, :fraction_k],
+            axis=2,
+        )
+    return hits
 
 
 def run_score_native(
@@ -1326,7 +1383,13 @@ def run_score_native(
     half_coordinates = CoordinateStream(str(job["transform_output"]))
     if len(half_coordinates) != HALF_RETAINED_ROWS:
         raise Round0132Error("R0132 half coordinate stream changed")
-    control_metrics, control_low_radius, control_low50, control_guard = _native_metrics(
+    (
+        control_metrics,
+        control_low_radius,
+        control_low50,
+        control_ffr_hits,
+        control_guard,
+    ) = _native_metrics(
         coordinates=half_coordinates,
         anchors=compact_anchors,
         high10=high10,
@@ -1345,7 +1408,13 @@ def run_score_native(
     ):
         raise Round0132Error("R0132 U12 is not a subset of accepted R0106 mapping")
     treatment_coordinates = _MappedRows(full_coordinates, full_positions)
-    treatment_metrics, treatment_low_radius, treatment_low50, treatment_guard = _native_metrics(
+    (
+        treatment_metrics,
+        treatment_low_radius,
+        treatment_low50,
+        treatment_ffr_hits,
+        treatment_guard,
+    ) = _native_metrics(
         coordinates=treatment_coordinates,
         anchors=compact_anchors,
         high10=high10,
@@ -1399,6 +1468,12 @@ def run_score_native(
         treatment_low_radius=treatment_low_radius,
         control_low_neighbors_top50=control_low50,
         treatment_low_neighbors_top50=treatment_low50,
+        native_fraction_k=np.asarray(
+            max(K_LOW_MAX, int(math.ceil(FRACTION * HALF_RETAINED_ROWS))),
+            dtype=np.int64,
+        ),
+        control_ffr_truth_hits=control_ffr_hits,
+        treatment_ffr_truth_hits=treatment_ffr_hits,
         family_sizes=family_sizes,
         density_bootstrap_deltas=deltas,
     )
@@ -1435,7 +1510,8 @@ def run_score_native(
             "can_gate_or_rescue": False,
             "calibration": _signature(str(job["stale_calibration"]), label="R0108 calibration"),
         },
-        "projection_ffr_role": "matched noninferiority metric only; OOD projection FFR remains diagnostic",
+        "native_global_ffr_role": "registered-noninferiority-gate",
+        "ood_projection_ffr_role": "diagnostic-only",
         "truth": {
             "computed_once_and_shared_by_both_maps": True,
             "high_d_guard": high_guard,
@@ -1677,6 +1753,11 @@ def run_score_ood(
     ])
     polish_control = probe_receipts[POLISH]["cells"]["control_12p5m"]
     polish_treatment = probe_receipts[POLISH]["cells"]["treatment_25m"]
+    every_probe_cell = [
+        cell
+        for probe in probe_receipts.values()
+        for cell in probe["cells"].values()
+    ]
     control_summary = {
         "fineweb_recall_at_50_of_high10": probe_receipts["fineweb-heldout"]["cells"]["control_12p5m"]["recall_at_50_of_high10"],
         "polish_recall_at_50_of_high10": polish_control["recall_at_50_of_high10"],
@@ -1707,18 +1788,11 @@ def run_score_ood(
         "checks": {
             "same_queries_corpora_and_truth_for_both_models": True,
             "polish_absent_from_registered_training_inventory": True,
-            "polish_treatment_recall50_exceeds_recall10": (
-                polish_treatment["recall_at_50_of_high10"]
-                > polish_treatment["recall_at_10"]
-            ),
-            "polish_treatment_at_least_half_in_mix_median": (
-                treatment_summary["polish_recall_at_50_of_high10"]
-                >= 0.5 * treatment_summary["in_mix_median_recall_at_50_of_high10"]
+            "every_cell_recall50_at_least_recall10": (
+                recall50_at_least_recall10(every_probe_cell)
             ),
             "all_probe_coordinates_finite_noncollapsed": all(
-                cell["finite_noncollapsed"]
-                for probe in probe_receipts.values()
-                for cell in probe["cells"].values()
+                cell["finite_noncollapsed"] for cell in every_probe_cell
             ),
         },
         "roles": {
@@ -1829,10 +1903,16 @@ def _authenticate_native_selector(native: Mapping[str, Any]) -> dict[str, Any]:
         treatment_low = np.asarray(
             arrays["treatment_low_neighbors_top50"], dtype=np.int64
         )
+        native_fraction_k_array = np.asarray(arrays["native_fraction_k"])
+        control_ffr_hits = np.asarray(arrays["control_ffr_truth_hits"])
+        treatment_ffr_hits = np.asarray(arrays["treatment_ffr_truth_hits"])
         family_sizes = np.asarray(arrays["family_sizes"], dtype=np.int64)
         stored_deltas = np.asarray(
             arrays["density_bootstrap_deltas"], dtype=np.float64
         )
+    expected_fraction_k = max(
+        K_LOW_MAX, int(math.ceil(FRACTION * HALF_RETAINED_ROWS))
+    )
     if (
         high.shape != (expected_rows, GRAPH_K)
         or high_radius.shape != (expected_rows,)
@@ -1840,6 +1920,14 @@ def _authenticate_native_selector(native: Mapping[str, Any]) -> dict[str, Any]:
         or treatment_radius.shape != high_radius.shape
         or control_low.shape != (expected_rows, K_LOW_MAX)
         or treatment_low.shape != control_low.shape
+        or native_fraction_k_array.shape != ()
+        or int(native_fraction_k_array) != expected_fraction_k
+        or control_ffr_hits.shape != (expected_rows, K_HIT)
+        or treatment_ffr_hits.shape != control_ffr_hits.shape
+        or control_ffr_hits.dtype.kind not in "bu"
+        or treatment_ffr_hits.dtype.kind not in "bu"
+        or np.any((control_ffr_hits != 0) & (control_ffr_hits != 1))
+        or np.any((treatment_ffr_hits != 0) & (treatment_ffr_hits != 1))
         or family_sizes.shape != high_radius.shape
         or stored_deltas.shape != (DENSITY_BOOTSTRAP_DRAWS,)
         or np.any(high < 0)
@@ -1867,6 +1955,7 @@ def _authenticate_native_selector(native: Mapping[str, Any]) -> dict[str, Any]:
         "treatment_minus_control",
         "paired_bootstrap_ci_level",
         "noninferiority_margin",
+        "comparison_atol",
     )
     if (
         not np.array_equal(stored_deltas, recomputed_deltas)
@@ -1891,27 +1980,40 @@ def _authenticate_native_selector(native: Mapping[str, Any]) -> dict[str, Any]:
     ):
         raise Round0132Error("R0132 density selector does not recompute")
     high10 = high[:, :K_HIT]
-    for label, low, receipt_key in (
-        ("control", control_low, "control_12p5m"),
-        ("treatment", treatment_low, "treatment_25m_on_u12"),
+    for label, low, ffr_hits, receipt_key in (
+        ("control", control_low, control_ffr_hits, "control_12p5m"),
+        (
+            "treatment",
+            treatment_low,
+            treatment_ffr_hits,
+            "treatment_25m_on_u12",
+        ),
     ):
         receipt = native.get(receipt_key) or {}
         recall10 = recall_from_neighbors(high10, low[:, :K_HIT])
         recall50 = recall_from_neighbors(high10, low[:, :K_LOW_MAX])
+        top50_hits = np.any(
+            high10[:, :, None] == low[:, None, :K_LOW_MAX], axis=2
+        )
+        global_ffr = float(np.asarray(ffr_hits, dtype=bool).mean())
         if (
             not _same_float(receipt.get("global_recall_at_10"), recall10)
             or not _same_float(
                 receipt.get("global_recall_at_50_of_high10"), recall50
             )
+            or not _same_float(receipt.get("global_ffr"), global_ffr)
+            or np.any(top50_hits & ~np.asarray(ffr_hits, dtype=bool))
         ):
             raise Round0132Error(
-                f"R0132 {label} native recall does not recompute"
+                f"R0132 {label} native recall/FFR does not recompute"
             )
     return {
         "arrays": dict(arrays_spec),
         "density_selector_recomputed": True,
         "density_classification": recomputed["classification"],
         "native_recall10_and_recall50_recomputed": True,
+        "native_global_ffr_recomputed_from_per_anchor_evidence": True,
+        "native_fraction_k": expected_fraction_k,
         "eligible_density_anchors": int(np.count_nonzero(
             family_sizes < FAMILY_SIZE_CUTOFF
         )),
@@ -1988,10 +2090,29 @@ def _authenticate_ood_metrics(ood: Mapping[str, Any]) -> dict[str, Any]:
             for metric, value in expected_summary.items()
         ):
             raise Round0132Error(f"R0132 {key} OOD summary changed")
+    every_probe_cell = [
+        cell
+        for probe in probes.values()
+        for cell in (probe.get("cells") or {}).values()
+    ]
+    expected_checks = {
+        "same_queries_corpora_and_truth_for_both_models": True,
+        "polish_absent_from_registered_training_inventory": True,
+        "every_cell_recall50_at_least_recall10": recall50_at_least_recall10(
+            every_probe_cell
+        ),
+        "all_probe_coordinates_finite_noncollapsed": all(
+            cell.get("finite_noncollapsed") is True
+            for cell in every_probe_cell
+        ),
+    }
+    if ood.get("checks") != expected_checks:
+        raise Round0132Error("R0132 OOD validity checks changed")
     return {
         "arrays": dict(arrays_spec),
         "probe_count": len(expected),
         "recall10_and_recall50_recomputed_for_both_models": True,
+        "inclusive_recall_order_recomputed_for_every_cell": True,
         "gating_summaries_recomputed": True,
     }
 
@@ -2069,9 +2190,6 @@ def run_decision(
         "authenticated_native_selector": authenticated_native,
         "authenticated_ood_metrics": authenticated_ood,
         **decision,
-        "capabilities_produced": [
-            "jina-diverse-12p5m-25m-scale-policy-geometry-v1"
-        ],
         "training_performed": True,
         "map_registry_state_changed": False,
         "production_ready": False,
