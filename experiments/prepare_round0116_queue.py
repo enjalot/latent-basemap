@@ -62,23 +62,10 @@ OUTPUT_NAMESPACE = (
     "canonical-jina-document-native8192-english-v1"
 )
 REVIEW_DEFAULTS = {
-    "0087": (
-        "review-0087-2026-07-28.md",
-        "61ab9268899c2edc47519bdbe4efeea65a54f0c9fda52bd89e7cad0dafd9d483",
-        "capability:jina-diverse-25m-inventory-v1",
-    ),
     "0114": (
         "review-0114-2026-07-30.md",
         "610a9abb93f3fb6908a018d855f81feecc1045e261c007a3ca13ad8379eec4b9",
         "capability:jina-fineweb-2m-dual-prompt-native8192-substrate-v2",
-    ),
-    # R0115 is program-state evidence, not a capability dependency.  Binding
-    # it makes the stale "unmaterialized fallback" premise impossible to
-    # revive and does not supersede its accepted prompt-map contrast.
-    "0115": (
-        "review-0115-2026-07-30.md",
-        "cbc6ad74773624a0fd8ea966f5a1e9cd37be120b554a0ca56c28011720d3bb02",
-        "capability:jina-fineweb-2m-prompt-map-contrast-v1",
     ),
 }
 
@@ -287,22 +274,20 @@ def prepare_round0116(
     )
     queue["schema"] = "round0116-canonical-prompted-corpus-queue-v1"
     queue["repo_root"] = RELEASE_ROOT
-    queue["queue_class"] = "gpu-data-production"
+    queue["queue_class"] = "gpu-data-production-filler"
     queue["required_reviews"] = list(REVIEW_DEFAULTS)
     queue["capability_dependencies"] = [
-        "jina-diverse-25m-inventory-v1",
         "jina-fineweb-2m-dual-prompt-native8192-substrate-v2",
     ]
-    queue["program_state_reviews"] = {
-        "0115": (
-            "accepted prompt-map contrast is preserved and is not superseded"
-        )
-    }
     queue["capabilities_produced"] = [CAPABILITY]
     queue["training_performed"] = False
     queue["output_namespace"] = namespace
     queue["scientific_contract"] = {
         "purpose": "canonical prompted embedding data production only",
+        "scheduling_role": (
+            "lower-priority late-campaign filler; does not gate the active "
+            "map-science chain"
+        ),
         "datasets": {
             dataset: {
                 "rows": rows,
@@ -325,6 +310,10 @@ def prepare_round0116(
         ],
         "source_manifest": source_manifest_summary(layout),
         "inventory_manifest": inventory_signature,
+        "inventory_manifest_role": (
+            "source-row identity named by R0114; not an additional reviewed "
+            "capability dependency"
+        ),
         "reused_manifest": reused_signature,
         "reused_prefix_mapping": reused_mapping,
         "performance_calibration": {
