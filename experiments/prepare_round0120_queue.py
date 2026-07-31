@@ -141,23 +141,35 @@ def _require_successful_r0116_terminal(
     queue_sha = terminal.get("queue_manifest_sha256")
     queue_sha_at_finish = terminal.get("queue_manifest_sha256_at_finish")
     nodes = terminal.get("nodes")
+
+    def successful_node(node: Any) -> bool:
+        if not isinstance(node, dict):
+            return False
+        fresh = (
+            node.get("returncode") == 0
+            and node.get("validation_problems") in (None, [])
+            and node.get("skipped_done_marker") in (None, False)
+        )
+        resumed = (
+            node.get("skipped_done_marker") is True
+            and node.get("done_marker_schema") == "slim-runner-done-v2"
+            and "returncode" not in node
+        )
+        return fresh or resumed
+
     nodes_valid = (
         isinstance(nodes, list)
         and [node.get("node") for node in nodes if isinstance(node, dict)]
         == required_jobs
         and len(nodes) == len(required_jobs)
-        and all(
-            isinstance(node, dict)
-            and node.get("returncode") == 0
-            and node.get("validation_problems") in (None, [])
-            for node in nodes
-        )
+        and all(successful_node(node) for node in nodes)
     )
     if (
         terminal.get("schema") != "slim-runner-terminal-v3"
         or terminal.get("round_id") != "0116"
         or terminal.get("verdict") != "succeeded"
         or terminal.get("stop_reason") is not None
+        or terminal.get("gpu_wall_accounting_complete") is not True
         or terminal.get("required_jobs") != required_jobs
         or terminal.get("completed_jobs") != required_jobs
         or not checkout_valid

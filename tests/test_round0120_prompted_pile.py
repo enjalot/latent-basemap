@@ -166,6 +166,7 @@ def test_r0116_ordering_receipt_requires_clean_success(
         "round_id": "0116",
         "verdict": "succeeded",
         "stop_reason": None,
+        "gpu_wall_accounting_complete": True,
         "completed_jobs": required_jobs,
         "required_jobs": required_jobs,
         "release_checkout": {
@@ -211,6 +212,20 @@ def test_r0116_ordering_receipt_requires_clean_success(
     assert observed == terminal
     assert observed_signature == signature
 
+    terminal["nodes"][0] = {
+        "node": required_jobs[0],
+        "skipped_done_marker": True,
+        "wall_s": 1.0,
+        "gpu_required": True,
+        "done_marker_schema": "slim-runner-done-v2",
+    }
+    path.write_text(json.dumps(terminal), encoding="utf-8")
+    signature = expected_input_signature(str(path))
+    observed, _ = prepare._require_successful_r0116_terminal(
+        str(path), expected_sha256=signature["sha256"]
+    )
+    assert observed["nodes"][0]["skipped_done_marker"] is True
+
     terminal["verdict"] = "failed"
     path.write_text(json.dumps(terminal), encoding="utf-8")
     signature = expected_input_signature(str(path))
@@ -226,6 +241,7 @@ def test_r0116_ordering_receipt_requires_clean_success(
         ("required_jobs", []),
         ("completed_jobs", []),
         ("queue_manifest_sha256_at_finish", "b" * 64),
+        ("gpu_wall_accounting_complete", False),
     ],
 )
 def test_r0116_ordering_receipt_rejects_degenerate_identity(
@@ -244,6 +260,7 @@ def test_r0116_ordering_receipt_rejects_degenerate_identity(
         "round_id": "0116",
         "verdict": "succeeded",
         "stop_reason": None,
+        "gpu_wall_accounting_complete": True,
         "completed_jobs": required_jobs,
         "required_jobs": required_jobs,
         "release_checkout": checkout,
