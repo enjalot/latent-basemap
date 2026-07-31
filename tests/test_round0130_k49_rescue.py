@@ -32,6 +32,10 @@ from basemap.round0130_k49_rescue import (
 from experiments.prepare_round0130_queue import (
     GPU_HOURS_CAP,
     P90_GPU_TOTAL_SECONDS,
+    R0129_CORRECTED_QUEUE_SHA256,
+    R0129_CORRECTED_RELEASE_SHA,
+    R0129_CORRECTED_ROUND_SHA256,
+    R0129_ROOT,
     _assert_two_seed_contract_equal,
     _require_inconclusive_r0124_review,
     _require_positive_r0129_review,
@@ -271,6 +275,7 @@ def _r0129_fixture(
     review_prose: str = "accepted",
 ) -> dict:
     release = "b" * 40
+    round_sha256 = "c" * 64
     selector = _selector(
         outcome=outcome,
         delta=-0.041,
@@ -377,6 +382,7 @@ def _r0129_fixture(
             "schema": "round0129-seed43-native-degree-replicate-queue-v1",
             "round_id": "0129",
             "release_sha": release,
+            "round_sha256": round_sha256,
             "capabilities_produced": [R0129_CAPABILITY],
             "conditional_trigger": {"decision": r0124_decision},
             "scientific_contract": _scientific_contract(),
@@ -427,6 +433,9 @@ def _r0129_fixture(
         "queue": str(queue_path),
         "terminal": str(terminal_path),
         "decision": str(decision_path),
+        "release": release,
+        "queue_sha": queue_signature["sha256"],
+        "round_sha": round_sha256,
     }
 
 
@@ -448,6 +457,9 @@ def _authenticate_r0129(fixture: dict, r0124: dict) -> dict:
         queue_path=fixture["queue"],
         terminal_path=fixture["terminal"],
         decision_path=fixture["decision"],
+        expected_release_sha=fixture["release"],
+        expected_queue_sha256=fixture["queue_sha"],
+        expected_round_sha256=fixture["round_sha"],
     )
 
 
@@ -531,6 +543,55 @@ def test_state_or_cross_seed_panel_drift_fails_closed(tmp_path: Path) -> None:
     r0129 = _authenticate_r0129(bad_panel, r0124)
     with pytest.raises(RuntimeError, match="intervention, panel, or margin"):
         _assert_two_seed_contract_equal(r0124, r0129)
+
+
+def test_r0129_trigger_binds_corrected_execution_lineage(tmp_path: Path) -> None:
+    assert R0129_ROOT.endswith("/round-0129/queue-correction-1")
+    assert R0129_CORRECTED_RELEASE_SHA == (
+        "c25c6abaeff74bb3e5ebcc9d85ef5abad6f7fcc9"
+    )
+    assert R0129_CORRECTED_QUEUE_SHA256 == (
+        "0d2fb9b9d8f96df8bb02403a23875a7a7840a41a4cef215b30cb14128e8fe136"
+    )
+    assert R0129_CORRECTED_ROUND_SHA256 == (
+        "893b170769fd9c6d48476fdd89b22cdc192300ec66db4e2f45a85d383ce1e896"
+    )
+
+    r0124_fixture = _r0124_fixture(tmp_path / "r0124")
+    r0124 = _authenticate_r0124(r0124_fixture)
+    fixture = _r0129_fixture(
+        tmp_path / "r0129",
+        r0124_decision=r0124["signatures"]["decision"],
+    )
+    common = {
+        "review_path": fixture["review"],
+        "expected_sha256": fixture["review_sha"],
+        "expected_r0124_decision": r0124["signatures"]["decision"],
+        "queue_path": fixture["queue"],
+        "terminal_path": fixture["terminal"],
+        "decision_path": fixture["decision"],
+    }
+    with pytest.raises(RuntimeError, match="corrected execution lineage"):
+        _require_positive_r0129_review(
+            **common,
+            expected_release_sha="d" * 40,
+            expected_queue_sha256=fixture["queue_sha"],
+            expected_round_sha256=fixture["round_sha"],
+        )
+    with pytest.raises(RuntimeError, match="corrected execution lineage"):
+        _require_positive_r0129_review(
+            **common,
+            expected_release_sha=fixture["release"],
+            expected_queue_sha256="e" * 64,
+            expected_round_sha256=fixture["round_sha"],
+        )
+    with pytest.raises(RuntimeError, match="corrected execution lineage"):
+        _require_positive_r0129_review(
+            **common,
+            expected_release_sha=fixture["release"],
+            expected_queue_sha256=fixture["queue_sha"],
+            expected_round_sha256="f" * 64,
+        )
 
 
 def test_round0130_uses_distinct_contract_and_preserves_budget() -> None:

@@ -112,7 +112,7 @@ R0124_DECISION = os.path.join(
     "degree-bridge-decision",
     "decision.json",
 )
-R0129_ROOT = "/data/latent-basemap/runs/round-0129/queue"
+R0129_ROOT = "/data/latent-basemap/runs/round-0129/queue-correction-1"
 R0129_QUEUE = os.path.join(R0129_ROOT, "queue.json")
 R0129_TERMINAL = os.path.join(R0129_ROOT, "runner-terminal.json")
 R0129_DECISION = os.path.join(
@@ -121,6 +121,14 @@ R0129_DECISION = os.path.join(
     "degree-replicate-decision",
     "decision.json",
 )
+R0129_CORRECTED_RELEASE_SHA = "c25c6abaeff74bb3e5ebcc9d85ef5abad6f7fcc9"
+R0129_CORRECTED_QUEUE_SHA256 = (
+    "0d2fb9b9d8f96df8bb02403a23875a7a7840a41a4cef215b30cb14128e8fe136"
+)
+R0129_CORRECTED_ROUND_SHA256 = (
+    "893b170769fd9c6d48476fdd89b22cdc192300ec66db4e2f45a85d383ce1e896"
+)
+R0129_ROUND_FILE = os.path.join(LAB_ROOT, "round-0129-2026-07-31.md")
 
 GPU_HOURS_CAP = 8.0
 P90_QUALIFICATION_SECONDS = 900.0
@@ -469,6 +477,9 @@ def _require_positive_r0129_review(
     queue_path: str = R0129_QUEUE,
     terminal_path: str = R0129_TERMINAL,
     decision_path: str = R0129_DECISION,
+    expected_release_sha: str = R0129_CORRECTED_RELEASE_SHA,
+    expected_queue_sha256: str = R0129_CORRECTED_QUEUE_SHA256,
+    expected_round_sha256: str = R0129_CORRECTED_ROUND_SHA256,
 ) -> dict[str, Any]:
     """Require the exact clean seed-43 positive result and execution closure."""
     signatures, queue, decision = _require_accepted_execution(
@@ -483,6 +494,12 @@ def _require_positive_r0129_review(
         decision_schema=R0129_DECISION_SCHEMA,
         decision_job_id="decide_degree_replicate",
     )
+    if (
+        queue.get("release_sha") != expected_release_sha
+        or signatures["queue"].get("sha256") != expected_queue_sha256
+        or queue.get("round_sha256") != expected_round_sha256
+    ):
+        raise RuntimeError("R0129 corrected execution lineage changed")
     selector = _finite_selector(decision, label="R0129")
     interval = selector["paired_bootstrap_delta_ci"]
     if (
@@ -754,6 +771,9 @@ def prepare_round0130(
         expected_sha256=r0129_review_sha256,
         expected_r0124_decision=r0124_evidence["signatures"]["decision"],
     )
+    r0129_round = expected_input_signature(R0129_ROUND_FILE)
+    if r0129_round["sha256"] != R0129_CORRECTED_ROUND_SHA256:
+        raise RuntimeError("R0129 append-only correction addendum changed")
     two_seed_proof = _assert_two_seed_contract_equal(
         r0124_evidence,
         r0129_evidence,
@@ -780,6 +800,7 @@ def prepare_round0130(
         r0129_evidence["density_score"],
         r0129_evidence["train_receipt"],
         r0129_evidence["production_config"],
+        r0129_round,
         r0108_queue,
         r0108_terminal,
     ])
