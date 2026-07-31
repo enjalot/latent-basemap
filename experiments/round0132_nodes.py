@@ -1921,7 +1921,8 @@ def _authenticate_native_selector(native: Mapping[str, Any]) -> dict[str, Any]:
         or control_low.shape != (expected_rows, K_LOW_MAX)
         or treatment_low.shape != control_low.shape
         or native_fraction_k_array.shape != ()
-        or int(native_fraction_k_array) != expected_fraction_k
+        or native_fraction_k_array.dtype.kind not in "iu"
+        or int(native_fraction_k_array.item()) != expected_fraction_k
         or control_ffr_hits.shape != (expected_rows, K_HIT)
         or treatment_ffr_hits.shape != control_ffr_hits.shape
         or control_ffr_hits.dtype.kind not in "bu"

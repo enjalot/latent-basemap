@@ -812,6 +812,18 @@ def test_terminal_native_selector_rejects_minted_global_ffr_scalar(tmp_path: Pat
         _authenticate_native_selector(native)
 
 
+def test_terminal_native_selector_rejects_noninteger_fraction_width(tmp_path: Path):
+    native = _native_selector_fixture(tmp_path)
+    path = Path(native["arrays"]["canonical_path"])
+    with np.load(path, allow_pickle=False) as stored:
+        arrays = {name: np.asarray(stored[name]) for name in stored.files}
+    arrays["native_fraction_k"] = np.asarray(12_475.5, dtype=np.float64)
+    np.savez(path, **arrays)
+    native["arrays"] = expected_input_signature(str(path))
+    with pytest.raises(Round0132Error, match="selector arrays changed"):
+        _authenticate_native_selector(native)
+
+
 def test_native_ffr_membership_evidence_exactly_recomputes_per_truth_hit():
     high10 = np.asarray([[2, 4, 6, 8, 10, 12, 14, 16, 18, 20]])
     low = np.arange(60, dtype=np.int64)[None, :]
