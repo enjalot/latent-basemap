@@ -141,6 +141,7 @@ def test_clean_terminal_requires_r0117_completion(tmp_path: Path) -> None:
 
 
 def test_registered_cell_and_group_order_is_frozen() -> None:
+    assert round0119_nodes.TRANSFORM_BATCH_ROWS == 8_192
     assert round0119_nodes.CELL_ORDER == (
         "historical_2m_seed42",
         "historical_2m_seed43",

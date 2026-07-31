@@ -265,7 +265,7 @@ def test_density_localization_end_to_end_cpu_smoke(
         validate_seal(json.load(handle), label="R0119 smoke decision")
 
 
-def test_current_2m_failure_rejects_scale_specific_explanation(
+def test_current_2m_failure_rejects_only_25m_uniqueness(
     tmp_path: Path,
 ) -> None:
     score_root = tmp_path / "score"
@@ -299,6 +299,7 @@ def test_current_2m_failure_rejects_scale_specific_explanation(
             "score_output": str(score_root),
         },
     )
-    assert decision["outcome"] == "scale-specific-explanation-rejected"
-    assert decision["scale_specific_explanation_rejected"] is True
+    assert decision["outcome"] == "failure-not-unique-to-25m-tuple"
+    assert decision["failure_unique_to_25m_tuple_rejected"] is True
+    assert decision["scale_contribution_excluded"] is False
     assert decision["bundled_2m_to_25m_transition_localized"] is False

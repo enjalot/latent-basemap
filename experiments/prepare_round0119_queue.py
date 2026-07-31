@@ -433,9 +433,10 @@ def prepare_round0119(
                 "25M pair does not both clear, localize only to the bundled "
                 "2M-to-25M population/graph/dose/execution transition"
             ),
-            "scale_specific_rejection_rule": (
-                "if either current 2M seed fails, reject a scale-specific "
-                "explanation"
+            "failure_uniqueness_rule": (
+                "if either current 2M seed fails, reject only the claim that "
+                "the failure is unique to the 25M tuple; do not exclude an "
+                "additional scale contribution"
             ),
             "single_cause_localization": False,
             "matched_cell_can_rescue_native_quality": False,

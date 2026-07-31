@@ -30,6 +30,7 @@ from basemap.round0108_evaluation import (
     FAMILY_SIZE_CUTOFF,
     K_DENSITY,
     Round0108Error,
+    TRANSFORM_BATCH_ROWS,
     map_family_sizes,
     seal,
     validate_seal,
@@ -47,7 +48,6 @@ SOURCE_ROWS = 2_000_000
 SOURCE_DIMENSION = 768
 REPRESENTATIVE_ROWS = 1_996_279
 ANCHORS = 10_000
-TRANSFORM_BATCH_ROWS = 262_144
 
 CELL_ORDER = (
     "historical_2m_seed42",
@@ -628,19 +628,19 @@ def run_decision(
     if not historical_reproduced or not historical_clear:
         outcome = "historical-controls-not-reproduced"
         bundled_transition_localized = False
-        scale_specific_explanation_rejected = False
+        failure_unique_to_25m_tuple_rejected = False
     elif not current_2m_clear:
-        outcome = "scale-specific-explanation-rejected"
+        outcome = "failure-not-unique-to-25m-tuple"
         bundled_transition_localized = False
-        scale_specific_explanation_rejected = True
+        failure_unique_to_25m_tuple_rejected = True
     elif not current_25m_clear:
         outcome = "bundled-2m-to-25m-transition-localized"
         bundled_transition_localized = True
-        scale_specific_explanation_rejected = False
+        failure_unique_to_25m_tuple_rejected = False
     else:
         outcome = "matched-density-failure-not-reproduced"
         bundled_transition_localized = False
-        scale_specific_explanation_rejected = False
+        failure_unique_to_25m_tuple_rejected = False
 
     receipt = seal({
         "schema": DECISION_SCHEMA,
@@ -675,9 +675,10 @@ def run_decision(
             else []
         ),
         "single_cause_localized": False,
-        "scale_specific_explanation_rejected": (
-            scale_specific_explanation_rejected
+        "failure_unique_to_25m_tuple_rejected": (
+            failure_unique_to_25m_tuple_rejected
         ),
+        "scale_contribution_excluded": False,
         "matched_cell_rescues_native_quality": False,
         "native_diverse_universe_quality_overridden": False,
         "production_transfer_claimed": False,
@@ -686,7 +687,9 @@ def run_decision(
         "role": (
             "localizes only whether the matched-density loss enters between "
             "the current 2M and 25M bundled training tuples; it cannot "
-            "separate population, graph, dose, or scale-dependent execution"
+            "separate population, graph, dose, or scale-dependent execution, "
+            "and a current-2M failure cannot exclude an additional scale "
+            "contribution"
         ),
         "training_performed": False,
     })
