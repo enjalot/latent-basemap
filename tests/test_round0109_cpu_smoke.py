@@ -101,6 +101,7 @@ def test_round0109_train_seal_reload_panel_cpu_smoke(
         "optimizer": {
             "successful_positive_lr_updates": updates,
             "positive_rows_per_update": positive_rows,
+            "update_rule": "cpu-smoke-fixed-successful-updates",
         },
         "execution": {
             "expected_pipeline_stamp": expected_stamp,
@@ -161,7 +162,11 @@ def test_round0109_train_seal_reload_panel_cpu_smoke(
                 path,
             )
 
-    monkeypatch.setattr(round0107_nodes, "_graph", lambda active, job: graph)
+    monkeypatch.setattr(
+        round0107_nodes,
+        "_graph",
+        lambda active, job, **kwargs: graph,
+    )
     monkeypatch.setattr(
         round0107_nodes,
         "train_config",
@@ -177,7 +182,11 @@ def test_round0109_train_seal_reload_panel_cpu_smoke(
         "Round0107TrainingInput",
         SmokeWrapper,
     )
-    monkeypatch.setattr(round0107_nodes, "_new_model", lambda config: SmokeModel())
+    monkeypatch.setattr(
+        round0107_nodes,
+        "_new_model",
+        lambda config, **kwargs: SmokeModel(),
+    )
     monkeypatch.setattr(torch.cuda, "manual_seed_all", lambda seed: None)
     monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda device: None)
     monkeypatch.setattr(
