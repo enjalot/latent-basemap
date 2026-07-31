@@ -74,6 +74,9 @@ BOOTSTRAP_SEED = 12_301
 ASSEMBLY_SHA256 = (
     "432b3caf8e29944eddea553e5d390003d94eb37c9c4d6835c0b0e0cba2b62486"
 )
+R0114_SUBSTRATE_SHA256 = (
+    "0c32f75c115fec194c0833c6d946081c37d319581bb14e372a994d7d47e4044a"
+)
 MAPPING_SHA256 = (
     "64c82d495777fa73e075706c495c3feaf1346b5abbd2579f1cf750603714f371"
 )
@@ -304,6 +307,13 @@ def _load_registered_inputs(job: Mapping[str, Any]) -> dict[str, Any]:
         label="R0113 compact assembly",
         sealed=True,
     )
+    substrate, substrate_signature = _read_json_signature(
+        job["r0114_substrate"],
+        label="R0114 dual-prompt substrate",
+        sealed=True,
+    )
+    source_contract = substrate.get("source_contract")
+    paired_invariant = substrate.get("paired_invariant")
     mapping_signature = _exact_signature(
         job["compact_mapping"], label="R0113 compact mapping"
     )
@@ -312,6 +322,24 @@ def _load_registered_inputs(job: Mapping[str, Any]) -> dict[str, Any]:
     )
     if (
         assembly_signature["sha256"] != ASSEMBLY_SHA256
+        or substrate_signature["sha256"] != R0114_SUBSTRATE_SHA256
+        or substrate.get("schema")
+        != "jina-fineweb-2m-dual-prompt-native8192-substrate-v2"
+        or substrate.get("round_id") != "0114"
+        or substrate.get("row_count") != SOURCE_ROWS
+        or substrate.get("dimension") != DIMENSION
+        or not isinstance(source_contract, Mapping)
+        or source_contract.get("rows") != SOURCE_ROWS
+        or source_contract.get("dimension") != DIMENSION
+        or source_contract.get("source_global_rows") != [0, SOURCE_ROWS]
+        or source_contract.get("row_order")
+        != "R0087/R0103 contiguous global order; exact rows 0:2000000"
+        or source_contract.get("source_historical_fp16_payload_sha256")
+        != R0104_SOURCE_PAYLOAD_SHA256
+        or not isinstance(paired_invariant, Mapping)
+        or paired_invariant.get("same_ordered_text_rows") is not True
+        or substrate.get("training_performed") is not False
+        or substrate.get("optimizer_updates") != 0
         or mapping_signature["sha256"] != MAPPING_SHA256
         or fresh_signature["sha256"] != FRESH_INPUT_SHA256
         or assembly.get("schema")
@@ -321,6 +349,7 @@ def _load_registered_inputs(job: Mapping[str, Any]) -> dict[str, Any]:
         or assembly.get("retained_rows") != COMPACT_ROWS
         or assembly.get("dimension") != DIMENSION
         or assembly.get("dtype") != "<f2"
+        or assembly.get("substrate") != substrate_signature
         or assembly.get("mapping") != mapping_signature
         or (assembly.get("outputs") or {}).get("raw") != fresh_signature
         or assembly.get("paired_row_population_identical") is not True
@@ -373,6 +402,7 @@ def _load_registered_inputs(job: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "r0122": r0122,
         "assembly": assembly_signature,
+        "substrate": substrate_signature,
         "mapping": mapping_signature,
         "legacy": legacy,
         "legacy_lineage": legacy_lineage,
@@ -640,6 +670,7 @@ def run_score(
             "compact_rows": COMPACT_ROWS,
             "dimension": DIMENSION,
             "assembly": inputs["assembly"],
+            "substrate": inputs["substrate"],
             "mapping": inputs["mapping"],
             "ordered_global_rows_sha256": inputs["legacy_lineage"][
                 "compact_ids"

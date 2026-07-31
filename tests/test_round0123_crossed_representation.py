@@ -179,9 +179,10 @@ def test_cpu_smoke_scores_exact_two_by_two_and_decides(
         round0123_nodes,
         "_load_registered_inputs",
         lambda _job: {
-            "r0122": fake_r0122,
-            "assembly": _signature("/smoke/assembly", 20),
-            "mapping": _signature("/smoke/mapping", 21),
+                "r0122": fake_r0122,
+                "assembly": _signature("/smoke/assembly", 20),
+                "substrate": _signature("/smoke/substrate", 25),
+                "mapping": _signature("/smoke/mapping", 21),
             "legacy": legacy,
             "legacy_lineage": {
                 "shared_evidence": _signature("/smoke/shared", 22),
@@ -380,4 +381,7 @@ def test_registered_queue_contract_is_narrow_and_no_training() -> None:
     assert round0123_nodes.K_DENSITY == 15
     assert round0123_nodes.BOOTSTRAP_DRAWS == 1_000
     assert round0123_nodes.BOOTSTRAP_SEED == 12_301
+    assert round0123_nodes.R0114_SUBSTRATE_SHA256 == (
+        "0c32f75c115fec194c0833c6d946081c37d319581bb14e372a994d7d47e4044a"
+    )
     assert prepare_round0123_queue.ROUND_ID == "0123"

@@ -44,6 +44,7 @@ from experiments.round0123_nodes import (
     MAPPING_SHA256,
     PANEL_SCHEMA,
     R0104_SOURCE_PAYLOAD_SHA256,
+    R0114_SUBSTRATE_SHA256,
     R0115_RESULT_SHA256,
     R0115_REVIEW_SHA256,
     R0122_RELEASE_SHA,
@@ -364,6 +365,17 @@ def _queue_lineage(
     with open(ASSEMBLY_MANIFEST, encoding="utf-8") as handle:
         assembly = json.load(handle)
     validate_seal(assembly, label="R0113 compact assembly")
+    substrate_signature = _exact_signature(
+        assembly.get("substrate") or {},
+        label="R0114 dual-prompt substrate",
+    )
+    with open(
+        substrate_signature["canonical_path"], encoding="utf-8"
+    ) as handle:
+        substrate = json.load(handle)
+    validate_seal(substrate, label="R0114 dual-prompt substrate")
+    source_contract = substrate.get("source_contract")
+    paired_invariant = substrate.get("paired_invariant")
     if (
         assembly.get("schema")
         != "round0113-compact-prompt-arrays-v1"
@@ -374,8 +386,28 @@ def _queue_lineage(
         or (assembly.get("outputs") or {}).get("raw")
         != fresh_input_signature
         or assembly.get("paired_row_population_identical") is not True
+        or substrate_signature["sha256"] != R0114_SUBSTRATE_SHA256
+        or substrate.get("schema")
+        != "jina-fineweb-2m-dual-prompt-native8192-substrate-v2"
+        or substrate.get("round_id") != "0114"
+        or substrate.get("row_count") != 2_000_000
+        or substrate.get("dimension") != DIMENSION
+        or not isinstance(source_contract, Mapping)
+        or source_contract.get("rows") != 2_000_000
+        or source_contract.get("dimension") != DIMENSION
+        or source_contract.get("source_global_rows") != [0, 2_000_000]
+        or source_contract.get("row_order")
+        != "R0087/R0103 contiguous global order; exact rows 0:2000000"
+        or source_contract.get("source_historical_fp16_payload_sha256")
+        != R0104_SOURCE_PAYLOAD_SHA256
+        or not isinstance(paired_invariant, Mapping)
+        or paired_invariant.get("same_ordered_text_rows") is not True
+        or substrate.get("training_performed") is not False
+        or substrate.get("optimizer_updates") != 0
     ):
-        raise RuntimeError("R0113 compact assembly semantics changed")
+        raise RuntimeError(
+            "R0113/R0114 compact population semantics changed"
+        )
     with open(
         fresh_bundle["train_receipt"]["canonical_path"], encoding="utf-8"
     ) as handle:
@@ -414,6 +446,7 @@ def _queue_lineage(
         "r0104_source_segments": source_segments,
         "source_shards": source_shards,
         "assembly_manifest": assembly_signature,
+        "r0114_substrate": substrate_signature,
         "compact_mapping": mapping_signature,
         "fresh_input": fresh_input_signature,
         "fresh_high_d_reference": fresh_reference_signature,
@@ -463,6 +496,7 @@ def prepare_round0123(
         lineage["r0104_shared_evidence"],
         *lineage["source_shards"],
         lineage["assembly_manifest"],
+        lineage["r0114_substrate"],
         lineage["compact_mapping"],
         lineage["fresh_input"],
         lineage["fresh_high_d_reference"],
@@ -516,6 +550,7 @@ def prepare_round0123(
             ],
             "r0104_source_segments": lineage["r0104_source_segments"],
             "assembly_manifest": lineage["assembly_manifest"],
+            "r0114_substrate": lineage["r0114_substrate"],
             "compact_mapping": lineage["compact_mapping"],
             "fresh_input": lineage["fresh_input"],
             "fresh_high_d_reference": lineage[
