@@ -5,7 +5,10 @@ import copy
 import json
 import os
 
+import numpy as np
 import pytest
+
+from experiments import round0120_nodes
 
 from basemap import round0120_prompted_pile as contract
 from basemap.artifact_identity import expected_input_signature
@@ -324,3 +327,38 @@ def test_r0116_ordering_receipt_rejects_degenerate_identity(
         prepare._require_successful_r0116_terminal(
             str(path), expected_sha256=signature["sha256"]
         )
+
+
+def test_pile_encoder_uses_registered_safe_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    def fake_encode(
+        model: object,
+        texts: list[str],
+        *,
+        requested_batch_size: int,
+    ) -> tuple[np.ndarray, dict[str, int]]:
+        observed.update({
+            "model": model,
+            "texts": texts,
+            "requested_batch_size": requested_batch_size,
+        })
+        return np.zeros((len(texts), 768), dtype=np.float32), {
+            "requested_batch_size": requested_batch_size,
+            "effective_batch_size": requested_batch_size,
+            "oom_retries": 0,
+        }
+
+    monkeypatch.setattr(round0120_nodes, "_encode_document", fake_encode)
+    model = object()
+    texts = ["Document: one", "Document: two"]
+    values, telemetry = round0120_nodes._encode_pile_document(model, texts)
+    assert values.shape == (2, 768)
+    assert observed == {
+        "model": model,
+        "texts": texts,
+        "requested_batch_size": 16,
+    }
+    assert telemetry["effective_batch_size"] == 16

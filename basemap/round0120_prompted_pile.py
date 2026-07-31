@@ -39,7 +39,11 @@ from .round0116_prompted_corpus import (
 ROUND_ID = "0120"
 DIMENSION = ROUND0005_DIMENSIONS
 CHUNK_ROWS = 25_000
-BATCH_SIZE = 256
+# R0116's canonical RedPajama tranche showed that a single long row can make
+# SentenceTransformers pad a 256-row batch to the native 8,192-token ceiling.
+# Batch 16 completed that exact shape without a throughput regression and
+# leaves enough headroom on the 32 GiB 5090 for the worst legal input.
+BATCH_SIZE = 16
 COMPUTE_DTYPE = "float32"
 # At this floor, all four nodes plus their registered fixed overhead remain
 # inside the 6.5 GPU-hour queue cap.  A lower passing floor could let a slow

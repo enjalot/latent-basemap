@@ -64,6 +64,18 @@ from experiments.round0116_nodes import (
 )
 
 
+def _encode_pile_document(
+    model: Any,
+    texts: list[str],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Use R0120's registered safe batch, not R0116's module default."""
+    return _encode_document(
+        model,
+        texts,
+        requested_batch_size=BATCH_SIZE,
+    )
+
+
 def _verify_bound_closures(job: Mapping[str, Any]) -> dict[str, Any]:
     _, inventory_signature = load_inventory_manifest(
         str(job.get("inventory_manifest_path") or "")
@@ -172,7 +184,7 @@ def run_embed_document_rows(
         source_hash = ordered_text_sha256(raw_texts)
         document_hash = ordered_text_sha256(document_texts)
         encode_started = time.monotonic()
-        values, telemetry = _encode_document(model, document_texts)
+        values, telemetry = _encode_pile_document(model, document_texts)
         encode_wall = time.monotonic() - encode_started
         encode_wall_total += encode_wall
         oom_retries += int(telemetry["oom_retries"])

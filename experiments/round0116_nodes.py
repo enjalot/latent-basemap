@@ -91,10 +91,18 @@ def _load_document_model():
 def _encode_document(
     model: Any,
     texts: Sequence[str],
+    *,
+    requested_batch_size: int | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     import torch
 
-    requested = BATCH_SIZE
+    requested = (
+        BATCH_SIZE
+        if requested_batch_size is None
+        else int(requested_batch_size)
+    )
+    if requested <= 0:
+        raise ValueError("requested embedding batch size must be positive")
     batch_size = requested
     retries = 0
     while True:
