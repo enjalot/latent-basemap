@@ -115,6 +115,29 @@ def _explicit_self_knn(
     return canonical_ids, canonical_distances, selected
 
 
+def _validate_control_topology_prefix(
+    *,
+    quality_ids: np.ndarray,
+    truth: np.ndarray,
+    observed: np.ndarray,
+    control_anchor_ids: np.ndarray,
+    control_exact: np.ndarray,
+    control_ann: np.ndarray,
+) -> None:
+    if (
+        control_anchor_ids.shape != (GRAPH_QUALITY_ROWS,)
+        or control_exact.shape[0] != GRAPH_QUALITY_ROWS
+        or control_ann.shape != control_exact.shape
+        or control_exact.shape[1] < GRAPH_DEGREE
+        or not np.array_equal(control_anchor_ids, quality_ids)
+        or not np.array_equal(control_exact[:, :GRAPH_DEGREE], truth)
+        or not np.array_equal(control_ann[:, :GRAPH_DEGREE], observed)
+    ):
+        raise Round0121Error(
+            "R0121 k15 topology is not the exact R0115 ranked prefix"
+        )
+
+
 def _control_graph(
     job: Mapping[str, Any],
     *,
@@ -126,6 +149,7 @@ def _control_graph(
     if (
         control.get("schema") != "round0113-prompt-arm-fuzzy-graph-v1"
         or control.get("round_id") != "0115"
+        or control.get("release_sha") != job.get("r0115_release_sha")
         or control.get("arm") != ARM
         or int(control.get("retained_rows", -1)) != RETAINED_ROWS
         or int(control.get("dimension", -1)) != DIMENSION
@@ -265,6 +289,27 @@ def run_build_graph(
     fixed = cells.get(str(GRAPH_NPROBE)) or {}
     if fixed.get("passed") is not True or selected_observed is None:
         raise Round0121Error("R0121 fixed-nprobe k15 graph did not qualify")
+    control_probe_path = verify_signature(
+        control["topology_probe"], label="R0115 raw topology probe"
+    )
+    with np.load(control_probe_path, allow_pickle=False) as archive:
+        control_anchor_ids = np.asarray(
+            archive["anchor_compact_ids"], dtype=np.int64
+        )
+        control_exact = np.asarray(
+            archive["exact_neighbors"], dtype=np.int64
+        )
+        control_ann = np.asarray(
+            archive["qualified_ann_neighbors"], dtype=np.int64
+        )
+    _validate_control_topology_prefix(
+        quality_ids=quality_ids,
+        truth=truth,
+        observed=selected_observed,
+        control_anchor_ids=control_anchor_ids,
+        control_exact=control_exact,
+        control_ann=control_ann,
+    )
 
     index.nprobe = GRAPH_NPROBE
     neighbors = np.empty(
@@ -375,6 +420,14 @@ def run_build_graph(
             control["high_d_reference_content_sha256"]
         ),
         "causal_control_graph": control_signature,
+        "control_topology_prefix_audit": {
+            "control_probe": control["topology_probe"],
+            "anchor_ids_equal": True,
+            "exact_first_15_equal": True,
+            "qualified_ann_first_15_equal": True,
+            "control_width": int(control_exact.shape[1]),
+            "treatment_width": GRAPH_DEGREE,
+        },
         "causal_change": {
             "changed": "fuzzy graph neighbor degree",
             "control": {
@@ -418,7 +471,9 @@ def run_train(
     graph_path = str(job["graph_manifest"])
     graph_signature = expected_input_signature(graph_path)
     graph = load_graph(
-        graph_path, expected_sha256=graph_signature["sha256"]
+        graph_path,
+        expected_sha256=graph_signature["sha256"],
+        expected_release_sha=active["manifest"]["release_sha"],
     )
     config, config_sha = train_config(
         graph_signature=graph["signature"],
@@ -593,11 +648,13 @@ def _authenticate_treatment_model(
     job: Mapping[str, Any],
 ) -> tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any]]:
     _execution_round_id(active)
-    assembly, _assembly_signature = prompt_nodes._load_assembly(job)
+    assembly, assembly_signature = prompt_nodes._load_assembly(job)
     graph_path = str(job["graph_manifest"])
     graph_signature = expected_input_signature(graph_path)
     graph = load_graph(
-        graph_path, expected_sha256=graph_signature["sha256"]
+        graph_path,
+        expected_sha256=graph_signature["sha256"],
+        expected_release_sha=active["manifest"]["release_sha"],
     )
     config, config_sha = train_config(
         graph_signature=graph["signature"],
@@ -607,13 +664,58 @@ def _authenticate_treatment_model(
     )
     train_path = os.path.join(str(job["train_output"]), "train-receipt.json")
     train = read_sealed(train_path, label="R0121 treatment train receipt")
+    config_path = verify_signature(
+        train.get("production_config"),
+        label="R0121 treatment production config",
+    )
+    with open(config_path, encoding="utf-8") as handle:
+        config_receipt = json.load(handle)
+    runtime = train.get("exact_execution_receipt")
+    accounting = train.get("train_accounting")
+    checks = train.get("train_checks")
+    expected_stamp = config["execution"]["expected_pipeline_stamp"]
     if (
         train.get("schema") != TRAIN_RECEIPT_SCHEMA
         or train.get("round_id") != ROUND_ID
         or train.get("arm") != ARM
+        or train.get("release_sha") != active["manifest"]["release_sha"]
         or train.get("production_config_sha256") != config_sha
+        or config_receipt.get("schema") != PRODUCTION_CONFIG_SCHEMA
+        or config_receipt.get("round_id") != ROUND_ID
+        or config_receipt.get("arm") != ARM
+        or config_receipt.get("config") != config
+        or config_receipt.get("config_sha256") != config_sha
+        or train.get("assembly") != assembly_signature
         or train.get("graph_manifest") != graph["manifest_signature"]
+        or train.get("graph") != graph["signature"]
         or train.get("optimizer_updates") != SUCCESSFUL_UPDATES
+        or not isinstance(runtime, Mapping)
+        or any(runtime.get(key) != value for key, value in expected_stamp.items())
+        or not isinstance(accounting, Mapping)
+        or any(
+            accounting.get(key) != value
+            for key, value in {
+                "optimizer_steps_attempted": SUCCESSFUL_UPDATES,
+                "optimizer_steps_succeeded": SUCCESSFUL_UPDATES,
+                "positive_lr_optimizer_steps": SUCCESSFUL_UPDATES,
+                "scheduler_steps": SUCCESSFUL_UPDATES,
+                "amp_overflow_skips": 0,
+                "nonfinite_loss_skips": 0,
+                "nonfinite_gradient_skips": 0,
+                "budget_satisfied": True,
+            }.items()
+        )
+        or not isinstance(checks, Mapping)
+        or any(
+            checks.get(key) is not True
+            for key in (
+                "exact_update_closure",
+                "zero_numerical_skips",
+                "no_pipeline_stamp_drift",
+                "endpoint_rows_match_updates",
+                "weighted_rejection_accounting_closes",
+            )
+        )
     ):
         raise Round0121Error("R0121 treatment train/config binding changed")
     model_path = verify_signature(train["model"], label="R0121 treatment model")
@@ -686,8 +788,10 @@ def _r0119_evidence(
     if (
         panel.get("schema") != localization_nodes.SCORE_SCHEMA
         or panel.get("round_id") != "0119"
+        or panel.get("release_sha") != job.get("r0119_release_sha")
         or decision.get("schema") != localization_nodes.DECISION_SCHEMA
         or decision.get("round_id") != "0119"
+        or decision.get("release_sha") != job.get("r0119_release_sha")
         or decision.get("score") != panel_signature
         or decision.get("outcome") != LOCALIZATION_OUTCOME
         or not isinstance(control, Mapping)
@@ -835,12 +939,23 @@ def run_decision(
     diagnostics = read_sealed(
         diagnostic_path, label="R0121 core/OOD diagnostics"
     )
+    expected_gates = {
+        "finite_noncollapsed_coordinates",
+        "transductive_recall50_gt_recall10",
+        "matched_projection_recall50_gt_recall10",
+        "exact_update_closure",
+        "zero_numerical_skips",
+        "no_pipeline_stamp_drift",
+    }
+    gates = diagnostics.get("execution_gates")
     if (
         density.get("schema") != DENSITY_SCHEMA
         or diagnostics.get("schema") != DIAGNOSTIC_SCHEMA
         or diagnostics.get("round_id") != ROUND_ID
         or diagnostics.get("arm") != ARM
-        or not all((diagnostics.get("execution_gates") or {}).values())
+        or not isinstance(gates, Mapping)
+        or set(gates) != expected_gates
+        or not all(gates.values())
     ):
         raise Round0121Error("R0121 decision evidence changed")
     control_density = float(

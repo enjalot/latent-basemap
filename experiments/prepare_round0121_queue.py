@@ -34,6 +34,7 @@ from experiments.prepare_round0020_0022_queues import (
     _dedupe,
 )
 from experiments.prepare_round0119_queue import (
+    _clean_terminal,
     _document,
     _frontmatter_list,
 )
@@ -108,7 +109,7 @@ def _accepted_review(
     expected_sha256: str,
     *,
     round_id: str,
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     signature = expected_input_signature(path)
     frontmatter, _text = _document(path)
     release = f"capability:{REQUIRED_CAPABILITIES[round_id]}"
@@ -137,12 +138,14 @@ def _accepted_review(
     result_signature = expected_input_signature(result_path)
     result_frontmatter, _result_text = _document(result_path)
     capability = REQUIRED_CAPABILITIES[round_id]
+    release_commit = frontmatter.get("verified_release_commit")
     if (
         result_signature["sha256"] != frontmatter.get("result_sha256")
         or result_frontmatter.get("round_id") != round_id
         or result_frontmatter.get("status") != "complete"
         or result_frontmatter.get("release_commit")
-        != frontmatter.get("verified_release_commit")
+        != release_commit
+        or not re.fullmatch(r"[0-9a-f]{40}", release_commit or "")
         or capability
         not in _frontmatter_list(
             result_frontmatter,
@@ -151,7 +154,11 @@ def _accepted_review(
         )
     ):
         raise RuntimeError(f"R{round_id} review does not close its result")
-    return [signature, result_signature]
+    return {
+        "review": signature,
+        "result": result_signature,
+        "release_commit": release_commit,
+    }
 
 
 def _read_sealed_signature(path: str, *, label: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -160,7 +167,10 @@ def _read_sealed_signature(path: str, *, label: str) -> tuple[dict[str, Any], di
     return value, signature
 
 
-def _inputs() -> list[dict[str, Any]]:
+def _inputs(
+    *,
+    reviews: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
     assembly_path = os.path.join(R0113_ASSEMBLY, "assembly-manifest.json")
     query_path = os.path.join(R0113_QUERY, "query-reserve-receipt.json")
     selection_path = os.path.join(
@@ -187,19 +197,38 @@ def _inputs() -> list[dict[str, Any]]:
     decision, decision_signature = _read_sealed_signature(
         R0119_DECISION, label="R0119 density localization decision"
     )
+    terminals = {
+        "0115": _clean_terminal(
+            R0115_QUEUE,
+            R0115_TERMINAL,
+            round_id="0115",
+            expected_release_sha=str(reviews["0115"]["release_commit"]),
+        ),
+        "0119": _clean_terminal(
+            R0119_QUEUE,
+            R0119_TERMINAL,
+            round_id="0119",
+            expected_release_sha=str(reviews["0119"]["release_commit"]),
+        ),
+    }
     control_cell = (panel.get("cells") or {}).get("current_2m_seed42")
     if (
         assembly.get("retained_rows") != RETAINED_ROWS
         or selection.get("selected_rows") != QUERY_ROWS
         or selection.get("selected_before_training") is not True
         or control.get("round_id") != "0115"
+        or control.get("release_sha") != reviews["0115"]["release_commit"]
         or control.get("arm") != "raw"
         or control.get("k") != 50
         or control_train.get("round_id") != "0115"
+        or control_train.get("release_sha")
+        != reviews["0115"]["release_commit"]
         or control_train.get("arm") != "raw"
         or control_train.get("graph_manifest") != control_signature
         or panel.get("schema") != R0119_SCORE_SCHEMA
+        or panel.get("release_sha") != reviews["0119"]["release_commit"]
         or decision.get("schema") != R0119_DECISION_SCHEMA
+        or decision.get("release_sha") != reviews["0119"]["release_commit"]
         or decision.get("score") != panel_signature
         or decision.get("outcome") != LOCALIZATION_OUTCOME
         or not isinstance(control_cell, Mapping)
@@ -227,16 +256,15 @@ def _inputs() -> list[dict[str, Any]]:
             selection["global_rows"],
             control_signature,
             control_train_signature,
+            control["topology_probe"],
             control["high_d_reference"],
             control["query_training_copy_mask"],
             control["polish_query_training_copy_mask"],
             panel_signature,
             decision_signature,
             expected_input_signature(R0108_CALIBRATION),
-            expected_input_signature(R0115_QUEUE),
-            expected_input_signature(R0115_TERMINAL),
-            expected_input_signature(R0119_QUEUE),
-            expected_input_signature(R0119_TERMINAL),
+            *terminals["0115"].values(),
+            *terminals["0119"].values(),
         ]
     )
 
@@ -253,19 +281,23 @@ def prepare_round0121(
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0121 release SHA must be one full commit")
     round_file = _issued_round()
-    review_inputs = [
-        *_accepted_review(
+    reviews = {
+        "0115": _accepted_review(
             r0115_review, r0115_review_sha256, round_id="0115"
         ),
-        *_accepted_review(
+        "0119": _accepted_review(
             r0119_review, r0119_review_sha256, round_id="0119"
         ),
-    ]
+    }
     inputs = _dedupe(
         [
             expected_input_signature(round_file),
-            *review_inputs,
-            *_inputs(),
+            *(
+                signature
+                for evidence in reviews.values()
+                for signature in (evidence["review"], evidence["result"])
+            ),
+            *_inputs(reviews=reviews),
         ]
     )
     ensure_data_directory(ROUND_ROOT)
@@ -286,8 +318,10 @@ def prepare_round0121(
         "query_selection_output": R0115_QUERY_SELECTION,
         "r0115_control_graph_manifest": R0115_CONTROL_GRAPH,
         "r0115_control_train_receipt": R0115_CONTROL_TRAIN,
+        "r0115_release_sha": reviews["0115"]["release_commit"],
         "r0119_panel": R0119_PANEL,
         "r0119_decision": R0119_DECISION,
+        "r0119_release_sha": reviews["0119"]["release_commit"],
         "r0108_calibration": expected_input_signature(R0108_CALIBRATION),
     }
     jobs = [

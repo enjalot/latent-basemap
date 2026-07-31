@@ -222,6 +222,7 @@ def load_graph(
     manifest_path: str,
     *,
     expected_sha256: str,
+    expected_release_sha: str,
 ) -> dict[str, Any]:
     signature = expected_input_signature(manifest_path)
     if signature["sha256"] != expected_sha256:
@@ -230,9 +231,11 @@ def load_graph(
     search = manifest.get("search_qualification") or {}
     fixed = (search.get("cells") or {}).get(str(GRAPH_NPROBE)) or {}
     degree = manifest.get("degree") or {}
+    prefix = manifest.get("control_topology_prefix_audit") or {}
     if (
         manifest.get("schema") != GRAPH_SCHEMA
         or manifest.get("round_id") != ROUND_ID
+        or manifest.get("release_sha") != expected_release_sha
         or manifest.get("arm") != ARM
         or int(manifest.get("retained_rows", -1)) != RETAINED_ROWS
         or int(manifest.get("dimension", -1)) != DIMENSION
@@ -240,8 +243,15 @@ def load_graph(
         or int(manifest.get("directed_edge_count", -1)) <= 0
         or int(search.get("selected_nprobe", -1)) != GRAPH_NPROBE
         or fixed.get("passed") is not True
+        or prefix.get("anchor_ids_equal") is not True
+        or prefix.get("exact_first_15_equal") is not True
+        or prefix.get("qualified_ann_first_15_equal") is not True
+        or int(prefix.get("treatment_width", -1)) != GRAPH_DEGREE
     ):
         raise Round0121Error("R0121 k15 graph contract changed")
+    verify_signature(
+        prefix.get("control_probe"), label="R0121 control topology probe"
+    )
     graph_path = verify_signature(manifest["graph"], label="R0121 k15 graph")
     from .pumap.parametric_umap.datasets.edge_list_dataset import load_edge_arrays
 
