@@ -55,7 +55,7 @@ ROUND_ROOT = "/data/latent-basemap/runs/round-0120"
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE_GLOB = os.path.join(LAB_ROOT, "round-0120-*.md")
 OUTPUT_NAMESPACE = "canonical-jina-document-pile-native8192-v1"
-R0116_RELEASE_SHA = "5243a994c45c1fdfacdf48b665ad00077d798286"
+R0116_RELEASE_SHA = "b850bfa7cc4f5d85767e3a629ceefae4f897cda6"
 R0116_TERMINAL_PATH = (
     "/data/latent-basemap/runs/round-0116/queue/runner-terminal.json"
 )
