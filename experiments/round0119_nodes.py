@@ -42,8 +42,8 @@ from experiments.round0108_nodes import _panel_config
 ROUND_ID = "0119"
 SCORE_SCHEMA = "round0119-jina-density-localization-panel-v1"
 DECISION_SCHEMA = "round0119-jina-density-localization-decision-v1"
-MATCHED_SCHEMA = "round0110-matched-fineweb-density-v1"
 CALIBRATION_SCHEMA = "round0108-jina-density-v2-calibration-v1"
+REFERENCE_SCHEMA = "hiD_reference.v3"
 SOURCE_ROWS = 2_000_000
 SOURCE_DIMENSION = 768
 REPRESENTATIVE_ROWS = 1_996_279
@@ -124,6 +124,221 @@ def _architecture(config: Mapping[str, Any]) -> dict[str, Any]:
     return observed
 
 
+def _authenticate_training_semantics(
+    train: Mapping[str, Any],
+    config: Mapping[str, Any],
+    spec: Mapping[str, Any],
+) -> dict[str, Any]:
+    expected = spec.get("semantic_contract")
+    optimizer = config.get("optimizer")
+    graph = config.get("graph")
+    accounting = train.get("train_accounting")
+    if not all(
+        isinstance(value, Mapping)
+        for value in (expected, optimizer, graph, accounting)
+    ):
+        raise Round0119Error(
+            f"{spec['key']} training semantic contract is missing"
+        )
+    expected = dict(expected)
+    updates = expected["successful_updates"]
+    if (
+        optimizer.get("successful_positive_lr_updates") != updates
+        or optimizer.get("seed") != spec["seed"]
+        or accounting.get("optimizer_steps_attempted") != updates
+        or accounting.get("optimizer_steps_succeeded") != updates
+        or graph.get("sampling")
+        != "fuzzy-weight-proportional-with-replacement"
+        or graph.get("positive_target_mode") != "binary"
+    ):
+        raise Round0119Error(
+            f"{spec['key']} population/graph/update semantics changed"
+        )
+
+    group = spec["group"]
+    if group == "historical_2m":
+        population = config.get("row_universe")
+        pipeline = train.get("actual_pipeline")
+        observed = {
+            "population_rows": (population or {}).get("rows"),
+            "graph_neighbors": graph.get("k"),
+            "successful_updates": accounting.get(
+                "optimizer_steps_succeeded"
+            ),
+            "pipeline": (pipeline or {}).get("pipeline"),
+            "sampler_class": (pipeline or {}).get("sampler_class"),
+            "positive_sampling": (pipeline or {}).get(
+                "positive_sampling"
+            ),
+            "multiplicity_policy": (pipeline or {}).get(
+                "multiplicity_policy"
+            ),
+            "feature_residency": (pipeline or {}).get("x_residency"),
+            "source_representation": (population or {}).get("source_dtype"),
+            "dequantization": (population or {})
+            .get("input_preprocessing", {})
+            .get("operation"),
+        }
+        accounting_observed = {
+            "pipeline": accounting.get("pipeline_pipeline"),
+            "sampler_class": accounting.get("pipeline_sampler_class"),
+            "positive_sampling": accounting.get(
+                "pipeline_positive_sampling"
+            ),
+            "multiplicity_policy": accounting.get(
+                "pipeline_multiplicity_policy"
+            ),
+            "feature_residency": accounting.get("pipeline_x_residency"),
+        }
+    elif group == "current_2m":
+        population = config.get("input")
+        pipeline = train.get("exact_execution_receipt")
+        observed = {
+            "population_rows": (population or {}).get("rows"),
+            "graph_neighbors": graph.get("k"),
+            "successful_updates": train.get("optimizer_updates"),
+            "pipeline": (pipeline or {}).get("pipeline"),
+            "sampler_class": (pipeline or {}).get("sampler_class"),
+            "positive_sampling": (pipeline or {}).get(
+                "positive_sampling"
+            ),
+            "multiplicity_policy": (pipeline or {}).get(
+                "multiplicity_policy"
+            ),
+            "feature_residency": (pipeline or {}).get(
+                "feature_residency"
+            ),
+            "source_representation": (pipeline or {}).get(
+                "source_representation"
+            ),
+            "dequantization": (pipeline or {}).get("device_conversion"),
+        }
+        accounting_observed = {
+            "pipeline": accounting.get("pipeline_pipeline"),
+            "sampler_class": accounting.get("pipeline_sampler_class"),
+            "positive_sampling": accounting.get(
+                "pipeline_positive_sampling"
+            ),
+            "multiplicity_policy": accounting.get(
+                "pipeline_multiplicity_policy"
+            ),
+            "feature_residency": accounting.get(
+                "pipeline_feature_residency"
+            ),
+            "source_representation": accounting.get(
+                "pipeline_source_representation"
+            ),
+            "dequantization": accounting.get("pipeline_device_conversion"),
+            "graph_neighbors": (
+                50
+                if accounting.get("pipeline_graph_degree")
+                == "variable-symmetric-fuzzy-k50-topology"
+                else None
+            ),
+            "population_rows": accounting.get(
+                "pipeline_compact_retained_rows"
+            ),
+        }
+        if (population or {}).get("representation") != "fresh-local-raw-fp16":
+            raise Round0119Error(
+                f"{spec['key']} configured source representation changed"
+            )
+    elif group == "current_25m":
+        population = config.get("input")
+        pipeline = train.get("exact_execution_receipt")
+        observed = {
+            "population_rows": (population or {}).get("rows"),
+            "graph_neighbors": (
+                graph.get("n_neighbors_including_self") - 1
+                if isinstance(
+                    graph.get("n_neighbors_including_self"), int
+                )
+                else None
+            ),
+            "graph_neighbors_including_self": graph.get(
+                "n_neighbors_including_self"
+            ),
+            "successful_updates": train.get("optimizer_updates"),
+            "pipeline": (pipeline or {}).get("pipeline"),
+            "sampler_class": (pipeline or {}).get("sampler_class"),
+            "positive_sampling": (pipeline or {}).get(
+                "positive_sampling"
+            ),
+            "multiplicity_policy": None,
+            "feature_residency": (pipeline or {}).get(
+                "feature_residency"
+            ),
+            "source_representation": (pipeline or {}).get(
+                "source_representation"
+            ),
+            "dequantization": (pipeline or {}).get("dequantization"),
+        }
+        accounting_observed = {
+            "pipeline": accounting.get("pipeline_pipeline"),
+            "sampler_class": accounting.get("pipeline_sampler_class"),
+            "positive_sampling": accounting.get(
+                "pipeline_positive_sampling"
+            ),
+            "multiplicity_policy": None,
+            "feature_residency": accounting.get(
+                "pipeline_feature_residency"
+            ),
+            "source_representation": accounting.get(
+                "pipeline_source_representation"
+            ),
+            "dequantization": accounting.get("pipeline_dequantization"),
+            "graph_neighbors": (
+                15
+                if accounting.get("pipeline_graph_degree")
+                == "variable-symmetric-fuzzy-k15-topology"
+                else None
+            ),
+            "graph_neighbors_including_self": 16,
+            "population_rows": accounting.get(
+                "pipeline_compact_retained_rows"
+            ),
+        }
+        if (
+            (population or {}).get("representation")
+            != "signed-int8-plus-exact-fp16-row-scale"
+        ):
+            raise Round0119Error(
+                f"{spec['key']} configured source representation changed"
+            )
+    else:
+        raise Round0119Error(f"{spec['key']} has an unknown model group")
+
+    if (
+        observed != expected
+        or any(
+            accounting_observed.get(key) != expected[key]
+            for key in accounting_observed
+        )
+        or (pipeline or {}).get("positive_with_replacement") is not True
+        or (pipeline or {}).get("weighted_effective") is not True
+    ):
+        raise Round0119Error(
+            f"{spec['key']} actual pipeline semantics changed"
+        )
+    checks = train.get("train_checks")
+    if checks is not None and (
+        not isinstance(checks, Mapping)
+        or any(
+            checks.get(key) is not True
+            for key in (
+                "endpoint_rows_match_updates",
+                "exact_update_closure",
+                "no_pipeline_stamp_drift",
+                "zero_numerical_skips",
+            )
+        )
+    ):
+        raise Round0119Error(
+            f"{spec['key']} training accounting does not close"
+        )
+    return expected
+
+
 def _authenticate_model(
     spec: Mapping[str, Any],
     *,
@@ -184,6 +399,9 @@ def _authenticate_model(
     ):
         raise Round0119Error(f"{spec['key']} prompt arm changed")
     expected_architecture = _architecture(config)
+    authenticated_semantics = _authenticate_training_semantics(
+        train, config, spec
+    )
 
     from basemap.pumap.parametric_umap import ParametricUMAP
 
@@ -214,6 +432,9 @@ def _authenticate_model(
         "training_population": spec["training_population"],
         "training_graph": spec["training_graph"],
         "training_dose": spec["training_dose"],
+        "training_representation": spec["training_representation"],
+        "training_dequantization": spec["training_dequantization"],
+        "authenticated_training_semantics": authenticated_semantics,
         "canonical_config_rehash_closes": canonical_config_closes,
         "legacy_integer_key_json_roundtrip": legacy_key_roundtrip,
     }
@@ -222,89 +443,55 @@ def _authenticate_model(
 def _load_universe(
     job: Mapping[str, Any],
 ) -> tuple[
+    np.ndarray,
     RepresentativeArrayView,
+    np.ndarray,
     np.ndarray,
     np.ndarray,
     np.ndarray,
     dict[str, Any],
     dict[str, np.ndarray],
 ]:
-    matched, matched_signature = _read_json_signature(
-        job["r0110_matched_receipt"],
-        label="R0110 matched-density receipt",
-        sealed=True,
-    )
     calibration, calibration_signature = _read_json_signature(
         job["r0108_calibration"],
         label="R0108 density calibration",
         sealed=True,
     )
     if (
-        matched.get("schema") != MATCHED_SCHEMA
-        or matched.get("round_id") != "0110"
-        or calibration.get("schema") != CALIBRATION_SCHEMA
+        calibration.get("schema") != CALIBRATION_SCHEMA
         or calibration.get("round_id") != "0108"
-        or matched.get("calibration") != calibration_signature
-        or matched.get("floor_changed_or_tuned") is not False
-        or matched.get("registered_floor")
-        != (calibration.get("floor_calibration") or {}).get(
-            "registered_floor"
-        )
+        or calibration.get("threshold_tuned_after_treatment") is not False
+        or "mean-k15 radius" not in str(calibration.get("scorer"))
     ):
-        raise Round0119Error("frozen matched-density contract changed")
-    universe = matched.get("universe")
-    if not isinstance(universe, Mapping) or (
-        universe.get("rows") != REPRESENTATIVE_ROWS
-        or universe.get("anchors") != ANCHORS
-        or universe.get("family_size_cutoff_exclusive")
-        != FAMILY_SIZE_CUTOFF
-        or universe.get("anchors_after_filter") != ANCHORS
-    ):
-        raise Round0119Error("R0110 matched universe changed")
-
-    arrays_signature = _exact_signature(
-        matched["arrays"], label="R0110 matched-density arrays"
-    )
-    with np.load(
-        arrays_signature["canonical_path"], allow_pickle=False
-    ) as archive:
-        anchors = np.asarray(
-            archive["anchor_compact_rows"], dtype=np.int64
-        )
-        global_rows = np.asarray(
-            archive["anchor_global_rows"], dtype=np.int64
-        )
-        high_radius = np.asarray(archive["high_radius"], dtype=np.float64)
-        stored_family_sizes = np.asarray(
-            archive["family_sizes"], dtype=np.int64
-        )
+        raise Round0119Error("frozen R0108 density contract changed")
+    floor_calibration = calibration.get("floor_calibration")
     if (
-        anchors.shape != (ANCHORS,)
-        or global_rows.shape != anchors.shape
-        or high_radius.shape != anchors.shape
-        or stored_family_sizes.shape != anchors.shape
-        or ordered_array_sha256(anchors)
-        != universe.get("anchor_compact_rows_sha256")
-        or ordered_array_sha256(global_rows)
-        != universe.get("anchor_global_rows_sha256")
-        or ordered_array_sha256(high_radius)
-        != universe.get("high_radius_sha256")
+        not isinstance(floor_calibration, Mapping)
+        or floor_calibration.get("registered_floor")
+        != 0.17589389755990817
+        or floor_calibration.get("gating_floor_registered") is not True
     ):
-        raise Round0119Error("R0110 anchor/radius arrays changed")
+        raise Round0119Error("R0108 registered floor changed")
 
     census, census_signature = _read_json_signature(
-        matched["census_receipt"],
+        calibration["census_receipt"],
         label="R0040 census receipt",
         sealed=False,
     )
-    del census
+    census_artifact_signature = _exact_signature(
+        calibration["census"], label="R0040 exact-family census"
+    )
+    if census.get("census") != census_artifact_signature:
+        raise Round0119Error("R0040 census receipt/artifact binding changed")
     representative_reference_signature = _exact_signature(
-        matched["representative_reference"],
+        calibration["representative_reference"],
         label="R0040 representative high-D reference",
     )
     census_bundle = load_jina_census(census_signature["canonical_path"])
+    if census_bundle["signature"] != census_artifact_signature:
+        raise Round0119Error("R0040 loaded census identity changed")
     source_signature = _exact_signature(
-        matched["source"], label="R0040 FineWeb source"
+        census["source"], label="R0040 FineWeb source"
     )
     if census_bundle["receipt"].get("source") != source_signature:
         raise Round0119Error("R0040 census/source binding changed")
@@ -323,17 +510,51 @@ def _load_universe(
         policy="R0040 exact nonzero fp16 family; minimum row representative",
     )
     representatives = RepresentativeArrayView(source, selector)
-    recomputed_global = selector.compact_to_global(anchors)
-    recomputed_family_sizes = map_family_sizes(
-        recomputed_global,
+
+    with np.load(
+        representative_reference_signature["canonical_path"],
+        allow_pickle=False,
+    ) as archive:
+        if set(("schema", "key", "anchor_ids", "r_hd")) - set(
+            archive.files
+        ):
+            raise Round0119Error("R0040 high-D reference arrays are missing")
+        reference_schema = str(np.asarray(archive["schema"]).item())
+        reference_key = str(np.asarray(archive["key"]).item())
+        anchors = np.asarray(archive["anchor_ids"], dtype=np.int64)
+        high_radius = np.asarray(archive["r_hd"], dtype=np.float64)
+    anchor_contract = calibration.get("anchors")
+    if (
+        reference_schema != REFERENCE_SCHEMA
+        or reference_key
+        != calibration.get("representative_reference_key")
+        or anchors.shape != (ANCHORS,)
+        or high_radius.shape != anchors.shape
+        or not isinstance(anchor_contract, Mapping)
+        or anchor_contract.get("before_family_filter") != ANCHORS
+        or anchor_contract.get("after_family_lt_16_filter") != ANCHORS
+        or ordered_array_sha256(anchors)
+        != anchor_contract.get("compact_rows_sha256")
+    ):
+        raise Round0119Error("R0040 anchor/high-D reference changed")
+
+    global_rows = selector.compact_to_global(anchors)
+    family_sizes = map_family_sizes(
+        global_rows,
         census_bundle["arrays"]["representative_rows"],
         census_bundle["arrays"]["family_counts"],
     )
+    retained_global_rows = selector.compact_to_global(
+        np.arange(len(representatives), dtype=np.int64)
+    )
     if (
         len(representatives) != REPRESENTATIVE_ROWS
-        or not np.array_equal(recomputed_global, global_rows)
-        or not np.array_equal(recomputed_family_sizes, stored_family_sizes)
-        or not np.all(recomputed_family_sizes < FAMILY_SIZE_CUTOFF)
+        or len(retained_global_rows) != REPRESENTATIVE_ROWS
+        or ordered_array_sha256(global_rows)
+        != anchor_contract.get("global_rows_sha256")
+        or ordered_array_sha256(family_sizes)
+        != anchor_contract.get("family_sizes_sha256")
+        or not np.all(family_sizes < FAMILY_SIZE_CUTOFF)
     ):
         raise Round0119Error("R0040 representative/family filter changed")
 
@@ -361,17 +582,21 @@ def _load_universe(
                     "R0108 historical high-D radii changed"
                 )
     lineage = {
-        "r0110_matched_receipt": matched_signature,
-        "r0110_arrays": arrays_signature,
         "r0108_calibration": calibration_signature,
         "r0108_calibration_arrays": calibration_arrays_signature,
         "census_receipt": census_signature,
+        "census": census_artifact_signature,
         "representative_reference": representative_reference_signature,
+        "representative_reference_key": reference_key,
         "source": source_signature,
-        "registered_floor": float(matched["registered_floor"]),
+        "registered_floor": float(
+            floor_calibration["registered_floor"]
+        ),
     }
     return (
+        source,
         representatives,
+        retained_global_rows,
         anchors,
         global_rows,
         high_radius,
@@ -384,19 +609,39 @@ def _score_cell(
     *,
     key: str,
     bundle: Mapping[str, Any],
+    source: np.ndarray,
     representatives: RepresentativeArrayView,
+    retained_global_rows: np.ndarray,
     anchors: np.ndarray,
     high_radius: np.ndarray,
     reference: Mapping[str, np.ndarray],
 ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     from basemap.panel_v2 import _self_knn
 
-    coordinates = np.asarray(
+    historical = bundle["group"] == "historical_2m"
+    transform_input = source if historical else representatives
+    transformed = np.asarray(
         bundle["model"].transform(
-            representatives, batch_size=TRANSFORM_BATCH_ROWS
+            transform_input, batch_size=TRANSFORM_BATCH_ROWS
         ),
         dtype=np.float32,
     )
+    expected_transform_rows = SOURCE_ROWS if historical else REPRESENTATIVE_ROWS
+    if (
+        transformed.shape != (expected_transform_rows, 2)
+        or not np.isfinite(transformed).all()
+    ):
+        raise Round0119Error(f"{key} transformed coordinates are malformed")
+    if historical:
+        # R0037/R0038 transformed the full 2M source in 8192-row batches.
+        # Selecting representatives only after that GEMM path is necessary to
+        # reproduce the frozen R0108 controls exactly.
+        coordinates = np.asarray(
+            transformed[retained_global_rows], dtype=np.float32
+        )
+        del transformed
+    else:
+        coordinates = transformed
     if (
         coordinates.shape != (REPRESENTATIVE_ROWS, 2)
         or not np.isfinite(coordinates).all()
@@ -471,9 +716,18 @@ def _score_cell(
         "training_population": bundle["training_population"],
         "training_graph": bundle["training_graph"],
         "training_dose": bundle["training_dose"],
+        "training_representation": bundle["training_representation"],
+        "training_dequantization": bundle["training_dequantization"],
+        "authenticated_training_semantics": bundle[
+            "authenticated_training_semantics"
+        ],
         "train_receipt": bundle["train"],
         "production_config": bundle["production_config"],
         "model": bundle["model_signature"],
+        "transform_batch_rows": TRANSFORM_BATCH_ROWS,
+        "transform_input_rows": expected_transform_rows,
+        "transform_selection_after_transform": historical,
+        "transform_selected_rows": REPRESENTATIVE_ROWS,
         "coordinates": {
             "rows": len(coordinates),
             "dtype": coordinates.dtype.str,
@@ -502,7 +756,9 @@ def run_score(
     )
     started = time.monotonic()
     (
+        source,
         representatives,
+        retained_global_rows,
         anchors,
         global_rows,
         high_radius,
@@ -528,7 +784,9 @@ def run_score(
         cell, cell_arrays = _score_cell(
             key=key,
             bundle=bundle,
+            source=source,
             representatives=representatives,
+            retained_global_rows=retained_global_rows,
             anchors=anchors,
             high_radius=high_radius,
             reference=reference,
@@ -550,7 +808,10 @@ def run_score(
         "release_sha": active["manifest"]["release_sha"],
         "lineage": lineage,
         "universe": {
-            "name": "R0110 exact matched R0040 FineWeb universe",
+            "name": (
+                "R0040 exact FineWeb representative universe reconstructed "
+                "from accepted R0108 calibration lineage"
+            ),
             "source_rows": SOURCE_ROWS,
             "representative_rows": len(representatives),
             "anchors": len(anchors),
@@ -562,6 +823,8 @@ def run_score(
         "scorer": {
             "metric": "density-v2 radius correlation",
             "k": K_DENSITY,
+            "transform_batch_rows": TRANSFORM_BATCH_ROWS,
+            "historical_full_source_transform_before_selection": True,
             "low_dim_search": "exact",
             "bootstrap_draws": 1_000,
             "bootstrap_seed": 10_801,
@@ -579,7 +842,7 @@ def run_score(
     })
     receipt_path = os.path.join(output, "density-localization-panel.json")
     atomic_write_new_json(receipt_path, receipt, immutable=True)
-    del representatives
+    del source, representatives, retained_global_rows
     gc.collect()
     return {**receipt, "receipt": expected_input_signature(receipt_path)}
 
@@ -669,6 +932,8 @@ def run_decision(
                 "training population",
                 "fuzzy graph",
                 "positive-update dose",
+                "source representation",
+                "dequantization path",
                 "associated scale-dependent execution tuple",
             ]
             if bundled_transition_localized
@@ -687,9 +952,9 @@ def run_decision(
         "role": (
             "localizes only whether the matched-density loss enters between "
             "the current 2M and 25M bundled training tuples; it cannot "
-            "separate population, graph, dose, or scale-dependent execution, "
-            "and a current-2M failure cannot exclude an additional scale "
-            "contribution"
+            "separate population, graph, dose, representation, "
+            "dequantization, or scale-dependent execution, and a current-2M "
+            "failure cannot exclude an additional scale contribution"
         ),
         "training_performed": False,
     })

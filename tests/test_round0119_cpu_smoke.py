@@ -32,9 +32,13 @@ def test_density_localization_end_to_end_cpu_smoke(
     rows = 256
     dimensions = 8
     anchors_count = 128
+    excluded = np.asarray([5, 17, 99, 230], dtype=np.int64)
+    representatives_count = rows - len(excluded)
     monkeypatch.setattr(round0119_nodes, "SOURCE_ROWS", rows)
     monkeypatch.setattr(round0119_nodes, "SOURCE_DIMENSION", dimensions)
-    monkeypatch.setattr(round0119_nodes, "REPRESENTATIVE_ROWS", rows)
+    monkeypatch.setattr(
+        round0119_nodes, "REPRESENTATIVE_ROWS", representatives_count
+    )
     monkeypatch.setattr(round0119_nodes, "ANCHORS", anchors_count)
 
     rng = np.random.default_rng(119)
@@ -44,20 +48,27 @@ def test_density_localization_end_to_end_cpu_smoke(
         rng.normal(size=(rows, dimensions)).astype(np.float16),
     )
     source_signature = expected_input_signature(str(source_path))
+    census_artifact_path = tmp_path / "census.npz"
+    np.savez(census_artifact_path, excluded_rows=excluded)
+    census_artifact_signature = expected_input_signature(
+        str(census_artifact_path)
+    )
     census_path = tmp_path / "census.json"
     census_signature = _write_json(
-        census_path, {"source": source_signature}
+        census_path,
+        {
+            "source": source_signature,
+            "census": census_artifact_signature,
+        },
     )
     census_bundle = {
-        "receipt": {"source": source_signature},
-        "signature": {
-            "kind": "file",
-            "canonical_path": str(tmp_path / "census.npz"),
-            "bytes": 1,
-            "sha256": "a" * 64,
+        "receipt": {
+            "source": source_signature,
+            "census": census_artifact_signature,
         },
+        "signature": census_artifact_signature,
         "arrays": {
-            "excluded_rows": np.empty(0, dtype=np.int64),
+            "excluded_rows": excluded,
             "representative_rows": np.empty(0, dtype=np.int64),
             "family_counts": np.empty(0, dtype=np.int64),
         },
@@ -65,27 +76,25 @@ def test_density_localization_end_to_end_cpu_smoke(
     monkeypatch.setattr(
         round0119_nodes, "load_jina_census", lambda _path: census_bundle
     )
-    reference_path = tmp_path / "representative-reference.npz"
-    np.savez(reference_path, placeholder=np.asarray([1]))
-    reference_signature = expected_input_signature(str(reference_path))
-
     anchors = np.arange(anchors_count, dtype=np.int64)
-    global_rows = anchors.copy()
+    retained_global = np.setdiff1d(
+        np.arange(rows, dtype=np.int64), excluded, assume_unique=True
+    )
+    global_rows = retained_global[anchors]
     high_radius = np.linspace(
         0.5, 2.0, anchors_count, dtype=np.float64
     )
     family_sizes = np.ones(anchors_count, dtype=np.int64)
-    matched_arrays_path = tmp_path / "matched-arrays.npz"
+    reference_key = "f" * 64
+    reference_path = tmp_path / "representative-reference.npz"
     np.savez(
-        matched_arrays_path,
-        anchor_compact_rows=anchors,
-        anchor_global_rows=global_rows,
-        high_radius=high_radius,
-        family_sizes=family_sizes,
+        reference_path,
+        schema=np.asarray(round0119_nodes.REFERENCE_SCHEMA),
+        key=np.asarray(reference_key),
+        anchor_ids=anchors,
+        r_hd=high_radius,
     )
-    matched_arrays_signature = expected_input_signature(
-        str(matched_arrays_path)
-    )
+    reference_signature = expected_input_signature(str(reference_path))
     frozen_low_radius = np.repeat(
         high_radius[:, None], round0119_nodes.K_DENSITY, axis=1
     ).mean(1)
@@ -119,38 +128,27 @@ def test_density_localization_end_to_end_cpu_smoke(
         seal({
             "schema": round0119_nodes.CALIBRATION_SCHEMA,
             "round_id": "0108",
-            "floor_calibration": {"registered_floor": floor},
-            "arrays": calibration_arrays_signature,
-        }),
-    )
-    matched_path = tmp_path / "matched.json"
-    matched_signature = _write_json(
-        matched_path,
-        seal({
-            "schema": round0119_nodes.MATCHED_SCHEMA,
-            "round_id": "0110",
-            "calibration": calibration_signature,
-            "registered_floor": floor,
-            "floor_changed_or_tuned": False,
-            "census_receipt": census_signature,
-            "source": source_signature,
-            "representative_reference": reference_signature,
-            "universe": {
-                "rows": rows,
-                "anchors": anchors_count,
-                "family_size_cutoff_exclusive": (
-                    round0119_nodes.FAMILY_SIZE_CUTOFF
-                ),
-                "anchors_after_filter": anchors_count,
-                "anchor_compact_rows_sha256": ordered_array_sha256(
-                    anchors
-                ),
-                "anchor_global_rows_sha256": ordered_array_sha256(
-                    global_rows
-                ),
-                "high_radius_sha256": ordered_array_sha256(high_radius),
+            "scorer": (
+                "R0085 density_v2: Pearson(log exact high-D mean-k15 "
+                "radius, log exact low-D mean-k15 radius)"
+            ),
+            "threshold_tuned_after_treatment": False,
+            "floor_calibration": {
+                "registered_floor": floor,
+                "gating_floor_registered": True,
             },
-            "arrays": matched_arrays_signature,
+            "arrays": calibration_arrays_signature,
+            "census": census_artifact_signature,
+            "census_receipt": census_signature,
+            "representative_reference": reference_signature,
+            "representative_reference_key": reference_key,
+            "anchors": {
+                "before_family_filter": anchors_count,
+                "after_family_lt_16_filter": anchors_count,
+                "compact_rows_sha256": ordered_array_sha256(anchors),
+                "global_rows_sha256": ordered_array_sha256(global_rows),
+                "family_sizes_sha256": ordered_array_sha256(family_sizes),
+            },
         }),
     )
 
@@ -159,10 +157,12 @@ def test_density_localization_end_to_end_cpu_smoke(
             self.marker = marker
 
         def transform(self, values, batch_size: int) -> np.ndarray:
-            assert len(values) == rows
-            result = np.zeros((rows, 2), dtype=np.float32)
+            assert batch_size == round0119_nodes.TRANSFORM_BATCH_ROWS
+            expected = rows if self.marker < 2 else representatives_count
+            assert len(values) == expected
+            result = np.zeros((len(values), 2), dtype=np.float32)
             result[:, 0] = self.marker
-            result[:, 1] = np.arange(rows, dtype=np.float32)
+            result[:, 1] = np.arange(len(values), dtype=np.float32)
             return result
 
     markers = {
@@ -195,6 +195,9 @@ def test_density_localization_end_to_end_cpu_smoke(
             "training_population": "population",
             "training_graph": "graph",
             "training_dose": "dose",
+            "training_representation": "representation",
+            "training_dequantization": "dequantization",
+            "authenticated_training_semantics": {"verified": True},
         }
 
     monkeypatch.setattr(
@@ -233,7 +236,6 @@ def test_density_localization_end_to_end_cpu_smoke(
         {"manifest": {"release_sha": "b" * 40}},
         {
             "outputs": [str(score_root)],
-            "r0110_matched_receipt": matched_signature,
             "r0108_calibration": calibration_signature,
             "model_bundles": specs,
         },
@@ -242,6 +244,17 @@ def test_density_localization_end_to_end_cpu_smoke(
     assert score["cells"]["historical_2m_seed42"][
         "historical_control_reproduction"
     ]["reproduces_frozen_control"] is True
+    assert score["scorer"]["k"] == 15
+    assert score["scorer"]["transform_batch_rows"] == 8_192
+    assert score["cells"]["historical_2m_seed42"][
+        "transform_input_rows"
+    ] == rows
+    assert score["cells"]["historical_2m_seed42"][
+        "transform_selection_after_transform"
+    ] is True
+    assert score["cells"]["current_2m_seed42"][
+        "transform_input_rows"
+    ] == representatives_count
     with (score_root / "density-localization-panel.json").open(
         encoding="utf-8"
     ) as handle:
