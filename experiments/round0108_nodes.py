@@ -1453,6 +1453,9 @@ def _refresh_registry_best_effort(
     receipt_path: str,
     map_definition_path: str,
     decision_path: str,
+    round_id: str = ROUND_ID,
+    map_key: str = MAP_KEY,
+    publication_schema: str = "round0108-map-registry-publication-v2",
 ) -> dict[str, Any]:
     """Refresh mutable registry views without invalidating immutable evidence."""
     from experiments import map_registry
@@ -1460,7 +1463,7 @@ def _refresh_registry_best_effort(
     stages: dict[str, Any] = {}
     registry: dict[str, Any] | None = None
     map_ids: list[str] = []
-    expected_map_id = f"round-{ROUND_ID}-{MAP_KEY}"
+    expected_map_id = f"round-{round_id}-{map_key}"
     expected_projection_probes = {
         "dadabase", "fineweb-heldout", POLISH, "trec-covid"
     }
@@ -1470,7 +1473,7 @@ def _refresh_registry_best_effort(
         round_entries = [
             item
             for item in registry["maps"]
-            if item.get("round_id") == ROUND_ID
+            if item.get("round_id") == round_id
         ]
         map_ids = sorted(
             str(item["map_id"])
@@ -1540,7 +1543,7 @@ def _refresh_registry_best_effort(
                     str((item.get("projection") or {}).get("probe")): item
                     for item in registry["maps"]
                     if (
-                        item.get("round_id") == ROUND_ID
+                        item.get("round_id") == round_id
                         and item.get("kind") == "projection-map"
                         and str((item.get("projection") or {}).get("probe"))
                         in expected_projection_probes
@@ -1549,7 +1552,7 @@ def _refresh_registry_best_effort(
                 missing = []
                 base_page = (
                     map_registry.SITE_DIR
-                    / f"round-{ROUND_ID}"
+                    / f"round-{round_id}"
                     / "index.html"
                 )
                 if not base_page.is_file():
@@ -1613,8 +1616,8 @@ def _refresh_registry_best_effort(
         )
     )
     receipt = seal({
-        "schema": "round0108-map-registry-publication-v2",
-        "round_id": ROUND_ID,
+        "schema": publication_schema,
+        "round_id": round_id,
         "immutable_artifacts": {
             "map_definition": expected_input_signature(map_definition_path),
             "atlas_decision": expected_input_signature(decision_path),

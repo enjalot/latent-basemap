@@ -709,6 +709,130 @@ def scan_round0108_atlas(
     }]
 
 
+def scan_round0118_atlas(
+    round_dir: Path,
+    ledger: dict,
+    *,
+    queue_dir: Path | None = None,
+) -> list[dict]:
+    """Discover the seed-44 diverse-Jina atlas evaluated by R0118.
+
+    R0118 deliberately preserves R0108's scientific protocol while writing a
+    distinct immutable definition for the R0111-trained model.  Keep its
+    matched-FineWeb qualification separate from native diverse-universe
+    density and never infer production readiness from registry presence.
+    """
+    queue_dir = queue_dir or round_dir / "queue"
+    artifacts = queue_dir / "artifacts"
+    definition_path = (
+        artifacts / "semantic-renders" / "map-definition.json"
+    )
+    transform_path = (
+        artifacts / "coordinates-seed44" / "actual-transform.json"
+    )
+    core_path = (
+        artifacts / "core-geometry-seed44" / "core-geometry.json"
+    )
+    decision_path = (
+        artifacts / "three-seed-decision" / "three-seed-decision.json"
+    )
+    definition = _load_json(definition_path)
+    transform = _load_json(transform_path)
+    core = _load_json(core_path)
+    decision = _load_json(decision_path)
+    if (
+        not isinstance(definition, dict)
+        or definition.get("schema") != "round0118-map-definition-v1"
+        or definition.get("round_id") != "0118"
+        or definition.get("training_round") != "0111"
+        or not isinstance(transform, dict)
+        or transform.get("round_id") != "0118"
+        or transform.get("map_key") != definition.get("map_key")
+        or not isinstance(core, dict)
+        or core.get("schema")
+        != "round0118-diverse-jina-core-geometry-v1"
+        or not isinstance(decision, dict)
+        or decision.get("schema")
+        != "round0118-diverse-jina-three-seed-decision-v1"
+        or decision.get("map_key") != definition.get("map_key")
+        or definition.get("embedding_prompt") != "raw"
+        or definition.get("prompt_applied") is not False
+        or definition.get("production_document_prompt_transfer_resolved")
+        is not False
+        or definition.get("production_ready") is not False
+        or decision.get("production_readiness_claimed") is not False
+    ):
+        return []
+    queue = _load_json(queue_dir / "queue.json") or {}
+    global_metrics = (core.get("metrics") or {}).get("global") or {}
+    density = (core.get("metrics") or {}).get("density_v2") or {}
+    accounting = transform.get("row_accounting") or {}
+    accepted = (
+        decision.get("seed44_atlas_quality_capability_released") is True
+    )
+    coordinate_chunks = sorted(
+        (artifacts / "coordinates-seed44").glob(
+            "chunk-*/coordinates.npy"
+        )
+    )
+    map_key = str(definition.get("map_key"))
+    return [{
+        "map_id": f"round-0118-{map_key}",
+        "round_id": "0118",
+        "kind": "round-map",
+        "map_label": definition.get("map_label"),
+        "date": datetime.fromtimestamp(
+            decision_path.stat().st_mtime, tz=timezone.utc
+        ).isoformat(),
+        "evidence_status": evidence_status("0118", ledger),
+        "n_rows": accounting.get("all_rows"),
+        "scientific_rows": accounting.get("retained_representatives"),
+        "dims": [768, 2],
+        "architecture": "residual_bottleneck",
+        "hidden_dim": 2048,
+        "kernel": "legacy_lp",
+        "pipeline": (
+            "R0111 weighted-host-int8/R0118 frozen retained evaluation"
+        ),
+        "precision": "fp32-transform",
+        "embedding_prompt": definition.get("embedding_prompt"),
+        "prompt_applied": definition.get("prompt_applied"),
+        "production_document_prompt_transfer_resolved": definition.get(
+            "production_document_prompt_transfer_resolved"
+        ),
+        "production_ready": False,
+        "scientific_status": (
+            "seed44-native-core-and-polish-ood-pass"
+            if accepted else "failed-with-registered-diagnostics"
+        ),
+        "capability_candidate": accepted,
+        "density_semantics": (
+            "jina-density-v2-frozen-r0108-native-and-r0110-matched"
+        ),
+        "model": transform.get("model"),
+        "coordinates": {
+            "dir": _relpath(artifacts / "coordinates-seed44"),
+            "chunks": len(coordinate_chunks),
+            "receipt_sha256": _file_signature(transform_path)["sha256"],
+        },
+        "panel": {
+            "path": _relpath(core_path),
+            "ffr": global_metrics.get("ffr"),
+            "density": density.get("correlation"),
+            "purity_k256": None,
+            "purity_k1024": None,
+            "proj_ffr": None,
+            "decision_checks_all_pass": accepted,
+            "formula_version": "density-v2-jina-calibrated",
+        },
+        "renders": [],
+        "render_diagnostics": core.get("geometry_diagnostics"),
+        "release_sha": queue.get("release_sha"),
+        "run_dir": _relpath(round_dir),
+        "training_round": "0111",
+    }]
+
+
 def _sha_of(obj) -> str | None:
     if isinstance(obj, dict):
         return obj.get("sha256") or obj.get("identity_sha256")
@@ -794,6 +918,9 @@ def scan() -> dict:
                     round_dir, ledger, queue_dir=queue_dir
                 )
                 maps += scan_round0108_atlas(
+                    round_dir, ledger, queue_dir=queue_dir
+                )
+                maps += scan_round0118_atlas(
                     round_dir, ledger, queue_dir=queue_dir
                 )
                 maps += scan_projection_maps(
