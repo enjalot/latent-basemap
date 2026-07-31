@@ -18,6 +18,8 @@ from experiments.prepare_round0119_queue import (
     RELEASE_ROOT,
     _accepted_review,
     _clean_terminal,
+    _document,
+    _frontmatter_list,
 )
 
 
@@ -301,10 +303,8 @@ def test_accepted_review_closes_result_release_and_capability(
             'round_id: "0117"',
             "status: complete",
             f'release_commit: "{release}"',
-            (
-                'capabilities_produced: ["jina-fineweb-2m-prompt-map-'
-                'seed43-contrast-v1"]'
-            ),
+            "capabilities_produced:",
+            "  - jina-fineweb-2m-prompt-map-seed43-contrast-v1",
             "---",
             "result",
             "",
@@ -342,6 +342,72 @@ def test_accepted_review_closes_result_release_and_capability(
     )
     with pytest.raises(RuntimeError, match="does not close"):
         _accepted_review(str(review_path), review_sha256, round_id="0117")
+
+
+def test_frontmatter_list_accepts_r0117_block_shape_and_inline_json(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "result-0117-2026-07-31.md"
+    path.write_text(
+        "\n".join([
+            "---",
+            'round_id: "0117"',
+            "status: complete",
+            "capabilities_produced:",
+            "  - jina-fineweb-2m-prompt-map-seed43-contrast-v1",
+            "---",
+            "result",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    frontmatter, _ = _document(str(path))
+    assert _frontmatter_list(
+        frontmatter,
+        "capabilities_produced",
+        label="R0117 result",
+    ) == ["jina-fineweb-2m-prompt-map-seed43-contrast-v1"]
+    assert _frontmatter_list(
+        {"releases": '["capability:one", "capability:two"]'},
+        "releases",
+        label="review",
+    ) == ["capability:one", "capability:two"]
+    assert _frontmatter_list(
+        {"releases": "  - \"a string\"\n  - 'reviewer''s-release'"},
+        "releases",
+        label="review",
+    ) == ["a string", "reviewer's-release"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "jina-capability",
+        "  -",
+        "  - valid\n    - nested",
+        "  - valid\n - inconsistent",
+        "  - valid\n  - 17",
+        "  - valid\n  - true",
+        "  - valid\n  - key: value",
+        '  - valid\n  - ["nested"]',
+        '  - "unterminated',
+        "  - 'unterminated",
+        '["valid", 17]',
+        '["valid", null]',
+        '["unterminated"',
+        '{"not": "a list"}',
+    ],
+)
+def test_frontmatter_list_rejects_malformed_or_non_string_items(
+    raw: str,
+) -> None:
+    with pytest.raises(RuntimeError):
+        _frontmatter_list(
+            {"capabilities_produced": raw},
+            "capabilities_produced",
+            label="result",
+        )
 
 
 def test_registered_cell_and_group_order_is_frozen() -> None:

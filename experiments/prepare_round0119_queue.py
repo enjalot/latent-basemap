@@ -102,10 +102,30 @@ def _document(path: str) -> tuple[dict[str, str], str]:
     if end < 0:
         raise RuntimeError(f"unterminated frontmatter: {path}")
     values: dict[str, str] = {}
+    block_key: str | None = None
+    block_lines: list[str] = []
+
+    def flush_block() -> None:
+        nonlocal block_key, block_lines
+        if block_key is not None:
+            values[block_key] = "\n".join(block_lines)
+        block_key = None
+        block_lines = []
+
     for line in text[4:end].splitlines():
-        if ":" in line:
-            key, value = line.split(":", 1)
-            values[key.strip()] = value.strip().strip("\"'")
+        if block_key is not None and (not line or line[0].isspace()):
+            block_lines.append(line)
+            continue
+        flush_block()
+        if ":" not in line or (line and line[0].isspace()):
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        values[key] = value.strip("\"'")
+        if not value:
+            block_key = key
+    flush_block()
     return values, text
 
 
@@ -119,15 +139,83 @@ def _frontmatter_list(
     *,
     label: str,
 ) -> list[str]:
-    try:
-        value = json.loads(frontmatter.get(key, ""))
-    except json.JSONDecodeError as error:
-        raise RuntimeError(f"{label} {key} is not a JSON list") from error
-    if (
-        not isinstance(value, list)
-        or not all(isinstance(item, str) for item in value)
-    ):
+    raw = frontmatter.get(key)
+    if not isinstance(raw, str):
         raise RuntimeError(f"{label} {key} is not a string list")
+    stripped = raw.strip()
+    if stripped.startswith("["):
+        try:
+            value = json.loads(stripped)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(
+                f"{label} {key} is not a valid inline JSON list"
+            ) from error
+        if (
+            not isinstance(value, list)
+            or not all(isinstance(item, str) for item in value)
+        ):
+            raise RuntimeError(f"{label} {key} is not a string list")
+        return value
+
+    indentation: str | None = None
+    value = []
+    for line in raw.splitlines():
+        match = re.fullmatch(r"( +)- +(.+?) *", line)
+        if match is None:
+            raise RuntimeError(
+                f"{label} {key} is not a canonical YAML block string list"
+            )
+        if indentation is None:
+            indentation = match.group(1)
+        elif match.group(1) != indentation:
+            raise RuntimeError(
+                f"{label} {key} has inconsistent YAML list indentation"
+            )
+        item = match.group(2)
+        if item.startswith('"'):
+            try:
+                decoded = json.loads(item)
+            except json.JSONDecodeError as error:
+                raise RuntimeError(
+                    f"{label} {key} has a malformed quoted string"
+                ) from error
+            if not isinstance(decoded, str):
+                raise RuntimeError(f"{label} {key} is not a string list")
+        elif item.startswith("'"):
+            if len(item) < 2 or not item.endswith("'"):
+                raise RuntimeError(
+                    f"{label} {key} has a malformed quoted string"
+                )
+            inner = item[1:-1]
+            decoded_parts: list[str] = []
+            index = 0
+            while index < len(inner):
+                if inner[index] != "'":
+                    decoded_parts.append(inner[index])
+                    index += 1
+                    continue
+                if index + 1 >= len(inner) or inner[index + 1] != "'":
+                    raise RuntimeError(
+                        f"{label} {key} has a malformed quoted string"
+                    )
+                decoded_parts.append("'")
+                index += 2
+            decoded = "".join(decoded_parts)
+        elif (
+            re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.:/+-]*", item)
+            and item.lower()
+            not in {"null", "true", "false", "yes", "no", "on", "off"}
+        ):
+            decoded = item
+        else:
+            raise RuntimeError(
+                f"{label} {key} contains a non-string or malformed item"
+            )
+        value.append(decoded)
+    if indentation is None:
+        raise RuntimeError(
+            f"{label} {key} is not an inline or YAML block string list"
+        )
     return value
 
 
