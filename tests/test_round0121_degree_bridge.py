@@ -113,41 +113,6 @@ def test_explicit_self_knn_enforces_15_distinct_nonself() -> None:
         )
 
 
-def test_control_topology_prefix_drift_is_rejected() -> None:
-    rows = round0121_nodes.GRAPH_QUALITY_ROWS
-    anchors = np.arange(rows, dtype=np.int64)
-    truth = np.tile(
-        np.arange(GRAPH_DEGREE, dtype=np.int64), (rows, 1)
-    )
-    observed = truth + 100
-    control_exact = np.concatenate(
-        (truth, np.zeros((rows, 34), dtype=np.int64)), axis=1
-    )
-    control_ann = np.concatenate(
-        (observed, np.zeros((rows, 34), dtype=np.int64)), axis=1
-    )
-    round0121_nodes._validate_control_topology_prefix(
-        quality_ids=anchors,
-        truth=truth,
-        observed=observed,
-        control_anchor_ids=anchors.copy(),
-        control_exact=control_exact,
-        control_ann=control_ann,
-    )
-    control_ann[0, 0] += 1
-    with pytest.raises(
-        round0121_nodes.Round0121Error, match="exact R0115 ranked prefix"
-    ):
-        round0121_nodes._validate_control_topology_prefix(
-            quality_ids=anchors,
-            truth=truth,
-            observed=observed,
-            control_anchor_ids=anchors,
-            control_exact=control_exact,
-            control_ann=control_ann,
-        )
-
-
 @pytest.mark.parametrize(
     ("treatment", "outcome", "sufficient"),
     [

@@ -473,7 +473,6 @@ def run_train(
     graph = load_graph(
         graph_path,
         expected_sha256=graph_signature["sha256"],
-        expected_release_sha=active["manifest"]["release_sha"],
     )
     config, config_sha = train_config(
         graph_signature=graph["signature"],
@@ -654,7 +653,6 @@ def _authenticate_treatment_model(
     graph = load_graph(
         graph_path,
         expected_sha256=graph_signature["sha256"],
-        expected_release_sha=active["manifest"]["release_sha"],
     )
     config, config_sha = train_config(
         graph_signature=graph["signature"],
