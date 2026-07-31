@@ -151,21 +151,55 @@ def test_coverage_rejects_duplicate_output_and_r0087_drift(
         contract.validate_coverage(drifted)
 
 
-def test_r0116_ordering_receipt_requires_clean_success(tmp_path) -> None:
+def test_r0116_ordering_receipt_requires_clean_success(
+    tmp_path, monkeypatch
+) -> None:
     path = tmp_path / "runner-terminal.json"
+    required_jobs = list(prepare.R0116_REQUIRED_JOBS)
     terminal = {
         "schema": "slim-runner-terminal-v3",
         "round_id": "0116",
         "verdict": "succeeded",
-        "completed_jobs": ["a"],
-        "required_jobs": ["a"],
+        "stop_reason": None,
+        "completed_jobs": required_jobs,
+        "required_jobs": required_jobs,
+        "release_checkout": {
+            "repo_root": prepare.RELEASE_ROOT,
+            "head": prepare.R0116_RELEASE_SHA,
+            "detached": True,
+            "dirty": False,
+        },
+        "release_checkout_at_finish": {
+            "repo_root": prepare.RELEASE_ROOT,
+            "head": prepare.R0116_RELEASE_SHA,
+            "detached": True,
+            "dirty": False,
+        },
         "release_checkout_unchanged": True,
+        "queue_manifest_sha256": "a" * 64,
+        "queue_manifest_sha256_at_finish": "a" * 64,
         "queue_manifest_unchanged": True,
         "boundary_problems": [],
         "validation_problems": [],
+        "nodes": [
+            {
+                "node": node,
+                "returncode": 0,
+                "validation_problems": [],
+            }
+            for node in required_jobs
+        ],
     }
     path.write_text(json.dumps(terminal), encoding="utf-8")
     signature = expected_input_signature(str(path))
+    with pytest.raises(RuntimeError, match="canonical receipt"):
+        prepare._require_successful_r0116_terminal(
+            str(path), expected_sha256=signature["sha256"]
+        )
+
+    monkeypatch.setattr(
+        prepare, "R0116_TERMINAL_PATH", signature["canonical_path"]
+    )
     observed, observed_signature = prepare._require_successful_r0116_terminal(
         str(path), expected_sha256=signature["sha256"]
     )
@@ -175,6 +209,61 @@ def test_r0116_ordering_receipt_requires_clean_success(tmp_path) -> None:
     terminal["verdict"] = "failed"
     path.write_text(json.dumps(terminal), encoding="utf-8")
     signature = expected_input_signature(str(path))
+    with pytest.raises(RuntimeError, match="clean terminal"):
+        prepare._require_successful_r0116_terminal(
+            str(path), expected_sha256=signature["sha256"]
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "value"),
+    [
+        ("required_jobs", []),
+        ("completed_jobs", []),
+        ("queue_manifest_sha256_at_finish", "b" * 64),
+    ],
+)
+def test_r0116_ordering_receipt_rejects_degenerate_identity(
+    tmp_path, monkeypatch, mutation, value
+) -> None:
+    path = tmp_path / "runner-terminal.json"
+    required_jobs = list(prepare.R0116_REQUIRED_JOBS)
+    checkout = {
+        "repo_root": prepare.RELEASE_ROOT,
+        "head": prepare.R0116_RELEASE_SHA,
+        "detached": True,
+        "dirty": False,
+    }
+    terminal = {
+        "schema": "slim-runner-terminal-v3",
+        "round_id": "0116",
+        "verdict": "succeeded",
+        "stop_reason": None,
+        "completed_jobs": required_jobs,
+        "required_jobs": required_jobs,
+        "release_checkout": checkout,
+        "release_checkout_at_finish": checkout,
+        "release_checkout_unchanged": True,
+        "queue_manifest_sha256": "a" * 64,
+        "queue_manifest_sha256_at_finish": "a" * 64,
+        "queue_manifest_unchanged": True,
+        "boundary_problems": [],
+        "validation_problems": [],
+        "nodes": [
+            {
+                "node": node,
+                "returncode": 0,
+                "validation_problems": [],
+            }
+            for node in required_jobs
+        ],
+    }
+    terminal[mutation] = value
+    path.write_text(json.dumps(terminal), encoding="utf-8")
+    signature = expected_input_signature(str(path))
+    monkeypatch.setattr(
+        prepare, "R0116_TERMINAL_PATH", signature["canonical_path"]
+    )
     with pytest.raises(RuntimeError, match="clean terminal"):
         prepare._require_successful_r0116_terminal(
             str(path), expected_sha256=signature["sha256"]

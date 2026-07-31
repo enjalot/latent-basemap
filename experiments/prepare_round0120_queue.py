@@ -55,6 +55,17 @@ ROUND_ROOT = "/data/latent-basemap/runs/round-0120"
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE_GLOB = os.path.join(LAB_ROOT, "round-0120-*.md")
 OUTPUT_NAMESPACE = "canonical-jina-document-pile-native8192-v1"
+R0116_RELEASE_SHA = "5243a994c45c1fdfacdf48b665ad00077d798286"
+R0116_TERMINAL_PATH = (
+    "/data/latent-basemap/runs/round-0116/queue/runner-terminal.json"
+)
+R0116_REQUIRED_JOBS = (
+    "embed_fineweb_tail",
+    "embed_redpajama_00",
+    "embed_redpajama_01",
+    "embed_redpajama_02",
+    "finalize_canonical_prompted_english",
+)
 REVIEW_DEFAULTS = {
     "0087": (
         "review-0087-2026-07-28.md",
@@ -108,19 +119,56 @@ def _require_successful_r0116_terminal(
     path: str, *, expected_sha256: str
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     signature = expected_input_signature(path)
+    if signature["canonical_path"] != R0116_TERMINAL_PATH:
+        raise RuntimeError("R0116 terminal receipt is not the canonical receipt")
     if signature["sha256"] != expected_sha256:
         raise RuntimeError("R0116 terminal receipt bytes changed")
     with open(path, encoding="utf-8") as handle:
         terminal = json.load(handle)
+    required_jobs = list(R0116_REQUIRED_JOBS)
+    checkouts = (
+        terminal.get("release_checkout"),
+        terminal.get("release_checkout_at_finish"),
+    )
+    checkout_valid = all(
+        isinstance(checkout, dict)
+        and checkout.get("repo_root") == RELEASE_ROOT
+        and checkout.get("head") == R0116_RELEASE_SHA
+        and checkout.get("detached") is True
+        and checkout.get("dirty") is False
+        for checkout in checkouts
+    )
+    queue_sha = terminal.get("queue_manifest_sha256")
+    queue_sha_at_finish = terminal.get("queue_manifest_sha256_at_finish")
+    nodes = terminal.get("nodes")
+    nodes_valid = (
+        isinstance(nodes, list)
+        and [node.get("node") for node in nodes if isinstance(node, dict)]
+        == required_jobs
+        and len(nodes) == len(required_jobs)
+        and all(
+            isinstance(node, dict)
+            and node.get("returncode") == 0
+            and node.get("validation_problems") in (None, [])
+            for node in nodes
+        )
+    )
     if (
         terminal.get("schema") != "slim-runner-terminal-v3"
         or terminal.get("round_id") != "0116"
         or terminal.get("verdict") != "succeeded"
-        or terminal.get("completed_jobs") != terminal.get("required_jobs")
+        or terminal.get("stop_reason") is not None
+        or terminal.get("required_jobs") != required_jobs
+        or terminal.get("completed_jobs") != required_jobs
+        or not checkout_valid
         or terminal.get("release_checkout_unchanged") is not True
+        or not isinstance(queue_sha, str)
+        or re.fullmatch(r"[0-9a-f]{64}", queue_sha) is None
+        or queue_sha_at_finish != queue_sha
         or terminal.get("queue_manifest_unchanged") is not True
         or terminal.get("boundary_problems") not in (None, [])
         or terminal.get("validation_problems") not in (None, [])
+        or not nodes_valid
     ):
         raise RuntimeError("R0116 did not reach a clean terminal evaluation")
     return terminal, signature
