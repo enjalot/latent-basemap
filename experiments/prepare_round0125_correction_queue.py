@@ -32,8 +32,12 @@ from basemap.round0125_runtime_bridge import (
     environment_freeze_receipt,
     validate_seal,
 )
-from experiments.prepare_round0020_0022_queues import _base_manifest, _dedupe
-from experiments.prepare_round0119_queue import _clean_terminal
+from experiments.prepare_round0020_0022_queues import LAB_ROOT, _base_manifest, _dedupe
+from experiments.prepare_round0119_queue import (
+    _clean_terminal,
+    _document,
+    _frontmatter_list,
+)
 from experiments.prepare_round0125_queue import (
     R0104_CAPABILITY,
     R0104_QUEUE,
@@ -66,6 +70,17 @@ PRIOR_QUEUE_SHA256 = (
 )
 PRIOR_TERMINAL_SHA256 = (
     "4095fbdc66b89ac721bb12518cc16375e92cf29f54b7d559ee37e2136704e835"
+)
+FIRST_RESULT = os.path.join(LAB_ROOT, "result-0125-2026-07-31.md")
+FIRST_RESULT_SHA256 = (
+    "6e6338cc15ed31a392b11009c401742ed8beec4afe0c3d548ad05482e83b232d"
+)
+FIRST_REVIEW = os.path.join(LAB_ROOT, "review-0125-2026-07-31.md")
+FIRST_REVIEW_SHA256 = (
+    "99e57343fbf9c15719bbbd6e209efd34e16bee568e9dfc94c493b13ddc22996d"
+)
+ORIGINAL_ROUND_SHA256 = (
+    "5b5f3c617905f643c3921cecd10cc31f3592e165b4efa91793bfd5632842c97a"
 )
 PRIOR_GPU_WALL_S = 9_246.523752104957
 ROUND_GPU_CAP_S = 4.0 * 3_600.0
@@ -147,6 +162,38 @@ def _prior_exact_signature(path: str) -> dict[str, Any]:
     if signature["sha256"] != PRIOR_EXPECTED_SHA256.get(path):
         raise RuntimeError(f"R0125 prior artifact bytes changed: {path}")
     return signature
+
+
+def _reviewed_first_attempt_inputs() -> list[dict[str, Any]]:
+    result_signature = expected_input_signature(FIRST_RESULT)
+    review_signature = expected_input_signature(FIRST_REVIEW)
+    result, _result_text = _document(FIRST_RESULT)
+    review, _review_text = _document(FIRST_REVIEW)
+    review_blocks = _frontmatter_list(
+        review, "blocks", label="R0125 first-attempt review"
+    )
+    if (
+        result_signature["sha256"] != FIRST_RESULT_SHA256
+        or review_signature["sha256"] != FIRST_REVIEW_SHA256
+        or result.get("round_id") != "0125"
+        or result.get("status") != "failed"
+        or result.get("release_commit") != ORIGINAL_RELEASE_SHA
+        or result.get("queue_manifest_sha256") != PRIOR_QUEUE_SHA256
+        or review.get("round_id") != "0125"
+        or review.get("status") != "accepted"
+        or review.get("round") != "round-0125-2026-07-31.md"
+        or review.get("round_sha256") != ORIGINAL_ROUND_SHA256
+        or review.get("result") != os.path.basename(FIRST_RESULT)
+        or review.get("result_sha256") != FIRST_RESULT_SHA256
+        or review.get("verified_release_commit") != ORIGINAL_RELEASE_SHA
+        or _frontmatter_list(
+            review, "releases", label="R0125 first-attempt review"
+        )
+        or "capability:jina-fineweb-2m-runtime-path-density-bridge-v1"
+        not in review_blocks
+    ):
+        raise RuntimeError("R0125 first failed result/review identity changed")
+    return [result_signature, review_signature]
 
 
 def _prior_attempt_inputs() -> list[dict[str, Any]]:
@@ -375,6 +422,7 @@ def prepare_correction_queue(
             query_truth_smoke_sha256,
             release_sha=release_sha,
         ),
+        *_reviewed_first_attempt_inputs(),
         *_prior_attempt_inputs(),
         *[
             dict(evidence[round_id][field])
@@ -502,6 +550,8 @@ def prepare_correction_queue(
             "prior_queue": expected_input_signature(PRIOR_QUEUE),
             "prior_terminal": expected_input_signature(PRIOR_TERMINAL),
             "prior_release_sha": ORIGINAL_RELEASE_SHA,
+            "first_attempt_result": expected_input_signature(FIRST_RESULT),
+            "first_attempt_review": expected_input_signature(FIRST_REVIEW),
             "prior_gpu_wall_s": PRIOR_GPU_WALL_S,
             "round_gpu_cap_s": ROUND_GPU_CAP_S,
             "residual_gpu_cap_s": ROUND_GPU_CAP_S - PRIOR_GPU_WALL_S,
