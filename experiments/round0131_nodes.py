@@ -24,7 +24,11 @@ from basemap.output_safety import (
     atomic_write_new_json,
     create_fresh_directory,
 )
-from basemap.round0104_training import InventoryFp16Array
+from basemap.round0104_training import (
+    InventoryFp16Array,
+    L2NormalizedArray,
+    panel_config,
+)
 from basemap.round0125_runtime_bridge import (
     BATCH_SIZE,
     GRAPH_EDGES,
@@ -54,7 +58,12 @@ from basemap.round0131_runtime_factorial import (
     select_outcome,
     train_config,
 )
-from experiments.round0104_nodes import _load_graph as _load_r0104_graph
+from experiments.round0104_nodes import (
+    _data_identity,
+    _load_graph as _load_r0104_graph,
+    _recall,
+    _without_self,
+)
 from experiments.round0119_nodes import _load_universe
 from experiments.round0125_nodes import (
     _load_shared_exact,
@@ -367,6 +376,112 @@ def _percentile_interval(values: np.ndarray) -> tuple[float, float]:
     return float(interval[0]), float(interval[1])
 
 
+def _score_native_model(
+    model: Any,
+    *,
+    arm: str,
+    shared: Mapping[str, Any],
+) -> tuple[dict[str, float], dict[str, bool]]:
+    """Run R0125's unchanged native and held-out metric panel in memory."""
+    from basemap.panel_v2 import (
+        cross_knn,
+        ffr_from_neighbors,
+        load_hiD_reference,
+        load_query_truth,
+        recall_at_k_from_neighbors,
+        score_panel,
+    )
+    from basemap.round0104_training import QUERY_ROWS, QUERY_START
+
+    source = InventoryFp16Array(0, ROWS)
+    queries = InventoryFp16Array(QUERY_START, QUERY_START + QUERY_ROWS)
+    coordinates = np.asarray(model.transform(source, batch_size=BATCH_SIZE), dtype=np.float32)
+    query_coordinates = np.asarray(
+        model.transform(queries, batch_size=BATCH_SIZE), dtype=np.float32
+    )
+    if (
+        coordinates.shape != (ROWS, 2)
+        or query_coordinates.shape != (QUERY_ROWS, 2)
+        or not np.isfinite(coordinates).all()
+        or not np.isfinite(query_coordinates).all()
+        or np.any(coordinates.std(axis=0) <= 1e-8)
+    ):
+        raise Round0131Error(f"R0131 {arm} native coordinates are invalid")
+    normalized = L2NormalizedArray(source)
+    config = panel_config()
+    reference = load_hiD_reference(
+        shared["high_d_reference"]["canonical_path"],
+        expected_key=shared["high_d_reference_key"],
+    )
+    truth = load_query_truth(
+        shared["query_truth"]["canonical_path"],
+        expected_key=shared["query_truth_key"],
+        expected_candidate_compute_backend="cuda",
+    )
+    panel = score_panel(
+        normalized,
+        coordinates,
+        config=config,
+        centroids_by_k=None,
+        hiD_reference=reference,
+        reference_identity={
+            "data_identity": _data_identity(shared["source_prefix_proof"]),
+            "convention": {
+                "row_order": "R0103 inventory first 2M rows",
+                "distance": "cosine via fp32-L2-normalized squared L2",
+                "self_exclusion": True,
+                "anchor_namespace": "zero-based R0103 row IDs",
+            },
+        },
+        scale_admission=None,
+        provenance={"round_id": ROUND_ID, "arm": arm},
+    )
+    k_fraction = max(config.k_hit, int(np.ceil(config.frac * ROWS)))
+    low_fraction = cross_knn(
+        query_coordinates, coordinates, k_fraction, config, hi_dim=False
+    )
+    low10 = low_fraction[:, : config.k_hit]
+    high10 = np.asarray(truth["neighbors"], dtype=np.int64)[:, : config.k_hit]
+    projection_ffr = ffr_from_neighbors(high10, low_fraction, config.k_hit)
+    projection_recall = recall_at_k_from_neighbors(high10, low10, config.k_hit)
+    low51 = cross_knn(
+        np.asarray(coordinates[reference["anchor_ids"]], dtype=np.float32),
+        coordinates,
+        51,
+        config,
+        hi_dim=False,
+    )
+    low50 = _without_self(low51, reference["anchor_ids"], 50)
+    recall50 = _recall(reference["hi_hit"], low50, config.k_hit)
+    query_low50 = cross_knn(
+        query_coordinates, coordinates, 50, config, hi_dim=False
+    )
+    query_recall50 = _recall(high10, query_low50, config.k_hit)
+    metrics = {
+        "ffr": float(panel["ffr"]),
+        "density": float(panel["density"]),
+        "recall_at_10": float(panel["recall@k"]),
+        "oos_proj_ffr": float(projection_ffr),
+        "oos_proj_recall_at_10": float(projection_recall),
+    }
+    guards = panel.get("guards") or {}
+    execution_gates = {
+        "finite_noncollapsed_coordinates": bool(
+            guards.get("coords_finite") is True
+            and guards.get("coords_collapsed") is False
+            and guards.get("emb_finite") is True
+            and guards.get("emb_zero_rows") == 0
+        ),
+        "transductive_recall50_gt_recall10": recall50 > metrics["recall_at_10"],
+        "projection_recall50_gt_recall10": (
+            query_recall50 > metrics["oos_proj_recall_at_10"]
+        ),
+    }
+    if not all(np.isfinite(value) for value in metrics.values()):
+        raise Round0131Error(f"R0131 {arm} native metrics are nonfinite")
+    return metrics, execution_gates
+
+
 def run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
     _validate_environment(active)
     trigger, trigger_signature = _validate_positive_trigger(job)
@@ -375,6 +490,24 @@ def run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
     if expected_input_signature(panel_path) != r0125_panel_signature:
         raise Round0131Error("R0125 matched panel bytes changed")
     r0125_panel = _read_sealed(panel_path, label="accepted R0125 matched panel")
+    if job.get("r0125_native_scores") != trigger.get("native_scores"):
+        raise Round0131Error("R0125 decision/native-score bindings changed")
+    r0125_native_scores = {}
+    for arm, signature in job["r0125_native_scores"].items():
+        if expected_input_signature(signature.get("canonical_path", "")) != signature:
+            raise Round0131Error(f"R0125 {arm} native score bytes changed")
+        score = _read_sealed(
+            str(signature["canonical_path"]),
+            label=f"accepted R0125 {arm} native score",
+        )
+        if (
+            score.get("schema") != "round0125-native-runtime-arm-score-v1"
+            or score.get("round_id") != "0125"
+            or score.get("arm") != arm
+            or not all((score.get("execution_gates") or {}).values())
+        ):
+            raise Round0131Error(f"R0125 {arm} native score contract changed")
+        r0125_native_scores[arm] = score
     r0125_arrays_signature = dict(r0125_panel.get("arrays") or {})
     if (
         r0125_panel.get("schema") != "round0125-matched-runtime-density-panel-v1"
@@ -419,9 +552,19 @@ def run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
         for key in ("host_control", "device_treatment")
     }
     arrays: dict[str, np.ndarray] = dict(inherited)
+    shared, _shared_signature = _load_shared_exact(job)
     train_signatures: dict[str, Any] = {}
+    native_metrics = {
+        arm: dict(score["metrics"])
+        for arm, score in r0125_native_scores.items()
+    }
+    native_execution_gates = {
+        arm: dict(score["execution_gates"])
+        for arm, score in r0125_native_scores.items()
+    }
     for arm in ARMS:
         model, _train, train_signature = _authenticate_model(active, job, arm=arm)
+        metrics, gates = _score_native_model(model, arm=arm, shared=shared)
         cell, cell_arrays = _score_matched_arm(
             arm=arm,
             model=model,
@@ -434,6 +577,8 @@ def run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
         cells[arm] = cell
         arrays.update(cell_arrays)
         train_signatures[arm] = train_signature
+        native_metrics[arm] = metrics
+        native_execution_gates[arm] = gates
         del model
         gc.collect()
 
@@ -466,6 +611,20 @@ def run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
         )
     }
     adjacent_ci = {key: _percentile_interval(value) for key, value in deltas.items()}
+    host_metrics = native_metrics["host_control"]
+    native_noninferiority = {
+        arm: {
+            key: {
+                "host": float(host_metrics[key]),
+                "observed": float(native_metrics[arm][key]),
+                "threshold": 0.97 * float(host_metrics[key]),
+                "passed": float(native_metrics[arm][key])
+                >= 0.97 * float(host_metrics[key]),
+            }
+            for key in host_metrics
+        }
+        for arm in ARMS
+    }
     output = create_fresh_directory(
         job["outputs"][0], label="R0131 runtime component panel"
     )
@@ -500,6 +659,9 @@ def run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
         "cells": cells,
         "correlations": correlations,
         "adjacent_ci99": {key: list(value) for key, value in adjacent_ci.items()},
+        "native_metrics": native_metrics,
+        "native_execution_gates": native_execution_gates,
+        "native_noninferiority_to_r0125_host": native_noninferiority,
         "train_receipts": train_signatures,
         "arrays": expected_input_signature(arrays_path),
         "training_performed": False,
@@ -541,6 +703,10 @@ def run_decision(active: dict[str, Any], job: dict[str, Any]) -> None:
             and panel.get("release_sha") == active["manifest"]["release_sha"]
             and panel.get("r0125_decision") == trigger_signature
             and panel.get("train_receipts") == expected_train_signatures
+            and all(
+                all((panel.get("native_execution_gates") or {}).get(arm, {}).values())
+                for arm in ARMS
+            )
         ),
         "identical_initial_model_state": (
             trains[RESIDENT_FUSED].get("initial_model_state_sha256")
@@ -584,6 +750,10 @@ def run_decision(active: dict[str, Any], job: dict[str, Any]) -> None:
         },
         execution_valid=all(execution_checks.values()),
     )
+    selector["native_intermediate_quality_tested"] = True
+    selector["native_noninferiority_to_r0125_host"] = panel[
+        "native_noninferiority_to_r0125_host"
+    ]
     output = create_fresh_directory(
         job["outputs"][0], label="R0131 runtime component decision"
     )
@@ -603,7 +773,10 @@ def run_decision(active: dict[str, Any], job: dict[str, Any]) -> None:
             RESIDENT_SEPARATE,
             "device_treatment",
         ],
-        "native_intermediate_quality_tested": False,
+        "native_intermediate_quality_tested": True,
+        "native_noninferiority_to_r0125_host": panel[
+            "native_noninferiority_to_r0125_host"
+        ],
         "single_mechanism_universal_cause_claimed": False,
         "production_runtime_adopted": False,
         "training_performed": True,
@@ -624,4 +797,3 @@ def run_job(active: dict[str, Any], job: dict[str, Any] | None = None) -> None:
         run_decision(active, selected)
     else:
         raise Round0131Error(f"unknown R0131 action {action!r}")
-

@@ -133,6 +133,7 @@ def _accepted_r0125(review_path: str) -> dict[str, Any]:
     decision = _read_json(decision_path, label="R0125 decision", sealed=True)
     panel = _read_json(panel_path, label="R0125 panel", sealed=True)
     arrays_signature = dict(panel.get("arrays") or {})
+    native_scores = dict(decision.get("native_scores") or {})
     evidence_text = review_text + "\n" + result_text
     if (
         decision.get("schema") != "round0125-device-host-runtime-decision-v1"
@@ -143,6 +144,12 @@ def _accepted_r0125(review_path: str) -> dict[str, Any]:
         or decision.get("matched_density_panel") != panel_signature
         or expected_input_signature(arrays_signature.get("canonical_path", ""))
         != arrays_signature
+        or set(native_scores) != {"device_treatment", "host_control"}
+        or any(
+            expected_input_signature(signature.get("canonical_path", ""))
+            != signature
+            for signature in native_scores.values()
+        )
         or decision_signature["sha256"] not in evidence_text
         or panel_signature["sha256"] not in evidence_text
     ):
@@ -163,6 +170,7 @@ def _accepted_r0125(review_path: str) -> dict[str, Any]:
         "decision": decision_signature,
         "panel": panel_signature,
         "arrays": arrays_signature,
+        "native_scores": native_scores,
         "outcome": decision["outcome"],
         "shared_output": str((queue.get("jobs") or [])[0].get("shared_output")),
         "calibration": dict(panel_job.get("r0108_calibration") or {}),
@@ -220,6 +228,7 @@ def prepare_round0131(
         evidence["decision"],
         evidence["panel"],
         evidence["arrays"],
+        *evidence["native_scores"].values(),
         evidence["calibration"],
         *evidence["inherited_inputs"],
     ])
@@ -287,9 +296,10 @@ def prepare_round0131(
             "panel",
             ["train_numpy_device_separate"],
             panel_output,
-            360.0,
+            1_200.0,
             train_outputs=train_outputs,
             r0125_panel=evidence["panel"],
+            r0125_native_scores=evidence["native_scores"],
             r0108_calibration=evidence["calibration"],
         ),
         job(
@@ -336,20 +346,20 @@ def prepare_round0131(
                 "sampler RNG plus epoch-batching mechanism",
             ],
             "new_arm_pipelines": PIPELINES,
-            "native_intermediate_quality_tested": False,
+            "native_intermediate_quality_tested": True,
             "production_runtime_adopted": False,
         },
         "p90_gpu_seconds": {
             "numpy_device_fused_train": 5_200.0,
             "numpy_device_separate_train": 5_200.0,
-            "matched_component_panel": 360.0,
-            "total": 10_760.0,
+            "native_and_matched_component_panel": 1_200.0,
+            "total": 11_600.0,
         },
         "estimate_basis": {
             "expected_gpu_hours": 2.65,
-            "p90_gpu_hours": 2.99,
+            "p90_gpu_hours": 3.23,
             "hard_cap_gpu_hours": 4.0,
-            "basis": "two R0125-class 500k-update Jina-768 trains plus one exact matched panel",
+            "basis": "two R0125-class 500k-update Jina-768 trains plus native, held-out, and exact matched panels",
         },
         "jobs": jobs,
     })
@@ -379,4 +389,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
