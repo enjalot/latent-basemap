@@ -53,7 +53,7 @@ def _tiny_model(*, pipeline: str, fused: bool) -> AuditedParametricUMAP:
         architecture="residual_bottleneck",
         lr_schedule="cosine",
         warmup_steps=1,
-        total_steps_estimate=3,
+        total_steps_estimate=8,
         require_full_budget=True,
         require_graph_manifest=False,
         required_input_pipeline=pipeline,
@@ -64,7 +64,7 @@ def _tiny_model(*, pipeline: str, fused: bool) -> AuditedParametricUMAP:
         gpu_resident_data=True,
         gpu_resident_vram_budget_gb=1.0,
     )
-    model._max_train_steps = 3
+    model._max_train_steps = 8
     model._bench_warmup = 0
     return model
 
@@ -164,10 +164,14 @@ def run_smoke(*, release_sha: str, output_path: str) -> dict:
             execution_valid=True,
         )
         checks = {
-            "both_actual_adapters_train_three_successful_updates": all(
-                receipt["positive_lr_updates"] == 3
+            "both_actual_adapters_train_eight_successful_updates": all(
+                receipt["positive_lr_updates"] == 8
                 and receipt["budget_satisfied"] is True
                 for receipt in receipts.values()
+            ),
+            "both_bounded_traces_are_complete": all(
+                trace["batches_hashed"] == trace["requested_batches"] == 8
+                for trace in traces.values()
             ),
             "checkpoint_reload_and_tiny_panel": all(
                 len(receipt["coordinates_sha256"]) == 64

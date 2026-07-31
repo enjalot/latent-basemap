@@ -124,7 +124,6 @@ def test_two_intermediate_adapters_emit_same_bounded_stream(tmp_path):
     graph = _graph(tmp_path, rows=rows)
     source = np.random.default_rng(7).normal(size=(rows, 768)).astype(np.float32)
     receipts = {}
-    samplers = []
     for arm in ARMS:
         training = Round0131TrainingInput(
             source, graph, arm=arm, device="cpu", expected_rows=rows
@@ -144,19 +143,25 @@ def test_two_intermediate_adapters_emit_same_bounded_stream(tmp_path):
         assert n_pos == 46
         batches = []
         iterator = iter(sampler)
-        for _ in range(3):
+        for _ in range(STREAM_TRACE_BATCHES):
             left, right, labels = next(iterator)
             batches.append((left.numpy(), right.numpy(), labels.numpy()))
+        # Production closes (and therefore drains) the async producer before
+        # sealing the runtime stamp.  Doing the same here makes the bounded
+        # trace independent of whether the producer has filled its next slot
+        # at the instant this thread reaches the assertion.
+        sampler.close()
         receipts[arm] = sampler.execution_stamp()
-        samplers.append(sampler)
         if arm == RESIDENT_FUSED:
             reference = batches
         else:
             for observed, expected in zip(batches, reference, strict=True):
                 for observed_array, expected_array in zip(observed, expected, strict=True):
                     assert np.array_equal(observed_array, expected_array)
-    for sampler in samplers:
-        sampler.close()
+    assert all(
+        receipt["stream_trace"]["batches_hashed"] == STREAM_TRACE_BATCHES
+        for receipt in receipts.values()
+    )
     assert receipts[RESIDENT_FUSED]["stream_trace"] == receipts[RESIDENT_SEPARATE]["stream_trace"]
     assert receipts[RESIDENT_FUSED]["endpoint_forward"] == "fused-source-destination"
     assert receipts[RESIDENT_SEPARATE]["endpoint_forward"] == "separate-source-destination"

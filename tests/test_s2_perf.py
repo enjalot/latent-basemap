@@ -60,7 +60,7 @@ def test_terminal_update_closes_every_requested_window(fake_clock):
 def test_training_closes_profiler_before_lr_horizon_break() -> None:
     source = inspect.getsource(ParametricUMAP.fit)
     profiler_call = source.index("prof.on_update(")
-    horizon_check = source.index("horizon_done =")
+    horizon_check = source.index("_successful_update_stop_reason(", profiler_call)
     next_batch = source.index('with _ph("sample")', profiler_call)
     assert profiler_call < horizon_check < next_batch
 
