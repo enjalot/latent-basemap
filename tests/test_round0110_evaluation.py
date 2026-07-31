@@ -64,31 +64,17 @@ def test_seed43_loader_binds_exact_r0109_identity(
 
 
 def test_seed43_wrapper_changes_only_evaluation_identity(
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    for name in (
-        "ROUND_ID",
-        "MAP_KEY",
-        "MAP_LABEL",
-        "CORE_SCHEMA",
-        "OOD_SCHEMA",
-        "load_reviewed_model",
-    ):
-        monkeypatch.setattr(
-            round0108_nodes, name, getattr(round0108_nodes, name)
-        )
-    original_calibration = round0108_nodes.CALIBRATION_SCHEMA
-    original_headline = round0108_nodes.headline_ood_decision
-    original_core_decision = round0108_nodes.core_geometry_decision
-    round0110_nodes._configure_seed43_contract()
-    assert round0108_nodes.ROUND_ID == "0110"
-    assert round0108_nodes.MAP_KEY == "r0109-diverse-jina-25m-seed43"
-    assert round0108_nodes.CORE_SCHEMA.startswith("round0110-")
-    assert round0108_nodes.OOD_SCHEMA.startswith("round0110-")
-    assert round0108_nodes.load_reviewed_model is round0110_nodes._seed43_model
-    assert round0108_nodes.CALIBRATION_SCHEMA == original_calibration
-    assert round0108_nodes.headline_ood_decision is original_headline
-    assert round0108_nodes.core_geometry_decision is original_core_decision
+    original = round0108_nodes.R0108_EVALUATION_CONTRACT
+    selected = round0110_nodes._seed43_job({"action": "score"})
+    contract = selected["evaluation_node_contract"]
+    assert contract["round_id"] == "0110"
+    assert contract["map_key"] == "r0109-diverse-jina-25m-seed43"
+    assert contract["core_schema"].startswith("round0110-")
+    assert contract["ood_schema"].startswith("round0110-")
+    assert contract["train_round_id"] == "0109"
+    assert contract["seed"] == 43
+    assert round0108_nodes.R0108_EVALUATION_CONTRACT is original
 
 
 def test_run_job_rejects_cross_round_dispatch() -> None:

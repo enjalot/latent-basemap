@@ -38,14 +38,17 @@ from basemap.round0107_training import (
 )
 
 
-def _new_model(config: Mapping[str, Any]):
-    from basemap.pumap.parametric_umap import ParametricUMAP
+def _new_model(config: Mapping[str, Any], *, model_class: Any | None = None):
+    if model_class is None:
+        from basemap.pumap.parametric_umap import ParametricUMAP
+
+        model_class = ParametricUMAP
 
     model = config["model"]
     optimizer = config["optimizer"]
     graph = config["graph"]
     execution = config["execution"]
-    return ParametricUMAP(
+    return model_class(
         n_components=model["output_dimension"],
         hidden_dim=model["hidden_dimension"],
         n_layers=model["hidden_layers"],
@@ -86,10 +89,16 @@ def _new_model(config: Mapping[str, Any]):
     )
 
 
-def _graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> dict[str, Any]:
+def _graph(
+    active: Mapping[str, Any],
+    job: Mapping[str, Any],
+    *,
+    graph_load_kwargs: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     graph = load_graph_manifest(
         str(job["graph_manifest"]),
         expected_sha256=str(job["graph_manifest_sha256"]),
+        **dict(graph_load_kwargs or {}),
     )
     manifest = graph["manifest"]
     if (
@@ -110,17 +119,23 @@ def run_train_contract(
     production_config_schema: str,
     train_receipt_schema: str,
     output_label: str,
+    graph_load_kwargs: Mapping[str, Any] | None = None,
+    train_config_kwargs: Mapping[str, Any] | None = None,
+    training_input_kwargs: Mapping[str, Any] | None = None,
+    model_class: Any | None = None,
+    require_initial_model_state: bool = False,
 ) -> dict[str, Any]:
     """Run one seed under the immutable R0107 graph/input/training law."""
     import torch
 
-    graph = _graph(active, job)
+    graph = _graph(active, job, graph_load_kwargs=graph_load_kwargs)
     manifest = graph["manifest"]
     config, config_sha256 = train_config(
         graph_manifest=manifest,
         graph_signature=graph["signature"],
         seed=seed,
         schema=train_config_schema,
+        **dict(train_config_kwargs or {}),
     )
     updates = int(config["optimizer"]["successful_positive_lr_updates"])
     if updates != int(graph["successful_updates"]):
@@ -142,7 +157,10 @@ def run_train_contract(
         "weights": arrays["weights"],
     }
     wrapper = Round0107TrainingInput(
-        dataset, graph_view, required_pipeline=PIPELINE
+        dataset,
+        graph_view,
+        required_pipeline=PIPELINE,
+        **dict(training_input_kwargs or {}),
     )
     output = create_fresh_directory(
         str(job["outputs"][0]), label=output_label
@@ -162,7 +180,7 @@ def run_train_contract(
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.cuda.reset_peak_memory_stats("cuda")
-    model = _new_model(config)
+    model = _new_model(config, model_class=model_class)
     model._max_train_steps = updates
     model._bench_warmup = PERFORMANCE_WARMUP_UPDATES
     model._perf_profile = True
@@ -264,7 +282,7 @@ def run_train_contract(
     model_path = os.path.join(output, "model.pt")
     atomic_build_new_file(model_path, model.save, immutable=True)
     free_bytes, total_bytes = torch.cuda.mem_get_info("cuda")
-    receipt = seal({
+    receipt_body = {
         "schema": train_receipt_schema,
         "round_id": round_id,
         "release_sha": active["manifest"]["release_sha"],
@@ -279,7 +297,7 @@ def run_train_contract(
             "positive_rows_per_update": int(
                 config["optimizer"]["positive_rows_per_update"]
             ),
-            "rule": "ceil(directed_fuzzy_edges/409)",
+            "rule": config["optimizer"]["update_rule"],
             "successful_updates": updates,
             "expected_positive_draws": expected_positive_draws,
         },
@@ -306,7 +324,13 @@ def run_train_contract(
         "optimizer_updates": updates,
         "evaluation_performed": False,
         "map_decision_made": False,
-    })
+    }
+    if require_initial_model_state:
+        initial_state = getattr(model, "_initial_model_state_receipt", None)
+        if not isinstance(initial_state, Mapping):
+            raise Round0107Error("initial model state receipt is missing")
+        receipt_body["initial_model_state"] = dict(initial_state)
+    receipt = seal(receipt_body)
     receipt_path = os.path.join(output, "train-receipt.json")
     atomic_write_new_json(receipt_path, receipt, immutable=True)
     del model, wrapper, dataset, graph, arrays

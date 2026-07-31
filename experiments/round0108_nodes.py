@@ -7,6 +7,7 @@ import math
 import os
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -85,6 +86,78 @@ from basemap.round0108_evaluation import (
     verify_signature,
 )
 from experiments.round0085_nodes import density_v2_calibration
+
+
+@dataclass(frozen=True)
+class EvaluationNodeContract:
+    round_id: str
+    map_key: str
+    map_label: str
+    graph_round_id: str
+    graph_k: int
+    core_schema: str
+    ood_schema: str
+    train_round_id: str
+    train_receipt_schema: str
+    production_config_schema: str
+    seed: int
+    graph_schema: str
+
+
+R0108_EVALUATION_CONTRACT = EvaluationNodeContract(
+    round_id=ROUND_ID,
+    map_key=MAP_KEY,
+    map_label=MAP_LABEL,
+    graph_round_id="0106",
+    graph_k=K,
+    core_schema=CORE_SCHEMA,
+    ood_schema=OOD_SCHEMA,
+    train_round_id="0107",
+    train_receipt_schema="round0107-diverse-jina-train-receipt-v1",
+    production_config_schema="round0107-production-config-v1",
+    seed=42,
+    graph_schema="round0106-jina-diverse-25m-fuzzy-graph-v1",
+)
+
+
+def evaluation_node_contract(job: Mapping[str, Any]) -> EvaluationNodeContract:
+    value = job.get("evaluation_node_contract")
+    if value is None:
+        return R0108_EVALUATION_CONTRACT
+    if not isinstance(value, Mapping):
+        raise Round0108Error("evaluation_node_contract must be a mapping")
+    expected = set(EvaluationNodeContract.__dataclass_fields__)
+    if set(value) != expected:
+        raise Round0108Error("evaluation_node_contract fields changed")
+    return EvaluationNodeContract(**{
+        "round_id": str(value["round_id"]),
+        "map_key": str(value["map_key"]),
+        "map_label": str(value["map_label"]),
+        "graph_round_id": str(value["graph_round_id"]),
+        "graph_k": int(value["graph_k"]),
+        "core_schema": str(value["core_schema"]),
+        "ood_schema": str(value["ood_schema"]),
+        "train_round_id": str(value["train_round_id"]),
+        "train_receipt_schema": str(value["train_receipt_schema"]),
+        "production_config_schema": str(value["production_config_schema"]),
+        "seed": int(value["seed"]),
+        "graph_schema": str(value["graph_schema"]),
+    })
+
+
+def _load_contract_model(
+    job: Mapping[str, Any], contract: EvaluationNodeContract
+) -> dict[str, Any]:
+    return load_reviewed_model(
+        train_output=str(job["train_output"]),
+        graph_manifest_path=str(job["graph_manifest"]),
+        graph_manifest_sha256=str(job["graph_manifest_sha256"]),
+        expected_train_round_id=contract.train_round_id,
+        expected_train_receipt_schema=contract.train_receipt_schema,
+        expected_production_config_schema=contract.production_config_schema,
+        expected_seed=contract.seed,
+        expected_graph_schema=contract.graph_schema,
+    )
 
 
 def _panel_config(*, anchors: int):
@@ -278,15 +351,12 @@ def run_transform(
     job: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Project all retained rows without materialising the 25M input."""
+    contract = evaluation_node_contract(job)
     output = create_fresh_directory(
         str(job["outputs"][0]), label="R0108 retained coordinate stream"
     )
     started = time.monotonic()
-    bundle = load_reviewed_model(
-        train_output=str(job["train_output"]),
-        graph_manifest_path=str(job["graph_manifest"]),
-        graph_manifest_sha256=str(job["graph_manifest_sha256"]),
-    )
+    bundle = _load_contract_model(job, contract)
     source = CompactInt8DequantizedArray(bundle["mapping"])
     members: list[dict[str, Any]] = []
     for index, start in enumerate(
@@ -326,8 +396,8 @@ def run_transform(
         del coordinates
     body = {
         "schema": TRANSFORM_SCHEMA,
-        "round_id": ROUND_ID,
-        "map_key": MAP_KEY,
+        "round_id": contract.round_id,
+        "map_key": contract.map_key,
         "model": bundle["train"]["model"],
         "train_receipt": bundle["train_signature"],
         "production_config": bundle["config_signature"],
@@ -337,7 +407,9 @@ def run_transform(
         "graph_manifest": bundle["graph_signature"],
         "compact_mapping": bundle["graph"]["compact_mapping"],
         "substrate": source.substrate["signature"],
-        "scientific_universe": "R0106 retained compact representatives",
+        "scientific_universe": (
+            f"R{contract.graph_round_id} retained compact representatives"
+        ),
         "input_preprocessing": (
             "signed-int8 times exact fp16 row scale to device fp32; "
             "no L2 renormalization before model"
@@ -355,7 +427,9 @@ def run_transform(
             "row_count": RETAINED_ROWS,
             "dimension": 2,
             "dtype": "<f4",
-            "row_order": "R0106 compact retained order",
+            "row_order": (
+                f"R{contract.graph_round_id} compact retained order"
+            ),
             "ordered_chunks": members,
         },
         "inference": {
@@ -380,8 +454,9 @@ def _gather_directed_memberships(
     targets: np.ndarray,
     weights: np.ndarray,
     anchors: np.ndarray,
+    k: int = K,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Gather up to K positive directed memberships for each source."""
+    """Gather up to the configured graph degree per source."""
     edge_sources = np.asarray(sources, dtype=np.int64)
     edge_targets = np.asarray(targets, dtype=np.int64)
     edge_weights = np.asarray(weights, dtype=np.float32)
@@ -397,15 +472,15 @@ def _gather_directed_memberships(
         or np.any(edge_weights > 1)
     ):
         raise Round0108Error("R0106 directed membership arrays are malformed")
-    gathered_targets = np.full((len(selected), K), -1, dtype=np.int64)
-    gathered_weights = np.zeros((len(selected), K), dtype=np.float32)
+    gathered_targets = np.full((len(selected), k), -1, dtype=np.int64)
+    gathered_weights = np.zeros((len(selected), k), dtype=np.float32)
     counts = np.empty(len(selected), dtype=np.int64)
     starts = np.searchsorted(edge_sources, selected, side="left")
     stops = np.searchsorted(edge_sources, selected, side="right")
     for position, (start, stop) in enumerate(zip(starts, stops)):
         count = int(stop - start)
         counts[position] = count
-        if count < 1 or count > K:
+        if count < 1 or count > k:
             raise Round0108Error(
                 "R0106 source has an invalid positive-membership count"
             )
@@ -417,13 +492,22 @@ def _gather_directed_memberships(
 def _load_graph_truth(
     compact_anchors: np.ndarray,
     part_outputs: Mapping[str, str],
+    *,
+    graph_k: int = K,
+    graph_contract: Any = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     """Gather each anchor's sealed positive R0106 directed memberships."""
-    from experiments.round0106_nodes import _validate_part_receipt
+    from experiments.round0106_nodes import (
+        R0106_GRAPH_CONTRACT,
+        _validate_part_receipt,
+    )
+
+    if graph_contract is None:
+        graph_contract = R0106_GRAPH_CONTRACT
 
     anchors = np.asarray(compact_anchors, dtype=np.int64)
-    targets = np.full((len(anchors), K), -1, dtype=np.int64)
-    weights = np.zeros((len(anchors), K), dtype=np.float32)
+    targets = np.full((len(anchors), graph_k), -1, dtype=np.int64)
+    weights = np.zeros((len(anchors), graph_k), dtype=np.float32)
     counts = np.zeros(len(anchors), dtype=np.int64)
     filled = np.zeros(len(anchors), dtype=bool)
     touched: dict[str, dict[str, Any]] = {}
@@ -435,7 +519,10 @@ def _load_graph_truth(
         if not np.any(mask):
             continue
         receipt, receipt_signature = _validate_part_receipt(
-            str(part_outputs[part]), expected_sha256=None, part=part
+            str(part_outputs[part]),
+            expected_sha256=None,
+            part=part,
+            contract=graph_contract,
         )
         touched[part] = {
             "receipt": receipt_signature,
@@ -465,6 +552,7 @@ def _load_graph_truth(
                         archive["targets"],
                         archive["weights"],
                         selected_anchors,
+                        k=graph_k,
                     )
                 )
                 targets[selected_positions] = selected_targets
@@ -475,7 +563,7 @@ def _load_graph_truth(
     if (
         not np.all(filled)
         or np.any(counts < 1)
-        or np.any(counts > K)
+        or np.any(counts > graph_k)
         or np.any(
             (targets >= RETAINED_ROWS)
             | ((targets < 0) & (targets != -1))
@@ -498,8 +586,12 @@ def _load_graph_truth(
     touched["membership_accounting"] = {
         "anchors": len(anchors),
         "positive_memberships": int(counts.sum()),
-        "zero_memberships_eliminated": int(len(anchors) * K - counts.sum()),
-        "sources_with_eliminated_memberships": int(np.count_nonzero(counts < K)),
+        "zero_memberships_eliminated": int(
+            len(anchors) * graph_k - counts.sum()
+        ),
+        "sources_with_eliminated_memberships": int(
+            np.count_nonzero(counts < graph_k)
+        ),
         "minimum_memberships_per_source": int(counts.min()),
         "padding_target": -1,
         "padding_weight": 0.0,
@@ -569,7 +661,10 @@ def run_core_score(
 ) -> dict[str, Any]:
     """Score retained map geometry on fixed stratified anchors."""
     from basemap.panel_v2 import _self_knn
+    from experiments.round0106_nodes import graph_node_contract
 
+    contract = evaluation_node_contract(job)
+    graph_contract = graph_node_contract(job)
     output = create_fresh_directory(
         str(job["outputs"][0]), label="R0108 core geometry score"
     )
@@ -587,8 +682,8 @@ def run_core_score(
     )
     coordinates = CoordinateStream(str(job["transform_output"]))
     if (
-        coordinates.receipt.get("round_id") != ROUND_ID
-        or coordinates.receipt.get("map_key") != MAP_KEY
+        coordinates.receipt.get("round_id") != contract.round_id
+        or coordinates.receipt.get("map_key") != contract.map_key
         or len(coordinates) != RETAINED_ROWS
     ):
         raise Round0108Error("R0108 coordinate stream identity changed")
@@ -613,8 +708,11 @@ def run_core_score(
     ):
         raise Round0108Error("R0108 core anchor selection changed")
 
-    graph15, graph_weights, graph_truth_inputs = _load_graph_truth(
-        compact_anchors, job["part_outputs"]
+    graph_neighbors, graph_weights, graph_truth_inputs = _load_graph_truth(
+        compact_anchors,
+        job["part_outputs"],
+        graph_k=contract.graph_k,
+        graph_contract=graph_contract,
     )
     config = _panel_config(anchors=PANEL_ANCHORS)
     fraction_k = max(K_LOW_MAX, int(math.ceil(FRACTION * RETAINED_ROWS)))
@@ -635,36 +733,32 @@ def run_core_score(
     ):
         raise Round0108Error("R0108 low-D neighbor geometry changed")
 
-    bundle = load_reviewed_model(
-        train_output=str(job["train_output"]),
-        graph_manifest_path=str(job["graph_manifest"]),
-        graph_manifest_sha256=str(job["graph_manifest_sha256"]),
-    )
+    bundle = _load_contract_model(job, contract)
     if not np.array_equal(
         np.asarray(bundle["mapping"][compact_anchors], dtype=np.int64),
         global_anchors,
     ):
         raise Round0108Error("R0108 compact/global anchor mapping changed")
     source = CompactInt8DequantizedArray(bundle["mapping"])
-    high15, high_distances, high_guard = _self_knn(
+    high_neighbors, high_distances, high_guard = _self_knn(
         source,
         compact_anchors,
-        K,
+        contract.graph_k,
         config,
         hi_dim=True,
         want_dist=True,
         exact=True,
     )
-    high15 = np.asarray(high15, dtype=np.int64)
+    high_neighbors = np.asarray(high_neighbors, dtype=np.int64)
     high_distances = np.asarray(high_distances, dtype=np.float64)
     if (
-        high15.shape != (PANEL_ANCHORS, K)
-        or high_distances.shape != high15.shape
+        high_neighbors.shape != (PANEL_ANCHORS, contract.graph_k)
+        or high_distances.shape != high_neighbors.shape
     ):
         raise Round0108Error("R0108 exact high-D truth geometry changed")
     high_radius = high_distances[:, :K_DENSITY].mean(1)
-    graph_membership_recall_at_15 = recall_from_neighbors(
-        high15, graph15, truth_k=K
+    graph_membership_recall_at_k = recall_from_neighbors(
+        high_neighbors, graph_neighbors, truth_k=contract.graph_k
     )
     low_radius = low_distances[:, :K_DENSITY].mean(1)
     representatives, family_counts = _family_arrays(str(job["eligibility"]))
@@ -684,7 +778,7 @@ def run_core_score(
         null_seed=10_804,
     )
 
-    high10 = high15[:, :K_HIT]
+    high10 = high_neighbors[:, :K_HIT]
     raw_global_metrics = projection_metrics(
         high10, low_neighbors, fraction_k=fraction_k
     )
@@ -773,39 +867,67 @@ def run_core_score(
         finite_noncollapsed=finite_noncollapsed,
     )
     arrays_path = os.path.join(output, "core-panel-arrays.npz")
-    atomic_save_new_npz(
-        arrays_path,
-        immutable=True,
-        global_anchor_rows=global_anchors,
-        compact_anchor_rows=compact_anchors,
-        group_ids=group_ids,
-        high_neighbors_top15=high15,
-        graph_neighbors_top15=graph15,
-        graph_fuzzy_weights=graph_weights,
-        low_neighbors_top50=low_neighbors[:, :K_LOW_MAX],
-        high_radius=high_radius,
-        low_radius=low_radius,
-        anchor_family_sizes=anchor_family_sizes,
-        density_bootstrap=density_bootstrap,
-        density_permuted_null=density_null,
-        anchor_coordinates=anchor_coordinates,
-        observed_map_mixing=observed_mixing,
-        centroid_distances=centroid_distances,
-    )
+    panel_arrays = {
+        "global_anchor_rows": global_anchors,
+        "compact_anchor_rows": compact_anchors,
+        "group_ids": group_ids,
+        "graph_fuzzy_weights": graph_weights,
+        "low_neighbors_top50": low_neighbors[:, :K_LOW_MAX],
+        "high_radius": high_radius,
+        "low_radius": low_radius,
+        "anchor_family_sizes": anchor_family_sizes,
+        "density_bootstrap": density_bootstrap,
+        "density_permuted_null": density_null,
+        "anchor_coordinates": anchor_coordinates,
+        "observed_map_mixing": observed_mixing,
+        "centroid_distances": centroid_distances,
+    }
+    if contract.graph_k == 15:
+        panel_arrays["high_neighbors_top15"] = high_neighbors
+        panel_arrays["graph_neighbors_top15"] = graph_neighbors
+    else:
+        panel_arrays["high_neighbors_topk"] = high_neighbors
+        panel_arrays["graph_neighbors_topk"] = graph_neighbors
+    atomic_save_new_npz(arrays_path, immutable=True, **panel_arrays)
+    if contract.graph_k == 15:
+        exact_truth = {
+            **high_guard,
+            "distance": (
+                "fp32 Euclidean, matching R0040/R0085 full-768 scorer"
+            ),
+            "top15_sha256": ordered_array_sha256(high_neighbors),
+        }
+        graph_recall_key = (
+            "r0106_positive_directed_membership_recall_against_"
+            "exact_high_d_top15"
+        )
+        graph_inputs_key = "r0106_positive_directed_membership_inputs"
+    else:
+        exact_truth = {
+            **high_guard,
+            "distance": (
+                "fp32 Euclidean, matching R0040/R0085 full-768 scorer"
+            ),
+            "top_k": contract.graph_k,
+            "topk_sha256": ordered_array_sha256(high_neighbors),
+        }
+        graph_recall_key = (
+            f"r{contract.graph_round_id}_positive_directed_membership_recall_"
+            f"against_exact_high_d_top{contract.graph_k}"
+        )
+        graph_inputs_key = (
+            f"r{contract.graph_round_id}_positive_directed_membership_inputs"
+        )
     receipt = seal({
-        "schema": CORE_SCHEMA,
-        "round_id": ROUND_ID,
-        "map_key": MAP_KEY,
+        "schema": contract.core_schema,
+        "round_id": contract.round_id,
+        "map_key": contract.map_key,
         "model": bundle["train"]["model"],
         "train_receipt": bundle["train_signature"],
         "transform_receipt": expected_input_signature(transform_path),
         "graph_manifest": bundle["graph_signature"],
         "graph_truth_inputs": graph_truth_inputs,
-        "exact_high_d_truth": {
-            **high_guard,
-            "distance": "fp32 Euclidean, matching R0040/R0085 full-768 scorer",
-            "top15_sha256": ordered_array_sha256(high15),
-        },
+        "exact_high_d_truth": exact_truth,
         "selection": expected_input_signature(str(job["selection"])),
         "anchors": {
             "total": PANEL_ANCHORS,
@@ -848,10 +970,8 @@ def run_core_score(
             "group_centroid_distance_matrix": centroid_distances.tolist(),
             "observed_anchor_map_mixing_k15": observed_mixing.tolist(),
             "graph_mixing_and_hubs": bundle["graph"]["diagnostics"],
-            "r0106_positive_directed_membership_recall_against_exact_high_d_top15": (
-                graph_membership_recall_at_15
-            ),
-            "r0106_positive_directed_membership_inputs": graph_truth_inputs,
+            graph_recall_key: graph_membership_recall_at_k,
+            graph_inputs_key: graph_truth_inputs,
             "low_dim_exact_search_guard": low_guard,
         },
         "decision": decision,
@@ -1004,17 +1124,14 @@ def run_ood(
     job: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Evaluate nineteen in-mix languages, held-out Polish, and map cards."""
+    contract = evaluation_node_contract(job)
     if job.get("embedding_prompt") != EMBEDDING_PROMPT:
         raise Round0108Error("R0108 raw embedding-prompt binding changed")
     output = create_fresh_directory(
         str(job["outputs"][0]), label="R0108 OOD evaluation"
     )
     started = time.monotonic()
-    bundle = load_reviewed_model(
-        train_output=str(job["train_output"]),
-        graph_manifest_path=str(job["graph_manifest"]),
-        graph_manifest_sha256=str(job["graph_manifest_sha256"]),
-    )
+    bundle = _load_contract_model(job, contract)
     model = bundle["model"]
     training_source = CompactInt8DequantizedArray(bundle["mapping"])
     selection_signature = expected_input_signature(str(job["selection"]))
@@ -1386,9 +1503,9 @@ def run_ood(
     }
     panel = seal({
         "schema": "universality-panel-v1",
-        "round_id": ROUND_ID,
+        "round_id": contract.round_id,
         "map": {
-            "label": MAP_LABEL,
+            "label": contract.map_label,
             "model": bundle["train"]["model"],
             "coordinate_receipt": expected_input_signature(transform_path),
         },
@@ -1412,9 +1529,9 @@ def run_ood(
     panel_path = os.path.join(output, "universality-panel-v1.json")
     atomic_write_new_json(panel_path, panel, immutable=True)
     receipt = seal({
-        "schema": OOD_SCHEMA,
-        "round_id": ROUND_ID,
-        "map_key": MAP_KEY,
+        "schema": contract.ood_schema,
+        "round_id": contract.round_id,
+        "map_key": contract.map_key,
         "model": bundle["train"]["model"],
         "train_receipt": bundle["train_signature"],
         "selection": selection_signature,

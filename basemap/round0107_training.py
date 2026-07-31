@@ -88,6 +88,10 @@ def load_graph_manifest(
     path: str,
     *,
     expected_sha256: str,
+    expected_graph_schema: str = GRAPH_SCHEMA,
+    expected_graph_round_id: str = "0106",
+    expected_k_real: int = N_NEIGHBORS - 1,
+    successful_updates: int | None = None,
 ) -> dict[str, Any]:
     signature = expected_input_signature(path)
     if signature["sha256"] != expected_sha256:
@@ -97,13 +101,13 @@ def load_graph_manifest(
     validate_seal(manifest, label="R0106 graph manifest")
     outputs = manifest.get("outputs") or {}
     if (
-        manifest.get("schema") != GRAPH_SCHEMA
-        or manifest.get("round_id") != "0106"
+        manifest.get("schema") != expected_graph_schema
+        or manifest.get("round_id") != expected_graph_round_id
         or int(manifest.get("retained_rows", -1)) != RETAINED_ROWS
         or int(manifest.get("dimension", -1)) != DIMENSION
-        or int(manifest.get("k_real", -1)) != N_NEIGHBORS - 1
+        or int(manifest.get("k_real", -1)) != expected_k_real
         or int(manifest.get("n_neighbors_including_self", -1))
-        != N_NEIGHBORS
+        != expected_k_real + 1
         or int(manifest.get("directed_edge_count", -1)) <= 0
         or set(outputs) != {"sources", "targets", "weights"}
         or (manifest.get("reciprocity_validation") or {}).get(
@@ -137,11 +141,17 @@ def load_graph_manifest(
         or arrays["mapping"].dtype != np.int64
     ):
         raise Round0107Error("R0106 graph arrays changed geometry")
+    updates = (
+        successful_update_target(edges)
+        if successful_updates is None else int(successful_updates)
+    )
+    if updates <= 0:
+        raise Round0107Error("training update target must be positive")
     return {
         "manifest": manifest,
         "signature": signature,
         "arrays": arrays,
-        "successful_updates": successful_update_target(edges),
+        "successful_updates": updates,
     }
 
 
@@ -240,6 +250,10 @@ class DiverseWeightedJinaSampler:
         pos_ratio: float,
         random_state: int,
         graph_signatures: Mapping[str, Any],
+        positive_destination_policy: str = (
+            "R0106-global-retained-fuzzy-tconorm-graph"
+        ),
+        graph_degree: str = "variable-symmetric-fuzzy-k15-topology",
     ) -> None:
         import torch
 
@@ -254,6 +268,8 @@ class DiverseWeightedJinaSampler:
         self.num_neg = self.batch_size - self.num_pos
         self.rng = np.random.default_rng(int(random_state))
         self.graph_signatures = dict(graph_signatures)
+        self.positive_destination_policy = str(positive_destination_policy)
+        self.graph_degree = str(graph_degree)
         self.device = dataset.device
         self.batch_no = 0
         self._prefetch_executor: concurrent.futures.ThreadPoolExecutor | None = None
@@ -406,13 +422,11 @@ class DiverseWeightedJinaSampler:
                 "fuzzy_weight_proportional_with_replacement_via_exact_"
                 "uniform_envelope_rejection"
             ),
-            "positive_destination_policy": (
-                "R0106-global-retained-fuzzy-tconorm-graph"
-            ),
+            "positive_destination_policy": self.positive_destination_policy,
             "negative_sampling": (
                 "uniform-24,948,663-compact-retained-rows-nonself"
             ),
-            "graph_degree": "variable-symmetric-fuzzy-k15-topology",
+            "graph_degree": self.graph_degree,
             "host_prefetch": "single-producer-two-pinned-slot",
             "host_prefetch_producer_batches": self._producer_batches,
             "host_prefetch_consumer_batches": self._consumer_batches,
@@ -451,10 +465,16 @@ class Round0107TrainingInput:
         graph: Mapping[str, Any],
         *,
         required_pipeline: str,
+        positive_destination_policy: str = (
+            "R0106-global-retained-fuzzy-tconorm-graph"
+        ),
+        graph_degree: str = "variable-symmetric-fuzzy-k15-topology",
     ) -> None:
         self.dataset = dataset
         self.graph = dict(graph)
         self.required_pipeline = required_pipeline
+        self.positive_destination_policy = str(positive_destination_policy)
+        self.graph_degree = str(graph_degree)
         self.shape = dataset.shape
         self._last_sampler: DiverseWeightedJinaSampler | None = None
         if self.shape != (RETAINED_ROWS, DIMENSION):
@@ -501,6 +521,16 @@ class Round0107TrainingInput:
             pos_ratio=pos_ratio,
             random_state=random_state,
             graph_signatures=self.graph["graph_signatures"],
+            positive_destination_policy=getattr(
+                self,
+                "positive_destination_policy",
+                "R0106-global-retained-fuzzy-tconorm-graph",
+            ),
+            graph_degree=getattr(
+                self,
+                "graph_degree",
+                "variable-symmetric-fuzzy-k15-topology",
+            ),
         )
         self._last_sampler = sampler
         runtime = sampler.execution_stamp()
@@ -524,11 +554,23 @@ def train_config(
     graph_signature: Mapping[str, Any],
     seed: int = SEED,
     schema: str = "round0107-diverse-jina-train-config-v1",
+    n_neighbors_including_self: int = N_NEIGHBORS,
+    successful_updates: int | None = None,
+    update_rule: str = "ceil(directed_fuzzy_edges/409)",
+    positive_destination_policy: str = (
+        "R0106-global-retained-fuzzy-tconorm-graph"
+    ),
+    graph_degree: str = "variable-symmetric-fuzzy-k15-topology",
 ) -> tuple[dict[str, Any], str]:
-    if seed < 0 or not schema:
+    if seed < 0 or not schema or n_neighbors_including_self < 2:
         raise Round0107Error("diverse-Jina train identity is invalid")
     edges = int(graph_manifest["directed_edge_count"])
-    updates = successful_update_target(edges)
+    updates = (
+        successful_update_target(edges)
+        if successful_updates is None else int(successful_updates)
+    )
+    if updates <= 0:
+        raise Round0107Error("diverse-Jina update target must be positive")
     expected_pipeline = {
         "schema": PIPELINE_SCHEMA,
         "pipeline": PIPELINE,
@@ -537,13 +579,11 @@ def train_config(
             "fuzzy_weight_proportional_with_replacement_via_exact_"
             "uniform_envelope_rejection"
         ),
-        "positive_destination_policy": (
-            "R0106-global-retained-fuzzy-tconorm-graph"
-        ),
+        "positive_destination_policy": positive_destination_policy,
         "negative_sampling": (
             "uniform-24,948,663-compact-retained-rows-nonself"
         ),
-        "graph_degree": "variable-symmetric-fuzzy-k15-topology",
+        "graph_degree": graph_degree,
         "host_prefetch": "single-producer-two-pinned-slot",
         "endpoint_forward": "fused-source-destination",
         "weighted_requested": True,
@@ -568,7 +608,7 @@ def train_config(
             "manifest": dict(graph_signature),
             "outputs": graph_manifest["outputs"],
             "directed_edges": edges,
-            "n_neighbors_including_self": N_NEIGHBORS,
+            "n_neighbors_including_self": n_neighbors_including_self,
             "sampling": "fuzzy-weight-proportional-with-replacement",
             "positive_target_mode": "binary",
         },
@@ -598,7 +638,7 @@ def train_config(
             "schedule": "cosine-v3-positive-budget",
             "warmup_successful_updates": PERFORMANCE_WARMUP_UPDATES,
             "successful_positive_lr_updates": updates,
-            "update_rule": "ceil(directed_fuzzy_edges/409)",
+            "update_rule": update_rule,
             "reject_neighbors": False,
         },
         "execution": {

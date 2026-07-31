@@ -605,6 +605,7 @@ def load_reviewed_model(
     expected_train_receipt_schema: str = TRAIN_RECEIPT_SCHEMA,
     expected_production_config_schema: str = "round0107-production-config-v1",
     expected_seed: int = 42,
+    expected_graph_schema: str = GRAPH_SCHEMA,
 ):
     """Authenticate one reviewed diverse-Jina train bundle and load its model."""
     train_path = os.path.join(train_output, "train-receipt.json")
@@ -646,7 +647,7 @@ def load_reviewed_model(
         or train.get("round_id") != expected_train_round_id
         or train.get("graph_manifest") != graph_signature
         or graph_signature["sha256"] != graph_manifest_sha256
-        or graph.get("schema") != GRAPH_SCHEMA
+        or graph.get("schema") != expected_graph_schema
         or train.get("production_config_sha256")
         != sha256_bytes(canonical_json(config))
         or config_receipt.get("config_sha256")

@@ -78,43 +78,45 @@ def _seed43_model(
     )
 
 
-def _configure_seed43_contract() -> None:
-    """Bind R0108's scorer implementation to the registered seed-43 identity.
-
-    Runner nodes execute in separate processes, so these module-local bindings
-    cannot leak into a different job. The frozen selectors, scorers, thresholds,
-    calibration schema, and prompt semantics remain those of R0108.
-    """
-    seed42_nodes.ROUND_ID = ROUND_ID
-    seed42_nodes.MAP_KEY = MAP_KEY
-    seed42_nodes.MAP_LABEL = MAP_LABEL
-    seed42_nodes.CORE_SCHEMA = CORE_SCHEMA
-    seed42_nodes.OOD_SCHEMA = OOD_SCHEMA
-    seed42_nodes.load_reviewed_model = _seed43_model
+def _seed43_job(job: Mapping[str, Any]) -> dict[str, Any]:
+    """Bind R0108's scorer through an explicit, process-local contract."""
+    selected = dict(job)
+    selected["evaluation_node_contract"] = {
+        "round_id": ROUND_ID,
+        "map_key": MAP_KEY,
+        "map_label": MAP_LABEL,
+        "graph_round_id": "0106",
+        "graph_k": 15,
+        "core_schema": CORE_SCHEMA,
+        "ood_schema": OOD_SCHEMA,
+        "train_round_id": "0109",
+        "train_receipt_schema": TRAIN_RECEIPT_SCHEMA,
+        "production_config_schema": PRODUCTION_CONFIG_SCHEMA,
+        "seed": SEED,
+        "graph_schema": "round0106-jina-diverse-25m-fuzzy-graph-v1",
+    }
+    return selected
 
 
 def run_transform(
     active: Mapping[str, Any],
     job: Mapping[str, Any],
 ) -> dict[str, Any]:
-    _configure_seed43_contract()
-    return seed42_nodes.run_transform(active, job)
+    return seed42_nodes.run_transform(active, _seed43_job(job))
 
 
 def run_core(
     active: Mapping[str, Any],
     job: Mapping[str, Any],
 ) -> dict[str, Any]:
-    _configure_seed43_contract()
-    return seed42_nodes.run_core_score(active, job)
+    return seed42_nodes.run_core_score(active, _seed43_job(job))
 
 
 def run_ood(
     active: Mapping[str, Any],
     job: Mapping[str, Any],
 ) -> dict[str, Any]:
-    _configure_seed43_contract()
-    return seed42_nodes.run_ood(active, job)
+    return seed42_nodes.run_ood(active, _seed43_job(job))
 
 
 def _exact_signature(
