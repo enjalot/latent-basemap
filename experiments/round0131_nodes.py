@@ -31,12 +31,15 @@ from basemap.round0104_training import (
 )
 from basemap.round0125_runtime_bridge import (
     BATCH_SIZE,
+    DEVICE_ARM,
     GRAPH_EDGES,
+    HOST_ARM,
     MATCHED_DENSITY_FLOOR,
     ROWS,
     SEED,
     STREAM_TRACE_BATCHES,
     SUCCESSFUL_UPDATES,
+    train_config as r0125_train_config,
     validate_environment_freeze,
     validate_seal,
 )
@@ -49,11 +52,13 @@ from basemap.round0131_runtime_factorial import (
     PERFORMANCE_WINDOWS,
     PIPELINES,
     POSITIVE_R0125_OUTCOMES,
+    R0125_RELEASE_SHA,
     RESIDENT_FUSED,
     RESIDENT_SEPARATE,
     ROUND_ID,
     Round0131Error,
     Round0131TrainingInput,
+    causal_execution_checks,
     new_model,
     select_outcome,
     train_config,
@@ -72,6 +77,8 @@ from experiments.round0125_nodes import (
 
 
 TRAIN_SCHEMA = "round0131-runtime-intermediate-train-receipt-v1"
+R0125_TRAIN_SCHEMA = "round0125-runtime-arm-train-receipt-v1"
+R0125_CONFIG_SCHEMA = "round0125-production-config-v1"
 PANEL_SCHEMA = "round0131-runtime-component-density-panel-v1"
 DECISION_SCHEMA = "round0131-runtime-component-decision-v1"
 TRAIN_CHECK_KEYS = {
@@ -81,6 +88,22 @@ TRAIN_CHECK_KEYS = {
     "endpoint_rows_match_updates",
     "bounded_stream_trace_complete",
     "initial_model_state_stamped",
+}
+R0125_TRAIN_CHECK_KEYS = {
+    "exact_update_closure",
+    "zero_numerical_skips",
+    "no_pipeline_stamp_drift",
+    "endpoint_rows_match_registered_path",
+    "bounded_stream_trace_complete",
+    "initial_model_state_stamped",
+}
+R0125_NATIVE_GATE_KEYS = {
+    "finite_noncollapsed_coordinates",
+    "transductive_recall50_gt_recall10",
+    "projection_recall50_gt_recall10",
+    "exact_update_closure",
+    "zero_numerical_skips",
+    "no_pipeline_stamp_drift",
 }
 
 
@@ -132,6 +155,136 @@ def _validate_positive_trigger(job: Mapping[str, Any]) -> tuple[dict[str, Any], 
     return decision, decision_signature
 
 
+def _exact_signature(signature: Mapping[str, Any], *, label: str) -> str:
+    path = str(signature.get("canonical_path") or "")
+    if expected_input_signature(path) != dict(signature):
+        raise Round0131Error(f"{label} signature changed")
+    return path
+
+
+def _r0125_train_contract(train: Mapping[str, Any], *, arm: str) -> bool:
+    checks = train.get("train_checks")
+    return bool(
+        train.get("schema") == R0125_TRAIN_SCHEMA
+        and train.get("round_id") == "0125"
+        and train.get("arm") == arm
+        and train.get("release_sha") == R0125_RELEASE_SHA
+        and isinstance(checks, Mapping)
+        and set(checks) == R0125_TRAIN_CHECK_KEYS
+        and all(checks.values())
+    )
+
+
+def _authenticate_r0125_endpoints(
+    active: Mapping[str, Any], job: Mapping[str, Any]
+) -> tuple[
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, Any],
+]:
+    """Seal-read the reviewed R0125 endpoint chain down to both trains."""
+
+    decision, _decision_signature = _validate_positive_trigger(job)
+    train_signatures = dict(job.get("r0125_train_receipts") or {})
+    config_signatures = dict(job.get("r0125_train_configs") or {})
+    native_signatures = dict(job.get("r0125_native_scores") or {})
+    panel_signature = dict(job.get("r0125_panel") or {})
+    endpoint_arms = {HOST_ARM, DEVICE_ARM}
+    if (
+        set(train_signatures) != endpoint_arms
+        or set(config_signatures) != endpoint_arms
+        or set(native_signatures) != endpoint_arms
+        or decision.get("native_scores") != native_signatures
+        or decision.get("matched_density_panel") != panel_signature
+    ):
+        raise Round0131Error("R0125 endpoint evidence bindings changed")
+
+    panel = _read_sealed(
+        _exact_signature(panel_signature, label="R0125 matched panel"),
+        label="accepted R0125 matched panel",
+    )
+    cells = panel.get("cells") or {}
+    if (
+        panel.get("schema") != "round0125-matched-runtime-density-panel-v1"
+        or panel.get("round_id") != "0125"
+        or panel.get("release_sha") != R0125_RELEASE_SHA
+        or set(cells) != endpoint_arms
+        or panel.get("train_receipts") != train_signatures
+        or any(
+            (cells.get(arm) or {}).get("train_receipt") != train_signatures[arm]
+            for arm in endpoint_arms
+        )
+    ):
+        raise Round0131Error("R0125 matched panel no longer binds both trains")
+
+    shared, shared_signature = _load_shared_exact(job)
+    trains: dict[str, dict[str, Any]] = {}
+    configs: dict[str, dict[str, Any]] = {}
+    native_scores: dict[str, dict[str, Any]] = {}
+    active_environment = (active.get("manifest") or {}).get("environment_freeze") or {}
+    for arm in endpoint_arms:
+        score = _read_sealed(
+            _exact_signature(
+                native_signatures[arm], label=f"R0125 {arm} native score"
+            ),
+            label=f"accepted R0125 {arm} native score",
+        )
+        if (
+            score.get("schema") != "round0125-native-runtime-arm-score-v1"
+            or score.get("round_id") != "0125"
+            or score.get("arm") != arm
+            or score.get("release_sha") != R0125_RELEASE_SHA
+            or score.get("train_receipt") != train_signatures[arm]
+            or score.get("shared_evidence") != shared_signature
+            or not isinstance(score.get("execution_gates"), Mapping)
+            or set(score["execution_gates"]) != R0125_NATIVE_GATE_KEYS
+            or not all(score["execution_gates"].values())
+        ):
+            raise Round0131Error(f"R0125 {arm} native score lineage changed")
+
+        train = _read_sealed(
+            _exact_signature(
+                train_signatures[arm], label=f"R0125 {arm} train receipt"
+            ),
+            label=f"accepted R0125 {arm} train receipt",
+        )
+        config_receipt = _read_sealed(
+            _exact_signature(
+                config_signatures[arm], label=f"R0125 {arm} production config"
+            ),
+            label=f"accepted R0125 {arm} production config",
+        )
+        expected_config, expected_config_sha = r0125_train_config(
+            arm,
+            graph_signature=shared["graph"],
+            graph_manifest_signature=shared["graph_manifest"],
+            graph_edges=shared["graph_edges"],
+        )
+        if (
+            not _r0125_train_contract(train, arm=arm)
+            or train.get("production_config") != config_signatures[arm]
+            or train.get("production_config_sha256") != expected_config_sha
+            or train.get("causal_invariant_sha256")
+            != expected_config["causal_invariant_sha256"]
+            or train.get("shared_evidence") != shared_signature
+            or train.get("graph") != shared["graph"]
+            or train.get("graph_manifest") != shared["graph_manifest"]
+            or train.get("environment_freeze_sha256")
+            != active_environment.get("freeze_sha256")
+            or config_receipt.get("schema") != R0125_CONFIG_SCHEMA
+            or config_receipt.get("round_id") != "0125"
+            or config_receipt.get("arm") != arm
+            or config_receipt.get("config") != expected_config
+            or config_receipt.get("config_sha256") != expected_config_sha
+        ):
+            raise Round0131Error(f"R0125 {arm} train/config lineage changed")
+        trains[arm] = train
+        configs[arm] = expected_config
+        native_scores[arm] = score
+    return trains, configs, native_scores, panel
+
+
 def _pipeline_mismatches(
     expected: Mapping[str, Any], runtime: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -161,6 +314,9 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
     arm = _arm(job)
     environment = _validate_environment(active)
     trigger, trigger_signature = _validate_positive_trigger(job)
+    endpoint_trains, _endpoint_configs, _native, _panel = (
+        _authenticate_r0125_endpoints(active, job)
+    )
     shared, shared_signature = _load_shared_exact(job)
     graph = _load_r0104_graph(shared)
     config, config_sha = train_config(
@@ -267,8 +423,18 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
         )
     ):
         mismatches["stream_trace"] = trace
-    if model.initial_model_state_sha256 is None:
-        mismatches["initial_model_state_sha256"] = None
+    endpoint_initial_hashes = {
+        endpoint_trains[endpoint_arm]["initial_model_state_sha256"]
+        for endpoint_arm in (HOST_ARM, DEVICE_ARM)
+    }
+    if (
+        model.initial_model_state_sha256 is None
+        or endpoint_initial_hashes != {model.initial_model_state_sha256}
+    ):
+        mismatches["initial_model_state_sha256"] = {
+            "expected_r0125_endpoints": sorted(endpoint_initial_hashes),
+            "observed": model.initial_model_state_sha256,
+        }
     if mismatches:
         raise Round0131Error(f"R0131 {arm} accounting failed: {mismatches}")
     for key, value in runtime.items():
@@ -331,9 +497,9 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
     gc.collect()
 
 
-def _authenticate_model(
+def _authenticate_r0131_train(
     active: Mapping[str, Any], job: Mapping[str, Any], *, arm: str
-):
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     config_path = os.path.join(job["train_outputs"][arm], "production-config.json")
     train_path = os.path.join(job["train_outputs"][arm], "train-receipt.json")
     config_receipt = _read_sealed(config_path, label=f"R0131 {arm} config")
@@ -354,7 +520,11 @@ def _authenticate_model(
         or config_receipt.get("config_sha256") != config_sha
         or train.get("production_config") != expected_input_signature(config_path)
         or train.get("production_config_sha256") != config_sha
+        or train.get("causal_invariant_sha256")
+        != config["causal_invariant_sha256"]
         or train.get("shared_evidence") != shared_signature
+        or train.get("graph") != shared["graph"]
+        or train.get("graph_manifest") != shared["graph_manifest"]
         or train.get("environment_freeze_sha256")
         != expected_environment["freeze_sha256"]
         or not _train_contract(
@@ -362,13 +532,42 @@ def _authenticate_model(
         )
     ):
         raise Round0131Error(f"R0131 {arm} model lineage changed")
+    return (
+        train,
+        config,
+        expected_input_signature(train_path),
+        expected_input_signature(config_path),
+    )
+
+
+def _authenticate_model(
+    active: Mapping[str, Any], job: Mapping[str, Any], *, arm: str
+):
+    train, config, train_signature, _config_signature = _authenticate_r0131_train(
+        active, job, arm=arm
+    )
     model_path = str(train["model"]["canonical_path"])
     if expected_input_signature(model_path) != train["model"]:
         raise Round0131Error(f"R0131 {arm} model bytes changed")
     from basemap.round0125_runtime_bridge import AuditedParametricUMAP
 
     model = AuditedParametricUMAP.load(model_path, device="cuda")
-    return model, train, expected_input_signature(train_path)
+    expected_model = config["model"]
+    observed_model = {
+        "architecture": model.architecture,
+        "input_dimension": model.input_dim,
+        "hidden_dimension": model.hidden_dim,
+        "hidden_layers": model.n_layers,
+        "output_dimension": model.n_components,
+        "use_batchnorm": model.use_batchnorm,
+        "use_dropout": model.use_dropout,
+        "low_dim_kernel": model.low_dim_kernel,
+        "a": model.a,
+        "b": model.b,
+    }
+    if observed_model != expected_model:
+        raise Round0131Error(f"R0131 {arm} model architecture changed")
+    return model, train, train_signature
 
 
 def _percentile_interval(values: np.ndarray) -> tuple[float, float]:
@@ -485,29 +684,13 @@ def _score_native_model(
 def run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
     _validate_environment(active)
     trigger, trigger_signature = _validate_positive_trigger(job)
+    (
+        r0125_trains,
+        _r0125_configs,
+        r0125_native_scores,
+        r0125_panel,
+    ) = _authenticate_r0125_endpoints(active, job)
     r0125_panel_signature = dict(job["r0125_panel"])
-    panel_path = str(r0125_panel_signature["canonical_path"])
-    if expected_input_signature(panel_path) != r0125_panel_signature:
-        raise Round0131Error("R0125 matched panel bytes changed")
-    r0125_panel = _read_sealed(panel_path, label="accepted R0125 matched panel")
-    if job.get("r0125_native_scores") != trigger.get("native_scores"):
-        raise Round0131Error("R0125 decision/native-score bindings changed")
-    r0125_native_scores = {}
-    for arm, signature in job["r0125_native_scores"].items():
-        if expected_input_signature(signature.get("canonical_path", "")) != signature:
-            raise Round0131Error(f"R0125 {arm} native score bytes changed")
-        score = _read_sealed(
-            str(signature["canonical_path"]),
-            label=f"accepted R0125 {arm} native score",
-        )
-        if (
-            score.get("schema") != "round0125-native-runtime-arm-score-v1"
-            or score.get("round_id") != "0125"
-            or score.get("arm") != arm
-            or not all((score.get("execution_gates") or {}).values())
-        ):
-            raise Round0131Error(f"R0125 {arm} native score contract changed")
-        r0125_native_scores[arm] = score
     r0125_arrays_signature = dict(r0125_panel.get("arrays") or {})
     if (
         r0125_panel.get("schema") != "round0125-matched-runtime-density-panel-v1"
@@ -638,6 +821,13 @@ def run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
         "r0125_decision": trigger_signature,
         "r0125_matched_panel": r0125_panel_signature,
         "r0125_matched_arrays": r0125_arrays_signature,
+        "r0125_native_scores": dict(job["r0125_native_scores"]),
+        "r0125_train_receipts": dict(job["r0125_train_receipts"]),
+        "r0125_train_configs": dict(job["r0125_train_configs"]),
+        "r0125_endpoint_update0_model_sha256": {
+            arm: r0125_trains[arm]["initial_model_state_sha256"]
+            for arm in (HOST_ARM, DEVICE_ARM)
+        },
         "lineage": lineage,
         "universe": {
             "source_rows": len(source),
@@ -672,28 +862,52 @@ def run_panel(active: dict[str, Any], job: dict[str, Any]) -> None:
 
 
 def run_decision(active: dict[str, Any], job: dict[str, Any]) -> None:
-    _validate_environment(active)
+    environment = _validate_environment(active)
     trigger, trigger_signature = _validate_positive_trigger(job)
+    (
+        endpoint_trains,
+        endpoint_configs,
+        _endpoint_native_scores,
+        _endpoint_panel,
+    ) = _authenticate_r0125_endpoints(active, job)
     panel_path = os.path.join(job["panel_output"], "runtime-component-panel.json")
     panel = _read_sealed(panel_path, label="R0131 runtime component panel")
     panel_signature = expected_input_signature(panel_path)
-    expected_train_signatures = {
-        arm: expected_input_signature(
-            os.path.join(job["train_outputs"][arm], "train-receipt.json")
-        )
-        for arm in ARMS
-    }
+    interior_trains: dict[str, dict[str, Any]] = {}
+    interior_configs: dict[str, dict[str, Any]] = {}
+    interior_train_signatures: dict[str, dict[str, Any]] = {}
+    interior_config_signatures: dict[str, dict[str, Any]] = {}
+    for arm in ARMS:
+        (
+            interior_trains[arm],
+            interior_configs[arm],
+            interior_train_signatures[arm],
+            interior_config_signatures[arm],
+        ) = _authenticate_r0131_train(active, job, arm=arm)
     trains = {
-        arm: _read_sealed(
-            os.path.join(job["train_outputs"][arm], "train-receipt.json"),
-            label=f"R0131 {arm} train",
-        )
-        for arm in ARMS
+        HOST_ARM: endpoint_trains[HOST_ARM],
+        RESIDENT_FUSED: interior_trains[RESIDENT_FUSED],
+        RESIDENT_SEPARATE: interior_trains[RESIDENT_SEPARATE],
+        DEVICE_ARM: endpoint_trains[DEVICE_ARM],
     }
+    configs = {
+        HOST_ARM: endpoint_configs[HOST_ARM],
+        RESIDENT_FUSED: interior_configs[RESIDENT_FUSED],
+        RESIDENT_SEPARATE: interior_configs[RESIDENT_SEPARATE],
+        DEVICE_ARM: endpoint_configs[DEVICE_ARM],
+    }
+    causal_checks = causal_execution_checks(
+        active_environment_sha256=environment["freeze_sha256"],
+        trains=trains,
+        configs=configs,
+    )
     execution_checks = {
-        "train_receipt_contracts": all(
+        "r0125_endpoint_chain_authenticated": True,
+        "r0131_train_receipt_contracts": all(
             _train_contract(
-                trains[arm], arm=arm, release_sha=active["manifest"]["release_sha"]
+                interior_trains[arm],
+                arm=arm,
+                release_sha=active["manifest"]["release_sha"],
             )
             for arm in ARMS
         ),
@@ -702,45 +916,31 @@ def run_decision(active: dict[str, Any], job: dict[str, Any]) -> None:
             and panel.get("round_id") == ROUND_ID
             and panel.get("release_sha") == active["manifest"]["release_sha"]
             and panel.get("r0125_decision") == trigger_signature
-            and panel.get("train_receipts") == expected_train_signatures
+            and panel.get("r0125_matched_panel") == job["r0125_panel"]
+            and panel.get("r0125_native_scores") == job["r0125_native_scores"]
+            and panel.get("r0125_train_receipts")
+            == job["r0125_train_receipts"]
+            and panel.get("r0125_train_configs") == job["r0125_train_configs"]
+            and panel.get("train_receipts") == interior_train_signatures
+            and set(panel.get("cells") or {})
+            == {HOST_ARM, RESIDENT_FUSED, RESIDENT_SEPARATE, DEVICE_ARM}
             and all(
-                all((panel.get("native_execution_gates") or {}).get(arm, {}).values())
-                for arm in ARMS
+                isinstance(
+                    (panel.get("native_execution_gates") or {}).get(arm),
+                    Mapping,
+                )
+                and all(
+                    (panel.get("native_execution_gates") or {})[arm].values()
+                )
+                for arm in (
+                    HOST_ARM,
+                    RESIDENT_FUSED,
+                    RESIDENT_SEPARATE,
+                    DEVICE_ARM,
+                )
             )
         ),
-        "identical_initial_model_state": (
-            trains[RESIDENT_FUSED].get("initial_model_state_sha256")
-            == trains[RESIDENT_SEPARATE].get("initial_model_state_sha256")
-            and re.fullmatch(
-                r"[0-9a-f]{64}",
-                str(trains[RESIDENT_FUSED].get("initial_model_state_sha256") or ""),
-            ) is not None
-        ),
-        "identical_causal_invariant": (
-            trains[RESIDENT_FUSED].get("causal_invariant_sha256")
-            == trains[RESIDENT_SEPARATE].get("causal_invariant_sha256")
-        ),
-        "identical_environment": (
-            trains[RESIDENT_FUSED].get("environment_freeze_sha256")
-            == trains[RESIDENT_SEPARATE].get("environment_freeze_sha256")
-            == active["manifest"]["environment_freeze"]["freeze_sha256"]
-        ),
-        "identical_bounded_numpy_stream": (
-            (trains[RESIDENT_FUSED].get("exact_execution_receipt") or {}).get(
-                "stream_trace"
-            )
-            == (trains[RESIDENT_SEPARATE].get("exact_execution_receipt") or {}).get(
-                "stream_trace"
-            )
-        ),
-        "only_forward_stamp_differs_between_new_arms": (
-            (trains[RESIDENT_FUSED].get("exact_execution_receipt") or {}).get(
-                "endpoint_forward"
-            ) == "fused-source-destination"
-            and (trains[RESIDENT_SEPARATE].get("exact_execution_receipt") or {}).get(
-                "endpoint_forward"
-            ) == "separate-source-destination"
-        ),
+        **causal_checks,
     }
     selector = select_outcome(
         r0125_outcome=trigger["outcome"],
@@ -763,6 +963,19 @@ def run_decision(active: dict[str, Any], job: dict[str, Any]) -> None:
         "release_sha": active["manifest"]["release_sha"],
         "r0125_decision": trigger_signature,
         "runtime_component_panel": panel_signature,
+        "r0125_train_receipts": dict(job["r0125_train_receipts"]),
+        "r0125_train_configs": dict(job["r0125_train_configs"]),
+        "r0131_train_receipts": interior_train_signatures,
+        "r0131_train_configs": interior_config_signatures,
+        "all_four_update0_model_sha256": {
+            arm: trains[arm]["initial_model_state_sha256"]
+            for arm in (
+                HOST_ARM,
+                RESIDENT_FUSED,
+                RESIDENT_SEPARATE,
+                DEVICE_ARM,
+            )
+        },
         "execution_checks": execution_checks,
         "selector": selector,
         "outcome": selector["outcome"],

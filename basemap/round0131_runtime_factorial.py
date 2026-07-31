@@ -25,9 +25,11 @@ from .artifact_identity import canonical_json, sha256_bytes
 from .round0104_training import InventoryFp16Array, preprocessing_stamp
 from .round0125_runtime_bridge import (
     BATCH_SIZE,
+    DEVICE_ARM,
     DIMENSION,
     GRAPH_EDGES,
     GRAPH_K,
+    HOST_ARM,
     MATCHED_DENSITY_FLOOR,
     N_EPOCHS,
     POSITIVE_RATIO,
@@ -40,14 +42,17 @@ from .round0125_runtime_bridge import (
     AuditedParametricUMAP,
     TracingDeviceArrayDataset,
     TracingPairedHostWeightedJinaSampler,
+    expected_device_endpoint_accounting,
 )
 
 
 ROUND_ID = "0131"
 CAPABILITY = "jina-fineweb-2m-runtime-component-localization-v1"
+R0125_RELEASE_SHA = "ff5dfcde5632257aac355008a70bc330bab26bee"
 RESIDENT_FUSED = "numpy_device_fused"
 RESIDENT_SEPARATE = "numpy_device_separate"
 ARMS = (RESIDENT_FUSED, RESIDENT_SEPARATE)
+PATH_ARMS = (HOST_ARM, RESIDENT_FUSED, RESIDENT_SEPARATE, DEVICE_ARM)
 PIPELINES = {
     RESIDENT_FUSED: "numpy_weighted_device_fp16_fused",
     RESIDENT_SEPARATE: "numpy_weighted_device_fp16_separate",
@@ -63,6 +68,70 @@ PERFORMANCE_WARMUP_UPDATES = 200
 PERFORMANCE_WINDOWS = math.ceil(
     (SUCCESSFUL_UPDATES - PERFORMANCE_WARMUP_UPDATES) / 2_500
 )
+
+_GRAPH_INVARIANT_KEYS = (
+    "rows",
+    "dimension",
+    "source_payload_sha256",
+    "graph",
+    "graph_manifest",
+    "graph_edges",
+    "graph_k",
+    "input_preprocessing",
+)
+_DOSE_ACCOUNTING = {
+    "lr_horizon": SUCCESSFUL_UPDATES,
+    "positive_lr_optimizer_steps": SUCCESSFUL_UPDATES,
+    "scheduler_steps": SUCCESSFUL_UPDATES,
+    "attempted_batches": SUCCESSFUL_UPDATES,
+    "finite_loss_batches": SUCCESSFUL_UPDATES,
+    "optimizer_steps_attempted": SUCCESSFUL_UPDATES,
+    "optimizer_steps_succeeded": SUCCESSFUL_UPDATES,
+    "amp_overflow_skips": 0,
+    "nonfinite_loss_skips": 0,
+    "nonfinite_gradient_skips": 0,
+    "stop_reason": "lr_horizon",
+    "budget_satisfied": True,
+    "n_pos_edges": GRAPH_EDGES,
+}
+_COMMON_RUNTIME_SEMANTICS = {
+    "positive_sampling": "weighted_with_replacement",
+    "negative_sampling": "uniform-2m-row-universe-nonself",
+    "graph_degree": "variable-fuzzy-k50-edge-universe",
+    "weighted_requested": True,
+    "weighted_effective": True,
+    "uniform_with_replacement": False,
+    "positive_with_replacement": True,
+    "multiplicity_policy": "row_multiplicity_uncapped",
+    "valid_canonical_edge_count": GRAPH_EDGES,
+    "source_representation": "fp16-control",
+}
+_REGISTERED_PATH = {
+    HOST_ARM: {
+        "sampler_class": "PairedHostWeightedJinaSampler",
+        "feature_residency": "host-mmap-fp16-source-shards",
+        "device_conversion": "device-fp32-from-exact-fp16",
+        "endpoint_forward": "fused-source-destination",
+    },
+    RESIDENT_FUSED: {
+        "sampler_class": SAMPLER_CLASS,
+        "feature_residency": "device-fp16",
+        "device_conversion": "resident-storage-to-device-fp32-on-gather",
+        "endpoint_forward": "fused-source-destination",
+    },
+    RESIDENT_SEPARATE: {
+        "sampler_class": SAMPLER_CLASS,
+        "feature_residency": "device-fp16",
+        "device_conversion": "resident-storage-to-device-fp32-on-gather",
+        "endpoint_forward": "separate-source-destination",
+    },
+    DEVICE_ARM: {
+        "sampler_class": "DeviceEdgeSampler",
+        "feature_residency": "device-fp16",
+        "device_conversion": "resident-storage-to-device-fp32-on-gather",
+        "endpoint_forward": "separate-source-destination",
+    },
+}
 
 
 class Round0131Error(RuntimeError):
@@ -438,6 +507,223 @@ def new_model(config: Mapping[str, Any], *, device: str = "cuda"):
     )
 
 
+def _mapping_subset_matches(
+    observed: Mapping[str, Any], expected: Mapping[str, Any]
+) -> bool:
+    return all(observed.get(key) == value for key, value in expected.items())
+
+
+def _normalized_graph_invariant(config: Mapping[str, Any]) -> dict[str, Any] | None:
+    invariant = config.get("causal_invariant")
+    if not isinstance(invariant, Mapping):
+        return None
+    if any(key not in invariant for key in _GRAPH_INVARIANT_KEYS):
+        return None
+    return {key: invariant[key] for key in _GRAPH_INVARIANT_KEYS}
+
+
+def _normalized_dose(
+    config: Mapping[str, Any], train: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    invariant = config.get("causal_invariant")
+    optimizer = config.get("optimizer")
+    accounting = train.get("train_accounting")
+    if not all(isinstance(value, Mapping) for value in (invariant, optimizer, accounting)):
+        return None
+    registered = {
+        "seed": invariant.get("seed"),
+        "batch_size": invariant.get("batch_size"),
+        "positive_ratio": invariant.get("positive_ratio"),
+        "successful_positive_lr_updates": invariant.get(
+            "successful_positive_lr_updates"
+        ),
+        "optimizer_batch_size": optimizer.get("batch_size"),
+        "optimizer_positive_ratio": optimizer.get("positive_ratio"),
+        "optimizer_successful_positive_lr_updates": optimizer.get(
+            "successful_positive_lr_updates"
+        ),
+        "n_epochs": optimizer.get("n_epochs"),
+    }
+    observed = {key: accounting.get(key) for key in _DOSE_ACCOUNTING}
+    return {"registered": registered, "observed": observed}
+
+
+def _stream_digest(train: Mapping[str, Any]) -> dict[str, Any] | None:
+    runtime = train.get("exact_execution_receipt")
+    trace = runtime.get("stream_trace") if isinstance(runtime, Mapping) else None
+    if not isinstance(trace, Mapping):
+        return None
+    value = {
+        "batches_hashed": trace.get("batches_hashed"),
+        "source_endpoint_ids_sha256": trace.get("source_endpoint_ids_sha256"),
+        "destination_endpoint_ids_sha256": trace.get(
+            "destination_endpoint_ids_sha256"
+        ),
+    }
+    if (
+        value["batches_hashed"] != STREAM_TRACE_BATCHES
+        or any(
+            not isinstance(value[key], str)
+            or len(value[key]) != 64
+            or any(character not in "0123456789abcdef" for character in value[key])
+            for key in (
+                "source_endpoint_ids_sha256",
+                "destination_endpoint_ids_sha256",
+            )
+        )
+    ):
+        return None
+    return value
+
+
+def causal_execution_checks(
+    *,
+    active_environment_sha256: str,
+    trains: Mapping[str, Mapping[str, Any]],
+    configs: Mapping[str, Mapping[str, Any]],
+) -> dict[str, bool]:
+    """Verify the four cells really form the registered H->R->F->D path.
+
+    The endpoint cells come from R0125 and the interior cells from R0131, so
+    round-local config hashes are deliberately not compared.  Instead, this
+    function compares the causal quantities after normalizing away schema and
+    arm labels, while checking each arm's observed runtime against its own
+    fully registered pipeline stamp.
+    """
+
+    exact_cells = set(trains) == set(PATH_ARMS) == set(configs)
+    selected_trains = [trains.get(arm, {}) for arm in PATH_ARMS]
+    selected_configs = [configs.get(arm, {}) for arm in PATH_ARMS]
+
+    initial_hashes = [train.get("initial_model_state_sha256") for train in selected_trains]
+    initial_hash_valid = all(
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+        for value in initial_hashes
+    )
+    environments = [train.get("environment_freeze_sha256") for train in selected_trains]
+    graph_invariants = [
+        _normalized_graph_invariant(config) for config in selected_configs
+    ]
+    model_invariants = [config.get("model") for config in selected_configs]
+    optimizer_invariants = [config.get("optimizer") for config in selected_configs]
+    dose_invariants = [
+        _normalized_dose(config, train)
+        for config, train in zip(selected_configs, selected_trains, strict=True)
+    ]
+    causal_hashes_match_configs = all(
+        isinstance(config.get("causal_invariant"), Mapping)
+        and train.get("causal_invariant_sha256")
+        == sha256_bytes(canonical_json(config["causal_invariant"]))
+        for config, train in zip(selected_configs, selected_trains, strict=True)
+    )
+    receipt_graphs_match_configs = all(
+        isinstance(config.get("causal_invariant"), Mapping)
+        and train.get("graph") == config["causal_invariant"].get("graph")
+        and train.get("graph_manifest")
+        == config["causal_invariant"].get("graph_manifest")
+        for config, train in zip(selected_configs, selected_trains, strict=True)
+    )
+
+    runtimes = {
+        arm: train.get("exact_execution_receipt")
+        for arm, train in zip(PATH_ARMS, selected_trains, strict=True)
+    }
+    pipeline_stamps_match_configs = all(
+        isinstance(runtimes[arm], Mapping)
+        and isinstance(configs.get(arm, {}).get("execution"), Mapping)
+        and isinstance(
+            configs[arm]["execution"].get("expected_pipeline_stamp"), Mapping
+        )
+        and _mapping_subset_matches(
+            runtimes[arm], configs[arm]["execution"]["expected_pipeline_stamp"]
+        )
+        for arm in PATH_ARMS
+    )
+    common_runtime_semantics = all(
+        isinstance(runtimes[arm], Mapping)
+        and _mapping_subset_matches(runtimes[arm], _COMMON_RUNTIME_SEMANTICS)
+        for arm in PATH_ARMS
+    )
+    registered_path_shape = all(
+        isinstance(runtimes[arm], Mapping)
+        and _mapping_subset_matches(runtimes[arm], _REGISTERED_PATH[arm])
+        for arm in PATH_ARMS
+    )
+    runtime_graphs_match_configs = all(
+        isinstance(runtimes[arm], Mapping)
+        and isinstance(configs.get(arm, {}).get("causal_invariant"), Mapping)
+        and runtimes[arm].get("graph")
+        == configs[arm]["causal_invariant"].get("graph")
+        and runtimes[arm].get("graph_manifest")
+        == configs[arm]["causal_invariant"].get("graph_manifest")
+        for arm in PATH_ARMS
+    )
+    numpy_streams = [_stream_digest(trains.get(arm, {})) for arm in PATH_ARMS[:3]]
+
+    expected_full_rows = SUCCESSFUL_UPDATES * BATCH_SIZE
+    device_endpoint_rows = expected_device_endpoint_accounting()[
+        "endpoint_rows_per_side"
+    ]
+    endpoint_rows_match_path = all(
+        isinstance(runtimes[arm], Mapping)
+        and runtimes[arm].get("source_rows_gathered")
+        == (expected_full_rows if arm != DEVICE_ARM else device_endpoint_rows)
+        and runtimes[arm].get("destination_rows_gathered")
+        == (expected_full_rows if arm != DEVICE_ARM else device_endpoint_rows)
+        for arm in PATH_ARMS
+    )
+
+    return {
+        "all_four_cells_present": exact_cells,
+        "all_four_update0_model_hashes_equal": (
+            exact_cells and initial_hash_valid and len(set(initial_hashes)) == 1
+        ),
+        "cross_round_environment_equal": (
+            exact_cells
+            and isinstance(active_environment_sha256, str)
+            and len(active_environment_sha256) == 64
+            and set(environments) == {active_environment_sha256}
+        ),
+        "normalized_graph_invariant_equal": (
+            exact_cells
+            and all(value is not None for value in graph_invariants)
+            and all(value == graph_invariants[0] for value in graph_invariants[1:])
+        ),
+        "normalized_model_invariant_equal": (
+            exact_cells
+            and isinstance(model_invariants[0], Mapping)
+            and all(value == model_invariants[0] for value in model_invariants[1:])
+        ),
+        "normalized_optimizer_invariant_equal": (
+            exact_cells
+            and isinstance(optimizer_invariants[0], Mapping)
+            and all(
+                value == optimizer_invariants[0]
+                for value in optimizer_invariants[1:]
+            )
+        ),
+        "normalized_registered_and_observed_dose_equal": (
+            exact_cells
+            and all(value is not None for value in dose_invariants)
+            and all(value == dose_invariants[0] for value in dose_invariants[1:])
+            and dose_invariants[0]["observed"] == _DOSE_ACCOUNTING
+        ),
+        "causal_invariant_hashes_match_configs": causal_hashes_match_configs,
+        "train_receipt_graphs_match_configs": receipt_graphs_match_configs,
+        "observed_pipeline_stamps_match_configs": pipeline_stamps_match_configs,
+        "common_sampler_distribution_semantics_equal": common_runtime_semantics,
+        "registered_h_r_f_d_path_shape": registered_path_shape,
+        "runtime_graphs_match_configs": runtime_graphs_match_configs,
+        "h_r_f_first8_numpy_endpoint_streams_equal": (
+            all(value is not None for value in numpy_streams)
+            and numpy_streams[0] == numpy_streams[1] == numpy_streams[2]
+        ),
+        "endpoint_rows_match_registered_path": endpoint_rows_match_path,
+    }
+
+
 def classify_interval(interval: tuple[float, float]) -> str:
     low, high = map(float, interval)
     if not np.isfinite([low, high]).all() or low > high:
@@ -507,4 +793,3 @@ def select_outcome(
         "native_intermediate_quality_tested": False,
         "production_runtime_adopted": False,
     }
-
