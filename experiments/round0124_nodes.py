@@ -76,6 +76,7 @@ from basemap.round0124_degree_bridge import (
     load_graph,
     paired_density_bootstrap,
     train_config,
+    verify_retry_provenance,
 )
 from experiments import round0113_nodes as prompt_nodes
 
@@ -85,6 +86,25 @@ def _execution_round_id(active: Mapping[str, Any]) -> str:
     if round_id != ROUND_ID:
         raise Round0124Error("R0124 handler received another queue")
     return round_id
+
+
+def _reused_graph(
+    job: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    retry = verify_retry_provenance(job.get("retry_provenance"))
+    reused = retry["reused_graph"]
+    manifest = reused["manifest"]
+    graph_path = str(job.get("graph_manifest") or "")
+    if graph_path != manifest["canonical_path"]:
+        raise Round0124Error("R0124 retry graph path changed")
+    graph = load_graph(
+        graph_path,
+        expected_manifest_signature=manifest,
+        expected_graph_signature=reused["graph"],
+        expected_topology_probe_signature=reused["topology_probe"],
+        expected_release_sha=reused["source_release_sha"],
+    )
+    return graph, retry
 
 
 def _verify_train_accounting(
@@ -555,12 +575,7 @@ def run_train(
 
     _execution_round_id(active)
     assembly, assembly_signature = prompt_nodes._load_assembly(job)
-    graph_path = str(job["graph_manifest"])
-    graph_signature = expected_input_signature(graph_path)
-    graph = load_graph(
-        graph_path,
-        expected_sha256=graph_signature["sha256"],
-    )
+    graph, retry = _reused_graph(job)
     config, config_sha = train_config(
         graph_signature=graph["signature"],
         graph_manifest_signature=graph["manifest_signature"],
@@ -704,6 +719,7 @@ def run_train(
         "assembly": assembly_signature,
         "graph_manifest": graph["manifest_signature"],
         "graph": graph["signature"],
+        "retry_provenance": retry,
         "train_accounting": accounting,
         "exact_execution_receipt": runtime,
         "performance_profile": profiler,
@@ -742,12 +758,7 @@ def _authenticate_treatment_model(
 ) -> tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any]]:
     _execution_round_id(active)
     assembly, assembly_signature = prompt_nodes._load_assembly(job)
-    graph_path = str(job["graph_manifest"])
-    graph_signature = expected_input_signature(graph_path)
-    graph = load_graph(
-        graph_path,
-        expected_sha256=graph_signature["sha256"],
-    )
+    graph, retry = _reused_graph(job)
     config, config_sha = train_config(
         graph_signature=graph["signature"],
         graph_manifest_signature=graph["manifest_signature"],
@@ -780,6 +791,7 @@ def _authenticate_treatment_model(
         or train.get("assembly") != assembly_signature
         or train.get("graph_manifest") != graph["manifest_signature"]
         or train.get("graph") != graph["signature"]
+        or train.get("retry_provenance") != retry
         or train.get("optimizer_updates") != SUCCESSFUL_UPDATES
         or not isinstance(runtime, Mapping)
         or any(runtime.get(key) != value for key, value in expected_stamp.items())
@@ -1025,6 +1037,7 @@ def run_native_density(
     job: Mapping[str, Any],
 ) -> dict[str, Any]:
     _execution_round_id(active)
+    retry = verify_retry_provenance(job.get("retry_provenance"))
     output = create_fresh_directory(
         str(job["outputs"][0]), label="R0124 native density contrast"
     )
@@ -1051,9 +1064,11 @@ def run_native_density(
     treatment_train_signature = expected_input_signature(
         os.path.join(str(job["train_output"]), "train-receipt.json")
     )
-    treatment_graph_signature = expected_input_signature(
-        str(job["graph_manifest"])
-    )
+    treatment_graph_signature = retry["reused_graph"]["manifest"]
+    if str(job.get("graph_manifest") or "") != treatment_graph_signature[
+        "canonical_path"
+    ]:
+        raise Round0124Error("R0124 retry graph path changed")
     if (
         diagnostics.get("schema") != DIAGNOSTIC_SCHEMA
         or diagnostics.get("round_id") != ROUND_ID
@@ -1177,6 +1192,7 @@ def run_native_density(
         "schema": NATIVE_DENSITY_SCHEMA,
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
+        "retry_provenance": retry,
         "control": {
             "role": "exact R0115 raw seed-42 k50 native re-score",
             "score": control_score_signature,
@@ -1230,6 +1246,7 @@ def run_decision(
     job: Mapping[str, Any],
 ) -> dict[str, Any]:
     _execution_round_id(active)
+    retry = verify_retry_provenance(job.get("retry_provenance"))
     output = create_fresh_directory(
         str(job["outputs"][0]), label="R0124 degree-bridge decision"
     )
@@ -1257,6 +1274,7 @@ def run_decision(
         or density.get("round_id") != ROUND_ID
         or density.get("release_sha")
         != active["manifest"]["release_sha"]
+        or density.get("retry_provenance") != retry
         or diagnostics.get("schema") != DIAGNOSTIC_SCHEMA
         or diagnostics.get("round_id") != ROUND_ID
         or diagnostics.get("release_sha")
@@ -1299,6 +1317,10 @@ def run_decision(
         "schema": DECISION_SCHEMA,
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
+        "retry_provenance": retry,
+        "cumulative_attempt_accounting": retry[
+            "cumulative_attempt_accounting"
+        ],
         "density_score": expected_input_signature(density_path),
         "diagnostics": expected_input_signature(diagnostic_path),
         "registered_selector": selector,

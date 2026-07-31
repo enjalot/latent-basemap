@@ -20,21 +20,33 @@ from basemap.round0113_prompt_contrast import (
     train_config as r0115_train_config,
 )
 from basemap.round0124_degree_bridge import (
+    ATTEMPT1_RELEASE_SHA,
     BOOTSTRAP_DRAWS,
     BOOTSTRAP_SEED,
     DIAGNOSTIC_SCHEMA,
     GRAPH_DEGREE,
+    GRAPH_NPROBE,
+    GRAPH_SCHEMA,
     GRAPH_SEARCH_NEIGHBORS,
     NATIVE_DENSITY_SCHEMA,
     OUTCOME_INCONCLUSIVE,
     OUTCOME_MATERIAL,
     OUTCOME_NOT_MATERIAL,
     classify_degree_bridge,
+    graph_degree_stamp,
+    load_graph,
     paired_density_bootstrap,
     train_config,
     training_loop_plan,
 )
-from experiments import round0124_nodes
+from experiments import prepare_round0124_queue, round0124_nodes
+
+
+def _retry() -> dict[str, Any]:
+    return {
+        "schema": "round0124-test-retry-v1",
+        "cumulative_attempt_accounting": {"test": True},
+    }
 
 
 def _signature(path: str = "/tmp/r0124-graph") -> dict[str, Any]:
@@ -127,6 +139,207 @@ def test_k15_training_loop_plan_covers_registered_horizon() -> None:
     assert plan["planned_loop_iters"] >= plan["successful_positive_lr_updates"]
 
 
+def test_real_model_applies_k15_training_loop_plan() -> None:
+    graph = _signature()
+    manifest = _signature("/tmp/r0124-manifest")
+    config, _digest = train_config(
+        graph_signature=graph,
+        graph_manifest_signature=manifest,
+        graph_edges=46_065_518,
+        retained_rows=1_993_761,
+    )
+    model = round0124_nodes._new_model(config)
+    assert model.n_epochs == 5
+    assert model.n_epochs * 112_630 == 563_150
+
+
+def test_load_graph_requires_frozen_cross_root_signatures(
+    tmp_path: Path,
+) -> None:
+    from basemap.round0113_prompt_contrast import seal
+
+    graph_path = tmp_path / "graph.npz"
+    np.savez(
+        graph_path,
+        sources=np.asarray([0], dtype=np.int32),
+        targets=np.asarray([1], dtype=np.int32),
+        weights=np.asarray([1.0], dtype=np.float32),
+        n_nodes=np.asarray(1_993_761, dtype=np.int64),
+    )
+    probe_path = tmp_path / "topology-probe.npz"
+    np.savez(probe_path, anchor_ids=np.asarray([0], dtype=np.int64))
+    graph_signature = expected_input_signature(str(graph_path))
+    probe_signature = expected_input_signature(str(probe_path))
+    manifest_path = tmp_path / "graph-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            seal(
+                {
+                    "schema": GRAPH_SCHEMA,
+                    "round_id": "0124",
+                    "release_sha": ATTEMPT1_RELEASE_SHA,
+                    "arm": "raw",
+                    "retained_rows": 1_993_761,
+                    "dimension": 768,
+                    "degree": graph_degree_stamp(),
+                    "directed_edge_count": 1,
+                    "search_qualification": {
+                        "selected_nprobe": GRAPH_NPROBE,
+                        "cells": {str(GRAPH_NPROBE): {"passed": True}},
+                    },
+                    "graph": graph_signature,
+                    "topology_probe": probe_signature,
+                }
+            )
+        ),
+        encoding="utf-8",
+    )
+    manifest_signature = expected_input_signature(str(manifest_path))
+    loaded = load_graph(
+        str(manifest_path),
+        expected_manifest_signature=manifest_signature,
+        expected_graph_signature=graph_signature,
+        expected_topology_probe_signature=probe_signature,
+        expected_release_sha=ATTEMPT1_RELEASE_SHA,
+    )
+    assert loaded["manifest_signature"] == manifest_signature
+    changed = dict(manifest_signature)
+    changed["sha256"] = "f" * 64
+    with pytest.raises(
+        round0124_nodes.Round0124Error, match="manifest bytes changed"
+    ):
+        load_graph(
+            str(manifest_path),
+            expected_manifest_signature=changed,
+            expected_graph_signature=graph_signature,
+            expected_topology_probe_signature=probe_signature,
+            expected_release_sha=ATTEMPT1_RELEASE_SHA,
+        )
+
+
+def test_retry_queue_reuses_graph_and_preserves_cumulative_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    round_root = tmp_path / "round-0124"
+    round_file = tmp_path / "round-0124.md"
+    round_file.write_text("issued retry\n", encoding="utf-8")
+    graph_path = tmp_path / "attempt-1-graph.npz"
+    graph_path.write_bytes(b"graph")
+    manifest_path = tmp_path / "attempt-1-graph-manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    probe_path = tmp_path / "attempt-1-probe.npz"
+    probe_path.write_bytes(b"probe")
+    graph_context = tmp_path / "r0106-context.json"
+    graph_context.write_text("{}", encoding="utf-8")
+    core_context = tmp_path / "r0108-context.json"
+    core_context.write_text("{}", encoding="utf-8")
+    graph_signature = expected_input_signature(str(graph_path))
+    manifest_signature = expected_input_signature(str(manifest_path))
+    probe_signature = expected_input_signature(str(probe_path))
+    evidence: dict[str, Any] = {}
+    for label in ("queue_manifest", "runner_terminal"):
+        path = tmp_path / f"attempt-1-{label}.json"
+        path.write_text("{}", encoding="utf-8")
+        evidence[label] = expected_input_signature(str(path))
+    retry = {
+        "schema": "round0124-test-retry-v1",
+        "attempt_1_evidence": evidence,
+        "reused_graph": {
+            "manifest": manifest_signature,
+            "graph": graph_signature,
+            "topology_probe": probe_signature,
+        },
+        "cumulative_attempt_accounting": {
+            "attempt_1_gpu_wall_s": 2171.39541627327,
+            "retry_gpu_hours_cap": (
+                2.5 - 2171.39541627327 / 3600.0
+            ),
+        },
+    }
+    review_signatures: dict[str, dict[str, Any]] = {}
+    for round_id in ("0106", "0108", "0115"):
+        review = tmp_path / f"review-{round_id}.md"
+        result = tmp_path / f"result-{round_id}.md"
+        review.write_text("review\n", encoding="utf-8")
+        result.write_text("result\n", encoding="utf-8")
+        review_signatures[round_id] = {
+            "review": expected_input_signature(str(review)),
+            "result": expected_input_signature(str(result)),
+            "release_commit": round_id * 10,
+        }
+    monkeypatch.setattr(
+        prepare_round0124_queue, "ROUND_ROOT", str(round_root)
+    )
+    monkeypatch.setattr(
+        prepare_round0124_queue,
+        "R0106_GRAPH_CONTEXT",
+        str(graph_context),
+    )
+    monkeypatch.setattr(
+        prepare_round0124_queue,
+        "R0108_CORE_CONTEXT",
+        str(core_context),
+    )
+    monkeypatch.setattr(
+        prepare_round0124_queue,
+        "ensure_data_directory",
+        lambda path: os.makedirs(path, exist_ok=True) or str(path),
+    )
+    monkeypatch.setattr(
+        prepare_round0124_queue, "_issued_round", lambda: str(round_file)
+    )
+    monkeypatch.setattr(
+        prepare_round0124_queue,
+        "_accepted_review",
+        lambda path, expected_sha256, *, round_id: review_signatures[round_id],
+    )
+    monkeypatch.setattr(
+        prepare_round0124_queue, "_inputs", lambda *, reviews: []
+    )
+    monkeypatch.setattr(
+        prepare_round0124_queue, "_retry_provenance", lambda: retry
+    )
+    queue_path = prepare_round0124_queue.prepare_round0124(
+        release_sha="d" * 40,
+        r0106_review="ignored",
+        r0106_review_sha256="ignored",
+        r0108_review="ignored",
+        r0108_review_sha256="ignored",
+        r0115_review="ignored",
+        r0115_review_sha256="ignored",
+        queue_root=str(round_root / "queue-attempt-2"),
+    )
+    with open(queue_path, encoding="utf-8") as handle:
+        queue = json.load(handle)
+    assert queue["gpu_hours_cap"] == 2.5 - 2171.39541627327 / 3600.0
+    assert [job["id"] for job in queue["jobs"]] == [
+        "train_k15_treatment",
+        "evaluate_core_ood",
+        "score_native_density",
+        "decide_degree_bridge",
+    ]
+    assert queue["jobs"][0]["deps"] == []
+    assert queue["required_reviews"] == ["0106", "0108", "0115"]
+    assert queue["capability_dependencies"] == [
+        "jina-diverse-25m-full768-fuzzy-graph-v1",
+        "jina-diverse-25m-map-registry-v1",
+        "jina-fineweb-2m-prompt-map-contrast-v1",
+    ]
+    assert all(
+        job.get("action") != "build_k15_graph" for job in queue["jobs"]
+    )
+    assert all(
+        job.get("graph_manifest", manifest_signature["canonical_path"])
+        == manifest_signature["canonical_path"]
+        for job in queue["jobs"]
+    )
+    assert queue["scientific_contract"]["graph_reuse"][
+        "rebuild_permitted"
+    ] is False
+    assert queue["retry_provenance"] == retry
+
+
 def test_explicit_self_knn_enforces_15_distinct_nonself() -> None:
     rows = np.asarray([4, 20], dtype=np.int64)
     ids = np.vstack(
@@ -204,6 +417,7 @@ def test_paired_native_density_bootstrap_is_frozen_and_deterministic() -> None:
 
 
 def test_decision_diagnostics_cannot_rescue_density(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     density_root = tmp_path / "density"
@@ -218,11 +432,16 @@ def test_decision_diagnostics_cannot_rescue_density(
         delta_ci_low=-0.06,
         delta_ci_high=-0.04,
     )
+    retry = _retry()
+    monkeypatch.setattr(
+        round0124_nodes, "verify_retry_provenance", lambda value: retry
+    )
     diagnostic = seal(
         {
             "schema": DIAGNOSTIC_SCHEMA,
             "round_id": "0124",
             "release_sha": "b" * 40,
+            "retry_provenance": retry,
             "arm": "raw",
             "execution_gates": {
                 "finite_noncollapsed_coordinates": True,
@@ -245,6 +464,7 @@ def test_decision_diagnostics_cannot_rescue_density(
             "schema": NATIVE_DENSITY_SCHEMA,
             "round_id": "0124",
             "release_sha": "b" * 40,
+            "retry_provenance": retry,
             "control": {"density": 0.23},
             "treatment": {
                 "density": 0.18,
@@ -275,7 +495,10 @@ def test_decision_diagnostics_cannot_rescue_density(
     )
 
 
-def test_decision_rejects_missing_execution_gates(tmp_path: Path) -> None:
+def test_decision_rejects_missing_execution_gates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     from basemap.round0113_prompt_contrast import seal
 
     density_root = tmp_path / "density"
@@ -288,6 +511,10 @@ def test_decision_rejects_missing_execution_gates(tmp_path: Path) -> None:
         delta_ci_low=-0.01,
         delta_ci_high=0.01,
     )
+    retry = _retry()
+    monkeypatch.setattr(
+        round0124_nodes, "verify_retry_provenance", lambda value: retry
+    )
     (diagnostic_root / "score.json").write_text(
         json.dumps(
             seal(
@@ -295,6 +522,7 @@ def test_decision_rejects_missing_execution_gates(tmp_path: Path) -> None:
                     "schema": DIAGNOSTIC_SCHEMA,
                     "round_id": "0124",
                     "release_sha": "b" * 40,
+                    "retry_provenance": retry,
                     "arm": "raw",
                     "execution_gates": {},
                 }
@@ -309,6 +537,7 @@ def test_decision_rejects_missing_execution_gates(tmp_path: Path) -> None:
                     "schema": NATIVE_DENSITY_SCHEMA,
                     "round_id": "0124",
                     "release_sha": "b" * 40,
+                    "retry_provenance": retry,
                     "control": {"density": 0.23},
                     "treatment": {
                         "density": 0.23,
@@ -367,6 +596,8 @@ def test_train_seal_reload_panel_cpu_smoke(
         "weights": np.ones(64, dtype=np.float32),
         "n_nodes": 240,
     }
+    retry = _retry()
+    retry["reused_graph"] = {"manifest": manifest_signature}
     expected_stamp = {
         "schema": "round0124-cpu-smoke-v1",
         "pipeline": "host_weighted_jina_prompt_contrast",
@@ -489,7 +720,10 @@ def test_train_seal_reload_panel_cpu_smoke(
         lambda job: (assembly, assembly_signature),
     )
     monkeypatch.setattr(
-        round0124_nodes, "load_graph", lambda *args, **kwargs: graph
+        round0124_nodes, "_reused_graph", lambda job: (graph, retry)
+    )
+    monkeypatch.setattr(
+        round0124_nodes, "verify_retry_provenance", lambda value: retry
     )
     monkeypatch.setattr(
         round0124_nodes,

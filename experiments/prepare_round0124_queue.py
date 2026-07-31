@@ -23,6 +23,9 @@ from basemap.round0113_prompt_contrast import (
     read_sealed,
 )
 from basemap.round0124_degree_bridge import (
+    ATTEMPT1_EVIDENCE,
+    ATTEMPT1_GPU_WALL_S,
+    ATTEMPT1_RELEASE_SHA,
     BOOTSTRAP_CI_LEVEL,
     BOOTSTRAP_DRAWS,
     BOOTSTRAP_SEED,
@@ -31,6 +34,10 @@ from basemap.round0124_degree_bridge import (
     MATERIAL_DENSITY_DEGRADATION,
     NATIVE_ANCHOR_SEED,
     NATIVE_DENSITY_ANCHORS,
+    RETRY_GPU_HOURS_CAP,
+    RETRY_PROVENANCE_SCHEMA,
+    ROUND_GPU_HOURS_CAP,
+    verify_retry_provenance,
 )
 from experiments.prepare_round0020_0022_queues import (
     LAB_ROOT,
@@ -46,6 +53,7 @@ ROUND_ID = "0124"
 ROUND_ROOT = "/data/latent-basemap/runs/round-0124"
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE_GLOB = os.path.join(LAB_ROOT, "round-0124-*.md")
+RETRY_QUEUE_ROOT = os.path.join(ROUND_ROOT, "queue-attempt-2")
 
 R0113_ASSEMBLY = (
     "/data/latent-basemap/runs/round-0113/queue/artifacts/compact-arrays"
@@ -83,6 +91,120 @@ REQUIRED_CAPABILITIES = {
     "0108": "jina-diverse-25m-map-registry-v1",
     "0115": "jina-fineweb-2m-prompt-map-contrast-v1",
 }
+
+
+def _load_json(path: str, *, label: str) -> dict[str, Any]:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"R0124 {label} is unreadable: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"R0124 {label} is not a JSON object")
+    return value
+
+
+def _retry_provenance() -> dict[str, Any]:
+    """Validate and bind attempt 1 without synthesizing cross-root markers."""
+    provenance = {
+        "schema": RETRY_PROVENANCE_SCHEMA,
+        "round_id": ROUND_ID,
+        "retry_kind": "same-round-execution-plan-correction",
+        "attempt_1_release_sha": ATTEMPT1_RELEASE_SHA,
+        "attempt_1_evidence": {
+            label: dict(signature)
+            for label, signature in ATTEMPT1_EVIDENCE.items()
+        },
+        "reused_graph": {
+            "manifest": dict(ATTEMPT1_EVIDENCE["graph_manifest"]),
+            "graph": dict(ATTEMPT1_EVIDENCE["graph"]),
+            "topology_probe": dict(ATTEMPT1_EVIDENCE["topology_probe"]),
+            "source_release_sha": ATTEMPT1_RELEASE_SHA,
+        },
+        "cumulative_attempt_accounting": {
+            "attempt_1_gpu_wall_s": ATTEMPT1_GPU_WALL_S,
+            "round_gpu_hours_max": ROUND_GPU_HOURS_CAP,
+            "retry_gpu_hours_cap": RETRY_GPU_HOURS_CAP,
+            "retry_terminal_gpu_wall_s": "from-terminal",
+            "cumulative_rule": (
+                "attempt_1_gpu_wall_s + retry_terminal_gpu_wall_s"
+            ),
+        },
+    }
+    verify_retry_provenance(provenance)
+    evidence = provenance["attempt_1_evidence"]
+    queue = _load_json(
+        evidence["queue_manifest"]["canonical_path"],
+        label="attempt-1 queue",
+    )
+    terminal = _load_json(
+        evidence["runner_terminal"]["canonical_path"],
+        label="attempt-1 terminal",
+    )
+    done = _load_json(
+        evidence["graph_done_marker"]["canonical_path"],
+        label="attempt-1 graph done marker",
+    )
+    failed = _load_json(
+        evidence["train_failed_marker"]["canonical_path"],
+        label="attempt-1 train failed marker",
+    )
+    graph = read_sealed(
+        evidence["graph_manifest"]["canonical_path"],
+        label="R0124 reused k15 graph",
+    )
+    admission = _load_json(
+        evidence["failed_admission"]["canonical_path"],
+        label="attempt-1 admission",
+    )
+    production = _load_json(
+        evidence["failed_production_config"]["canonical_path"],
+        label="attempt-1 production config",
+    )
+    queue_sha = evidence["queue_manifest"]["sha256"]
+    graph_done_wall = float(done.get("wall_s", -1.0))
+    train_failed_wall = float(failed.get("wall_s", -1.0))
+    config = production.get("config") or {}
+    if (
+        queue.get("round_id") != ROUND_ID
+        or queue.get("release_sha") != ATTEMPT1_RELEASE_SHA
+        or queue.get("gpu_hours_cap") != ROUND_GPU_HOURS_CAP
+        or terminal.get("schema") != "slim-runner-terminal-v3"
+        or terminal.get("round_id") != ROUND_ID
+        or terminal.get("verdict") != "failed"
+        or terminal.get("queue_manifest_sha256") != queue_sha
+        or terminal.get("release_checkout_unchanged") is not True
+        or terminal.get("queue_manifest_unchanged") is not True
+        or terminal.get("gpu_wall_accounting_complete") is not True
+        or terminal.get("boundary_problems") != []
+        or terminal.get("completed_jobs") != ["build_k15_graph"]
+        or terminal.get("gpu_wall_s") != ATTEMPT1_GPU_WALL_S
+        or done.get("schema") != "slim-runner-done-v2"
+        or done.get("node") != "build_k15_graph"
+        or done.get("returncode") != 0
+        or done.get("queue_manifest_sha256") != queue_sha
+        or done.get("release_sha") != ATTEMPT1_RELEASE_SHA
+        or failed.get("schema") != "slim-runner-failed-v2"
+        or failed.get("node") != "train_k15_treatment"
+        or failed.get("returncode") != 1
+        or failed.get("queue_manifest_sha256") != queue_sha
+        or failed.get("release_sha") != ATTEMPT1_RELEASE_SHA
+        or "225260/500000" not in str(failed.get("log_tail") or "")
+        or graph_done_wall + train_failed_wall != ATTEMPT1_GPU_WALL_S
+        or graph.get("release_sha") != ATTEMPT1_RELEASE_SHA
+        or graph.get("graph") != evidence["graph"]
+        or graph.get("topology_probe") != evidence["topology_probe"]
+        or admission.get("verified_hashes", {}).get("graph")
+        != evidence["graph"]
+        or admission.get("verified_hashes", {}).get("graph_manifest")
+        != evidence["graph_manifest"]
+        or (config.get("graph") or {}).get("sha256")
+        != evidence["graph"]["sha256"]
+        or (config.get("graph") or {}).get("manifest_sha256")
+        != evidence["graph_manifest"]["sha256"]
+    ):
+        raise RuntimeError("R0124 attempt-1 retry evidence changed")
+    return provenance
 
 
 def _issued_round() -> str:
@@ -299,7 +421,7 @@ def prepare_round0124(
     r0108_review_sha256: str,
     r0115_review: str,
     r0115_review_sha256: str,
-    queue_root: str = os.path.join(ROUND_ROOT, "queue"),
+    queue_root: str = RETRY_QUEUE_ROOT,
 ) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0124 release SHA must be one full commit")
@@ -315,6 +437,7 @@ def prepare_round0124(
             r0115_review, r0115_review_sha256, round_id="0115"
         ),
     }
+    retry = _retry_provenance()
     inputs = _dedupe(
         [
             expected_input_signature(round_file),
@@ -324,6 +447,7 @@ def prepare_round0124(
                 for signature in (evidence["review"], evidence["result"])
             ),
             *_inputs(reviews=reviews),
+            *retry["attempt_1_evidence"].values(),
         ]
     )
     ensure_data_directory(ROUND_ROOT)
@@ -331,14 +455,14 @@ def prepare_round0124(
         queue_root, label="R0124 graph-degree bridge queue"
     )
     artifacts = ensure_data_directory(os.path.join(queue_root, "artifacts"))
-    graph_output = os.path.join(artifacts, "k15-graph")
     train_output = os.path.join(artifacts, "k15-train")
     diagnostic_output = os.path.join(artifacts, "core-ood-diagnostics")
     density_output = os.path.join(artifacts, "native-density-contrast")
     decision_output = os.path.join(artifacts, "degree-bridge-decision")
-    graph_manifest = os.path.join(graph_output, "graph-manifest.json")
+    graph_manifest = retry["reused_graph"]["manifest"]["canonical_path"]
     common = {
         "expected_inputs": inputs,
+        "retry_provenance": retry,
         "assembly_output": R0113_ASSEMBLY,
         "query_output": R0113_QUERY,
         "query_selection_output": R0115_QUERY_SELECTION,
@@ -355,26 +479,11 @@ def prepare_round0124(
     }
     jobs = [
         {
-            "id": "build_k15_graph",
-            "action": "build_k15_graph",
-            "handler_module": "experiments.round0124_nodes",
-            "handler_callable": "run_job",
-            "deps": [],
-            "outputs": [graph_output],
-            "done_marker": os.path.join(artifacts, "build_k15_graph.done.json"),
-            "p90_wall_s": 300.0,
-            **common,
-            "node_policy": {
-                "gpu_required": True,
-                "training_performed": False,
-            },
-        },
-        {
             "id": "train_k15_treatment",
             "action": "train_k15_treatment",
             "handler_module": "experiments.round0124_nodes",
             "handler_callable": "run_job",
-            "deps": ["build_k15_graph"],
+            "deps": [],
             "outputs": [train_output],
             "done_marker": os.path.join(
                 artifacts, "train_k15_treatment.done.json"
@@ -441,6 +550,7 @@ def prepare_round0124(
             "diagnostic_output": diagnostic_output,
             "density_output": density_output,
             "expected_inputs": inputs,
+            "retry_provenance": retry,
             "node_policy": {
                 "gpu_required": False,
                 "training_performed": False,
@@ -452,23 +562,29 @@ def prepare_round0124(
         release_sha=release_sha,
         round_file=round_file,
         queue_root=queue_root,
-        gpu_hours_cap=2.5,
+        gpu_hours_cap=RETRY_GPU_HOURS_CAP,
         execution_authority="autonomous-gpu",
         gpu=True,
     )
     queue.update(
         {
-            "schema": "round0124-fineweb-2m-degree-bridge-queue-v1",
+            "schema": "round0124-fineweb-2m-degree-bridge-retry-queue-v1",
             "repo_root": RELEASE_ROOT,
             "queue_class": "gpu-research",
             "required_reviews": ["0106", "0108", "0115"],
             "capability_dependencies": [
-                "jina-fineweb-2m-prompt-map-contrast-v1"
+                "jina-diverse-25m-full768-fuzzy-graph-v1",
+                "jina-diverse-25m-map-registry-v1",
+                "jina-fineweb-2m-prompt-map-contrast-v1",
             ],
             "capabilities_produced": [
                 "jina-fineweb-2m-native-k15-degree-bridge-v1"
             ],
             "training_performed": True,
+            "retry_provenance": retry,
+            "cumulative_attempt_accounting": retry[
+                "cumulative_attempt_accounting"
+            ],
             "scientific_contract": {
                 "control": (
                     "exact re-score of R0115 raw seed-42 k50 native "
@@ -482,6 +598,15 @@ def prepare_round0124(
                     GRAPH_SEARCH_NEIGHBORS
                 ),
                 "successful_updates": SUCCESSFUL_UPDATES,
+                "graph_reuse": {
+                    "policy": "reuse-exact-successful-attempt-1-graph",
+                    "manifest": retry["reused_graph"]["manifest"],
+                    "graph": retry["reused_graph"]["graph"],
+                    "topology_probe": retry["reused_graph"][
+                        "topology_probe"
+                    ],
+                    "rebuild_permitted": False,
+                },
                 "native_reference": (
                     "exact R0115 raw 4,000-anchor high-D reference"
                 ),
@@ -499,11 +624,10 @@ def prepare_round0124(
             },
             "jobs": jobs,
             "p90_gpu_seconds": {
-                "build_k15_graph": 300.0,
                 "train_k15_treatment": 5_400.0,
                 "evaluate_core_ood": 300.0,
                 "score_native_density": 120.0,
-                "total": 6_120.0,
+                "total": 5_820.0,
             },
         }
     )
@@ -522,7 +646,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--r0115-review", required=True)
     parser.add_argument("--r0115-review-sha256", required=True)
     parser.add_argument(
-        "--queue-root", default=os.path.join(ROUND_ROOT, "queue")
+        "--queue-root", default=RETRY_QUEUE_ROOT
     )
     args = parser.parse_args(argv)
     path = prepare_round0124(

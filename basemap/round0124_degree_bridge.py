@@ -34,6 +34,103 @@ from .round0113_prompt_contrast import (
 ROUND_ID = "0124"
 ARM = "raw"
 
+ATTEMPT1_RELEASE_SHA = "e565830721254e543e46403275a5fe831bb40c18"
+ATTEMPT1_GPU_WALL_S = 2171.39541627327
+ROUND_GPU_HOURS_CAP = 2.5
+RETRY_GPU_HOURS_CAP = (
+    ROUND_GPU_HOURS_CAP - ATTEMPT1_GPU_WALL_S / 3600.0
+)
+RETRY_PROVENANCE_SCHEMA = "round0124-same-round-retry-provenance-v1"
+ATTEMPT1_ROOT = "/data/latent-basemap/runs/round-0124/queue"
+ATTEMPT1_EVIDENCE = {
+    "queue_manifest": {
+        "canonical_path": f"{ATTEMPT1_ROOT}/queue.json",
+        "kind": "file",
+        "bytes": 68_414,
+        "sha256": (
+            "caae9d85ec713a3e24b2657a3adc70764b7d4134910c6425f85065810a1874bc"
+        ),
+    },
+    "runner_terminal": {
+        "canonical_path": f"{ATTEMPT1_ROOT}/runner-terminal.json",
+        "kind": "file",
+        "bytes": 1_783,
+        "sha256": (
+            "8639f0f56c23aeccc5c42971696b84fc2cab641e9c316c2b1c0ae7e028155833"
+        ),
+    },
+    "graph_done_marker": {
+        "canonical_path": (
+            f"{ATTEMPT1_ROOT}/artifacts/build_k15_graph.done.json"
+        ),
+        "kind": "file",
+        "bytes": 464,
+        "sha256": (
+            "3836dab207b8e4a18434bf6fec0ed50cf9d6eb49b77eb8a091176354255fd883"
+        ),
+    },
+    "train_failed_marker": {
+        "canonical_path": (
+            f"{ATTEMPT1_ROOT}/artifacts/train_k15_treatment.failed.json"
+        ),
+        "kind": "file",
+        "bytes": 1_573,
+        "sha256": (
+            "98d34a31d1a916a8345890a8294a8efb1788295ae0a4be421367eacf6fe5f468"
+        ),
+    },
+    "graph_manifest": {
+        "canonical_path": (
+            f"{ATTEMPT1_ROOT}/artifacts/k15-graph/graph-manifest.json"
+        ),
+        "kind": "file",
+        "bytes": 8_730,
+        "sha256": (
+            "0e092b253648e1f9f9916cb3ccccfd789c52a97d61a119439108a5ed38f68010"
+        ),
+    },
+    "graph": {
+        "canonical_path": (
+            f"{ATTEMPT1_ROOT}/artifacts/k15-graph/edges-k15-fuzzy.npz"
+        ),
+        "kind": "file",
+        "bytes": 552_787_644,
+        "sha256": (
+            "c5a2b5b0cb9413c8cecc322a71941a7a766a5b23dcbd9f57afe0ebbc0a34b828"
+        ),
+    },
+    "topology_probe": {
+        "canonical_path": (
+            f"{ATTEMPT1_ROOT}/artifacts/k15-graph/topology-probe.npz"
+        ),
+        "kind": "file",
+        "bytes": 1_016_578,
+        "sha256": (
+            "a5d7ac641d825d29aa397ba14753458ce577ffde2d2e73f582508eb37fd7c3a9"
+        ),
+    },
+    "failed_admission": {
+        "canonical_path": (
+            f"{ATTEMPT1_ROOT}/artifacts/k15-train/admission.json"
+        ),
+        "kind": "file",
+        "bytes": 3_712,
+        "sha256": (
+            "f7d0905d2ab803860ceabe9d8d3dfa78fefc012b99b001b41e9deb4030ff50b8"
+        ),
+    },
+    "failed_production_config": {
+        "canonical_path": (
+            f"{ATTEMPT1_ROOT}/artifacts/k15-train/production-config.json"
+        ),
+        "kind": "file",
+        "bytes": 5_104,
+        "sha256": (
+            "f274e57d129e2cc1993b93b7f0e0ad47b3e1a14b0742a177ae8a5024a63bb566"
+        ),
+    },
+}
+
 # R0115 called its 50-search-neighbor (49 nonself) graph "k50".  This bridge
 # deliberately follows the later R0106/R0107 convention: k is the number of
 # distinct nonself neighbors and the search/fuzzy tuple includes self.
@@ -70,6 +167,41 @@ OUTCOME_INCONCLUSIVE = "k15-native-density-effect-inconclusive"
 
 class Round0124Error(RuntimeError):
     """The frozen R0124 single-variable contrast was violated."""
+
+
+def verify_retry_provenance(value: Any) -> dict[str, Any]:
+    """Authenticate the failed attempt and exact graph reused by the retry."""
+    if not isinstance(value, Mapping):
+        raise Round0124Error("R0124 retry provenance is missing")
+    evidence = value.get("attempt_1_evidence")
+    graph = value.get("reused_graph")
+    accounting = value.get("cumulative_attempt_accounting")
+    if (
+        value.get("schema") != RETRY_PROVENANCE_SCHEMA
+        or value.get("round_id") != ROUND_ID
+        or value.get("retry_kind") != "same-round-execution-plan-correction"
+        or value.get("attempt_1_release_sha") != ATTEMPT1_RELEASE_SHA
+        or not isinstance(evidence, Mapping)
+        or dict(evidence) != ATTEMPT1_EVIDENCE
+        or not isinstance(graph, Mapping)
+        or graph.get("manifest") != ATTEMPT1_EVIDENCE["graph_manifest"]
+        or graph.get("graph") != ATTEMPT1_EVIDENCE["graph"]
+        or graph.get("topology_probe")
+        != ATTEMPT1_EVIDENCE["topology_probe"]
+        or graph.get("source_release_sha") != ATTEMPT1_RELEASE_SHA
+        or not isinstance(accounting, Mapping)
+        or accounting.get("attempt_1_gpu_wall_s") != ATTEMPT1_GPU_WALL_S
+        or accounting.get("round_gpu_hours_max") != ROUND_GPU_HOURS_CAP
+        or accounting.get("retry_gpu_hours_cap") != RETRY_GPU_HOURS_CAP
+        or accounting.get("retry_terminal_gpu_wall_s") != "from-terminal"
+        or accounting.get("cumulative_rule")
+        != "attempt_1_gpu_wall_s + retry_terminal_gpu_wall_s"
+    ):
+        raise Round0124Error("R0124 retry provenance contract changed")
+    for label, expected in ATTEMPT1_EVIDENCE.items():
+        if expected_input_signature(expected["canonical_path"]) != expected:
+            raise Round0124Error(f"R0124 retry {label} bytes changed")
+    return dict(value)
 
 
 def training_loop_plan(
@@ -255,10 +387,13 @@ def train_config(
 def load_graph(
     manifest_path: str,
     *,
-    expected_sha256: str,
+    expected_manifest_signature: Mapping[str, Any],
+    expected_graph_signature: Mapping[str, Any],
+    expected_topology_probe_signature: Mapping[str, Any],
+    expected_release_sha: str,
 ) -> dict[str, Any]:
     signature = expected_input_signature(manifest_path)
-    if signature["sha256"] != expected_sha256:
+    if signature != dict(expected_manifest_signature):
         raise Round0124Error("R0124 graph manifest bytes changed")
     manifest = read_sealed(manifest_path, label="R0124 k15 graph manifest")
     search = manifest.get("search_qualification") or {}
@@ -267,6 +402,7 @@ def load_graph(
     if (
         manifest.get("schema") != GRAPH_SCHEMA
         or manifest.get("round_id") != ROUND_ID
+        or manifest.get("release_sha") != expected_release_sha
         or manifest.get("arm") != ARM
         or int(manifest.get("retained_rows", -1)) != RETAINED_ROWS
         or int(manifest.get("dimension", -1)) != DIMENSION
@@ -274,9 +410,15 @@ def load_graph(
         or int(manifest.get("directed_edge_count", -1)) <= 0
         or int(search.get("selected_nprobe", -1)) != GRAPH_NPROBE
         or fixed.get("passed") is not True
+        or manifest.get("graph") != dict(expected_graph_signature)
+        or manifest.get("topology_probe")
+        != dict(expected_topology_probe_signature)
     ):
         raise Round0124Error("R0124 k15 graph contract changed")
     graph_path = verify_signature(manifest["graph"], label="R0124 k15 graph")
+    verify_signature(
+        manifest["topology_probe"], label="R0124 k15 topology probe"
+    )
     from .pumap.parametric_umap.datasets.edge_list_dataset import load_edge_arrays
 
     sources, targets, weights, n_nodes = load_edge_arrays(
