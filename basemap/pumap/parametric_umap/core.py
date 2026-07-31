@@ -1932,7 +1932,14 @@ class ParametricUMAP:
                     # not a partial benchmark.  Existing short canaries still
                     # stop as ``bench_cap`` because their horizon is larger.
                     st["stop_reason"] = stop_reason
-                    if stop_reason == "bench_cap" and self._bench_t0:
+                    # The benchmark window is orthogonal to why a successful
+                    # update stopped training.  Full-budget round wrappers set
+                    # ``_max_train_steps == lr_horizon`` and still consume this
+                    # wall time after ``fit`` to enforce their steady-rate
+                    # floor.  In that equal-boundary case the honest stop label
+                    # is ``lr_horizon``; finalize the already-open benchmark
+                    # window for either successful stop reason.
+                    if self._bench_t0:
                         if 'cuda' in str(self.device):
                             torch.cuda.synchronize(self.device)
                         self._bench_seconds = time.perf_counter() - self._bench_t0
