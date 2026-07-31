@@ -31,6 +31,11 @@ def test_registered_work_ranges_cover_only_the_missing_rows() -> None:
     assert total == contract.NEW_ROWS == 3_727_340
     assert contract.production_payload_bytes() == 5_725_194_240
     assert contract.required_free_bytes() > contract.production_payload_bytes()
+    worst_passing_gpu_s = (
+        contract.NEW_ROWS / contract.EMBED_MINIMUM_ROWS_PER_S
+        + 300.0 * len(contract.WORK_RANGES)
+    )
+    assert worst_passing_gpu_s < 6.5 * 3_600.0
 
 
 def test_source_layout_maps_exact_shards_and_rejects_a_gap(

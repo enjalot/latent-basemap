@@ -45,8 +45,12 @@ DIMENSION = ROUND0005_DIMENSIONS
 CHUNK_ROWS = 25_000
 BATCH_SIZE = 256
 COMPUTE_DTYPE = "float32"
-EMBED_MINIMUM_ROWS_PER_S = 120.0
-EMBED_WARNING_ROWS_PER_S = 180.0
+# At this floor, all four nodes plus their registered fixed overhead remain
+# inside the 6.5 GPU-hour queue cap.  A lower passing floor could let a slow
+# run finish over budget because the slim runner enforces the cap at node
+# boundaries.
+EMBED_MINIMUM_ROWS_PER_S = 180.0
+EMBED_WARNING_ROWS_PER_S = 200.0
 PERFORMANCE_GUARD_ROWS = 50_000
 
 FINEWEB_ROWS = 2_890_362
