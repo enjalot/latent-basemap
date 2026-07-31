@@ -331,6 +331,14 @@ def test_all_four_causal_execution_contract_is_valid():
         ("optimizer", "normalized_optimizer_invariant_equal"),
         ("dose", "normalized_registered_and_observed_dose_equal"),
         ("numpy_stream", "h_r_f_first8_numpy_endpoint_streams_equal"),
+        (
+            "device_same_stream",
+            "d_first8_device_endpoint_stream_is_valid_and_distinct",
+        ),
+        (
+            "device_invalid_stream",
+            "d_first8_device_endpoint_stream_is_valid_and_distinct",
+        ),
         ("path", "registered_h_r_f_d_path_shape"),
         ("pipeline", "observed_pipeline_stamps_match_configs"),
         ("endpoint_rows", "endpoint_rows_match_registered_path"),
@@ -363,6 +371,16 @@ def test_each_cross_round_causal_drift_fails_closed(drift, failed_check):
         trains[RESIDENT_FUSED]["exact_execution_receipt"]["stream_trace"][
             "source_endpoint_ids_sha256"
         ] = "8" * 64
+    elif drift == "device_same_stream":
+        trains[DEVICE_ARM]["exact_execution_receipt"]["stream_trace"] = (
+            copy.deepcopy(
+                trains[HOST_ARM]["exact_execution_receipt"]["stream_trace"]
+            )
+        )
+    elif drift == "device_invalid_stream":
+        trains[DEVICE_ARM]["exact_execution_receipt"]["stream_trace"][
+            "destination_endpoint_ids_sha256"
+        ] = "not-a-sha256"
     elif drift == "path":
         trains[RESIDENT_FUSED]["exact_execution_receipt"]["endpoint_forward"] = (
             "separate-source-destination"

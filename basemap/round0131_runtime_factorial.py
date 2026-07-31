@@ -661,6 +661,7 @@ def causal_execution_checks(
         for arm in PATH_ARMS
     )
     numpy_streams = [_stream_digest(trains.get(arm, {})) for arm in PATH_ARMS[:3]]
+    device_stream = _stream_digest(trains.get(DEVICE_ARM, {}))
 
     expected_full_rows = SUCCESSFUL_UPDATES * BATCH_SIZE
     device_endpoint_rows = expected_device_endpoint_accounting()[
@@ -719,6 +720,23 @@ def causal_execution_checks(
         "h_r_f_first8_numpy_endpoint_streams_equal": (
             all(value is not None for value in numpy_streams)
             and numpy_streams[0] == numpy_streams[1] == numpy_streams[2]
+        ),
+        # D intentionally changes the sampler/RNG/epoch-batching mechanism.
+        # Its bounded trace must therefore be present and well-formed, but it
+        # must not be the same source+destination digest pair as H/R/F.  Without
+        # this inequality a copied NumPy trace can masquerade as the registered
+        # torch-device treatment and make the final causal contrast vacuous.
+        "d_first8_device_endpoint_stream_is_valid_and_distinct": (
+            device_stream is not None
+            and numpy_streams[0] is not None
+            and (
+                device_stream["source_endpoint_ids_sha256"],
+                device_stream["destination_endpoint_ids_sha256"],
+            )
+            != (
+                numpy_streams[0]["source_endpoint_ids_sha256"],
+                numpy_streams[0]["destination_endpoint_ids_sha256"],
+            )
         ),
         "endpoint_rows_match_registered_path": endpoint_rows_match_path,
     }

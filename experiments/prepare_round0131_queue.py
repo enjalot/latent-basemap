@@ -481,6 +481,7 @@ def prepare_round0131(
                 "all-four environment freezes equal",
                 "normalized graph/model/optimizer/dose equal",
                 "H/R/F first-eight NumPy endpoint stream digests equal",
+                "D first-eight endpoint stream digests valid and distinct from H/R/F",
                 "observed H/R/F/D pipeline path and endpoint rows exact",
             ],
             "new_arm_pipelines": PIPELINES,
@@ -494,10 +495,10 @@ def prepare_round0131(
             "total": 11_600.0,
         },
         "estimate_basis": {
-            "expected_gpu_hours": 2.65,
+            "expected_gpu_hours": 2.9,
             "p90_gpu_hours": 3.23,
             "hard_cap_gpu_hours": 4.0,
-            "basis": "two R0125-class 500k-update Jina-768 trains plus native, held-out, and exact matched panels",
+            "basis": "two measured 4,550-4,680s R0125-class 500k-update Jina-768 trains plus 1,200s native, held-out, and exact matched panels",
         },
         "jobs": jobs,
     })
