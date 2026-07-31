@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import math
 import os
 import re
 from collections.abc import Mapping
@@ -91,6 +92,11 @@ P90_DIAGNOSTIC_SECONDS = 300.0
 P90_DENSITY_SECONDS = 120.0
 P90_GPU_TOTAL_SECONDS = (
     P90_TRAIN_SECONDS + P90_DIAGNOSTIC_SECONDS + P90_DENSITY_SECONDS
+)
+R0124_GPU_NODES = (
+    "train_k15_treatment",
+    "evaluate_core_ood",
+    "score_native_density",
 )
 
 
@@ -269,6 +275,91 @@ def _require_inconclusive_r0124_review(
     }
 
 
+def _r0124_estimate_calibration(
+    trigger: Mapping[str, Mapping[str, Any]],
+    *,
+    terminal_path: str = R0124_TERMINAL,
+) -> dict[str, Any]:
+    """Derive R0129's estimate calibration from the bound R0124 terminal."""
+    terminal_signature = expected_input_signature(terminal_path)
+    if trigger.get("terminal") != terminal_signature:
+        raise RuntimeError("R0124 calibration terminal bytes changed")
+    with open(terminal_path, encoding="utf-8") as handle:
+        terminal = json.load(handle)
+    nodes = terminal.get("nodes") or []
+    if (
+        terminal.get("schema") != "slim-runner-terminal-v3"
+        or terminal.get("round_id") != "0124"
+        or terminal.get("verdict") != "succeeded"
+        or terminal.get("gpu_wall_accounting_complete") is not True
+        or terminal.get("boundary_problems") != []
+        or len(nodes) != len({str(node.get("node") or "") for node in nodes})
+    ):
+        raise RuntimeError("R0124 calibration terminal is not clean and complete")
+    by_id = {str(node.get("node") or ""): node for node in nodes}
+    if set(by_id) != {*R0124_GPU_NODES, "decide_degree_bridge"}:
+        raise RuntimeError("R0124 calibration node set changed")
+    gpu_walls: dict[str, float] = {}
+    for node_id in R0124_GPU_NODES:
+        node = by_id[node_id]
+        wall = node.get("wall_s")
+        if (
+            node.get("gpu_required") is not True
+            or isinstance(wall, bool)
+            or not isinstance(wall, (int, float))
+            or not math.isfinite(float(wall))
+            or float(wall) <= 0.0
+            or node.get("validation_problems") != []
+        ):
+            raise RuntimeError("R0124 calibration GPU-node receipt changed")
+        gpu_walls[node_id] = float(wall)
+    decision = by_id["decide_degree_bridge"]
+    if (
+        decision.get("gpu_required") is not False
+        or decision.get("validation_problems") != []
+    ):
+        raise RuntimeError("R0124 calibration CPU decision receipt changed")
+    derived_total = math.fsum(gpu_walls.values())
+    terminal_total = terminal.get("gpu_wall_s")
+    if (
+        isinstance(terminal_total, bool)
+        or not isinstance(terminal_total, (int, float))
+        or not math.isfinite(float(terminal_total))
+        or not math.isclose(
+            derived_total,
+            float(terminal_total),
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+    ):
+        raise RuntimeError("R0124 calibrated GPU-node walls do not close")
+    p90 = {
+        "train_k15_seed43": P90_TRAIN_SECONDS,
+        "evaluate_core_ood": P90_DIAGNOSTIC_SECONDS,
+        "score_native_density": P90_DENSITY_SECONDS,
+        "total": P90_GPU_TOTAL_SECONDS,
+    }
+    observed_against_p90 = {
+        "train_k15_seed43": gpu_walls["train_k15_treatment"],
+        "evaluate_core_ood": gpu_walls["evaluate_core_ood"],
+        "score_native_density": gpu_walls["score_native_density"],
+        "total": derived_total,
+    }
+    if any(observed_against_p90[key] > p90[key] for key in p90):
+        raise RuntimeError("R0129 p90 is not conservative against R0124 retry")
+    return {
+        "schema": "round0129-estimate-calibration-v1",
+        "status": "confirmed-calibrated-from-authenticated-r0124-retry-terminal",
+        "source_round_id": "0124",
+        "source_terminal": terminal_signature,
+        "source_gpu_node_wall_s": gpu_walls,
+        "source_retry_gpu_wall_s": derived_total,
+        "r0129_p90_gpu_seconds": p90,
+        "p90_remains_conservative": True,
+        "round_gpu_hours_cap": GPU_HOURS_CAP,
+    }
+
+
 def _scientific_inputs(
     *, r0117: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
@@ -383,6 +474,7 @@ def prepare_round0129(
         r0124_review,
         expected_sha256=r0124_review_sha256,
     )
+    estimate_calibration = _r0124_estimate_calibration(trigger)
     provenance = graph_provenance()
     inputs = _dedupe(
         [
@@ -554,8 +646,11 @@ def prepare_round0129(
                 "evaluate_core_ood": P90_DIAGNOSTIC_SECONDS,
                 "score_native_density": P90_DENSITY_SECONDS,
                 "total": P90_GPU_TOTAL_SECONDS,
-                "estimate_status": "conservative-pending-r0124-retry-receipt",
+                "estimate_status": (
+                    "confirmed-calibrated-from-authenticated-r0124-retry-terminal"
+                ),
             },
+            "estimate_calibration": estimate_calibration,
         }
     )
     path = os.path.join(queue_root, "queue.json")

@@ -241,6 +241,14 @@ def _write_trigger_bundle(tmp_path, *, outcome: str):
     jobs = [
         {"id": "train_k15_treatment", "outputs": [str(tmp_path / "train")]},
         {
+            "id": "evaluate_core_ood",
+            "outputs": [str(tmp_path / "diagnostics")],
+        },
+        {
+            "id": "score_native_density",
+            "outputs": [str(tmp_path / "density")],
+        },
+        {
             "id": "decide_degree_bridge",
             "outputs": [str(decision_dir)],
         },
@@ -262,13 +270,37 @@ def _write_trigger_bundle(tmp_path, *, outcome: str):
         "required_jobs": [job["id"] for job in jobs],
         "completed_jobs": [job["id"] for job in jobs],
         "nodes": [
-            {"node": job["id"], "validation_problems": []} for job in jobs
+            {
+                "node": "train_k15_treatment",
+                "gpu_required": True,
+                "wall_s": 40.0,
+                "validation_problems": [],
+            },
+            {
+                "node": "evaluate_core_ood",
+                "gpu_required": True,
+                "wall_s": 2.0,
+                "validation_problems": [],
+            },
+            {
+                "node": "score_native_density",
+                "gpu_required": True,
+                "wall_s": 1.0,
+                "validation_problems": [],
+            },
+            {
+                "node": "decide_degree_bridge",
+                "gpu_required": False,
+                "wall_s": 0.5,
+                "validation_problems": [],
+            },
         ],
         "queue_manifest_sha256": queue_sig["sha256"],
         "queue_manifest_sha256_at_finish": queue_sig["sha256"],
         "queue_manifest_unchanged": True,
         "release_checkout_unchanged": True,
         "gpu_wall_accounting_complete": True,
+        "gpu_wall_s": 43.0,
         "boundary_problems": [],
         "release_checkout": {"head": release},
         "release_checkout_at_finish": {"head": release},
@@ -327,6 +359,41 @@ def test_structured_inconclusive_trigger_ignores_positive_negative_prose(
         decision_path=bundle["decision"],
     )
     assert set(evidence) == {"review", "result", "queue", "terminal", "decision"}
+
+
+def test_estimate_calibration_is_derived_from_bound_terminal_and_fails_mutation(
+    tmp_path,
+):
+    bundle = _write_trigger_bundle(tmp_path, outcome=OUTCOME_INCONCLUSIVE)
+    evidence = prepare_round0129_queue._require_inconclusive_r0124_review(
+        bundle["review"],
+        expected_sha256=bundle["review_sha"],
+        queue_path=bundle["queue"],
+        terminal_path=bundle["terminal"],
+        decision_path=bundle["decision"],
+    )
+    calibration = prepare_round0129_queue._r0124_estimate_calibration(
+        evidence,
+        terminal_path=bundle["terminal"],
+    )
+    assert calibration["source_retry_gpu_wall_s"] == 43.0
+    assert calibration["source_gpu_node_wall_s"] == {
+        "train_k15_treatment": 40.0,
+        "evaluate_core_ood": 2.0,
+        "score_native_density": 1.0,
+    }
+    assert calibration["p90_remains_conservative"] is True
+
+    with open(bundle["terminal"], encoding="utf-8") as handle:
+        changed = json.load(handle)
+    changed["nodes"][2]["wall_s"] = 1.25
+    _write_json(tmp_path / "runner-terminal.json", changed)
+    evidence["terminal"] = expected_input_signature(bundle["terminal"])
+    with pytest.raises(RuntimeError, match="walls do not close"):
+        prepare_round0129_queue._r0124_estimate_calibration(
+            evidence,
+            terminal_path=bundle["terminal"],
+        )
 
 
 @pytest.mark.parametrize("outcome", [OUTCOME_MATERIAL, OUTCOME_NOT_MATERIAL])
