@@ -17,7 +17,12 @@ from basemap.round0128_k49_rescue import (
     noninferiority_checks,
     paired_density_materiality,
 )
-from experiments.prepare_round0128_queue import _require_issued_round
+from experiments.prepare_round0128_queue import (
+    GPU_HOURS_CAP,
+    P90_GPU_TOTAL_SECONDS,
+    P90_GRAPH_PART_SECONDS,
+    _require_issued_round,
+)
 from experiments.round0105_nodes import _exact_rerank
 from experiments.round0106_nodes import (
     R0106_GRAPH_CONTRACT,
@@ -25,10 +30,15 @@ from experiments.round0106_nodes import (
     _validate_directed_memberships,
 )
 from experiments.round0128_nodes import (
+    EVALUATION_CONTRACT,
     GRAPH_CONTRACT,
     _k49_policy_metrics,
     _legacy_initial_reconstruction,
     _model_class,
+)
+from experiments.round0108_nodes import (
+    R0108_EVALUATION_CONTRACT,
+    _ordered_core_panel_arrays,
 )
 
 
@@ -106,6 +116,60 @@ def test_legacy_r0106_contract_and_part_hash_are_frozen() -> None:
     assert GRAPH_CONTRACT.round_id == "0128"
     assert GRAPH_CONTRACT.k == GRAPH_K
     assert GRAPH_CONTRACT.n_neighbors == 50
+
+
+def test_legacy_r0108_npz_member_order_is_frozen() -> None:
+    common = {
+        key: np.asarray([index])
+        for index, key in enumerate((
+            "global_anchor_rows",
+            "compact_anchor_rows",
+            "group_ids",
+            "graph_fuzzy_weights",
+            "low_neighbors_top50",
+            "high_radius",
+            "low_radius",
+            "anchor_family_sizes",
+            "density_bootstrap",
+            "density_permuted_null",
+            "anchor_coordinates",
+            "observed_map_mixing",
+            "centroid_distances",
+        ))
+    }
+    high = np.asarray([[1]], dtype=np.int64)
+    graph = np.asarray([[2]], dtype=np.int64)
+    legacy = _ordered_core_panel_arrays(
+        R0108_EVALUATION_CONTRACT,
+        common,
+        high_neighbors=high,
+        graph_neighbors=graph,
+    )
+    assert list(legacy) == [
+        "global_anchor_rows",
+        "compact_anchor_rows",
+        "group_ids",
+        "high_neighbors_top15",
+        "graph_neighbors_top15",
+        "graph_fuzzy_weights",
+        "low_neighbors_top50",
+        "high_radius",
+        "low_radius",
+        "anchor_family_sizes",
+        "density_bootstrap",
+        "density_permuted_null",
+        "anchor_coordinates",
+        "observed_map_mixing",
+        "centroid_distances",
+    ]
+    treatment = _ordered_core_panel_arrays(
+        EVALUATION_CONTRACT,
+        common,
+        high_neighbors=high,
+        graph_neighbors=graph,
+    )
+    assert "high_neighbors_topk" in treatment
+    assert "graph_neighbors_topk" in treatment
 
 
 def test_k49_membership_contract_counts_exact_degree() -> None:
@@ -336,3 +400,11 @@ def test_draft_round_cannot_materialize_queue(
     )
     with pytest.raises(RuntimeError, match="found 0"):
         _require_issued_round()
+
+
+def test_p90_budget_has_graph_and_terminal_headroom() -> None:
+    assert 3 * P90_GRAPH_PART_SECONDS == 3_600.0
+    assert P90_GPU_TOTAL_SECONDS == 23_700.0
+    assert P90_GPU_TOTAL_SECONDS / 3_600 == pytest.approx(6.5833333333)
+    assert GPU_HOURS_CAP == 8.0
+    assert P90_GPU_TOTAL_SECONDS < GPU_HOURS_CAP * 3_600

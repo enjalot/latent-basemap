@@ -119,6 +119,22 @@ R0108_EVALUATION_CONTRACT = EvaluationNodeContract(
     graph_schema="round0106-jina-diverse-25m-fuzzy-graph-v1",
 )
 
+_CORE_PANEL_COMMON_ORDER = (
+    "global_anchor_rows",
+    "compact_anchor_rows",
+    "group_ids",
+    "graph_fuzzy_weights",
+    "low_neighbors_top50",
+    "high_radius",
+    "low_radius",
+    "anchor_family_sizes",
+    "density_bootstrap",
+    "density_permuted_null",
+    "anchor_coordinates",
+    "observed_map_mixing",
+    "centroid_distances",
+)
+
 
 def evaluation_node_contract(job: Mapping[str, Any]) -> EvaluationNodeContract:
     value = job.get("evaluation_node_contract")
@@ -158,6 +174,31 @@ def _load_contract_model(
         expected_seed=contract.seed,
         expected_graph_schema=contract.graph_schema,
     )
+
+
+def _ordered_core_panel_arrays(
+    contract: EvaluationNodeContract,
+    values: Mapping[str, np.ndarray],
+    *,
+    high_neighbors: np.ndarray,
+    graph_neighbors: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Keep legacy NPZ member order exact while naming explicit-k outputs."""
+    if set(values) != set(_CORE_PANEL_COMMON_ORDER):
+        raise Round0108Error("core panel array members changed")
+    output = {
+        key: values[key] for key in _CORE_PANEL_COMMON_ORDER[:3]
+    }
+    if contract.graph_k == 15:
+        output["high_neighbors_top15"] = high_neighbors
+        output["graph_neighbors_top15"] = graph_neighbors
+    else:
+        output["high_neighbors_topk"] = high_neighbors
+        output["graph_neighbors_topk"] = graph_neighbors
+    output.update({
+        key: values[key] for key in _CORE_PANEL_COMMON_ORDER[3:]
+    })
+    return output
 
 
 def _panel_config(*, anchors: int):
@@ -867,7 +908,7 @@ def run_core_score(
         finite_noncollapsed=finite_noncollapsed,
     )
     arrays_path = os.path.join(output, "core-panel-arrays.npz")
-    panel_arrays = {
+    panel_values = {
         "global_anchor_rows": global_anchors,
         "compact_anchor_rows": compact_anchors,
         "group_ids": group_ids,
@@ -882,12 +923,13 @@ def run_core_score(
         "observed_map_mixing": observed_mixing,
         "centroid_distances": centroid_distances,
     }
-    if contract.graph_k == 15:
-        panel_arrays["high_neighbors_top15"] = high_neighbors
-        panel_arrays["graph_neighbors_top15"] = graph_neighbors
-    else:
-        panel_arrays["high_neighbors_topk"] = high_neighbors
-        panel_arrays["graph_neighbors_topk"] = graph_neighbors
+    # NPZ member order is byte-significant even though lookup is name-based.
+    panel_arrays = _ordered_core_panel_arrays(
+        contract,
+        panel_values,
+        high_neighbors=high_neighbors,
+        graph_neighbors=graph_neighbors,
+    )
     atomic_save_new_npz(arrays_path, immutable=True, **panel_arrays)
     if contract.graph_k == 15:
         exact_truth = {

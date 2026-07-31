@@ -75,6 +75,24 @@ R0108_CALIBRATION_RECEIPT = os.path.join(
 R0108_CORE = os.path.join(R0108_ROOT, "artifacts", "core-geometry")
 R0108_OOD = os.path.join(R0108_ROOT, "artifacts", "ood")
 
+GPU_HOURS_CAP = 8.0
+P90_QUALIFICATION_SECONDS = 900.0
+P90_GRAPH_PART_SECONDS = 1_200.0
+P90_TRAIN_SECONDS = 15_000.0
+P90_TRANSFORM_SECONDS = 900.0
+P90_CORE_SECONDS = 900.0
+P90_OOD_SECONDS = 1_800.0
+P90_MATCHED_SECONDS = 600.0
+P90_GPU_TOTAL_SECONDS = (
+    P90_QUALIFICATION_SECONDS
+    + len(PARTS) * P90_GRAPH_PART_SECONDS
+    + P90_TRAIN_SECONDS
+    + P90_TRANSFORM_SECONDS
+    + P90_CORE_SECONDS
+    + P90_OOD_SECONDS
+    + P90_MATCHED_SECONDS
+)
+
 REVIEW_DEFAULTS = {
     "0105": (
         "review-0105-2026-07-29.md",
@@ -294,7 +312,7 @@ def prepare_round0128(
         deps=[],
         output=quality_output,
         expected_inputs=search_inputs,
-        p90_wall_s=900.0,
+        p90_wall_s=P90_QUALIFICATION_SECONDS,
         gpu=True,
         r0105_truth=R0105_TRUTH,
         r0105_truth_sha256=expected_input_signature(R0105_TRUTH)["sha256"],
@@ -308,7 +326,7 @@ def prepare_round0128(
             deps=["qualify_k49_selected_policy"],
             output=part_outputs[part],
             expected_inputs=search_inputs,
-            p90_wall_s=600.0,
+            p90_wall_s=P90_GRAPH_PART_SECONDS,
             gpu=True,
             part=part,
             quality_output=quality_output,
@@ -336,7 +354,7 @@ def prepare_round0128(
         deps=["assemble_k49_graph"],
         output=train_output,
         expected_inputs=[*common, *r0107_inputs, *substrate_inputs],
-        p90_wall_s=12_750.0,
+        p90_wall_s=P90_TRAIN_SECONDS,
         gpu=True,
         training=True,
         release_sha=release_sha,
@@ -369,7 +387,7 @@ def prepare_round0128(
         deps=["train_k49_treatment"],
         output=transform_output,
         expected_inputs=eval_common,
-        p90_wall_s=900.0,
+        p90_wall_s=P90_TRANSFORM_SECONDS,
         gpu=True,
         train_output=train_output,
         graph_manifest=graph_manifest,
@@ -381,7 +399,7 @@ def prepare_round0128(
         deps=["transform_retained_map"],
         output=core_output,
         expected_inputs=eval_common,
-        p90_wall_s=900.0,
+        p90_wall_s=P90_CORE_SECONDS,
         gpu=True,
         calibration_output=R0108_CALIBRATION,
         transform_output=transform_output,
@@ -403,7 +421,7 @@ def prepare_round0128(
             *ood_source["language_sources"].values(),
             *ood_source["diagnostic_sources"].values(),
         ]),
-        p90_wall_s=1_800.0,
+        p90_wall_s=P90_OOD_SECONDS,
         gpu=True,
         transform_output=transform_output,
         selection=R0108_SELECTION,
@@ -426,7 +444,7 @@ def prepare_round0128(
             expected_input_signature(R0040_REFERENCE),
             expected_input_signature(R0108_CALIBRATION_RECEIPT),
         ]),
-        p90_wall_s=600.0,
+        p90_wall_s=P90_MATCHED_SECONDS,
         gpu=True,
         calibration_output=R0108_CALIBRATION,
         census_receipt=R0040_CENSUS_RECEIPT,
@@ -484,7 +502,7 @@ def prepare_round0128(
         release_sha=release_sha,
         round_file=round_file,
         queue_root=queue_root,
-        gpu_hours_cap=5.5,
+        gpu_hours_cap=GPU_HOURS_CAP,
         execution_authority="autonomous-gpu",
         gpu=True,
     )
@@ -536,14 +554,16 @@ def prepare_round0128(
     }
     queue["jobs"] = jobs
     queue["p90_gpu_seconds"] = {
-        "qualify_k49_selected_policy": 900.0,
-        **{str(job["id"]): 600.0 for job in graph_jobs},
-        "train_k49_treatment": 12_750.0,
-        "transform_retained_map": 900.0,
-        "score_core_geometry": 900.0,
-        "score_ood": 1_800.0,
-        "score_matched_r0040_density": 600.0,
-        "total": 19_650.0,
+        "qualify_k49_selected_policy": P90_QUALIFICATION_SECONDS,
+        **{
+            str(job["id"]): P90_GRAPH_PART_SECONDS for job in graph_jobs
+        },
+        "train_k49_treatment": P90_TRAIN_SECONDS,
+        "transform_retained_map": P90_TRANSFORM_SECONDS,
+        "score_core_geometry": P90_CORE_SECONDS,
+        "score_ood": P90_OOD_SECONDS,
+        "score_matched_r0040_density": P90_MATCHED_SECONDS,
+        "total": P90_GPU_TOTAL_SECONDS,
     }
     path = os.path.join(queue_root, "queue.json")
     atomic_write_new_json(path, queue, immutable=True)
