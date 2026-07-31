@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import glob
 import json
 import os
@@ -29,6 +30,11 @@ ROUND_ID = "0118"
 ROUND_ROOT = "/data/latent-basemap/runs/round-0118"
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE_GLOB = os.path.join(LAB_ROOT, "round-0118-*.md")
+REVIEW_RELEASES = {
+    "0108": "capability:jina-diverse-25m-map-registry-v1",
+    "0110": "0118",
+    "0111": "capability:jina-diverse-25m-full768-trained-map-seed44-v1",
+}
 
 R0108_ROOT = "/data/latent-basemap/runs/round-0108/queue-attempt-3"
 R0108_QUEUE = os.path.join(R0108_ROOT, "queue.json")
@@ -111,16 +117,27 @@ def _require_accepted_review(
     *,
     expected_sha256: str,
     round_id: str,
+    required_release: str,
 ) -> dict[str, Any]:
     signature = expected_input_signature(path)
     if signature["sha256"] != expected_sha256:
         raise RuntimeError(f"Review {round_id} bytes changed")
     frontmatter = _frontmatter(path)
+    try:
+        releases = ast.literal_eval(frontmatter.get("releases", "[]"))
+    except (SyntaxError, ValueError) as error:
+        raise RuntimeError(
+            f"Review {round_id} releases are malformed"
+        ) from error
     if (
         frontmatter.get("round_id") != round_id
         or frontmatter.get("status") != "accepted"
+        or not isinstance(releases, list)
+        or required_release not in releases
     ):
-        raise RuntimeError(f"Review {round_id} is not accepted")
+        raise RuntimeError(
+            f"Review {round_id} is not accepted and release-complete"
+        )
     return signature
 
 
@@ -190,6 +207,8 @@ def _job_template(source: dict[str, Any]) -> dict[str, Any]:
 def prepare_round0118(
     *,
     release_sha: str,
+    r0108_review_path: str,
+    r0108_review_sha256: str,
     r0110_review_path: str,
     r0110_review_sha256: str,
     r0111_review_path: str,
@@ -205,14 +224,22 @@ def prepare_round0118(
     round_file = _require_issued_round()
     reviews = [
         _require_accepted_review(
+            r0108_review_path,
+            expected_sha256=r0108_review_sha256,
+            round_id="0108",
+            required_release=REVIEW_RELEASES["0108"],
+        ),
+        _require_accepted_review(
             r0110_review_path,
             expected_sha256=r0110_review_sha256,
             round_id="0110",
+            required_release=REVIEW_RELEASES["0110"],
         ),
         _require_accepted_review(
             r0111_review_path,
             expected_sha256=r0111_review_sha256,
             round_id="0111",
+            required_release=REVIEW_RELEASES["0111"],
         ),
     ]
 
@@ -476,7 +503,7 @@ def prepare_round0118(
                 "score_seed44_ood",
                 "score_seed44_matched_fineweb_density",
             ],
-            "outputs": [decision_output],
+            "outputs": [decision_output, render_output],
             "done_marker": os.path.join(
                 artifacts,
                 "decide_three_seed_stability_and_publish_registry.done.json",
@@ -511,7 +538,7 @@ def prepare_round0118(
     queue["schema"] = "round0118-diverse-jina-seed44-evaluation-queue-v1"
     queue["repo_root"] = RELEASE_ROOT
     queue["queue_class"] = "gpu-research"
-    queue["required_reviews"] = ["0110", "0111"]
+    queue["required_reviews"] = ["0108", "0110", "0111"]
     queue["capability_dependencies"] = [
         "jina-diverse-25m-full768-trained-map-seed44-v1",
         "jina-diverse-25m-map-registry-v1",
@@ -596,6 +623,8 @@ def prepare_round0118(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-sha", required=True)
+    parser.add_argument("--r0108-review", required=True)
+    parser.add_argument("--r0108-review-sha256", required=True)
     parser.add_argument("--r0110-review", required=True)
     parser.add_argument("--r0110-review-sha256", required=True)
     parser.add_argument("--r0111-review", required=True)
@@ -610,6 +639,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     path = prepare_round0118(
         release_sha=args.release_sha,
+        r0108_review_path=args.r0108_review,
+        r0108_review_sha256=args.r0108_review_sha256,
         r0110_review_path=args.r0110_review,
         r0110_review_sha256=args.r0110_review_sha256,
         r0111_review_path=args.r0111_review,

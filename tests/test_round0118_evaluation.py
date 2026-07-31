@@ -262,6 +262,42 @@ def test_round0118_timing_is_receipt_calibrated_and_bounded() -> None:
     assert GPU_P90_S <= 15 * 60
 
 
+def test_review_admission_requires_the_registered_release(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "review-0111-2026-07-31.md"
+    path.write_text(
+        "---\nround_id: \"0111\"\nstatus: accepted\n"
+        "releases: [\"unrelated-negative-evidence\"]\n---\n",
+        encoding="utf-8",
+    )
+    signature = expected_input_signature(path)
+    with pytest.raises(RuntimeError, match="release-complete"):
+        prepare_round0118_queue._require_accepted_review(
+            str(path),
+            expected_sha256=signature["sha256"],
+            round_id="0111",
+            required_release=(
+                prepare_round0118_queue.REVIEW_RELEASES["0111"]
+            ),
+        )
+
+    path.write_text(
+        "---\nround_id: \"0111\"\nstatus: accepted\n"
+        "releases: ["
+        f"\"{prepare_round0118_queue.REVIEW_RELEASES['0111']}\""
+        "]\n---\n",
+        encoding="utf-8",
+    )
+    signature = expected_input_signature(path)
+    assert prepare_round0118_queue._require_accepted_review(
+        str(path),
+        expected_sha256=signature["sha256"],
+        round_id="0111",
+        required_release=prepare_round0118_queue.REVIEW_RELEASES["0111"],
+    ) == signature
+
+
 def test_prepare_queue_materializes_frozen_seed44_job_graph(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -307,16 +343,24 @@ def test_prepare_queue_materializes_frozen_seed44_job_graph(
         str(labs / "round-0118-*.md"),
     )
 
-    def review(round_id: str) -> tuple[Path, str]:
+    def review(round_id: str, release: str) -> tuple[Path, str]:
         path = labs / f"review-{round_id}-2026-07-31.md"
         path.write_text(
-            f"---\nround_id: \"{round_id}\"\nstatus: accepted\n---\n",
+            f"---\nround_id: \"{round_id}\"\nstatus: accepted\n"
+            f"releases: [\"{release}\"]\n---\n",
             encoding="utf-8",
         )
         return path, expected_input_signature(path)["sha256"]
 
-    r0110_review, r0110_sha = review("0110")
-    r0111_review, r0111_sha = review("0111")
+    r0108_review, r0108_sha = review(
+        "0108", prepare_round0118_queue.REVIEW_RELEASES["0108"]
+    )
+    r0110_review, r0110_sha = review(
+        "0110", prepare_round0118_queue.REVIEW_RELEASES["0110"]
+    )
+    r0111_review, r0111_sha = review(
+        "0111", prepare_round0118_queue.REVIEW_RELEASES["0111"]
+    )
 
     def terminal(root: Path, round_id: str, jobs: list[str]) -> None:
         root.mkdir(parents=True, exist_ok=True)
@@ -448,6 +492,8 @@ def test_prepare_queue_materializes_frozen_seed44_job_graph(
     output = tmp_path / "r0118" / "queue"
     path = prepare_round0118_queue.prepare_round0118(
         release_sha="a" * 40,
+        r0108_review_path=str(r0108_review),
+        r0108_review_sha256=r0108_sha,
         r0110_review_path=str(r0110_review),
         r0110_review_sha256=r0110_sha,
         r0111_review_path=str(r0111_review),
@@ -468,6 +514,11 @@ def test_prepare_queue_materializes_frozen_seed44_job_graph(
         "decide_three_seed_stability_and_publish_registry",
     ]
     assert queue["jobs"][-1]["node_policy"]["gpu_required"] is False
+    assert queue["jobs"][-1]["outputs"] == [
+        str(output / "artifacts" / "three-seed-decision"),
+        str(output / "artifacts" / "semantic-renders"),
+    ]
+    assert queue["required_reviews"] == ["0108", "0110", "0111"]
     assert queue["scientific_contract"][
         "production_readiness_claimed"
     ] is False
