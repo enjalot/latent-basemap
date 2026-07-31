@@ -126,11 +126,17 @@ def _projection_map_context(panel: dict, rid: str) -> tuple[str, dict | None, di
     return str(label or f"round{rid}"), model, coordinates
 
 
-def scan_projection_maps(round_dir: Path, ledger: dict) -> list[dict]:
+def scan_projection_maps(
+    round_dir: Path,
+    ledger: dict,
+    *,
+    queue_dir: Path | None = None,
+) -> list[dict]:
     """Discover immutable OOD coordinate archives beside registered panels."""
     rid_m = re.match(r"round-(\d{4})", round_dir.name)
     rid = rid_m.group(1) if rid_m else round_dir.name
-    artifacts = round_dir / "queue/artifacts"
+    queue_dir = queue_dir or round_dir / "queue"
+    artifacts = queue_dir / "artifacts"
     panels = sorted({
         *artifacts.glob("**/universality-panel-v1.json"),
         *artifacts.glob("**/common-corpus-ood-panel-v1.json"),
@@ -142,8 +148,9 @@ def scan_projection_maps(round_dir: Path, ledger: dict) -> list[dict]:
         "code": "Common Corpus code",
         "science": "Common Corpus science",
         "latin": "Common Corpus Latin",
+        "pol_Latn": "Held-out Polish",
     }
-    queue = _load_json(round_dir / "queue/queue.json") or {}
+    queue = _load_json(queue_dir / "queue.json") or {}
     release_sha = queue.get("release_sha") or (queue.get("release") or {}).get("sha")
     for panel_path in panels:
         panel = _load_json(panel_path)
@@ -218,12 +225,18 @@ def scan_projection_maps(round_dir: Path, ledger: dict) -> list[dict]:
     return entries
 
 
-def scan_modern_round(round_dir: Path, ledger: dict) -> list[dict]:
+def scan_modern_round(
+    round_dir: Path,
+    ledger: dict,
+    *,
+    queue_dir: Path | None = None,
+) -> list[dict]:
     """Rounds with a queue/ manifest (0014+ layout). One entry per trained map."""
     rid_m = re.match(r"round-(\d{4})", round_dir.name)
     rid = rid_m.group(1) if rid_m else round_dir.name
-    art = round_dir / "queue/artifacts"
-    queue = _load_json(round_dir / "queue/queue.json") or {}
+    queue_dir = queue_dir or round_dir / "queue"
+    art = queue_dir / "artifacts"
+    queue = _load_json(queue_dir / "queue.json") or {}
     entries = []
 
     receipt = _load_json(art / "train/train-receipt.json")
@@ -299,6 +312,403 @@ def scan_modern_round(round_dir: Path, ledger: dict) -> list[dict]:
     return entries
 
 
+def scan_evaluation_round(
+    round_dir: Path,
+    ledger: dict,
+    *,
+    queue_dir: Path | None = None,
+) -> list[dict]:
+    """Discover a map evaluated in a successor round to its training round.
+
+    R0034 stops at a reviewed model candidate and R0036 owns its transform and
+    quality claims.  Requiring a synthetic ``artifacts/train`` directory here
+    would misstate that provenance, so the registry consumes the sealed
+    transform's external model reference directly.
+    """
+    rid_m = re.match(r"round-(\d{4})", round_dir.name)
+    rid = rid_m.group(1) if rid_m else round_dir.name
+    queue_dir = queue_dir or round_dir / "queue"
+    art = queue_dir / "artifacts"
+    transform_path = art / "coordinates/actual-transform.json"
+    panel_path = art / "panel/panel.json"
+    render_path = art / "semantic-renders/render-manifest.json"
+    transform = _load_json(transform_path)
+    panel = _load_json(panel_path)
+    if (
+        not isinstance(transform, dict)
+        or transform.get("schema") != "round0036-transform-capability-v1"
+        or not isinstance(panel, dict)
+        or panel.get("schema") != "round0036-registered-panel-v1"
+    ):
+        return []
+    queue = _load_json(queue_dir / "queue.json") or {}
+    render = _load_json(render_path) or {}
+    scientific = panel.get("panel") if isinstance(panel.get("panel"), dict) else {}
+    projection = panel.get("projection") \
+        if isinstance(panel.get("projection"), dict) else {}
+    purity = scientific.get("purity") \
+        if isinstance(scientific.get("purity"), dict) else {}
+    model = transform.get("model") if isinstance(transform.get("model"), dict) else {}
+    chunks = sorted((art / "coordinates").glob("chunk-*/coordinates.npy"))
+    pngs = sorted((art / "semantic-renders").glob("*.png")) \
+        if (art / "semantic-renders").is_dir() else []
+    finished = None
+    for marker in sorted(art.glob("*.done.json")):
+        finished = (_load_json(marker) or {}).get("finished") or finished
+    checks = panel.get("decision_checks") or {}
+    accounting = transform.get("row_accounting") or {}
+    selector_passed = bool(checks) and all(bool(value) for value in checks.values())
+    return [{
+        "map_id": f"round-{rid}-r0034-seed42-150m",
+        "round_id": rid,
+        "kind": "round-map",
+        "date": finished,
+        "evidence_status": evidence_status(rid, ledger),
+        "n_rows": accounting.get("all_rows"),
+        "scientific_rows": accounting.get("retained_representatives"),
+        "dims": [384, 2],
+        "architecture": "residual_bottleneck",
+        "hidden_dim": 2048,
+        "kernel": "legacy_lp",
+        "pipeline": "R0034-host-int8-canonical/R0036-retained-evaluation",
+        "precision": "fp32-transform",
+        "scientific_status": (
+            "same-domain-selector-pass"
+            if selector_passed
+            else "same-domain-selector-failed-diagnostic"
+        ),
+        "capability_candidate": selector_passed,
+        "model": model,
+        "coordinates": {
+            "dir": _relpath(art / "coordinates"),
+            "chunks": len(chunks),
+            "receipt_sha256": _file_signature(transform_path)["sha256"],
+        },
+        "panel": {
+            "path": _relpath(panel_path),
+            "ffr": scientific.get("ffr"),
+            "density": scientific.get("density"),
+            "purity_k256": purity.get("k256"),
+            "purity_k1024": purity.get("k1024"),
+            "proj_ffr": projection.get("proj_ffr"),
+            "proj_knn_ffr": projection.get("proj_knn_regressor_ffr"),
+            "decision_checks_all_pass": selector_passed,
+            "formula_version": scientific.get("formula_version"),
+        },
+        "renders": [
+            {"path": _relpath(path), "bytes": path.stat().st_size}
+            for path in pngs
+        ],
+        "render_diagnostics": render.get("diagnostics"),
+        "release_sha": queue.get("release_sha") or (queue.get("release") or {}).get("sha"),
+        "run_dir": _relpath(round_dir),
+        "training_round": "0034",
+    }]
+
+
+def scan_scale_evaluation_round(
+    round_dir: Path,
+    ledger: dict,
+    *,
+    queue_dir: Path | None = None,
+) -> list[dict]:
+    """Discover registry-facing maps produced by scale evaluation rounds.
+
+    R0064 intentionally evaluates three map/universe pairs, but only the
+    matched 30M control and the full 60M treatment are base maps.  The
+    60M-model-on-30M pair is a same-row diagnostic and remains available in
+    the scale-comparison receipt without becoming a third product map. Newer
+    rounds declare their base maps in an immutable, queue-local definition
+    file so registry discovery does not require another round-specific branch.
+    """
+    rid_m = re.match(r"round-(\d{4})", round_dir.name)
+    rid = rid_m.group(1) if rid_m else round_dir.name
+    queue_dir = queue_dir or round_dir / "queue"
+    art = queue_dir / "artifacts"
+    queue = _load_json(queue_dir / "queue.json") or {}
+    render_manifest = _load_json(
+        art / "semantic-renders/render-manifest.json"
+    ) or {}
+    if rid == "0064":
+        definitions = (
+            {
+                "key": "r0061-30m-on-30m",
+                "label": "r0061-balanced-30m-seed42",
+                "coordinates": art / "coordinates-r0061-30m",
+                "panel": art / "panel-r0061-30m/panel.json",
+                "render": art / "semantic-renders/r0061-30m-on-30m.png",
+                "training_round": "0061",
+                "panel_schema": "round0064-registered-panel-v1",
+            },
+            {
+                "key": "r0063-60m-on-60m",
+                "label": "r0063-balanced-60m-seed42",
+                "coordinates": art / "coordinates-r0063-60m",
+                "panel": art / "panel-r0063-60m/panel.json",
+                "render": art / "semantic-renders/r0063-60m-on-60m.png",
+                "training_round": "0063",
+                "panel_schema": "round0064-registered-panel-v1",
+            },
+        )
+    else:
+        declared = _load_json(
+            art / "semantic-renders/scale-map-definitions.json"
+        )
+        if (
+            not isinstance(declared, dict)
+            or declared.get("schema") != "scale-map-definitions-v1"
+            or declared.get("round_id") != rid
+            or not isinstance(declared.get("maps"), list)
+        ):
+            return []
+        definitions = []
+        for raw in declared["maps"]:
+            if not isinstance(raw, dict):
+                return []
+            resolved: dict[str, object] = {}
+            for field in ("coordinates", "panel", "render"):
+                value = raw.get(field)
+                relative = Path(value) if isinstance(value, str) else None
+                if (
+                    relative is None
+                    or relative.is_absolute()
+                    or ".." in relative.parts
+                ):
+                    return []
+                resolved[field] = art / relative
+            definitions.append({
+                "key": raw.get("key"),
+                "label": raw.get("label"),
+                "training_round": raw.get("training_round"),
+                "panel_schema": raw.get("panel_schema"),
+                "density_semantics": raw.get("density_semantics"),
+                **resolved,
+            })
+    entries: list[dict] = []
+    for definition in definitions:
+        transform_path = definition["coordinates"] / "actual-transform.json"
+        transform = _load_json(transform_path)
+        panel = _load_json(definition["panel"])
+        if (
+            not isinstance(transform, dict)
+            or transform.get("schema")
+            != "round0036-transform-capability-v1"
+            or transform.get("map_key") != definition["key"]
+            or not isinstance(panel, dict)
+            or panel.get("schema") != definition["panel_schema"]
+            or panel.get("map_key") != definition["key"]
+        ):
+            continue
+        scientific = panel.get("panel") or {}
+        projection = panel.get("projection") or {}
+        purity = scientific.get("purity") or {}
+        accounting = transform.get("row_accounting") or {}
+        model = transform.get("model") or {}
+        chunks = sorted(
+            definition["coordinates"].glob("chunk-*/coordinates.npy")
+        )
+        renders = (
+            [{
+                "path": _relpath(definition["render"]),
+                "bytes": definition["render"].stat().st_size,
+            }]
+            if definition["render"].is_file()
+            else []
+        )
+        checks = panel.get("decision_checks") or {}
+        if definition.get("density_semantics") in {
+            "representative-relative-v1",
+            "density-v2-fixed-floor-plus-legacy-diagnostic",
+        }:
+            selector_checks = {
+                key: value
+                for key, value in checks.items()
+                if key != "density_at_least_0_60"
+            }
+            selector_passed = bool(selector_checks) and all(
+                bool(value) for value in selector_checks.values()
+            )
+            selector_label = "representative-non-density-selector-pass"
+            selector_failed_label = (
+                "representative-non-density-selector-failed-diagnostic"
+            )
+        else:
+            # Preserve the registered decision on older panels. Some accepted
+            # scale panels predate the durable decision_checks object even
+            # though their absolute_selector_passed field is present.
+            selector_passed = bool(panel.get("absolute_selector_passed"))
+            selector_label = "same-domain-selector-pass"
+            selector_failed_label = "same-domain-selector-failed-diagnostic"
+        entries.append({
+            "map_id": f"round-{rid}-{_slug(definition['label'])}",
+            "round_id": rid,
+            "kind": "round-map",
+            "map_label": definition["label"],
+            "date": datetime.fromtimestamp(
+                definition["panel"].stat().st_mtime,
+                tz=timezone.utc,
+            ).isoformat(),
+            "evidence_status": evidence_status(rid, ledger),
+            "n_rows": accounting.get("all_rows"),
+            "scientific_rows": accounting.get("retained_representatives"),
+            "dims": [384, 2],
+            "architecture": "residual_bottleneck",
+            "hidden_dim": 2048,
+            "kernel": "legacy_lp",
+            "pipeline": (
+                f"R{definition['training_round']}-host-int8-canonical/"
+                f"R{rid}-representative-evaluation"
+            ),
+            "precision": "fp32-transform",
+            "scientific_status": (
+                selector_label
+                if selector_passed
+                else selector_failed_label
+            ),
+            "capability_candidate": selector_passed,
+            "density_semantics": definition.get("density_semantics"),
+            "model": model,
+            "coordinates": {
+                "dir": _relpath(definition["coordinates"]),
+                "chunks": len(chunks),
+                "receipt_sha256": _file_signature(transform_path)["sha256"],
+            },
+            "panel": {
+                "path": _relpath(definition["panel"]),
+                "ffr": scientific.get("ffr"),
+                "density": scientific.get("density"),
+                "purity_k256": purity.get("k256"),
+                "purity_k1024": purity.get("k1024"),
+                "proj_ffr": projection.get("proj_ffr"),
+                "proj_knn_ffr": projection.get(
+                    "proj_knn_regressor_ffr"
+                ),
+                "decision_checks_all_pass": selector_passed,
+                "raw_decision_checks_all_pass": (
+                    bool(checks)
+                    and all(bool(value) for value in checks.values())
+                ),
+                "legacy_absolute_selector_passed": bool(
+                    panel.get("absolute_selector_passed")
+                ),
+                "formula_version": scientific.get("formula_version"),
+            },
+            "renders": renders,
+            "render_diagnostics": (
+                (render_manifest.get("renders") or {}).get(
+                    definition["key"]
+                )
+            ),
+            "release_sha": queue.get("release_sha")
+            or (queue.get("release") or {}).get("sha"),
+            "run_dir": _relpath(round_dir),
+            "training_round": definition["training_round"],
+        })
+    return entries
+
+
+def scan_round0108_atlas(
+    round_dir: Path,
+    ledger: dict,
+    *,
+    queue_dir: Path | None = None,
+) -> list[dict]:
+    """Discover the diverse-Jina atlas evaluated by R0108.
+
+    The map was trained in R0107 and transformed/evaluated in R0108.  Its
+    compact retained order and Jina-specific density calibration are not the
+    MiniLM scale-evaluation schema, so consume its explicit immutable
+    definition instead of pretending it is an R0036 map.
+    """
+    queue_dir = queue_dir or round_dir / "queue"
+    artifacts = queue_dir / "artifacts"
+    definition_path = artifacts / "semantic-renders/map-definition.json"
+    definition = _load_json(definition_path)
+    transform_path = artifacts / "coordinates/actual-transform.json"
+    core_path = artifacts / "core-geometry/core-geometry.json"
+    decision_path = artifacts / "decision/atlas-decision.json"
+    transform = _load_json(transform_path)
+    core = _load_json(core_path)
+    decision = _load_json(decision_path)
+    if (
+        not isinstance(definition, dict)
+        or definition.get("schema") != "round0108-map-definition-v1"
+        or definition.get("round_id") != "0108"
+        or not isinstance(transform, dict)
+        or transform.get("round_id") != "0108"
+        or transform.get("map_key") != definition.get("map_key")
+        or not isinstance(core, dict)
+        or core.get("schema") != "round0108-diverse-jina-core-geometry-v1"
+        or not isinstance(decision, dict)
+        or decision.get("schema") != "round0108-diverse-jina-atlas-decision-v1"
+        or definition.get("embedding_prompt") != "raw"
+        or definition.get("prompt_applied") is not False
+        or definition.get("production_document_prompt_transfer_resolved")
+        is not False
+        or definition.get("production_ready") is not False
+    ):
+        return []
+    queue = _load_json(queue_dir / "queue.json") or {}
+    global_metrics = (core.get("metrics") or {}).get("global") or {}
+    density = (core.get("metrics") or {}).get("density_v2") or {}
+    accounting = transform.get("row_accounting") or {}
+    accepted = decision.get("atlas_quality_capability_released") is True
+    coordinate_chunks = sorted(
+        (artifacts / "coordinates").glob("chunk-*/coordinates.npy")
+    )
+    return [{
+        "map_id": "round-0108-r0107-diverse-jina-25m-seed42",
+        "round_id": "0108",
+        "kind": "round-map",
+        "map_label": definition.get("map_label"),
+        "date": datetime.fromtimestamp(
+            decision_path.stat().st_mtime, tz=timezone.utc
+        ).isoformat(),
+        "evidence_status": evidence_status("0108", ledger),
+        "n_rows": accounting.get("all_rows"),
+        "scientific_rows": accounting.get("retained_representatives"),
+        "dims": [768, 2],
+        "architecture": "residual_bottleneck",
+        "hidden_dim": 2048,
+        "kernel": "legacy_lp",
+        "pipeline": "R0107 weighted-host-int8/R0108 retained evaluation",
+        "precision": "fp32-transform",
+        "embedding_prompt": definition.get("embedding_prompt"),
+        "prompt_applied": definition.get("prompt_applied"),
+        "production_document_prompt_transfer_resolved": definition.get(
+            "production_document_prompt_transfer_resolved"
+        ),
+        "production_ready": definition.get("production_ready") is True,
+        "scientific_status": (
+            "core-and-polish-ood-pass"
+            if accepted else "failed-with-registered-diagnostics"
+        ),
+        "capability_candidate": accepted,
+        "density_semantics": "jina-density-v2-two-seed-calibrated",
+        "model": transform.get("model"),
+        "coordinates": {
+            "dir": _relpath(artifacts / "coordinates"),
+            "chunks": len(coordinate_chunks),
+            "receipt_sha256": _file_signature(transform_path)["sha256"],
+        },
+        "panel": {
+            "path": _relpath(core_path),
+            "ffr": global_metrics.get("ffr"),
+            "density": density.get("correlation"),
+            "purity_k256": None,
+            "purity_k1024": None,
+            "proj_ffr": None,
+            "decision_checks_all_pass": accepted,
+            "formula_version": "density-v2-jina-calibrated",
+        },
+        "renders": [],
+        "render_diagnostics": core.get("geometry_diagnostics"),
+        "release_sha": queue.get("release_sha"),
+        "run_dir": _relpath(round_dir),
+        "training_round": "0107",
+    }]
+
+
 def _sha_of(obj) -> str | None:
     if isinstance(obj, dict):
         return obj.get("sha256") or obj.get("identity_sha256")
@@ -343,14 +753,52 @@ def scan_checkpoints() -> list[dict]:
     return out
 
 
+def _latest_queue_dir(round_dir: Path) -> Path | None:
+    """Select the newest immutable slim-runner attempt for one round.
+
+    ``queue`` is attempt 1. Setup corrections preserve it and materialize
+    ``queue-attempt-N`` siblings; scanning only the original directory makes
+    successful retry artifacts invisible to both the registry and the local
+    explorer. The highest numbered materialized attempt is the authoritative
+    artifact root while every older attempt remains untouched on disk.
+    """
+    candidates: list[tuple[int, Path]] = []
+    canonical = round_dir / "queue"
+    if (canonical / "artifacts").is_dir():
+        candidates.append((1, canonical))
+    for candidate in round_dir.glob("queue-attempt-*"):
+        match = re.fullmatch(r"queue-attempt-(\d+)", candidate.name)
+        if match and (candidate / "artifacts").is_dir():
+            candidates.append((int(match.group(1)), candidate))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])[1]
+
+
 def scan() -> dict:
     ledger = ledger_status()
     maps: list[dict] = []
     if RUNS_DIR.is_dir():
         for round_dir in sorted(RUNS_DIR.glob("round-*")):
-            if (round_dir / "queue/artifacts").is_dir():
-                maps += scan_modern_round(round_dir, ledger)
-                maps += scan_projection_maps(round_dir, ledger)
+            if re.fullmatch(r"round-\d{4}", round_dir.name) is None:
+                continue
+            queue_dir = _latest_queue_dir(round_dir)
+            if queue_dir is not None:
+                maps += scan_modern_round(
+                    round_dir, ledger, queue_dir=queue_dir
+                )
+                maps += scan_evaluation_round(
+                    round_dir, ledger, queue_dir=queue_dir
+                )
+                maps += scan_scale_evaluation_round(
+                    round_dir, ledger, queue_dir=queue_dir
+                )
+                maps += scan_round0108_atlas(
+                    round_dir, ledger, queue_dir=queue_dir
+                )
+                maps += scan_projection_maps(
+                    round_dir, ledger, queue_dir=queue_dir
+                )
             elif (round_dir / "renders").is_dir():
                 maps += scan_legacy_renders(round_dir, ledger)
     maps += scan_checkpoints()

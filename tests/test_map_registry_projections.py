@@ -131,3 +131,62 @@ def test_registry_index_links_projection_explorer(tmp_path: Path, monkeypatch) -
     assert "Projection maps" in index
     assert "round-0042-fixture-map-custom-projection" in index
     assert (site / "projections/round-0042-fixture-map-custom-projection/index.html").is_file()
+
+
+def test_registry_discovers_external_training_round_map_and_marks_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    runs = tmp_path / "runs"
+    labs = tmp_path / "labs"
+    checkpoints = tmp_path / "checkpoints"
+    artifacts = runs / "round-0036/queue/artifacts"
+    coordinates = artifacts / "coordinates"
+    panel_dir = artifacts / "panel"
+    render_dir = artifacts / "semantic-renders"
+    coordinates.mkdir(parents=True)
+    panel_dir.mkdir(parents=True)
+    render_dir.mkdir(parents=True)
+    labs.mkdir()
+    checkpoints.mkdir()
+    np.save(coordinates / "chunk-00000.npy", np.zeros((3, 2), np.float32))
+    (coordinates / "actual-transform.json").write_text(json.dumps({
+        "schema": "round0036-transform-capability-v1",
+        "model": {"canonical_path": "/tmp/r0034.pt", "sha256": "a" * 64},
+        "row_accounting": {
+            "all_rows": 150_000_000,
+            "retained_representatives": 147_221_757,
+        },
+    }))
+    (panel_dir / "panel.json").write_text(json.dumps({
+        "schema": "round0036-registered-panel-v1",
+        "panel": {
+            "ffr": 0.39,
+            "density": 0.7,
+            "purity": {"k256": 0.8, "k1024": 0.8},
+            "formula_version": "panel_v2.2-2026-07-15",
+        },
+        "projection": {"proj_ffr": 0.3},
+        "decision_checks": {"ffr_at_least_0_40": False},
+    }))
+    (render_dir / "render-manifest.json").write_text(json.dumps({
+        "diagnostics": {"collapsed": False}
+    }))
+    (runs / "round-0036/queue/queue.json").write_text(json.dumps({
+        "release_sha": "b" * 40
+    }))
+    (labs / "round-0036-2026-07-22.md").write_text(
+        '---\nround_id: "0036"\nstatus: issued\n---\n'
+    )
+    (labs / "review-0036-2026-07-22.md").write_text(
+        '---\nround_id: "0036"\nstatus: rejected\n---\n'
+    )
+    monkeypatch.setattr(map_registry, "RUNS_DIR", runs)
+    monkeypatch.setattr(map_registry, "LEDGER_DIR", labs)
+    monkeypatch.setattr(map_registry, "CHECKPOINT_DIR", checkpoints)
+
+    registry = map_registry.scan()
+    entry = next(item for item in registry["maps"] if item["round_id"] == "0036")
+    assert entry["training_round"] == "0034"
+    assert entry["scientific_status"] == "same-domain-selector-failed-diagnostic"
+    assert entry["capability_candidate"] is False
+    assert entry["panel"]["decision_checks_all_pass"] is False

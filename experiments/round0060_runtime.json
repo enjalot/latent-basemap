@@ -1,0 +1,42 @@
+{
+  "schema": "round0059-gpu-faiss-runtime-v1",
+  "python": "3.12.3",
+  "distributions": {
+    "faiss": "1.14.3",
+    "numpy": "2.4.4",
+    "nvidia-cublas-cu12": "12.8.4.1",
+    "nvidia-cuda-runtime-cu12": "12.8.90",
+    "torch": "2.11.0+cu128"
+  },
+  "modules": {
+    "faiss": "1.14.3",
+    "numpy": "2.4.4",
+    "torch": "2.11.0+cu128"
+  },
+  "binary_sha256": {
+    "faiss._swigfaiss_avx2": "ce4195fd56334aa169609dfc443bb03608d85aa83c0b5d6e9d6b5aeff616f7bb",
+    "torch._C": "fc945c4168eb823fba967804a4243111a3824ef9eda1a443c252244fa6c623a5"
+  },
+  "gpu_compute_capability": [12, 0],
+  "faiss_build": {
+    "source_repository": "https://github.com/facebookresearch/faiss.git",
+    "source_tag": "v1.14.3",
+    "source_commit": "0ca9df4792b173d573044ee14ca0704780176e82",
+    "cuda_compiler": "12.8.93",
+    "cuda_architectures": [120],
+    "host_compiler": "gcc-13.3.0",
+    "cmake": "4.4.0",
+    "blas": "system-openblas-0.3.26",
+    "wheel": {
+      "canonical_path": "/data/latent-basemap/toolchains/faiss-v1.14.3-sm120/build/faiss/python/dist/faiss-1.14.3-py3-none-any.whl",
+      "kind": "file",
+      "bytes": 35239874,
+      "sha256": "1de097d3dd7a31dfc4ddfad77dc18f8dda86fbec391c102019732bf8f7f1492d"
+    }
+  },
+  "environment_policy": {
+    "faiss_runtime": "canonical-run-checkout-venv-source-built-sm120",
+    "torch_runtime": "canonical-run-checkout-venv",
+    "venv_mutation_after_queue_materialization": false
+  }
+}
