@@ -41,6 +41,7 @@ from .round0104_training import (
 
 ROUND_ID = "0125"
 CAPABILITY = "jina-fineweb-2m-runtime-path-density-bridge-v1"
+ORIGINAL_RELEASE_SHA = "ff5dfcde5632257aac355008a70bc330bab26bee"
 ARMS = ("device_treatment", "host_control")
 DEVICE_ARM, HOST_ARM = ARMS
 GRAPH_EDGES = 151_202_984
@@ -71,6 +72,17 @@ R0104_HIGH_D_REFERENCE_SHA256 = (
 )
 R0104_QUERY_TRUTH_SHA256 = (
     "a1dafdf662325bcc3cccf9e1156b74fea36570b6da331cc0fa455a639760418b"
+)
+R0104_QUERY_TRUTH_KEY = (
+    "d5c34b7bb2596f5e51d45de9a3c85def9703ae730cc34761a9e19c75101c9666"
+)
+R0104_QUERY_TRUTH_PRODUCER_IMPLEMENTATION_SHA256 = (
+    "42559e5ff24fceeb1f42927df65ded34f929fc70ad99c9db3fc79fc953293700"
+)
+R0104_QUERY_TRUTH_PRODUCER_BACKEND = "cuda"
+R0104_QUERY_TRUTH_PATH = (
+    "/data/latent-basemap/runs/round-0104/queue-attempt-3/artifacts/shared/"
+    "oos-query-truth-k10.npz"
 )
 R0104_FP16_MODEL_SHA256 = (
     "36a7fb86784b6a891f7c73b83d008aead320a7729eea913efc117e4bcd5b3e08"

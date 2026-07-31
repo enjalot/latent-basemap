@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import inspect
 import json
+import math
 import os
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from basemap.artifact_identity import expected_input_signature
+from basemap.artifact_identity import (
+    canonical_json,
+    expected_input_signature,
+    ordered_array_sha256,
+    sha256_bytes,
+)
 from basemap.round0104_training import (
     ROWS,
     PairedHostWeightedJinaSampler,
@@ -263,6 +270,196 @@ def test_environment_freeze_fails_closed_on_job_boundary_drift(
     )
     with pytest.raises(Round0125Error, match="environment changed"):
         validate_environment_freeze(expected)
+
+
+def test_historical_query_truth_requires_exact_explicit_producer_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import basemap.panel_v2 as panel_v2
+
+    def historical_cross_knn(
+        queries, corpus, k, config, hi_dim=True, q_tile=4096, exact=True
+    ):
+        return np.tile(np.arange(k, dtype=np.int64), (len(queries), 1))
+
+    monkeypatch.setattr(panel_v2, "cross_knn", historical_cross_knn)
+    historical_sha = sha256_bytes(
+        inspect.getsource(historical_cross_knn).encode("utf-8")
+    )
+    config = panel_v2.PanelV2Config(k_hit=3, overselect=2)
+    key, parts = panel_v2.query_truth_key(
+        corpus_identity={"sha256": "a" * 64},
+        query_identity={"sha256": "b" * 64},
+        cfg=config,
+        k=3,
+        corpus_cardinality=8,
+        query_rows=2,
+        dimensions=4,
+        candidate_compute_backend="cuda",
+    )
+    neighbors = np.asarray([[0, 1, 2], [3, 4, 5]], dtype=np.int64)
+    truth_path = panel_v2.save_query_truth(
+        {
+            "schema": panel_v2.QUERY_TRUTH_SCHEMA,
+            "key": key,
+            "key_parts": parts,
+            "k": 3,
+            "query_rows": 2,
+            "corpus_cardinality": 8,
+            "neighbors": neighbors,
+            "payload_sha256": ordered_array_sha256(neighbors),
+            "build_wall_s": 0.0,
+        },
+        str(tmp_path / "historical-truth.npz"),
+    )
+
+    def current_cross_knn(
+        queries, corpus, k, config, hi_dim=True, q_tile=4096, exact=True
+    ):
+        return np.tile(np.arange(k - 1, -1, -1, dtype=np.int64), (len(queries), 1))
+
+    monkeypatch.setattr(panel_v2, "cross_knn", current_cross_knn)
+    with pytest.raises(ValueError, match="implementation/backend identity"):
+        panel_v2.load_query_truth(
+            truth_path, expected_key=key,
+            expected_candidate_compute_backend="cuda",
+        )
+    with pytest.raises(ValueError, match="malformed"):
+        panel_v2.load_query_truth(
+            truth_path,
+            expected_candidate_compute_backend="cuda",
+            expected_producer_implementation_sha256=42,
+        )
+    with pytest.raises(ValueError, match="requires an explicit"):
+        panel_v2.load_query_truth(
+            truth_path,
+            expected_producer_implementation_sha256=historical_sha,
+        )
+    with pytest.raises(ValueError, match="implementation/backend identity"):
+        panel_v2.load_query_truth(
+            truth_path,
+            expected_candidate_compute_backend="cuda",
+            expected_producer_implementation_sha256="f" * 64,
+        )
+    loaded = panel_v2.load_query_truth(
+        truth_path,
+        expected_key=key,
+        expected_key_parts=parts,
+        expected_candidate_compute_backend="cuda",
+        expected_producer_implementation_sha256=historical_sha,
+    )
+    assert np.array_equal(loaded["neighbors"], neighbors)
+    assert sha256_bytes(canonical_json(loaded["key_parts"])) == key
+    with np.load(truth_path, allow_pickle=False) as archive:
+        corrupted = {
+            name: np.array(archive[name], copy=True) for name in archive.files
+        }
+    corrupted["neighbors"][0, 0] = 7
+    os.chmod(truth_path, 0o644)
+    with open(truth_path, "wb") as handle:
+        np.savez(handle, **corrupted)
+    with pytest.raises(ValueError, match="payload SHA-256 mismatch"):
+        panel_v2.load_query_truth(
+            truth_path,
+            expected_key=key,
+            expected_candidate_compute_backend="cuda",
+            expected_producer_implementation_sha256=historical_sha,
+        )
+
+
+def test_prior_r0125_artifacts_can_name_only_the_original_release() -> None:
+    active = {"manifest": {"release_sha": "c" * 40}}
+    assert round0125_nodes._prior_artifact_release_sha(
+        active, {}, field="train_release_sha"
+    ) == "c" * 40
+    assert round0125_nodes._prior_artifact_release_sha(
+        active,
+        {"train_release_sha": "ff5dfcde5632257aac355008a70bc330bab26bee"},
+        field="train_release_sha",
+    ) == "ff5dfcde5632257aac355008a70bc330bab26bee"
+    with pytest.raises(Round0125Error, match="exact original release"):
+        round0125_nodes._prior_artifact_release_sha(
+            active,
+            {"train_release_sha": "d" * 40},
+            field="train_release_sha",
+        )
+
+
+def test_r0125_query_truth_wrapper_never_infers_historical_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import basemap.panel_v2 as panel_v2
+    from basemap.round0125_runtime_bridge import (
+        R0104_QUERY_TRUTH_KEY,
+        R0104_QUERY_TRUTH_PRODUCER_BACKEND,
+        R0104_QUERY_TRUTH_PRODUCER_IMPLEMENTATION_SHA256,
+    )
+
+    artifact = tmp_path / "truth.npz"
+    artifact.write_bytes(b"representative truth bytes")
+    signature = expected_input_signature(str(artifact))
+    observed: dict[str, object] = {}
+
+    def fake_load(path: str, **kwargs):
+        observed.update({"path": path, **kwargs})
+        return {
+            "key_parts": {
+                "policy": {
+                    "implementation_sha256": (
+                        R0104_QUERY_TRUTH_PRODUCER_IMPLEMENTATION_SHA256
+                    ),
+                    "candidate_compute_backend": R0104_QUERY_TRUTH_PRODUCER_BACKEND,
+                }
+            }
+        }
+
+    monkeypatch.setattr(panel_v2, "load_query_truth", fake_load)
+    round0125_nodes._load_accepted_r0104_query_truth({
+        "query_truth": signature,
+        "query_truth_key": R0104_QUERY_TRUTH_KEY,
+    })
+    assert observed == {
+        "path": str(artifact),
+        "expected_key": R0104_QUERY_TRUTH_KEY,
+        "expected_candidate_compute_backend": R0104_QUERY_TRUTH_PRODUCER_BACKEND,
+        "expected_producer_implementation_sha256": (
+            R0104_QUERY_TRUTH_PRODUCER_IMPLEMENTATION_SHA256
+        ),
+    }
+
+    def wrong_policy(_path: str, **_kwargs):
+        return {
+            "key_parts": {
+                "policy": {
+                    "implementation_sha256": "f" * 64,
+                    "candidate_compute_backend": R0104_QUERY_TRUTH_PRODUCER_BACKEND,
+                }
+            }
+        }
+
+    monkeypatch.setattr(panel_v2, "load_query_truth", wrong_policy)
+    with pytest.raises(Round0125Error, match="producer changed"):
+        round0125_nodes._load_accepted_r0104_query_truth({
+            "query_truth": signature,
+            "query_truth_key": R0104_QUERY_TRUTH_KEY,
+        })
+
+
+def test_correction_queue_reserves_only_the_original_cap_residual() -> None:
+    from experiments.prepare_round0125_correction_queue import (
+        PRIOR_GPU_WALL_S,
+        RESIDUAL_GPU_CAP_HOURS,
+        ROUND_GPU_CAP_S,
+    )
+
+    assert PRIOR_GPU_WALL_S == 9_246.523752104957
+    assert RESIDUAL_GPU_CAP_HOURS > 900.0 / 3_600.0
+    assert math.isclose(
+        PRIOR_GPU_WALL_S + RESIDUAL_GPU_CAP_HOURS * 3_600.0,
+        ROUND_GPU_CAP_S,
+        rel_tol=0.0,
+        abs_tol=1e-9,
+    )
 
 
 def test_queue_preparation_refuses_wrong_python_before_writes(

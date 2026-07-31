@@ -46,6 +46,7 @@ from basemap.round0125_runtime_bridge import (
     HOST_ARM,
     MATCHED_DENSITY_FLOOR,
     N_EPOCHS,
+    ORIGINAL_RELEASE_SHA,
     PAIRED_BOOTSTRAP_DRAWS,
     PAIRED_BOOTSTRAP_SEED,
     PERFORMANCE_WARMUP_UPDATES,
@@ -56,6 +57,9 @@ from basemap.round0125_runtime_bridge import (
     R0104_GRAPH_MANIFEST_SHA256,
     R0104_GRAPH_SHA256,
     R0104_HIGH_D_REFERENCE_SHA256,
+    R0104_QUERY_TRUTH_KEY,
+    R0104_QUERY_TRUTH_PRODUCER_BACKEND,
+    R0104_QUERY_TRUTH_PRODUCER_IMPLEMENTATION_SHA256,
     R0104_QUERY_TRUTH_SHA256,
     R0104_SHARED_RECEIPT_SHA256,
     R0122_FP16_MATCHED_DENSITY,
@@ -157,11 +161,39 @@ def _load_shared_exact(
         != R0104_HIGH_D_REFERENCE_SHA256
         or shared.get("query_truth", {}).get("sha256")
         != R0104_QUERY_TRUTH_SHA256
+        or shared.get("query_truth_key") != R0104_QUERY_TRUTH_KEY
         or proof.get("payload_sha256")
         != "f4a0050e81a3755de84ba73405ba6823fa387f09a15d3ad299083fa60093f069"
     ):
         raise Round0125Error("accepted R0104 shared evidence changed")
     return shared, signature
+
+
+def _load_accepted_r0104_query_truth(
+    shared: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Authenticate, without relabelling, R0104's reviewed truth producer."""
+    from basemap.panel_v2 import load_query_truth
+
+    truth = load_query_truth(
+        verify_signature(
+            shared["query_truth"], label="accepted R0104 query truth"
+        ),
+        expected_key=R0104_QUERY_TRUTH_KEY,
+        expected_candidate_compute_backend=R0104_QUERY_TRUTH_PRODUCER_BACKEND,
+        expected_producer_implementation_sha256=(
+            R0104_QUERY_TRUTH_PRODUCER_IMPLEMENTATION_SHA256
+        ),
+    )
+    policy = (truth.get("key_parts") or {}).get("policy") or {}
+    if (
+        policy.get("implementation_sha256")
+        != R0104_QUERY_TRUTH_PRODUCER_IMPLEMENTATION_SHA256
+        or policy.get("candidate_compute_backend")
+        != R0104_QUERY_TRUTH_PRODUCER_BACKEND
+    ):
+        raise Round0125Error("accepted R0104 query truth producer changed")
+    return truth
 
 
 def _new_model(config: Mapping[str, Any], *, device: str = "cuda"):
@@ -246,6 +278,26 @@ def _train_receipt_contract(
         and set(checks) == TRAIN_CHECK_KEYS
         and all(checks.values())
     )
+
+
+def _prior_artifact_release_sha(
+    active: Mapping[str, Any], job: Mapping[str, Any], *, field: str
+) -> str:
+    """Return the authenticated release for an immutable completed artifact.
+
+    The correction queue may consume only R0125 artifacts sealed by the exact
+    original release.  Ordinary execution continues to require the active
+    release, preserving the original queue's behavior.
+    """
+    active_release = str(active["manifest"]["release_sha"])
+    observed = job.get(field)
+    if observed is None:
+        return active_release
+    if observed != ORIGINAL_RELEASE_SHA:
+        raise Round0125Error(
+            f"R0125 {field} may name only the exact original release"
+        )
+    return ORIGINAL_RELEASE_SHA
 
 
 def _open_training_input(
@@ -489,6 +541,9 @@ def _authenticate_model(
     train_path = os.path.join(str(job["train_output"]), "train-receipt.json")
     config_receipt = _read_sealed(config_path, label=f"R0125 {arm} config")
     train = _read_sealed(train_path, label=f"R0125 {arm} train")
+    train_release_sha = _prior_artifact_release_sha(
+        active, job, field="train_release_sha"
+    )
     expected_environment = (active.get("manifest") or {}).get("environment_freeze")
     if (
         config_receipt.get("schema") != _schema("production-config")
@@ -497,7 +552,7 @@ def _authenticate_model(
         or config_receipt.get("config") != config
         or config_receipt.get("config_sha256") != config_sha
         or train.get("arm") != arm
-        or train.get("release_sha") != active["manifest"]["release_sha"]
+        or train.get("release_sha") != train_release_sha
         or train.get("production_config") != expected_input_signature(config_path)
         or train.get("production_config_sha256") != config_sha
         or train.get("shared_evidence") != shared_signature
@@ -508,7 +563,7 @@ def _authenticate_model(
         or not _train_receipt_contract(
             train,
             arm=arm,
-            release_sha=active["manifest"]["release_sha"],
+            release_sha=train_release_sha,
         )
     ):
         raise Round0125Error(f"R0125 {arm} train/config lineage changed")
@@ -585,7 +640,6 @@ def run_native_score(active: dict[str, Any], job: dict[str, Any]) -> None:
         cross_knn,
         ffr_from_neighbors,
         load_hiD_reference,
-        load_query_truth,
         recall_at_k_from_neighbors,
         score_panel,
     )
@@ -605,18 +659,24 @@ def run_native_score(active: dict[str, Any], job: dict[str, Any]) -> None:
     )
     train = _read_sealed(train_path, label=f"R0125 {arm} train")
     transform = _read_sealed(transform_path, label=f"R0125 {arm} transform")
+    train_release_sha = _prior_artifact_release_sha(
+        active, job, field="train_release_sha"
+    )
+    transform_release_sha = _prior_artifact_release_sha(
+        active, job, field="transform_release_sha"
+    )
     if (
         not _train_receipt_contract(
             train,
             arm=arm,
-            release_sha=active["manifest"]["release_sha"],
+            release_sha=train_release_sha,
         )
         or train.get("production_config_sha256") != config_sha
         or train.get("shared_evidence") != shared_signature
         or transform.get("schema") != _schema("native-transform-receipt")
         or transform.get("round_id") != ROUND_ID
         or transform.get("arm") != arm
-        or transform.get("release_sha") != active["manifest"]["release_sha"]
+        or transform.get("release_sha") != transform_release_sha
         or transform.get("production_config_sha256") != config_sha
         or transform.get("train_receipt") != expected_input_signature(train_path)
         or transform.get("model") != train.get("model")
@@ -638,11 +698,7 @@ def run_native_score(active: dict[str, Any], job: dict[str, Any]) -> None:
         shared["high_d_reference"]["canonical_path"],
         expected_key=shared["high_d_reference_key"],
     )
-    truth = load_query_truth(
-        shared["query_truth"]["canonical_path"],
-        expected_key=shared["query_truth_key"],
-        expected_candidate_compute_backend="cuda",
-    )
+    truth = _load_accepted_r0104_query_truth(shared)
     output = create_fresh_directory(
         job["outputs"][0], label=f"R0125 {arm} native score"
     )
@@ -724,6 +780,7 @@ def run_native_score(active: dict[str, Any], job: dict[str, Any]) -> None:
         "shared_evidence": shared_signature,
         "high_d_reference": shared["high_d_reference"],
         "query_truth": shared["query_truth"],
+        "query_truth_producer_policy": truth["key_parts"]["policy"],
         "panel": panel,
         "projection": {
             "ffr": projection_ffr,
@@ -832,6 +889,7 @@ def run_matched_density(active: dict[str, Any], job: dict[str, Any]) -> None:
                 "arm": arm,
                 "shared_output": job["shared_output"],
                 "train_output": job["train_outputs"][arm],
+                "train_release_sha": job.get("train_release_sha"),
             },
         )
         cell, cell_arrays = _score_matched_arm(
@@ -924,7 +982,9 @@ def run_decision(active: dict[str, Any], job: dict[str, Any]) -> None:
             _train_receipt_contract(
                 trains[arm],
                 arm=arm,
-                release_sha=active["manifest"]["release_sha"],
+                release_sha=_prior_artifact_release_sha(
+                    active, job, field="train_release_sha"
+                ),
             )
             for arm in ARMS
         ),

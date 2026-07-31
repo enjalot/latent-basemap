@@ -941,7 +941,17 @@ def save_query_truth(truth: dict, path: str) -> str:
 
 def load_query_truth(path: str, *, expected_key: str | None = None,
                      expected_key_parts: dict | None = None,
-                     expected_candidate_compute_backend: str | None = None) -> dict:
+                     expected_candidate_compute_backend: str | None = None,
+                     expected_producer_implementation_sha256: str | None = None,
+                     ) -> dict:
+    """Load persisted truth while authenticating its exact producer policy.
+
+    By default the persisted producer must be this checkout's ``cross_knn``
+    implementation.  A consumer of previously reviewed immutable truth may
+    instead pin that truth's historical producer hash explicitly.  The pin is
+    never inferred from the archive and requires an explicit backend too, so a
+    caller cannot accidentally relabel historical bytes as current output.
+    """
     path = path if path.endswith(".npz") else path + ".npz"
     with np.load(path, allow_pickle=False) as archive:
         required_fields = {"key", "k", "query_rows", "corpus_cardinality",
@@ -969,7 +979,29 @@ def load_query_truth(path: str, *, expected_key: str | None = None,
                 "candidate_selection", "rerank", "formula_version"}:
             raise ValueError("query truth exactness policy fields are invalid")
         import inspect
-        current_implementation = sha256_bytes(inspect.getsource(cross_knn).encode("utf-8"))
+        current_implementation = sha256_bytes(
+            inspect.getsource(cross_knn).encode("utf-8")
+        )
+        expected_implementation = current_implementation
+        if expected_producer_implementation_sha256 is not None:
+            if (
+                not isinstance(expected_producer_implementation_sha256, str)
+                or len(expected_producer_implementation_sha256) != 64
+                or any(
+                    char not in "0123456789abcdef"
+                    for char in expected_producer_implementation_sha256
+                )
+            ):
+                raise ValueError(
+                    "expected query truth producer implementation SHA-256 "
+                    "is malformed"
+                )
+            if expected_candidate_compute_backend is None:
+                raise ValueError(
+                    "historical query truth producer pin requires an explicit "
+                    "candidate backend"
+                )
+            expected_implementation = expected_producer_implementation_sha256
         if expected_candidate_compute_backend is None:
             try:
                 _torch, current_backend = _torch_scoring_device()
@@ -979,7 +1011,7 @@ def load_query_truth(path: str, *, expected_key: str | None = None,
             if expected_candidate_compute_backend not in {"cpu", "cuda"}:
                 raise ValueError("expected query truth candidate backend is unsupported")
             current_backend = expected_candidate_compute_backend
-        if (policy.get("implementation_sha256") != current_implementation or
+        if (policy.get("implementation_sha256") != expected_implementation or
                 policy.get("candidate_compute_backend") != current_backend):
             raise ValueError("query truth implementation/backend identity mismatch")
         candidate = policy.get("candidate_selection")
