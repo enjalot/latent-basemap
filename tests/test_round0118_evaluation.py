@@ -298,6 +298,169 @@ def test_review_admission_requires_the_registered_release(
     ) == signature
 
 
+def _r0111_fixture(
+    root: Path,
+    *,
+    documents: Path,
+) -> dict[str, object]:
+    release = "d" * 40
+    queue_root = root / "r0111"
+    train = (
+        queue_root
+        / "artifacts"
+        / "train-diverse-jina-25m-seed44"
+    )
+    train.mkdir(parents=True)
+    for name in ("train-receipt.json", "production-config.json", "model.pt"):
+        (train / name).write_bytes(name.encode())
+    queue_path = queue_root / "queue.json"
+    queue_path.write_text(json.dumps({
+        "schema": "round0111-diverse-jina-seed44-training-queue-v1",
+        "round_id": "0111",
+        "release_sha": release,
+        "repo_root": prepare_round0118_queue.RELEASE_ROOT,
+        "training_performed": True,
+        "capabilities_produced": [
+            "jina-diverse-25m-full768-trained-map-seed44-v1"
+        ],
+        "jobs": [{
+            "id": "train",
+            "action": "train_diverse_jina_seed44",
+            "outputs": [str(train)],
+            "node_policy": {
+                "gpu_required": True,
+                "training_performed": True,
+            },
+        }],
+    }), encoding="utf-8")
+    queue_sha256 = expected_input_signature(queue_path)["sha256"]
+    checkout = {
+        "repo_root": prepare_round0118_queue.RELEASE_ROOT,
+        "head": release,
+        "detached": True,
+        "dirty": False,
+    }
+    terminal_path = queue_root / "runner-terminal.json"
+    terminal_path.write_text(json.dumps({
+        "schema": "slim-runner-terminal-v3",
+        "round_id": "0111",
+        "verdict": "succeeded",
+        "stop_reason": None,
+        "completed_jobs": ["train"],
+        "required_jobs": ["train"],
+        "gpu_wall_s": 10.0,
+        "prior_attempt_gpu_wall_s": 0.0,
+        "invocation_gpu_wall_s": 10.0,
+        "gpu_wall_accounting_complete": True,
+        "release_checkout": checkout,
+        "release_checkout_at_finish": checkout,
+        "release_checkout_unchanged": True,
+        "queue_manifest_sha256": queue_sha256,
+        "queue_manifest_sha256_at_finish": queue_sha256,
+        "queue_manifest_unchanged": True,
+        "boundary_problems": [],
+        "nodes": [{
+            "node": "train",
+            "returncode": 0,
+            "gpu_required": True,
+            "validation_problems": [],
+        }],
+    }), encoding="utf-8")
+    result_path = documents / "result-0111-2026-07-31.md"
+    result_path.write_text(
+        "\n".join([
+            "---",
+            'round_id: "0111"',
+            "status: complete",
+            f'release_commit: "{release}"',
+            f'queue_manifest: "gsv:{queue_path}"',
+            f'queue_manifest_sha256: "{queue_sha256}"',
+            "---",
+            "result",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    result_sha256 = expected_input_signature(result_path)["sha256"]
+    review_path = documents / "review-0111-2026-07-31.md"
+    review_path.write_text(
+        "\n".join([
+            "---",
+            'round_id: "0111"',
+            "status: accepted",
+            f"result: {result_path.name}",
+            f'result_sha256: "{result_sha256}"',
+            f'verified_release_commit: "{release}"',
+            (
+                'releases: ["capability:jina-diverse-25m-full768-'
+                'trained-map-seed44-v1"]'
+            ),
+            "---",
+            "review",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    return {
+        "queue_root": queue_root,
+        "queue_path": queue_path,
+        "terminal_path": terminal_path,
+        "train": train,
+        "result_path": result_path,
+        "review_path": review_path,
+        "review_sha256": expected_input_signature(review_path)["sha256"],
+        "release": release,
+    }
+
+
+def test_r0111_admission_closes_review_result_queue_terminal_and_output(
+    tmp_path: Path,
+) -> None:
+    fixture = _r0111_fixture(tmp_path, documents=tmp_path)
+    review = prepare_round0118_queue._require_accepted_r0111_review(
+        str(fixture["review_path"]),
+        expected_sha256=str(fixture["review_sha256"]),
+    )
+    execution = prepare_round0118_queue._require_exact_r0111_execution(
+        str(fixture["queue_path"]),
+        review=review,
+        train_output=str(fixture["train"]),
+    )
+    assert execution["queue_signature"]["sha256"] == review["queue_sha256"]
+    assert execution["train_output"] == str(
+        Path(fixture["train"]).resolve()
+    )
+
+    with pytest.raises(RuntimeError, match="queue/release/train output"):
+        prepare_round0118_queue._require_exact_r0111_execution(
+            str(fixture["queue_path"]),
+            review=review,
+            train_output=str(tmp_path / "unreviewed-train"),
+        )
+
+    result_path = Path(fixture["result_path"])
+    result_path.write_text(
+        result_path.read_text(encoding="utf-8") + "changed\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="does not close"):
+        prepare_round0118_queue._require_accepted_r0111_review(
+            str(fixture["review_path"]),
+            expected_sha256=str(fixture["review_sha256"]),
+        )
+
+    terminal_path = Path(fixture["terminal_path"])
+    terminal = json.loads(terminal_path.read_text(encoding="utf-8"))
+    terminal["nodes"][0]["validation_problems"] = ["synthetic drift"]
+    terminal_path.write_text(json.dumps(terminal), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="exact clean reviewed success"):
+        prepare_round0118_queue._require_exact_r0111_execution(
+            str(fixture["queue_path"]),
+            review=review,
+            train_output=str(fixture["train"]),
+        )
+
+
 def test_prepare_queue_materializes_frozen_seed44_job_graph(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -357,9 +520,6 @@ def test_prepare_queue_materializes_frozen_seed44_job_graph(
     )
     r0110_review, r0110_sha = review(
         "0110", prepare_round0118_queue.REVIEW_RELEASES["0110"]
-    )
-    r0111_review, r0111_sha = review(
-        "0111", prepare_round0118_queue.REVIEW_RELEASES["0111"]
     )
 
     def terminal(root: Path, round_id: str, jobs: list[str]) -> None:
@@ -477,17 +637,10 @@ def test_prepare_queue_materializes_frozen_seed44_job_graph(
         "{}", encoding="utf-8"
     )
 
-    r0111 = tmp_path / "r0111"
-    terminal(r0111, "0111", ["train"])
-    (r0111 / "queue.json").write_text(json.dumps({
-        "schema": "round0111-diverse-jina-seed44-training-queue-v1",
-        "round_id": "0111",
-        "jobs": [],
-    }), encoding="utf-8")
-    train = r0111 / "artifacts" / "train-diverse-jina-25m-seed44"
-    train.mkdir(parents=True)
-    for name in ("train-receipt.json", "production-config.json", "model.pt"):
-        (train / name).write_bytes(name.encode())
+    r0111 = _r0111_fixture(tmp_path, documents=labs)
+    train = Path(r0111["train"])
+    r0111_review = Path(r0111["review_path"])
+    r0111_sha = str(r0111["review_sha256"])
 
     output = tmp_path / "r0118" / "queue"
     path = prepare_round0118_queue.prepare_round0118(
@@ -500,7 +653,7 @@ def test_prepare_queue_materializes_frozen_seed44_job_graph(
         r0111_review_sha256=r0111_sha,
         r0108_queue_path=str(r0108 / "queue.json"),
         r0110_queue_path=str(r0110 / "queue.json"),
-        r0111_queue_path=str(r0111 / "queue.json"),
+        r0111_queue_path=str(r0111["queue_path"]),
         r0111_train_output=str(train),
         queue_root=str(output),
     )
@@ -522,6 +675,36 @@ def test_prepare_queue_materializes_frozen_seed44_job_graph(
     assert queue["scientific_contract"][
         "production_readiness_claimed"
     ] is False
+    expected_paths = {
+        item["canonical_path"]
+        for job in queue["jobs"]
+        for item in job["expected_inputs"]
+    }
+    assert str(Path(r0111["result_path"]).resolve()) in expected_paths
+
+    terminal_path = Path(r0111["terminal_path"])
+    r0111_terminal = json.loads(
+        terminal_path.read_text(encoding="utf-8")
+    )
+    r0111_terminal["gpu_wall_accounting_complete"] = False
+    terminal_path.write_text(json.dumps(r0111_terminal), encoding="utf-8")
+    rejected_output = tmp_path / "r0118-rejected" / "queue"
+    with pytest.raises(RuntimeError, match="exact clean reviewed success"):
+        prepare_round0118_queue.prepare_round0118(
+            release_sha="a" * 40,
+            r0108_review_path=str(r0108_review),
+            r0108_review_sha256=r0108_sha,
+            r0110_review_path=str(r0110_review),
+            r0110_review_sha256=r0110_sha,
+            r0111_review_path=str(r0111_review),
+            r0111_review_sha256=r0111_sha,
+            r0108_queue_path=str(r0108 / "queue.json"),
+            r0110_queue_path=str(r0110 / "queue.json"),
+            r0111_queue_path=str(r0111["queue_path"]),
+            r0111_train_output=str(train),
+            queue_root=str(rejected_output),
+        )
+    assert not rejected_output.exists()
 
 
 def test_map_registry_discovers_explicit_round0118_seed44_atlas(
@@ -582,3 +765,188 @@ def test_map_registry_discovers_explicit_round0118_seed44_atlas(
     )
     assert maps[0]["training_round"] == "0111"
     assert maps[0]["production_ready"] is False
+
+
+def test_round0118_registry_scan_and_publication_close_base_and_probes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    round_dir = tmp_path / "round-0118"
+    queue = round_dir / "queue"
+    artifacts = queue / "artifacts"
+    transform = artifacts / "coordinates-seed44"
+    core = artifacts / "core-geometry-seed44"
+    ood = artifacts / "ood-seed44"
+    decision = artifacts / "three-seed-decision"
+    definitions = artifacts / "semantic-renders"
+    for path in (transform, core, ood, decision, definitions):
+        path.mkdir(parents=True, exist_ok=True)
+    (transform / "chunk-00000").mkdir()
+    np.save(
+        transform / "chunk-00000" / "coordinates.npy",
+        np.zeros((2, 2), dtype=np.float32),
+    )
+    queue_path = queue / "queue.json"
+    queue_path.write_text(
+        json.dumps({"release_sha": "a" * 40}), encoding="utf-8"
+    )
+    transform_path = transform / "actual-transform.json"
+    transform_path.write_text(json.dumps({
+        "round_id": "0118",
+        "map_key": round0118_nodes.MAP_KEY,
+        "row_accounting": {
+            "all_rows": 24_948_663,
+            "retained_representatives": 24_948_663,
+        },
+        "model": {"sha256": "b" * 64},
+    }), encoding="utf-8")
+    core_path = core / "core-geometry.json"
+    core_path.write_text(json.dumps({
+        "schema": round0118_nodes.CORE_SCHEMA,
+        "metrics": {
+            "global": {"ffr": 0.6},
+            "density_v2": {"correlation": 0.17},
+        },
+        "geometry_diagnostics": {"finite": True},
+    }), encoding="utf-8")
+    decision_path = decision / "three-seed-decision.json"
+    decision_path.write_text(json.dumps({
+        "schema": round0118_nodes.DECISION_SCHEMA,
+        "map_key": round0118_nodes.MAP_KEY,
+        "seed44_atlas_quality_capability_released": True,
+        "production_readiness_claimed": False,
+    }), encoding="utf-8")
+    sample_path = definitions / "sample-semantic-ids.npy"
+    np.save(sample_path, np.asarray([3, 7], dtype=np.int64))
+    definition_path = definitions / "map-definition.json"
+    definition_path.write_text(json.dumps({
+        "schema": round0118_nodes.MAP_DEFINITION_SCHEMA,
+        "round_id": "0118",
+        "map_key": round0118_nodes.MAP_KEY,
+        "map_label": round0118_nodes.MAP_LABEL,
+        "training_round": "0111",
+        "embedding_prompt": "raw",
+        "prompt_applied": False,
+        "production_document_prompt_transfer_resolved": False,
+        "production_ready": False,
+        "coordinates": expected_input_signature(transform_path),
+        "core_panel": expected_input_signature(core_path),
+        "decision": expected_input_signature(decision_path),
+        "sample_ids": expected_input_signature(sample_path),
+    }), encoding="utf-8")
+
+    probes = {}
+    probe_names = {
+        "dadabase",
+        "fineweb-heldout",
+        "pol_Latn",
+        "trec-covid",
+    }
+    for index, probe in enumerate(sorted(probe_names)):
+        coordinate_path = ood / f"{probe}-coordinates.npz"
+        np.savez(
+            coordinate_path,
+            probe_corpus_coords=np.zeros((2, 2), dtype=np.float32),
+            probe_query_coords=np.full(
+                (1, 2), index + 1, dtype=np.float32
+            ),
+        )
+        probes[probe] = {
+            "status": "included",
+            "probe": {
+                "corpus_rows": 2,
+                "query_rows": 1,
+                "ffr": 0.5,
+            },
+            "coordinates": expected_input_signature(coordinate_path),
+            "inputs": {},
+            "truth": {},
+            "selection": {},
+            "duplicate_control": {},
+            "verdict": "diagnostic-only",
+        }
+    panel_path = ood / "universality-panel-v1.json"
+    panel_path.write_text(json.dumps({
+        "schema": "universality-panel-v1",
+        "round_id": "0118",
+        "map": {
+            "label": round0118_nodes.MAP_LABEL,
+            "model": {"sha256": "b" * 64},
+            "coordinate_receipt": expected_input_signature(transform_path),
+        },
+        "probes": probes,
+    }), encoding="utf-8")
+
+    base_maps = map_registry.scan_round0118_atlas(
+        round_dir, {}, queue_dir=queue
+    )
+    projection_maps = map_registry.scan_projection_maps(
+        round_dir, {}, queue_dir=queue
+    )
+    assert len(base_maps) == 1
+    assert {
+        item["projection"]["probe"] for item in projection_maps
+    } == probe_names
+    assert all(
+        item["base_sample_ids"]
+        == {"path": f"gsv:{sample_path}"}
+        for item in projection_maps
+    )
+    registry = {
+        "schema": map_registry.SCHEMA,
+        "maps": [*base_maps, *projection_maps],
+    }
+    registry_path = tmp_path / "maps.json"
+    history_path = tmp_path / "maps-history.json"
+    site = tmp_path / "site"
+
+    def write_registry(value: dict) -> Path:
+        registry_path.write_text(json.dumps(value), encoding="utf-8")
+        history_path.write_text(json.dumps(value), encoding="utf-8")
+        return history_path
+
+    def publish(value: dict) -> None:
+        atlas = site / "round-0118"
+        atlas.mkdir(parents=True)
+        (atlas / "index.html").write_text("atlas", encoding="utf-8")
+        for item in value["maps"]:
+            if item.get("kind") != "projection-map":
+                continue
+            root = site / "projections" / item["map_id"]
+            root.mkdir(parents=True)
+            (root / "index.html").write_text(
+                "projection", encoding="utf-8"
+            )
+            (root / "manifest.json").write_text(
+                "{}", encoding="utf-8"
+            )
+
+    monkeypatch.setattr(map_registry, "REGISTRY_PATH", registry_path)
+    monkeypatch.setattr(map_registry, "SITE_DIR", site)
+    monkeypatch.setattr(map_registry, "scan", lambda: registry)
+    monkeypatch.setattr(map_registry, "write_registry", write_registry)
+    monkeypatch.setattr(map_registry, "publish", publish)
+    publication_path = decision / "registry-publication.json"
+    publication = round0118_nodes._refresh_registry_best_effort(
+        receipt_path=str(publication_path),
+        map_definition_path=str(definition_path),
+        decision_path=str(decision_path),
+        round_id="0118",
+        map_key=round0118_nodes.MAP_KEY,
+        publication_schema=round0118_nodes.REGISTRY_PUBLICATION_SCHEMA,
+    )
+    assert publication_path.is_file()
+    assert publication["schema"] == (
+        round0118_nodes.REGISTRY_PUBLICATION_SCHEMA
+    )
+    assert publication["expected_map_ids"] == [
+        f"round-0118-{round0118_nodes.MAP_KEY}"
+    ]
+    assert set(publication["expected_projection_probes"]) == probe_names
+    refresh = publication["mutable_view_refresh"]
+    assert refresh["status"] == "published"
+    assert refresh["requires_followup"] is False
+    assert refresh["stages"]["inventory_validation"]["status"] == (
+        "completed"
+    )
+    assert refresh["stages"]["site_artifacts"]["status"] == "completed"

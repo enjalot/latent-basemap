@@ -6,6 +6,7 @@ import argparse
 import ast
 import glob
 import json
+import math
 import os
 import re
 import sys
@@ -141,6 +142,65 @@ def _require_accepted_review(
     return signature
 
 
+def _recorded_local_path(value: str, *, label: str) -> str:
+    path = value.removeprefix("gsv:")
+    path = os.path.expanduser(path)
+    if not os.path.isabs(path):
+        raise RuntimeError(f"{label} is not an absolute gsv/local path")
+    return os.path.realpath(path)
+
+
+def _require_accepted_r0111_review(
+    path: str,
+    *,
+    expected_sha256: str,
+) -> dict[str, Any]:
+    review_signature = _require_accepted_review(
+        path,
+        expected_sha256=expected_sha256,
+        round_id="0111",
+        required_release=REVIEW_RELEASES["0111"],
+    )
+    review = _frontmatter(path)
+    result_name = review.get("result") or ""
+    if (
+        os.path.basename(result_name) != result_name
+        or re.fullmatch(
+            r"result-0111-[0-9]{4}-[0-9]{2}-[0-9]{2}"
+            r"(?:-[0-9]{2})?\.md",
+            result_name,
+        )
+        is None
+    ):
+        raise RuntimeError("Review 0111 result binding is malformed")
+    result_path = os.path.join(os.path.dirname(path), result_name)
+    result_signature = expected_input_signature(result_path)
+    result = _frontmatter(result_path)
+    release_sha = review.get("verified_release_commit") or ""
+    queue_sha256 = result.get("queue_manifest_sha256") or ""
+    if (
+        result_signature["sha256"] != review.get("result_sha256")
+        or result.get("round_id") != "0111"
+        or result.get("status") != "complete"
+        or re.fullmatch(r"[0-9a-f]{40}", release_sha) is None
+        or result.get("release_commit") != release_sha
+        or re.fullmatch(r"[0-9a-f]{64}", queue_sha256) is None
+    ):
+        raise RuntimeError(
+            "Review 0111 does not close its exact result and release"
+        )
+    return {
+        "review": review_signature,
+        "result": result_signature,
+        "release_sha": release_sha,
+        "queue_path": _recorded_local_path(
+            result.get("queue_manifest") or "",
+            label="R0111 result queue manifest",
+        ),
+        "queue_sha256": queue_sha256,
+    }
+
+
 def _require_clean_terminal(path: str, *, round_id: str) -> dict[str, Any]:
     signature = expected_input_signature(path)
     with open(path, encoding="utf-8") as handle:
@@ -155,6 +215,165 @@ def _require_clean_terminal(path: str, *, round_id: str) -> dict[str, Any]:
     ):
         raise RuntimeError(f"R{round_id} terminal is not a clean success")
     return signature
+
+
+def _finite_nonnegative(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        and float(value) >= 0.0
+    )
+
+
+def _require_exact_r0111_execution(
+    queue_path: str,
+    *,
+    review: dict[str, Any],
+    train_output: str,
+) -> dict[str, Any]:
+    queue, queue_signature = _load_queue(
+        queue_path,
+        schema="round0111-diverse-jina-seed44-training-queue-v1",
+        round_id="0111",
+    )
+    release_sha = str(review["release_sha"])
+    jobs = queue.get("jobs")
+    jobs_are_objects = (
+        isinstance(jobs, list)
+        and all(isinstance(job, dict) for job in jobs)
+    )
+    required_jobs = (
+        [job.get("id") for job in jobs]
+        if jobs_are_objects
+        else []
+    )
+    training_jobs = (
+        [
+            job
+            for job in jobs
+            if job.get("action") == "train_diverse_jina_seed44"
+        ]
+        if jobs_are_objects
+        else []
+    )
+    training_outputs = (
+        training_jobs[0].get("outputs")
+        if len(training_jobs) == 1
+        else None
+    )
+    canonical_train_output = os.path.realpath(train_output)
+    expected_capability = REVIEW_RELEASES["0111"].removeprefix(
+        "capability:"
+    )
+    capabilities = queue.get("capabilities_produced")
+    if (
+        os.path.realpath(queue_path) != review["queue_path"]
+        or queue_signature["sha256"] != review["queue_sha256"]
+        or queue.get("release_sha") != release_sha
+        or os.path.realpath(str(queue.get("repo_root") or ""))
+        != os.path.realpath(RELEASE_ROOT)
+        or queue.get("training_performed") is not True
+        or not isinstance(capabilities, list)
+        or expected_capability not in capabilities
+        or not required_jobs
+        or any(
+            not isinstance(node, str) or not node for node in required_jobs
+        )
+        or len(required_jobs) != len(set(required_jobs))
+        or len(training_jobs) != 1
+        or not isinstance(training_outputs, list)
+        or [
+            os.path.realpath(str(output))
+            for output in training_outputs or []
+        ]
+        != [canonical_train_output]
+    ):
+        raise RuntimeError(
+            "R0111 reviewed queue/release/train output does not close"
+        )
+
+    terminal_path = os.path.join(
+        os.path.dirname(os.path.realpath(queue_path)),
+        "runner-terminal.json",
+    )
+    terminal_signature = expected_input_signature(terminal_path)
+    with open(terminal_path, encoding="utf-8") as handle:
+        terminal = json.load(handle)
+    start = terminal.get("release_checkout")
+    finish = terminal.get("release_checkout_at_finish")
+    nodes = terminal.get("nodes")
+    clean_checkouts = all(
+        isinstance(checkout, dict)
+        and os.path.realpath(str(checkout.get("repo_root") or ""))
+        == os.path.realpath(RELEASE_ROOT)
+        and checkout.get("head") == release_sha
+        and checkout.get("detached") is True
+        and checkout.get("dirty") is False
+        for checkout in (start, finish)
+    )
+    clean_nodes = (
+        isinstance(nodes, list)
+        and all(isinstance(node, dict) for node in nodes)
+        and [node.get("node") for node in nodes] == required_jobs
+        and all(
+            node.get("validation_problems", []) == []
+            and (
+                (
+                    node.get("skipped_done_marker") is True
+                    and node.get("done_marker_schema")
+                    == "slim-runner-done-v2"
+                )
+                or (
+                    node.get("skipped_done_marker") is not True
+                    and node.get("returncode") == 0
+                )
+            )
+            for node in nodes
+        )
+    )
+    gpu_wall = terminal.get("gpu_wall_s")
+    prior_gpu_wall = terminal.get("prior_attempt_gpu_wall_s")
+    invocation_gpu_wall = terminal.get("invocation_gpu_wall_s")
+    accounting_closes = (
+        _finite_nonnegative(gpu_wall)
+        and _finite_nonnegative(prior_gpu_wall)
+        and _finite_nonnegative(invocation_gpu_wall)
+        and math.isclose(
+            float(gpu_wall),
+            float(prior_gpu_wall) + float(invocation_gpu_wall),
+            rel_tol=1e-12,
+            abs_tol=1e-9,
+        )
+    )
+    if (
+        terminal.get("schema") != "slim-runner-terminal-v3"
+        or terminal.get("round_id") != "0111"
+        or terminal.get("verdict") != "succeeded"
+        or terminal.get("stop_reason") is not None
+        or terminal.get("required_jobs") != required_jobs
+        or terminal.get("completed_jobs") != required_jobs
+        or terminal.get("gpu_wall_accounting_complete") is not True
+        or not accounting_closes
+        or terminal.get("queue_manifest_sha256")
+        != queue_signature["sha256"]
+        or terminal.get("queue_manifest_sha256_at_finish")
+        != queue_signature["sha256"]
+        or terminal.get("release_checkout_unchanged") is not True
+        or terminal.get("queue_manifest_unchanged") is not True
+        or terminal.get("boundary_problems") != []
+        or not clean_checkouts
+        or not clean_nodes
+    ):
+        raise RuntimeError(
+            "R0111 terminal is not an exact clean reviewed success"
+        )
+    return {
+        "queue": queue,
+        "queue_signature": queue_signature,
+        "terminal_signature": terminal_signature,
+        "train_output": canonical_train_output,
+    }
 
 
 def _load_queue(
@@ -222,25 +441,27 @@ def prepare_round0118(
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0118 release SHA must be one full commit")
     round_file = _require_issued_round()
+    r0108_review = _require_accepted_review(
+        r0108_review_path,
+        expected_sha256=r0108_review_sha256,
+        round_id="0108",
+        required_release=REVIEW_RELEASES["0108"],
+    )
+    r0110_review = _require_accepted_review(
+        r0110_review_path,
+        expected_sha256=r0110_review_sha256,
+        round_id="0110",
+        required_release=REVIEW_RELEASES["0110"],
+    )
+    r0111_review = _require_accepted_r0111_review(
+        r0111_review_path,
+        expected_sha256=r0111_review_sha256,
+    )
     reviews = [
-        _require_accepted_review(
-            r0108_review_path,
-            expected_sha256=r0108_review_sha256,
-            round_id="0108",
-            required_release=REVIEW_RELEASES["0108"],
-        ),
-        _require_accepted_review(
-            r0110_review_path,
-            expected_sha256=r0110_review_sha256,
-            round_id="0110",
-            required_release=REVIEW_RELEASES["0110"],
-        ),
-        _require_accepted_review(
-            r0111_review_path,
-            expected_sha256=r0111_review_sha256,
-            round_id="0111",
-            required_release=REVIEW_RELEASES["0111"],
-        ),
+        r0108_review,
+        r0110_review,
+        r0111_review["review"],
+        r0111_review["result"],
     ]
 
     r0108_root = os.path.dirname(os.path.realpath(r0108_queue_path))
@@ -294,16 +515,14 @@ def prepare_round0118(
         ),
     ]
 
-    r0111_root = os.path.dirname(os.path.realpath(r0111_queue_path))
-    r0111_queue, r0111_queue_signature = _load_queue(
+    r0111_execution = _require_exact_r0111_execution(
         r0111_queue_path,
-        schema="round0111-diverse-jina-seed44-training-queue-v1",
-        round_id="0111",
+        review=r0111_review,
+        train_output=r0111_train_output,
     )
-    r0111_terminal = _require_clean_terminal(
-        os.path.join(r0111_root, "runner-terminal.json"),
-        round_id="0111",
-    )
+    r0111_queue_signature = r0111_execution["queue_signature"]
+    r0111_terminal = r0111_execution["terminal_signature"]
+    r0111_train_output = r0111_execution["train_output"]
     r0111_train = [
         expected_input_signature(os.path.join(r0111_train_output, name))
         for name in (
