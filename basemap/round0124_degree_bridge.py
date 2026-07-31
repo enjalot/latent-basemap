@@ -1,6 +1,7 @@
 """Frozen contract for the R0124 native 2M Jina graph-degree bridge."""
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -69,6 +70,32 @@ OUTCOME_INCONCLUSIVE = "k15-native-density-effect-inconclusive"
 
 class Round0124Error(RuntimeError):
     """The frozen R0124 single-variable contrast was violated."""
+
+
+def training_loop_plan(
+    *,
+    graph_edges: int,
+    positive_rows_per_update: int = POSITIVE_ROWS_PER_UPDATE,
+    successful_updates: int = SUCCESSFUL_UPDATES,
+) -> dict[str, Any]:
+    """Return the minimal epoch plan needed to cover the registered horizon."""
+    if graph_edges <= 0 or positive_rows_per_update <= 0 or successful_updates <= 0:
+        raise Round0124Error("R0124 training loop plan inputs are invalid")
+    batches_per_epoch = int(math.ceil(graph_edges / positive_rows_per_update))
+    n_epochs = int(math.ceil(successful_updates / batches_per_epoch))
+    return {
+        "schema": "round0124-training-loop-plan-v1",
+        "rule": (
+            "ceil(successful_updates / "
+            "ceil(graph_edges / positive_rows_per_update))"
+        ),
+        "graph_edges": int(graph_edges),
+        "positive_rows_per_update": int(positive_rows_per_update),
+        "batches_per_epoch": batches_per_epoch,
+        "successful_positive_lr_updates": int(successful_updates),
+        "n_epochs": n_epochs,
+        "planned_loop_iters": batches_per_epoch * n_epochs,
+    }
 
 
 def graph_degree_stamp() -> dict[str, Any]:
@@ -145,6 +172,7 @@ def train_config(
         graph_manifest_signature=graph_manifest_signature,
         graph_edges=graph_edges,
     )
+    loop_plan = training_loop_plan(graph_edges=graph_edges)
     config = {
         "schema": TRAIN_CONFIG_SCHEMA,
         "arm": ARM,
@@ -217,6 +245,7 @@ def train_config(
             "warning_train_upd_s": TRAIN_WARNING_UPDATES_PER_S,
             "performance_subfloor_patience": 2,
             "performance_windows": PERFORMANCE_WINDOWS,
+            "training_loop_plan": loop_plan,
             "expected_pipeline_stamp": pipeline,
         },
     }

@@ -32,6 +32,7 @@ from basemap.round0124_degree_bridge import (
     classify_degree_bridge,
     paired_density_bootstrap,
     train_config,
+    training_loop_plan,
 )
 from experiments import round0124_nodes
 
@@ -116,6 +117,14 @@ def test_only_registered_training_change_is_graph_degree() -> None:
     assert stamp["sampler_class"] == "PromptWeightedJinaSampler"
     assert stamp["positive_sampling"] == control_stamp["positive_sampling"]
     assert stamp["graph_degree"] == "variable-symmetric-fuzzy-k15-topology"
+
+
+def test_k15_training_loop_plan_covers_registered_horizon() -> None:
+    plan = training_loop_plan(graph_edges=46_065_518)
+    assert plan["batches_per_epoch"] == 112_630
+    assert plan["n_epochs"] == 5
+    assert plan["planned_loop_iters"] == 563_150
+    assert plan["planned_loop_iters"] >= plan["successful_positive_lr_updates"]
 
 
 def test_explicit_self_knn_enforces_15_distinct_nonself() -> None:

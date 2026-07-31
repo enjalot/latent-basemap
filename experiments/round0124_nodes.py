@@ -542,7 +542,9 @@ def run_build_graph(
 
 
 def _new_model(config: Mapping[str, Any]):
-    return prompt_nodes._new_model(config)
+    model = prompt_nodes._new_model(config)
+    model.n_epochs = int(config["execution"]["training_loop_plan"]["n_epochs"])
+    return model
 
 
 def run_train(
