@@ -20,12 +20,6 @@ from basemap.output_safety import (
     atomic_write_new_json,
     create_fresh_directory,
 )
-from basemap.round0005_staging import (
-    ROUND0005_MODEL_ID,
-    ROUND0005_MODEL_REVISION,
-    ROUND0005_NORMALIZATION,
-    ROUND0005_POOLING,
-)
 from basemap.round0112_prompt_substrate import (
     MODEL_ROOT,
     model_member_signatures,

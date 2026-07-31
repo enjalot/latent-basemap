@@ -14,7 +14,6 @@ import platform
 import sys
 from importlib import metadata
 from collections.abc import Callable, Mapping, Sequence
-from pathlib import Path
 from typing import Any
 
 import numpy as np
