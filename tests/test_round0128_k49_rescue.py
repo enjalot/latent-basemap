@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import json
 import random
+from pathlib import Path
 
 import numpy as np
 import pytest
 
+from basemap.artifact_identity import expected_input_signature
 from basemap.round0107_training import train_config
+from basemap.round0113_prompt_contrast import seal
+from basemap.round0124_degree_bridge import (
+    DECISION_SCHEMA as R0124_DECISION_SCHEMA,
+    OUTCOME_INCONCLUSIVE as R0124_INCONCLUSIVE_OUTCOME,
+    OUTCOME_MATERIAL as R0124_POSITIVE_OUTCOME,
+    OUTCOME_NOT_MATERIAL as R0124_NEGATIVE_OUTCOME,
+)
 from basemap.round0128_k49_rescue import (
     FIXED_SUCCESSFUL_UPDATES,
     GRAPH_K,
@@ -22,6 +32,7 @@ from experiments.prepare_round0128_queue import (
     P90_GPU_TOTAL_SECONDS,
     P90_GRAPH_PART_SECONDS,
     _require_issued_round,
+    _require_positive_r0124_review,
 )
 from experiments.round0105_nodes import _exact_rerank
 from experiments.round0106_nodes import (
@@ -408,3 +419,175 @@ def test_p90_budget_has_graph_and_terminal_headroom() -> None:
     assert P90_GPU_TOTAL_SECONDS / 3_600 == pytest.approx(6.5833333333)
     assert GPU_HOURS_CAP == 8.0
     assert P90_GPU_TOTAL_SECONDS < GPU_HOURS_CAP * 3_600
+
+
+def _r0124_review_fixture(
+    root: Path,
+    *,
+    outcome: str,
+    review_discussion: str,
+) -> dict[str, str]:
+    release = "c" * 40
+    retry = {"schema": "test-r0124-attempt-2-provenance-v1"}
+    decision_root = root / "artifacts" / "degree-bridge-decision"
+    decision_root.mkdir(parents=True)
+    decision_path = decision_root / "decision.json"
+    decision_path.write_text(
+        json.dumps(
+            seal({
+                "schema": R0124_DECISION_SCHEMA,
+                "round_id": "0124",
+                "release_sha": release,
+                "retry_provenance": retry,
+                "registered_selector": {"outcome": outcome},
+                "capabilities_produced": [
+                    "jina-fineweb-2m-native-k15-degree-bridge-v1"
+                ],
+            }),
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    decision_signature = expected_input_signature(str(decision_path))
+
+    queue_path = root / "queue.json"
+    queue_path.write_text(
+        json.dumps({
+            "schema": "round0124-fineweb-2m-degree-bridge-retry-queue-v1",
+            "round_id": "0124",
+            "release_sha": release,
+            "retry_provenance": retry,
+            "jobs": [{
+                "id": "decide_degree_bridge",
+                "outputs": [str(decision_root.resolve())],
+            }],
+        }),
+        encoding="utf-8",
+    )
+    queue_signature = expected_input_signature(str(queue_path))
+
+    terminal_path = root / "runner-terminal.json"
+    terminal_path.write_text(
+        json.dumps({
+            "schema": "slim-runner-terminal-v3",
+            "round_id": "0124",
+            "verdict": "succeeded",
+            "required_jobs": ["decide_degree_bridge"],
+            "completed_jobs": ["decide_degree_bridge"],
+            "queue_manifest_sha256": queue_signature["sha256"],
+            "queue_manifest_sha256_at_finish": queue_signature["sha256"],
+            "queue_manifest_unchanged": True,
+            "release_checkout_unchanged": True,
+            "gpu_wall_accounting_complete": True,
+            "boundary_problems": [],
+            "nodes": [{
+                "node": "decide_degree_bridge",
+                "validation_problems": [],
+            }],
+            "release_checkout": {"head": release},
+            "release_checkout_at_finish": {"head": release},
+        }),
+        encoding="utf-8",
+    )
+    terminal_signature = expected_input_signature(str(terminal_path))
+
+    result_path = root / "result-0124-2026-07-31.md"
+    result_path.write_text(
+        "\n".join([
+            "---",
+            'round_id: "0124"',
+            "status: complete",
+            f'release_commit: "{release}"',
+            f'queue_manifest: "gsv:{queue_path}"',
+            (
+                "queue_manifest_sha256: "
+                f'"{queue_signature["sha256"]}"'
+            ),
+            "---",
+            "# Result 0124",
+            f'Queue SHA-256 `{queue_signature["sha256"]}`.',
+            f'Terminal SHA-256 `{terminal_signature["sha256"]}`.',
+            f'Decision SHA-256 `{decision_signature["sha256"]}`.',
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    result_signature = expected_input_signature(str(result_path))
+
+    review_path = root / "review-0124-2026-07-31.md"
+    review_path.write_text(
+        "\n".join([
+            "---",
+            'round_id: "0124"',
+            "status: accepted",
+            f"result: {result_path.name}",
+            f'result_sha256: "{result_signature["sha256"]}"',
+            f'verified_release_commit: "{release}"',
+            (
+                'releases: ["capability:jina-fineweb-2m-native-k15-'
+                'degree-bridge-v1"]'
+            ),
+            "---",
+            "# Review 0124",
+            review_discussion,
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    return {
+        "review": str(review_path),
+        "review_sha256": expected_input_signature(str(review_path))["sha256"],
+        "queue": str(queue_path),
+        "terminal": str(terminal_path),
+        "decision": str(decision_path),
+    }
+
+
+def test_r0124_positive_outcome_is_authenticated_from_sealed_attempt2(
+    tmp_path: Path,
+) -> None:
+    fixture = _r0124_review_fixture(
+        tmp_path,
+        outcome=R0124_POSITIVE_OUTCOME,
+        review_discussion="The registered positive branch is accepted.",
+    )
+    evidence = _require_positive_r0124_review(
+        fixture["review"],
+        expected_sha256=fixture["review_sha256"],
+        queue_path=fixture["queue"],
+        terminal_path=fixture["terminal"],
+        decision_path=fixture["decision"],
+    )
+    assert set(evidence) == {
+        "review",
+        "result",
+        "queue",
+        "terminal",
+        "decision",
+    }
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [R0124_NEGATIVE_OUTCOME, R0124_INCONCLUSIVE_OUTCOME],
+)
+def test_nonpositive_r0124_cannot_admit_via_positive_review_prose(
+    tmp_path: Path,
+    outcome: str,
+) -> None:
+    fixture = _r0124_review_fixture(
+        tmp_path,
+        outcome=outcome,
+        review_discussion=(
+            "The phrase k15-materially-degrades-native-density is discussed "
+            "only as the branch that did not occur."
+        ),
+    )
+    with pytest.raises(RuntimeError, match="not the positive degree branch"):
+        _require_positive_r0124_review(
+            fixture["review"],
+            expected_sha256=fixture["review_sha256"],
+            queue_path=fixture["queue"],
+            terminal_path=fixture["terminal"],
+            decision_path=fixture["decision"],
+        )

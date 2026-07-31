@@ -30,6 +30,11 @@ from basemap.round0128_k49_rescue import (
     HEADLINE_KPI_RETENTION,
     ROUND_ID,
 )
+from basemap.round0124_degree_bridge import (
+    DECISION_SCHEMA as R0124_DECISION_SCHEMA,
+    OUTCOME_MATERIAL as R0124_POSITIVE_OUTCOME,
+    read_sealed as read_r0124_sealed,
+)
 from experiments.prepare_round0020_0022_queues import (
     LAB_ROOT,
     _base_manifest,
@@ -74,6 +79,15 @@ R0108_CALIBRATION_RECEIPT = os.path.join(
 )
 R0108_CORE = os.path.join(R0108_ROOT, "artifacts", "core-geometry")
 R0108_OOD = os.path.join(R0108_ROOT, "artifacts", "ood")
+R0124_ROOT = "/data/latent-basemap/runs/round-0124/queue-attempt-2"
+R0124_QUEUE = os.path.join(R0124_ROOT, "queue.json")
+R0124_TERMINAL = os.path.join(R0124_ROOT, "runner-terminal.json")
+R0124_DECISION = os.path.join(
+    R0124_ROOT,
+    "artifacts",
+    "degree-bridge-decision",
+    "decision.json",
+)
 
 GPU_HOURS_CAP = 8.0
 P90_QUALIFICATION_SECONDS = 900.0
@@ -167,6 +181,145 @@ def _require_review(
     return signature
 
 
+def _document_text(path: str) -> str:
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
+def _require_positive_r0124_review(
+    review_path: str,
+    *,
+    expected_sha256: str,
+    queue_path: str = R0124_QUEUE,
+    terminal_path: str = R0124_TERMINAL,
+    decision_path: str = R0124_DECISION,
+) -> dict[str, dict[str, Any]]:
+    """Authenticate the executed R0124 selector, never prose about it."""
+    review_signature = expected_input_signature(review_path)
+    review_frontmatter = _frontmatter(review_path)
+    try:
+        review_releases = json.loads(review_frontmatter.get("releases") or "[]")
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("Review 0124 releases are malformed") from exc
+    if (
+        review_signature["sha256"] != expected_sha256
+        or review_frontmatter.get("round_id") != "0124"
+        or review_frontmatter.get("status") != "accepted"
+        or not isinstance(review_releases, list)
+        or not all(isinstance(value, str) for value in review_releases)
+        or "capability:jina-fineweb-2m-native-k15-degree-bridge-v1"
+        not in review_releases
+    ):
+        raise RuntimeError("Review 0124 is not accepted at the expected bytes")
+    result_name = review_frontmatter.get("result") or ""
+    result_sha256 = review_frontmatter.get("result_sha256") or ""
+    if (
+        not result_name
+        or os.path.basename(result_name) != result_name
+        or not re.fullmatch(
+            r"result-0124-[0-9]{4}-[0-9]{2}-[0-9]{2}\.md",
+            result_name,
+        )
+        or not re.fullmatch(r"[0-9a-f]{64}", result_sha256)
+    ):
+        raise RuntimeError("Review 0124 does not bind one result document")
+    result_path = os.path.join(os.path.dirname(review_path), result_name)
+    result_signature = expected_input_signature(result_path)
+    result_frontmatter = _frontmatter(result_path)
+    review_release = review_frontmatter.get("verified_release_commit")
+    result_release = result_frontmatter.get("release_commit")
+    result_queue = (result_frontmatter.get("queue_manifest") or "").removeprefix(
+        "gsv:"
+    )
+    if (
+        result_signature["sha256"] != result_sha256
+        or result_frontmatter.get("round_id") != "0124"
+        or result_frontmatter.get("status") != "complete"
+        or not re.fullmatch(r"[0-9a-f]{40}", result_release or "")
+        or review_release != result_release
+        or os.path.realpath(result_queue) != os.path.realpath(queue_path)
+    ):
+        raise RuntimeError("Accepted Review 0124 result binding changed")
+
+    queue_signature = expected_input_signature(queue_path)
+    terminal_signature = expected_input_signature(terminal_path)
+    decision_signature = expected_input_signature(decision_path)
+    with open(queue_path, encoding="utf-8") as handle:
+        queue = json.load(handle)
+    with open(terminal_path, encoding="utf-8") as handle:
+        terminal = json.load(handle)
+    decision = read_r0124_sealed(
+        decision_path, label="R0124 attempt-2 degree decision"
+    )
+    jobs = queue.get("jobs") or []
+    required_jobs = [str(job.get("id") or "") for job in jobs]
+    decision_jobs = [
+        job for job in jobs if job.get("id") == "decide_degree_bridge"
+    ]
+    release = str(queue.get("release_sha") or "")
+    terminal_nodes = terminal.get("nodes") or []
+    terminal_required = terminal.get("required_jobs")
+    terminal_completed = terminal.get("completed_jobs")
+    terminal_node_ids = [str(node.get("node") or "") for node in terminal_nodes]
+    result_text = _document_text(result_path)
+    if (
+        queue.get("schema")
+        != "round0124-fineweb-2m-degree-bridge-retry-queue-v1"
+        or queue.get("round_id") != "0124"
+        or release != result_release
+        or not required_jobs
+        or any(not value for value in required_jobs)
+        or len(set(required_jobs)) != len(required_jobs)
+        or len(decision_jobs) != 1
+        or decision_jobs[0].get("outputs")
+        != [os.path.dirname(os.path.realpath(decision_path))]
+        or terminal.get("schema") != "slim-runner-terminal-v3"
+        or terminal.get("round_id") != "0124"
+        or terminal.get("verdict") != "succeeded"
+        or terminal_required != required_jobs
+        or not isinstance(terminal_completed, list)
+        or sorted(terminal_completed) != sorted(required_jobs)
+        or len(terminal_completed) != len(required_jobs)
+        or sorted(terminal_node_ids) != sorted(required_jobs)
+        or len(terminal_node_ids) != len(required_jobs)
+        or terminal.get("queue_manifest_sha256") != queue_signature["sha256"]
+        or terminal.get("queue_manifest_sha256_at_finish")
+        != queue_signature["sha256"]
+        or terminal.get("queue_manifest_unchanged") is not True
+        or terminal.get("release_checkout_unchanged") is not True
+        or terminal.get("gpu_wall_accounting_complete") is not True
+        or terminal.get("boundary_problems") != []
+        or any(node.get("validation_problems") != [] for node in terminal_nodes)
+        or (terminal.get("release_checkout") or {}).get("head") != release
+        or (terminal.get("release_checkout_at_finish") or {}).get("head")
+        != release
+        or decision.get("schema") != R0124_DECISION_SCHEMA
+        or decision.get("round_id") != "0124"
+        or decision.get("release_sha") != release
+        or decision.get("retry_provenance") != queue.get("retry_provenance")
+        or decision.get("capabilities_produced")
+        != ["jina-fineweb-2m-native-k15-degree-bridge-v1"]
+        or result_frontmatter.get("queue_manifest_sha256")
+        != queue_signature["sha256"]
+        or decision_signature["sha256"] not in result_text
+        or queue_signature["sha256"] not in result_text
+        or terminal_signature["sha256"] not in result_text
+    ):
+        raise RuntimeError("R0124 attempt-2 execution/result linkage changed")
+    outcome = (decision.get("registered_selector") or {}).get("outcome")
+    if outcome != R0124_POSITIVE_OUTCOME:
+        raise RuntimeError(
+            "R0124 sealed decision outcome is not the positive degree branch"
+        )
+    return {
+        "review": review_signature,
+        "result": result_signature,
+        "queue": queue_signature,
+        "terminal": terminal_signature,
+        "decision": decision_signature,
+    }
+
+
 def _require_clean_r0108() -> tuple[dict[str, Any], dict[str, Any]]:
     queue_signature = expected_input_signature(R0108_QUEUE)
     terminal_signature = expected_input_signature(R0108_TERMINAL)
@@ -255,12 +408,11 @@ def prepare_round0128(
         )
         for round_id, (name, sha, capability) in REVIEW_DEFAULTS.items()
     }
-    reviews["0124"] = _require_review(
+    r0124_evidence = _require_positive_r0124_review(
         r0124_review_path,
         expected_sha256=r0124_review_sha256,
-        round_id="0124",
-        required_text="k15-materially-degrades-native-density",
     )
+    reviews["0124"] = r0124_evidence["review"]
     r0108_queue, r0108_terminal = _require_clean_r0108()
     queue_root = create_fresh_directory(
         queue_root, label="R0128 direct k49 degree-rescue queue"
@@ -269,6 +421,11 @@ def prepare_round0128(
     common = _dedupe([
         expected_input_signature(round_file),
         *reviews.values(),
+        *(
+            value
+            for key, value in r0124_evidence.items()
+            if key != "review"
+        ),
         r0108_queue,
         r0108_terminal,
     ])
