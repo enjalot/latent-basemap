@@ -543,8 +543,28 @@ class HostFp16EndpointArray:
 class PromptWeightedJinaSampler(DiverseWeightedJinaSampler):
     """R0107's exact rejection sampler with prompt-specific stamps."""
 
-    def __init__(self, *args: Any, arm: str, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        arm: str,
+        graph_search_neighbors_including_self: int = GRAPH_K,
+        graph_nonself_degree: int = GRAPH_K - 1,
+        graph_degree_label: int = GRAPH_K,
+        **kwargs: Any,
+    ) -> None:
         self.arm = arm
+        self.graph_search_neighbors_including_self = int(
+            graph_search_neighbors_including_self
+        )
+        self.graph_nonself_degree = int(graph_nonself_degree)
+        self.graph_degree_label = int(graph_degree_label)
+        if (
+            self.graph_search_neighbors_including_self < 2
+            or self.graph_nonself_degree
+            != self.graph_search_neighbors_including_self - 1
+            or self.graph_degree_label <= 0
+        ):
+            raise Round0113Error("prompt graph degree stamp is malformed")
         random_state = int(kwargs["random_state"])
         super().__init__(*args, **kwargs)
         self._positive_rng_seed = random_state
@@ -580,7 +600,8 @@ class PromptWeightedJinaSampler(DiverseWeightedJinaSampler):
                 "uniform_envelope_rejection"
             ),
             "positive_destination_policy": (
-                f"separate-{self.arm}-fp16-fuzzy-k50-graph"
+                f"separate-{self.arm}-fp16-fuzzy-k"
+                f"{self.graph_degree_label}-graph"
             ),
             "negative_sampling": (
                 f"uniform-{self.n_nodes}-compact-representatives-nonself"
@@ -591,7 +612,14 @@ class PromptWeightedJinaSampler(DiverseWeightedJinaSampler):
             "positive_rng_seed": self._positive_rng_seed,
             "negative_rng_seed": self._negative_rng_seed,
             "negative_row_pairs_identical_across_arms": True,
-            "graph_degree": "variable-symmetric-fuzzy-k50-topology",
+            "graph_degree": (
+                "variable-symmetric-fuzzy-k"
+                f"{self.graph_degree_label}-topology"
+            ),
+            "graph_search_neighbors_including_self": (
+                self.graph_search_neighbors_including_self
+            ),
+            "graph_nonself_degree": self.graph_nonself_degree,
             "host_prefetch": "single-producer-two-pinned-slot",
             "host_prefetch_producer_batches": self._producer_batches,
             "host_prefetch_consumer_batches": self._consumer_batches,
