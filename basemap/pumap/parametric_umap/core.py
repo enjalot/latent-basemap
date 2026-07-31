@@ -23,6 +23,40 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 
+
+def _successful_update_stop_reason(*, stats, lr_schedule, lr_horizon,
+                                   max_successful_updates):
+    """Return a stop reason using only successful positive-LR progress."""
+    if (lr_schedule == "cosine"
+            and stats["positive_lr_optimizer_steps"] >= lr_horizon):
+        return "lr_horizon"
+    if (max_successful_updates is not None
+            and stats["positive_lr_optimizer_steps"]
+            >= max_successful_updates):
+        return "bench_cap"
+    return None
+
+
+def _successful_update_budget_satisfied(stats):
+    """A full budget closes only after its registered successful updates."""
+    return stats["positive_lr_optimizer_steps"] >= stats["lr_horizon"]
+
+
+def _record_optimizer_outcome(stats, *, optimizer_was_run, lr_used):
+    """Record one GradScaler/optimizer outcome without consuming skips."""
+    successful_positive_update = bool(optimizer_was_run and lr_used > 0)
+    if optimizer_was_run:
+        stats["optimizer_steps_succeeded"] += 1
+        if successful_positive_update:
+            stats["positive_lr_optimizer_steps"] += 1
+            if stats["lr_used_first"] is None:
+                stats["lr_used_first"] = lr_used
+            stats["lr_used_last"] = lr_used
+    else:
+        stats["amp_overflow_skips"] += 1
+    stats["final_lr"] = lr_used
+    return successful_positive_update
+
 class ParametricUMAP:
     def __init__(
         self,
@@ -146,7 +180,9 @@ class ParametricUMAP:
         self.gpu_resident_vram_budget_gb = gpu_resident_vram_budget_gb
         self._fast_device_path = False   # set True by _prepare_edge_list_training
         self._X_dev = None               # DeviceArrayDataset when fast path active
-        self._max_train_steps = None     # benchmark hook: stop after N global steps
+        # Benchmark hook: stop after N successful positive-LR updates. Attempted
+        # batches and AMP-scaler skips never consume this cap.
+        self._max_train_steps = None
         self._bench_warmup = 0           # benchmark hook: steps to exclude from timing
         self._bench_t0 = 0.0
         self._bench_seconds = None       # measured steady-state loop seconds
@@ -1393,7 +1429,12 @@ class ParametricUMAP:
         # (the old step/W made update 0 an LR=0 update → "500k" was really
         # 499,999 positive-LR updates). We stop after H positive-LR updates and
         # never apply the LR=0 endpoint.
-        planned_loop = int(len(loader)) * int(self.n_epochs)
+        loader_batches_per_epoch = int(len(loader))
+        planned_loop = loader_batches_per_epoch * int(self.n_epochs)
+        if loader_batches_per_epoch <= 0 or int(self.n_epochs) <= 0:
+            if hasattr(loader, "close"):
+                loader.close()
+            raise ValueError("training loader plan must contain at least one batch")
         if self.lr_schedule == "cosine":
             if int(self.total_steps_estimate) <= 0:
                 lr_horizon = planned_loop
@@ -1422,9 +1463,30 @@ class ParametricUMAP:
             lr_horizon = planned_loop
         else:
             raise ValueError(f"Unknown lr_schedule: {self.lr_schedule}")
+        if self.require_full_budget:
+            if planned_loop < lr_horizon:
+                if hasattr(loader, "close"):
+                    loader.close()
+                raise ValueError(
+                    "P0-3: actual loader plan cannot supply the required "
+                    f"successful-update budget ({planned_loop} batches < "
+                    f"{lr_horizon} updates)"
+                )
+            if (self._max_train_steps is not None
+                    and int(self._max_train_steps) < lr_horizon):
+                if hasattr(loader, "close"):
+                    loader.close()
+                raise ValueError(
+                    "P0-3: benchmark cap cannot truncate a required full "
+                    f"budget ({self._max_train_steps} < {lr_horizon}); set "
+                    "require_full_budget=False for an exploratory partial run"
+                )
         schedule_version = "cosine-v3-positive-budget" if self.lr_schedule == "cosine" else self.lr_schedule
         self._train_stats = {
-            "schedule_version": schedule_version, "planned_loop_iters": planned_loop,
+            "schedule_version": schedule_version,
+            "loader_batches_per_epoch": loader_batches_per_epoch,
+            "planned_loop_iters": planned_loop,
+            "max_successful_update_cap": self._max_train_steps,
             "lr_horizon": lr_horizon, "attempted_batches": 0, "finite_loss_batches": 0,
             "optimizer_steps_attempted": 0, "optimizer_steps_succeeded": 0,
             "positive_lr_optimizer_steps": 0, "scheduler_steps": 0,
@@ -1456,6 +1518,9 @@ class ParametricUMAP:
                     "pipeline": getattr(self, "_pipeline_info", {}),
                     "verified_hashes": getattr(self, "_pipeline_verified_hashes", {}),
                     "schedule_version": schedule_version, "lr_horizon": lr_horizon,
+                    "loader_batches_per_epoch": loader_batches_per_epoch,
+                    "planned_loop_iters": planned_loop,
+                    "max_successful_update_cap": self._max_train_steps,
                     "edges_path": getattr(self, "_edges_path_used", None)}
             _tmp = f"{_adm_path}.tmp.{os.getpid()}"
             import json as _jsonw
@@ -1795,27 +1860,21 @@ class ParametricUMAP:
                     else:
                         optimizer.step()
 
-                if optimizer_was_run:
-                    st["optimizer_steps_succeeded"] += 1
+                successful_positive_update = _record_optimizer_outcome(
+                    st,
+                    optimizer_was_run=optimizer_was_run,
+                    lr_used=lr_used,
+                )
+                if successful_positive_update:
                     consecutive_nonfinite_gradients = 0   # P0-3: reset on real progress
-                    if lr_used > 0:
-                        st["positive_lr_optimizer_steps"] += 1
-                        if st["lr_used_first"] is None:
-                            st["lr_used_first"] = lr_used
-                        st["lr_used_last"] = lr_used
                     # Advance the schedule ONLY on a successful update, so an
                     # AMP-overflow skip does not consume the LR horizon.
                     if self.lr_schedule == "cosine":
                         scheduler.step()
                         st["scheduler_steps"] += 1
                         st["next_lr"] = optimizer.param_groups[0]['lr']
-                else:
-                    # scaler.step skipped (scale decreased) → an AMP overflow at
-                    # THIS step; the schedule was NOT advanced, so H is preserved.
-                    # Not first-strike terminal: dynamic loss scaling recovers by
-                    # design, and the consecutive/fraction guards bound pathology.
-                    st["amp_overflow_skips"] += 1
-                st["final_lr"] = lr_used
+                # If scaler.step skipped (scale decreased), the helper records
+                # the overflow but neither this schedule nor H advances.
 
                 current_lr = optimizer.param_groups[0]['lr']  # LR for the NEXT update
 
@@ -1835,8 +1894,12 @@ class ParametricUMAP:
                 epoch_umap_t += umap_loss.detach()
                 epoch_corr_t += corr_loss.detach()
                 num_batches += 1
-                global_step += 1
-                st["executed_iters"] = global_step
+                # Keep attempted optimizer iterations distinct from successful
+                # update progress. In particular, GradScaler-skipped steps are
+                # attempts, but they do not advance schedules, science budgets,
+                # benchmark caps, or the global successful-update coordinate.
+                st["executed_iters"] += 1
+                global_step = st["positive_lr_optimizer_steps"]
 
                 # Close performance windows on the update that reaches their
                 # boundary.  This must precede the LR-horizon break: otherwise
@@ -1851,22 +1914,25 @@ class ParametricUMAP:
                     break
 
                 # P0-B: stop when the cosine update budget is spent — i.e. the
-                # schedule has taken `lr_horizon` successful steps (progress=1,
-                # LR≈0). Counting scheduler_steps is exact; testing current_lr<=0
-                # is not, because float cos(π)≈−1 leaves a tiny positive LR. AMP
-                # skips don't advance scheduler_steps, so they don't consume the
-                # budget. Or stop on the benchmark step cap; finalize bench timing
-                # on this path too (the old horizon branch left it None).
-                horizon_done = (self.lr_schedule == "cosine" and st["scheduler_steps"] >= lr_horizon)
-                bench_cap = (self._max_train_steps is not None and global_step >= self._max_train_steps)
-                if horizon_done or bench_cap:
+                # schedule has taken `lr_horizon` successful positive-LR steps
+                # (progress=1, LR≈0). Testing current_lr<=0 is not exact because
+                # float cos(π)≈−1 leaves a tiny positive LR. AMP skips do not
+                # consume this counter. Or stop on the benchmark step cap; finalize
+                # bench timing on this path too (the old horizon branch left it None).
+                stop_reason = _successful_update_stop_reason(
+                    stats=st,
+                    lr_schedule=self.lr_schedule,
+                    lr_horizon=lr_horizon,
+                    max_successful_updates=self._max_train_steps,
+                )
+                if stop_reason is not None:
                     stop_training = True
                     # When the exact benchmark cap and the successful-update LR
                     # horizon coincide, this is a completed scientific budget,
                     # not a partial benchmark.  Existing short canaries still
                     # stop as ``bench_cap`` because their horizon is larger.
-                    st["stop_reason"] = "lr_horizon" if horizon_done else "bench_cap"
-                    if bench_cap and self._bench_t0:
+                    st["stop_reason"] = stop_reason
+                    if stop_reason == "bench_cap" and self._bench_t0:
                         if 'cuda' in str(self.device):
                             torch.cuda.synchronize(self.device)
                         self._bench_seconds = time.perf_counter() - self._bench_t0
@@ -1878,7 +1944,7 @@ class ParametricUMAP:
 
                 # Step-rate logging every 10k steps (plan B1: never fly blind on
                 # a long run again). Reports steps/s over the last window + ETA.
-                if global_step % 10000 == 0:
+                if successful_positive_update and global_step % 10000 == 0:
                     now = time.perf_counter()
                     if not hasattr(self, "_rate_t0"):
                         self._rate_t0 = self._train_t0 if hasattr(self, "_train_t0") else now
@@ -1895,7 +1961,9 @@ class ParametricUMAP:
                     self._rate_t0 = now
                     self._rate_s0 = st["positive_lr_optimizer_steps"]
 
-                if self._max_train_steps is not None and global_step == self._bench_warmup:
+                if (self._max_train_steps is not None
+                        and successful_positive_update
+                        and global_step == self._bench_warmup):
                     if 'cuda' in str(self.device):
                         torch.cuda.synchronize(self.device)
                     self._bench_t0 = time.perf_counter()
@@ -1932,7 +2000,9 @@ class ParametricUMAP:
                         'neg_q': f'{neg_qs_mean:.3f}',
                     })
 
-                if self._max_train_steps is not None and global_step >= self._max_train_steps:
+                if (self._max_train_steps is not None
+                        and st["positive_lr_optimizer_steps"]
+                        >= self._max_train_steps):
                     batch = None  # benchmark hook: stop this epoch early
 
             pbar.close()
@@ -1940,7 +2010,9 @@ class ParametricUMAP:
             if stop_training:
                 break  # P0.2: LR horizon reached — end the run, not just the epoch
 
-            if self._max_train_steps is not None and global_step >= self._max_train_steps:
+            if (self._max_train_steps is not None
+                    and self._train_stats["positive_lr_optimizer_steps"]
+                    >= self._max_train_steps):
                 if 'cuda' in str(self.device):
                     torch.cuda.synchronize(self.device)
                 self._bench_seconds = time.perf_counter() - self._bench_t0
@@ -1980,7 +2052,6 @@ class ParametricUMAP:
                     logging.info("Peak GPU Memory: %.2f GB", peak_memory)
                 wandb.log(log_dict)
 
-        self.is_fitted = True
         # P0-B: honest step accounting. Also compute throughput in meaningful
         # units (positive-LR updates/s and edge-pairs/s), not n*epochs/time.
         s = self._train_stats
@@ -1991,10 +2062,11 @@ class ParametricUMAP:
         # horizon), NOT if the epoch plan ran out first. A matched-budget run that
         # exhausted its plan below H must fail closed — never be reported as a
         # completed H-update run.
-        s["budget_satisfied"] = bool(
-            self.lr_schedule != "cosine"
-            or s["positive_lr_optimizer_steps"] >= s["lr_horizon"]
-            or s["stop_reason"] == "bench_cap")
+        s["budget_satisfied"] = _successful_update_budget_satisfied(s)
+        # A failed full-budget run must not leave a savable fitted model or a
+        # live host-prefetch worker behind.
+        if hasattr(loader, "close"):
+            loader.close()
         if not s["budget_satisfied"] and self.require_full_budget:
             raise RuntimeError(
                 f"P0-3: matched-budget run exhausted its {s['planned_loop_iters']}-iter plan "
@@ -2002,6 +2074,7 @@ class ParametricUMAP:
                 f"updates (stop={s['stop_reason']}). Increase n_epochs or lower the horizon, or "
                 f"set require_full_budget=False for an exploratory run; refuse to silently report "
                 f"this as a satisfied {s['lr_horizon']}-update budget.")
+        self.is_fitted = True
         train_secs = time.perf_counter() - getattr(self, "_train_t0", time.perf_counter())
         s["train_seconds"] = round(train_secs, 1)
         s["updates_per_s"] = round(s["positive_lr_optimizer_steps"] / train_secs, 1) if train_secs > 0 else 0.0
@@ -2017,10 +2090,6 @@ class ParametricUMAP:
         # Capture mutable endpoint accounting after the final batch.  Requested
         # configuration and the pre-update stamp are not evidence that both
         # endpoints actually traversed the intended host-int8 path.
-        # Stop HostStreamEdgeSampler producer threads so they don't keep drawing
-        # and discarding batches during the final transform / downstream scoring.
-        if hasattr(loader, "close"):
-            loader.close()
         if hasattr(loader, "execution_stamp"):
             self._pipeline_runtime_info = loader.execution_stamp()
             self._train_stats["pipeline_runtime"] = self._pipeline_runtime_info

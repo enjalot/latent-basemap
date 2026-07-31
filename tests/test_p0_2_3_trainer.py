@@ -1,7 +1,12 @@
 """P0.2/P0-B (schedule + accounting) and P0.3 (zero-weight correlation skip)."""
 import sys, os, numpy as np, torch, pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from basemap.pumap.parametric_umap.core import ParametricUMAP
+from basemap.pumap.parametric_umap.core import (
+    ParametricUMAP,
+    _record_optimizer_outcome,
+    _successful_update_budget_satisfied,
+    _successful_update_stop_reason,
+)
 
 
 def _edges(n, e, seed=0):
@@ -50,13 +55,79 @@ def test_p0b_bench_hook_populates_seconds_and_stops():
     s, t, w = _edges(500, 20000, 2); np.savez('/tmp/_pb2.npz', sources=s, targets=t, weights=w, n_nodes=500, k=15)
     m = ParametricUMAP(a=1., b=1., correlation_weight=0.0, n_epochs=50, batch_size=64,
                        total_steps_estimate=100000, lr_schedule='cosine', warmup_steps=0,
-                       device='cpu', positive_target_mode='binary', gpu_resident_data=False, use_amp=False)
+                       device='cpu', positive_target_mode='binary', gpu_resident_data=False,
+                       use_amp=False, require_full_budget=False)
     m._max_train_steps = 120; m._bench_warmup = 20
     m.fit(X, precomputed_edges_path='/tmp/_pb2.npz')
     assert m._bench_seconds is not None, "bench seconds not finalized on stop path"
     assert m._train_stats['stop_reason'] == 'bench_cap'
     assert m._train_stats['executed_iters'] == 120
+    assert m._train_stats['positive_lr_optimizer_steps'] == 120
+    assert m._train_stats['budget_satisfied'] is False
 
+
+def test_scaler_skips_do_not_consume_successful_update_cap_or_budget():
+    # Simulate GradScaler outcomes without requiring CUDA: False means
+    # scaler.step skipped the optimizer because it lowered the scale.
+    outcomes = [True, True, False, False, True, False, True]
+    stats = {
+        'scheduler_steps': 0,
+        'positive_lr_optimizer_steps': 0,
+        'optimizer_steps_succeeded': 0,
+        'lr_horizon': 6,
+        'executed_iters': 0,
+        'amp_overflow_skips': 0,
+        'lr_used_first': None,
+        'lr_used_last': None,
+        'final_lr': None,
+    }
+    reasons = []
+    for optimizer_was_run in outcomes:
+        stats['executed_iters'] += 1
+        succeeded = _record_optimizer_outcome(
+            stats,
+            optimizer_was_run=optimizer_was_run,
+            lr_used=0.001,
+        )
+        if succeeded:
+            stats['scheduler_steps'] += 1
+        reasons.append(_successful_update_stop_reason(
+            stats=stats,
+            lr_schedule='cosine',
+            lr_horizon=stats['lr_horizon'],
+            max_successful_updates=4,
+        ))
+    assert reasons[:6] == [None] * 6
+    assert reasons[6] == 'bench_cap'
+    assert stats['executed_iters'] == 7
+    assert stats['positive_lr_optimizer_steps'] == 4
+    assert stats['amp_overflow_skips'] == 3
+    assert _successful_update_budget_satisfied(stats) is False
+    stats['scheduler_steps'] = stats['lr_horizon']
+    assert _successful_update_stop_reason(
+        stats=stats, lr_schedule='cosine', lr_horizon=stats['lr_horizon'],
+        max_successful_updates=None,
+    ) is None
+    # A historical bench_cap label can never mint a full-budget closure.
+    stats['stop_reason'] = 'bench_cap'
+    assert _successful_update_budget_satisfied(stats) is False
+
+
+def test_required_full_budget_rejects_partial_bench_cap_before_training():
+    X = np.random.RandomState(3).randn(100, 8).astype(np.float32)
+    s, t, w = _edges(100, 1000, 3)
+    np.savez('/tmp/_pb_partial_cap.npz', sources=s, targets=t, weights=w,
+             n_nodes=100, k=15)
+    m = ParametricUMAP(
+        a=1., b=1., correlation_weight=0.0, n_epochs=10, batch_size=64,
+        total_steps_estimate=100, lr_schedule='cosine', warmup_steps=0,
+        device='cpu', positive_target_mode='binary', gpu_resident_data=False,
+        use_amp=False, require_full_budget=True,
+    )
+    m._max_train_steps = 20
+    with pytest.raises(ValueError, match="benchmark cap.*full budget"):
+        m.fit(X, precomputed_edges_path='/tmp/_pb_partial_cap.npz')
+    assert m.is_fitted is False
 
 def test_p0a_amp_skip_path_does_not_break_scaler():
     # Regression: the P0-A gradient guard unscale_()s then may skip a batch; under
@@ -170,7 +241,7 @@ def test_p0_3_zero_horizon_takes_planned_positive_updates():
 def test_p0_3_exhausted_plan_below_budget_fails():
     # A horizon larger than the epoch plan must fail closed, not silently report a
     # satisfied budget.
-    with pytest.raises(RuntimeError, match="exhausted|budget"):
+    with pytest.raises(ValueError, match="loader plan|budget"):
         _fit(horizon=10_000_000, epochs=1)
 
 
