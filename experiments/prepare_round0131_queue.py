@@ -48,6 +48,9 @@ ROUND_FILE_GLOB = os.path.join(LAB_ROOT, "round-0131-*.md")
 R0125_CAPABILITY = "jina-fineweb-2m-runtime-path-density-bridge-v1"
 R0125_CORRECTED_RESULT = "result-0125-2026-07-31-01.md"
 R0125_CORRECTED_REVIEW = "review-0125-2026-07-31-01.md"
+R0125_CORRECTED_QUEUE = (
+    "/data/latent-basemap/runs/round-0125/queue-attempt-2/queue.json"
+)
 R0125_TRAIN_CHECK_KEYS = {
     "exact_update_closure",
     "zero_numerical_skips",
@@ -142,6 +145,10 @@ def _accepted_r0125(review_path: str) -> dict[str, Any]:
     if not queue_field.startswith("gsv:/"):
         raise RuntimeError("R0125 result lacks a canonical queue path")
     queue_path = queue_field.removeprefix("gsv:")
+    if queue_path != R0125_CORRECTED_QUEUE:
+        raise RuntimeError(
+            "R0125 result does not bind the registered correction queue"
+        )
     queue_signature = expected_input_signature(queue_path)
     queue = _read_json(queue_path, label="R0125 queue")
     terminal_path = os.path.join(os.path.dirname(queue_path), "runner-terminal.json")
@@ -168,6 +175,16 @@ def _accepted_r0125(review_path: str) -> dict[str, Any]:
         or queue.get("training_performed") is not False
         or (queue.get("correction_attempt") or {}).get("prior_release_sha")
         != R0125_TRAIN_RELEASE_SHA
+        or (queue.get("correction_attempt") or {}).get("retraining_permitted")
+        is not False
+        or (queue.get("scientific_contract") or {}).get(
+            "original_train_receipts_reused"
+        )
+        is not True
+        or (queue.get("scientific_contract") or {}).get(
+            "training_performed_in_correction"
+        )
+        is not False
         or any(
             (node.get("node_policy") or {}).get("training_performed") is not False
             or node.get("action") == "train"
