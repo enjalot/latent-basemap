@@ -23,6 +23,11 @@ def test_work_ranges_are_balanced_gap_free_and_payload_is_exact() -> None:
     assert contract.CHUNK_ROWS == 25_000
     assert contract.production_payload_bytes() == 5_220_919_296
     assert contract.required_free_bytes() > contract.production_payload_bytes()
+    worst_passing_gpu_s = (
+        contract.CORPUS_ROWS / contract.EMBED_MINIMUM_ROWS_PER_S
+        + 300.0 * len(contract.WORK_RANGES)
+    )
+    assert worst_passing_gpu_s < 6.5 * 3_600.0
 
 
 def test_source_layout_preserves_r0087_and_local_identity(
