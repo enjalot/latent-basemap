@@ -35,6 +35,7 @@ from experiments.prepare_round0020_0022_queues import (
     _base_manifest,
     _dedupe,
 )
+from experiments.round0119_nodes import SOURCE_ROWS
 
 
 ROUND_ROOT = "/data/latent-basemap/runs/round-0134"

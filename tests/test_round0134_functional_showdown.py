@@ -22,6 +22,7 @@ from experiments.prepare_round0134_queue import (
     GPU_HOURS_MINIMUM,
     GPU_HOURS_P90,
     REVIEW_CAPABILITIES,
+    SOURCE_ROWS,
 )
 
 
@@ -107,6 +108,7 @@ def test_cell_order_is_an_authenticated_selector_input():
 
 
 def test_registered_metrics_and_budget_match_round_design():
+    assert SOURCE_ROWS == 2_000_000
     assert METRIC_ORDER == (
         "ffr",
         "purity_fidelity_k256",
