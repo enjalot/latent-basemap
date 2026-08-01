@@ -11,6 +11,7 @@ from basemap.jina_historical_selection import (
     evenly_spaced_validation_positions,
     map_dataset_rows_to_global,
     map_historical_positions,
+    materialize_indexed_fp16_npy,
     validate_historical_provenance,
     verify_embedding_rows,
 )
@@ -208,6 +209,14 @@ def test_indexed_inventory_fp16_array_preserves_arbitrary_order(tmp_path) -> Non
     assert np.array_equal(source[[5, 0, 2]], expected[[5, 0, 2]])
     assert np.array_equal(source[-1], expected[-1])
     assert len(source.segments) == 6
+    staged_path = tmp_path / "staged.npy"
+    signature = materialize_indexed_fp16_npy(
+        staged_path, source, block_rows=2
+    )
+    assert signature["canonical_path"] == str(staged_path)
+    assert np.array_equal(
+        np.load(staged_path, mmap_mode="r", allow_pickle=False), expected
+    )
     with pytest.raises(IndexError, match="logical row"):
         _ = source[6]
 

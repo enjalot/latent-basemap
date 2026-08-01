@@ -21,7 +21,8 @@ from typing import Any
 
 import numpy as np
 
-from .artifact_identity import ordered_array_sha256
+from .artifact_identity import expected_input_signature, ordered_array_sha256
+from .output_safety import atomic_build_new_file
 from .round0087_inventory import FINEWEB, PILE, REDPAJAMA
 
 
@@ -552,3 +553,41 @@ class IndexedInventoryFp16Array:
             output[mask] = self._arrays[path][local]
         shaped = output.reshape(logical_shape + (self.shape[1],))
         return shaped[0] if scalar else shaped
+
+
+def materialize_indexed_fp16_npy(
+    path: str | Path,
+    source: IndexedInventoryFp16Array,
+    *,
+    block_rows: int = 65_536,
+) -> dict[str, Any]:
+    """Atomically stage an indexed source as one contiguous immutable NPY.
+
+    Training performs hundreds of thousands of random endpoint gathers.  The
+    indexed view is ideal for one validation/staging pass, but leaving those
+    gathers scattered over many corpus shards would turn source I/O into a
+    confound and likely regress throughput.  This one-time CPU materialization
+    gives graph building and training the same contiguous mmap access pattern
+    as the R0140 control.
+    """
+    if block_rows <= 0:
+        raise ValueError("block_rows must be positive")
+    output = os.path.realpath(os.fspath(path))
+
+    def build(temp_path: str) -> None:
+        staged = np.lib.format.open_memmap(
+            temp_path,
+            mode="w+",
+            dtype=source.dtype,
+            shape=source.shape,
+        )
+        try:
+            for start in range(0, len(source), block_rows):
+                stop = min(start + block_rows, len(source))
+                staged[start:stop] = source[start:stop]
+            staged.flush()
+        finally:
+            del staged
+
+    atomic_build_new_file(output, build, immutable=True)
+    return expected_input_signature(output)
