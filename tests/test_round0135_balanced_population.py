@@ -9,7 +9,7 @@ from basemap import round0135_balanced_population as subject
 def _configure_small_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(subject, "FINAL_ROWS", 8)
     monkeypatch.setattr(subject, "STAGED_ROWS", 10)
-    monkeypatch.setattr(subject, "PADDING_DUPLICATE_ROWS", 2)
+    monkeypatch.setattr(subject, "PADDING_ROWS", 2)
     monkeypatch.setattr(subject, "CANDIDATE_ROWS_PER_LANGUAGE", 6)
     monkeypatch.setattr(subject, "ENGLISH_DATASETS", ("e0", "e1", "e2"))
     monkeypatch.setattr(subject, "IN_MIX_LANGUAGES", ("l1",))
@@ -98,22 +98,19 @@ def test_canonicalization_precedes_quota_and_padding_stays_excluded(
         np.asarray([0, 1, 2, 4, 6, 9, 10, 11]),
     )
     np.testing.assert_array_equal(
-        population["padding_candidate_rows"], np.asarray([3, 7])
+        population["padding_candidate_rows"], np.asarray([3, 5])
     )
     np.testing.assert_array_equal(
         population["complement_candidate_rows"], np.asarray([3, 5, 7, 8])
     )
     np.testing.assert_array_equal(
         population["staged_candidate_rows"],
-        np.asarray([0, 1, 2, 4, 6, 9, 10, 11, 3, 7]),
+        np.asarray([0, 1, 2, 4, 6, 9, 10, 11, 3, 5]),
     )
     np.testing.assert_array_equal(
         population["eligibility"]["excluded_rows"], np.asarray([8, 9])
     )
-    np.testing.assert_array_equal(
-        population["eligibility"]["duplicate_representative_rows"],
-        np.asarray([0, 4]),
-    )
+    assert len(population["eligibility"]["duplicate_representative_rows"]) == 0
     assert population["final_group_quotas"] == {
         "e0": 2,
         "e1": 1,
@@ -141,14 +138,14 @@ def test_quota_shortfall_aborts_without_replenishment(
         subject.build_balanced_population(selection, census)
 
 
-def test_padding_aborts_if_authentic_selected_families_are_insufficient(
+def test_padding_aborts_if_authentic_complement_is_insufficient(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _configure_small_contract(monkeypatch)
-    monkeypatch.setattr(subject, "STAGED_ROWS", 12)
-    monkeypatch.setattr(subject, "PADDING_DUPLICATE_ROWS", 4)
+    monkeypatch.setattr(subject, "STAGED_ROWS", 13)
+    monkeypatch.setattr(subject, "PADDING_ROWS", 5)
     selection = subject.build_candidate_selection(_inventory())
-    with pytest.raises(subject.Round0135Error, match="authentic duplicate copies"):
+    with pytest.raises(subject.Round0135Error, match="authentic complement rows"):
         subject.build_balanced_population(selection, _census())
 
 

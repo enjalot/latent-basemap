@@ -21,7 +21,7 @@ ROUND_ID = "0135"
 FINAL_ROWS = 24_948_663
 STAGED_ROWS = 25_000_000
 CANDIDATE_ROWS_PER_LANGUAGE = 1_300_000
-PADDING_DUPLICATE_ROWS = STAGED_ROWS - FINAL_ROWS
+PADDING_ROWS = STAGED_ROWS - FINAL_ROWS
 ENGLISH_DATASETS = (FINEWEB, REDPAJAMA, PILE)
 LANGUAGE_GROUPS = tuple(sorted(("eng_Latn", *IN_MIX_LANGUAGES)))
 
@@ -339,59 +339,33 @@ def build_balanced_population(
     if len(complement_candidate_rows) != candidate_rows - FINAL_ROWS:
         raise Round0135Error("balanced population complement did not close")
 
-    duplicate_rows = arrays["duplicate_excluded_rows"]
-    duplicate_reps = arrays["duplicate_representative_rows"]
-    positions = np.searchsorted(final_candidate_rows, duplicate_reps)
-    represented = positions < len(final_candidate_rows)
-    represented_indices = np.flatnonzero(represented)
-    represented[represented_indices] = (
-        final_candidate_rows[positions[represented_indices]]
-        == duplicate_reps[represented_indices]
-    )
-    available_padding_rows = duplicate_rows[represented]
-    available_padding_reps = duplicate_reps[represented]
-    order = np.argsort(available_padding_rows, kind="stable")
-    available_padding_rows = available_padding_rows[order]
-    available_padding_reps = available_padding_reps[order]
-    if len(available_padding_rows) < PADDING_DUPLICATE_ROWS:
+    invalid_candidate_rows = np.unique(np.concatenate((
+        arrays["zero_rows"], arrays["nonfinite_rows"]
+    ))).astype(np.int64, copy=False)
+    padding_pool = complement_candidate_rows[
+        ~_membership(invalid_candidate_rows, complement_candidate_rows)
+    ]
+    if len(padding_pool) < PADDING_ROWS:
         raise Round0135Error(
-            "not enough authentic duplicate copies to preserve the 25M substrate ABI"
+            "not enough authentic complement rows to preserve the 25M substrate ABI"
         )
-    padding_candidate_rows = available_padding_rows[:PADDING_DUPLICATE_ROWS]
-    padding_candidate_reps = available_padding_reps[:PADDING_DUPLICATE_ROWS]
-    rep_positions = np.searchsorted(final_candidate_rows, padding_candidate_reps)
-    if not np.array_equal(final_candidate_rows[rep_positions], padding_candidate_reps):
-        raise Round0135Error("padding duplicate representative is absent from final rows")
+    # Keep the tested 25M physical substrate/index envelope while making the
+    # scientific universe exactly the leading FINAL_ROWS. Padding comes from
+    # the deterministic population complement and is excluded by selection.
+    # Candidate IDs remain authentic and unique; no synthetic row is created.
+    padding_candidate_rows = padding_pool[:PADDING_ROWS]
     staged_candidate_rows = np.concatenate(
         (final_candidate_rows, padding_candidate_rows)
     ).astype(np.int64, copy=False)
     if (
         len(staged_candidate_rows) != STAGED_ROWS
-        or len(padding_candidate_rows) != PADDING_DUPLICATE_ROWS
+        or len(padding_candidate_rows) != PADDING_ROWS
         or np.any(padding_candidate_rows[1:] <= padding_candidate_rows[:-1])
         or np.any(_membership(final_candidate_rows, padding_candidate_rows))
     ):
         raise Round0135Error("one candidate row was staged twice")
 
     staged_excluded = np.arange(FINAL_ROWS, STAGED_ROWS, dtype=np.int64)
-    staged_duplicate_reps = rep_positions.astype(np.int64, copy=False)
-    family_order = np.lexsort((staged_excluded, staged_duplicate_reps))
-    grouped_reps = staged_duplicate_reps[family_order]
-    grouped_members = staged_excluded[family_order]
-    representatives, starts, counts_without_rep = np.unique(
-        grouped_reps, return_index=True, return_counts=True
-    )
-    family_counts = counts_without_rep.astype(np.int64) + 1
-    family_offsets = np.zeros(len(representatives) + 1, dtype=np.int64)
-    family_offsets[1:] = np.cumsum(family_counts, dtype=np.int64)
-    member_rows = np.empty(int(family_offsets[-1]), dtype=np.int64)
-    for index, (representative, start, copies) in enumerate(
-        zip(representatives, starts, counts_without_rep, strict=True)
-    ):
-        left = family_offsets[index]
-        right = family_offsets[index + 1]
-        member_rows[left] = representative
-        member_rows[left + 1:right] = grouped_members[start:start + copies]
     staged_group_ids = group_ids_for_rows(staged_candidate_rows, selection)
     final_language_counts = {
         language: 0 for language in LANGUAGE_GROUPS
@@ -405,18 +379,18 @@ def build_balanced_population(
         "zero_rows": np.empty(0, dtype=np.int64),
         "nonfinite_rows": np.empty(0, dtype=np.int64),
         "excluded_rows": staged_excluded,
-        "duplicate_excluded_rows": staged_excluded.copy(),
-        "duplicate_representative_rows": staged_duplicate_reps,
-        "representative_rows": representatives,
-        "family_counts": family_counts,
-        "family_offsets": family_offsets,
-        "member_rows": member_rows,
+        "duplicate_excluded_rows": np.empty(0, dtype=np.int64),
+        "duplicate_representative_rows": np.empty(0, dtype=np.int64),
+        "representative_rows": np.empty(0, dtype=np.int64),
+        "family_counts": np.empty(0, dtype=np.int64),
+        "family_offsets": np.zeros(1, dtype=np.int64),
+        "member_rows": np.empty(0, dtype=np.int64),
+        "selection_excluded_rows": staged_excluded.copy(),
     }
     return {
         "final_candidate_rows": final_candidate_rows,
         "complement_candidate_rows": complement_candidate_rows,
         "padding_candidate_rows": padding_candidate_rows,
-        "padding_candidate_representatives": padding_candidate_reps,
         "staged_candidate_rows": staged_candidate_rows,
         "staged_group_ids": staged_group_ids,
         "eligibility": eligibility,
@@ -424,7 +398,7 @@ def build_balanced_population(
         "final_group_quotas": quotas,
         "final_language_quotas": final_language_counts,
         "candidate_duplicate_summary": dict(census["summary"]),
-        "available_authentic_padding_duplicates": len(available_padding_rows),
+        "available_authentic_finite_nonzero_complement_rows": len(padding_pool),
         "checks": {
             "canonicalization_precedes_quota_fill": True,
             "exact_final_rows": len(final_candidate_rows) == FINAL_ROWS,
@@ -433,7 +407,7 @@ def build_balanced_population(
                 - min(final_language_counts.values()) <= 1
             ),
             "no_final_exact_duplicates_zero_or_nonfinite": True,
-            "padding_uses_distinct_authentic_candidate_copies": True,
+            "padding_uses_distinct_authentic_complement_rows": True,
             "padding_never_enters_compact_training_universe": True,
         },
     }
