@@ -207,6 +207,7 @@ def test_r0148_budget_is_calibrated_from_r0132() -> None:
         prepare.GPU_HOURS_P90,
         prepare.GPU_HOURS_MAXIMUM,
     ) == (2.0, 2.5, 3.2, 4.5)
+    assert prepare.P90_NODE_SECONDS["graph_part"] == 900.0
 
 
 def test_positive_r0147_review_is_required(monkeypatch, tmp_path: Path) -> None:

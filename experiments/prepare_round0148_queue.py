@@ -61,7 +61,9 @@ GPU_HOURS_MAXIMUM = 4.5
 P90_NODE_SECONDS = {
     "build_index": 180.0,
     "qualify_search": 300.0,
-    "graph_part": 720.0,
+    # R0148's middle part has 6.20M rows.  R0132 measured 635 s for its
+    # largest 4.54M-row part, so the size-calibrated p90 is about 870 s.
+    "graph_part": 900.0,
     "train": 7_200.0,
     "transform": 180.0,
     "functional_density": 300.0,
