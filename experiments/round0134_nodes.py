@@ -301,6 +301,47 @@ def _load_reference(job: Mapping[str, Any]):
     return shared, shared_signature, reference, truth, centroids
 
 
+def _load_shared_evaluation_inputs(
+    job: Mapping[str, Any],
+) -> tuple[dict[str, Any], Any, np.ndarray]:
+    """Load the exact R0037 scoring views, not just their storage arrays."""
+    source_signature = _signature(job["source"], label="R0037 2M source")
+    source_storage = np.load(
+        source_signature["canonical_path"], mmap_mode="r", allow_pickle=False
+    )
+    if (
+        source_storage.shape != (SOURCE_ROWS, SOURCE_DIMENSION)
+        or source_storage.dtype != np.dtype("<f2")
+        or not source_storage.flags.c_contiguous
+    ):
+        raise Round0134Error("R0037 2M source shape/dtype changed")
+
+    # R0037's frozen high-D reference and historical transforms used the
+    # full-768 PrefixL2NormalizedArray view.  At 768 dimensions it does not
+    # renormalize, but it does expose fp32 scoring slices and the exact source
+    # path identity required by the shared-reference key.  Passing the raw fp16
+    # memmap would be numerically close but would not be the registered view.
+    from basemap.round0027_program import input_array
+
+    source = input_array(
+        SOURCE_DIMENSION, path=source_signature["canonical_path"]
+    )
+    queries = np.load(
+        job["query_embeddings"]["canonical_path"],
+        mmap_mode="r",
+        allow_pickle=False,
+    )
+    # R0037 intentionally materialized held-out queries as fp32 scoring rows;
+    # this is sealed in the 61,440,128-byte query artifact and its truth key.
+    if (
+        queries.shape != (QUERY_ROWS, SOURCE_DIMENSION)
+        or queries.dtype != np.dtype("<f4")
+        or not queries.flags.c_contiguous
+    ):
+        raise Round0134Error("R0037 held-out query shape/dtype changed")
+    return source_signature, source, queries
+
+
 def _projection_metrics(
     *, coordinates: np.ndarray, query_coordinates: np.ndarray, truth: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -411,12 +452,7 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> dict[str, An
         str(job["outputs"][0]), label="R0134 functional showdown panel"
     )
     started = time.monotonic()
-    source_signature = _signature(job["source"], label="R0037 2M source")
-    source = np.load(
-        source_signature["canonical_path"], mmap_mode="r", allow_pickle=False
-    )
-    if source.shape != (SOURCE_ROWS, SOURCE_DIMENSION) or source.dtype != np.dtype("<f2"):
-        raise Round0134Error("R0037 2M source shape/dtype changed")
+    source_signature, source, queries = _load_shared_evaluation_inputs(job)
     (
         shared,
         shared_signature,
@@ -424,12 +460,6 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> dict[str, An
         truth,
         centroids,
     ) = _load_reference(job)
-    queries = np.load(
-        job["query_embeddings"]["canonical_path"], mmap_mode="r", allow_pickle=False
-    )
-    if queries.shape != (QUERY_ROWS, SOURCE_DIMENSION) or queries.dtype != np.dtype("<f2"):
-        raise Round0134Error("R0037 held-out query shape/dtype changed")
-
     from basemap.panel_v2 import reset_process_cuda_peak, score_panel
 
     reset_process_cuda_peak()

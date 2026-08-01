@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pytest
 
 from basemap.round0134_functional_showdown import (
@@ -24,7 +25,11 @@ from experiments.prepare_round0134_queue import (
     REVIEW_CAPABILITIES,
     SOURCE_ROWS,
 )
-from experiments.round0134_nodes import _load_frozen_query_truth
+from experiments.round0134_nodes import (
+    _load_frozen_query_truth,
+    _load_reference,
+    _load_shared_evaluation_inputs,
+)
 
 
 R0037_SHARED_RECEIPT = (
@@ -175,3 +180,27 @@ def test_reviewed_r0037_query_truth_survives_current_builder_source_drift():
             expected_policy=changed,
             expected_payload_sha256=shared["query_truth_payload_sha256"],
         )
+
+
+def test_real_r0037_source_query_and_reference_views_close_before_cuda():
+    import json
+
+    from basemap.panel_v2 import _resolve_reference, sample_anchors
+    from experiments.round0027_nodes import _panel_config
+
+    with open(
+        "/data/latent-basemap/runs/round-0134/queue/queue.json",
+        encoding="utf-8",
+    ) as handle:
+        job = json.load(handle)["jobs"][0]
+    _source_signature, source, queries = _load_shared_evaluation_inputs(job)
+    _shared, _shared_signature, reference, _truth, centroids = _load_reference(job)
+    config = _panel_config()
+    anchors = sample_anchors(len(source), config)
+    resolved, reused = _resolve_reference(
+        source, anchors, config, centroids, reference
+    )
+    assert reused is True
+    assert resolved["key"] == reference["key"]
+    assert source.dtype == np.dtype("<f4")
+    assert queries.dtype == np.dtype("<f4")
