@@ -157,6 +157,14 @@ FULL_GRAPH_SCHEMA = "round0106-jina-diverse-25m-fuzzy-graph-v1"
 FULL_TRAIN_SCHEMA = "round0107-diverse-jina-train-receipt-v1"
 FULL_PRODUCTION_SCHEMA = "round0107-production-config-v1"
 TRANSFORM_SCHEMA_R0132 = TRANSFORM_SCHEMA
+TRANSFORM_MAP_KEY = "r0132-diverse-jina-12p5m-seed42"
+TRANSFORM_SCIENTIFIC_UNIVERSE = (
+    "R0132 deterministic 12,474,331-row half subset"
+)
+TRANSFORM_ROW_ORDER = "R0132 half compact order"
+TRAIN_OUTPUT_LABEL = "R0132 12.5M coverage-aligned train output"
+INDEX_FILENAME = "jina-diverse-12p5m.ivfpq"
+CANDIDATE_UNIVERSE_LABEL = "exact R0132 half subset"
 
 
 @lru_cache(maxsize=256)
@@ -440,7 +448,7 @@ def run_build_index(
     assembled = faiss.index_gpu_to_cpu(gpu)
     _require_geometry(assembled, ntotal=HALF_RETAINED_ROWS)
     validation = _validate_subset_index_ids(assembled, subset["mapping"])
-    index_path = os.path.join(output, "jina-diverse-12p5m.ivfpq")
+    index_path = os.path.join(output, INDEX_FILENAME)
     index_signature = _write_index_new(assembled, index_path)
     receipt = seal({
         "schema": INDEX_SCHEMA,
@@ -780,7 +788,7 @@ def run_graph_part(
             for value in receipts
         ],
         "pipeline": {
-            "candidate_universe": "exact R0132 half subset",
+            "candidate_universe": CANDIDATE_UNIVERSE_LABEL,
             "nprobe": SEARCH_NPROBE,
             "shortlist_width": SEARCH_SHORTLIST_WIDTH,
             "exact_native_rerank": True,
@@ -1066,7 +1074,7 @@ def run_train(
         train_config_schema=TRAIN_CONFIG_SCHEMA,
         production_config_schema=PRODUCTION_CONFIG_SCHEMA,
         train_receipt_schema=TRAIN_RECEIPT_SCHEMA,
-        output_label="R0132 12.5M coverage-aligned train output",
+        output_label=TRAIN_OUTPUT_LABEL,
         graph_load_kwargs={
             "expected_graph_schema": GRAPH_SCHEMA,
             "expected_graph_round_id": ROUND_ID,
@@ -1176,14 +1184,14 @@ def run_transform(
     receipt = coordinate_seal({
         "schema": TRANSFORM_SCHEMA_R0132,
         "round_id": ROUND_ID,
-        "map_key": "r0132-diverse-jina-12p5m-seed42",
+        "map_key": TRANSFORM_MAP_KEY,
         "model": bundle["train"]["model"],
         "train_receipt": bundle["train_signature"],
         "production_config": bundle["config_signature"],
         "graph_manifest": bundle["graph_signature"],
         "compact_mapping": bundle["graph"]["compact_mapping"],
         "substrate": source.substrate["signature"],
-        "scientific_universe": "R0132 deterministic 12,474,331-row half subset",
+        "scientific_universe": TRANSFORM_SCIENTIFIC_UNIVERSE,
         "input_preprocessing": (
             "signed-int8 times exact fp16 row scale to device fp32; no L2 "
             "renormalization before model"
@@ -1199,7 +1207,7 @@ def run_transform(
             "row_count": HALF_RETAINED_ROWS,
             "dimension": 2,
             "dtype": "<f4",
-            "row_order": "R0132 half compact order",
+            "row_order": TRANSFORM_ROW_ORDER,
             "ordered_chunks": members,
         },
         "inference": {
@@ -1554,6 +1562,7 @@ def _matched_probe(
     control_model: Any,
     treatment_model: Any,
     duplicate_policy: str,
+    cell_labels: tuple[str, str] = ("control_12p5m", "treatment_25m"),
 ) -> dict[str, Any]:
     from basemap.panel_v2 import cross_knn
 
@@ -1568,9 +1577,10 @@ def _matched_probe(
     fraction_k = max(K_LOW_MAX, int(math.ceil(FRACTION * len(corpus))))
     cells: dict[str, Any] = {}
     arrays: dict[str, np.ndarray] = {"exact_high_d_top10": truth}
-    for label, model in (
-        ("control_12p5m", control_model),
-        ("treatment_25m", treatment_model),
+    if len(cell_labels) != 2 or cell_labels[0] == cell_labels[1]:
+        raise Round0132Error("matched-probe cell labels are malformed")
+    for label, model in zip(
+        cell_labels, (control_model, treatment_model), strict=True
     ):
         corpus_coordinates = np.asarray(
             model.transform(corpus, batch_size=TRANSFORM_BATCH_ROWS), dtype=np.float32

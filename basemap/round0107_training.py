@@ -47,6 +47,9 @@ _R0132_PIPELINE_SCHEMA = "round0132-host-weighted-jina-diverse-pipeline-v1"
 _R0132_POSITIVE_DESTINATION_POLICY = (
     "R0132-global-half-retained-fuzzy-tconorm-graph"
 )
+_R0148_POSITIVE_DESTINATION_POLICY = (
+    "R0148-english-anchor-fuzzy-tconorm-graph"
+)
 
 
 class Round0107Error(RuntimeError):
@@ -62,7 +65,7 @@ def _validate_legacy_or_r0132_variant(
     positive_destination_policy: str,
     require_registered_rows: bool = True,
 ) -> None:
-    """Keep the shared R0107 surface closed to its one reviewed extension."""
+    """Keep the shared surface closed to explicitly registered extensions."""
     legacy = (
         (not require_registered_rows or int(rows) == RETAINED_ROWS)
         and str(pipeline) == PIPELINE
@@ -77,7 +80,15 @@ def _validate_legacy_or_r0132_variant(
         and str(positive_destination_policy)
         == _R0132_POSITIVE_DESTINATION_POLICY
     )
-    if not (legacy or r0132):
+    r0148 = (
+        int(rows) == _R0132_RETAINED_ROWS
+        and str(pipeline) == _R0132_PIPELINE
+        and str(pipeline_schema) == _R0132_PIPELINE_SCHEMA
+        and str(sampler_class) == SAMPLER_CLASS
+        and str(positive_destination_policy)
+        == _R0148_POSITIVE_DESTINATION_POLICY
+    )
+    if not (legacy or r0132 or r0148):
         raise Round0107Error("training pipeline variant is not registered")
 
 
