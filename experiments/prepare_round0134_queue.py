@@ -8,6 +8,7 @@ import glob
 import json
 import os
 import re
+import subprocess
 import sys
 from collections.abc import Mapping
 from typing import Any
@@ -40,6 +41,7 @@ from experiments.round0119_nodes import SOURCE_ROWS
 
 ROUND_ROOT = "/data/latent-basemap/runs/round-0134"
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
+IMPLEMENTATION_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROUND_FILE_GLOB = os.path.join(LAB_ROOT, "round-0134-*.md")
 
 R0119_QUEUE = "/data/latent-basemap/runs/round-0119/queue/queue.json"
@@ -120,6 +122,36 @@ def _frontmatter_list(frontmatter: Mapping[str, str], key: str) -> list[str]:
     return value
 
 
+def _authorize_release(round_path: str, release_sha: str) -> None:
+    frontmatter = _frontmatter(round_path)
+    original = frontmatter.get("base_commit") or ""
+    if original == release_sha:
+        return
+    with open(round_path, encoding="utf-8") as handle:
+        text = handle.read()
+    if (
+        "pre-execution setup correction addendum" not in text
+        or f"`{release_sha}`" not in text
+    ):
+        raise RuntimeError("R0134 corrected release lacks an exact round addendum")
+    ancestor = subprocess.run(
+        ["git", "-C", IMPLEMENTATION_ROOT, "merge-base", "--is-ancestor", original, release_sha],
+        check=False,
+    )
+    if ancestor.returncode != 0:
+        raise RuntimeError("R0134 corrected release does not descend from base_commit")
+    changed = subprocess.check_output(
+        ["git", "-C", IMPLEMENTATION_ROOT, "diff", "--name-only", original, release_sha],
+        text=True,
+    ).splitlines()
+    allowed = {
+        "experiments/prepare_round0134_queue.py",
+        "tests/test_round0134_functional_showdown.py",
+    }
+    if not changed or set(changed) - allowed:
+        raise RuntimeError("R0134 setup correction changed runtime/scientific code")
+
+
 def _issued_round(release_sha: str) -> tuple[str, dict[str, Any]]:
     candidates = [
         path
@@ -128,9 +160,7 @@ def _issued_round(release_sha: str) -> tuple[str, dict[str, Any]]:
     ]
     if len(candidates) != 1:
         raise RuntimeError(f"R0134 requires exactly one issued round; found {len(candidates)}")
-    frontmatter = _frontmatter(candidates[0])
-    if frontmatter.get("base_commit") != release_sha:
-        raise RuntimeError("R0134 issued round does not bind the release")
+    _authorize_release(candidates[0], release_sha)
     return candidates[0], expected_input_signature(candidates[0])
 
 
