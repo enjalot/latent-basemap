@@ -6,6 +6,7 @@ import pytest
 from basemap.jina_historical_selection import (
     HISTORICAL_CORPORA,
     HistoricalJinaSelectionError,
+    IndexedInventoryFp16Array,
     derive_first_eligible_historical_rows,
     evenly_spaced_validation_positions,
     map_dataset_rows_to_global,
@@ -159,3 +160,80 @@ def test_exact_embedding_validation_uses_inventory_shards(tmp_path) -> None:
 def test_evenly_spaced_validation_positions_are_unique_and_cover_ends() -> None:
     assert evenly_spaced_validation_positions(10, count=4).tolist() == [0, 3, 6, 9]
     assert evenly_spaced_validation_positions(3, count=10).tolist() == [0, 1, 2]
+
+
+def test_indexed_inventory_fp16_array_preserves_arbitrary_order(tmp_path) -> None:
+    source_paths = []
+    source_arrays = []
+    for corpus_id in range(3):
+        dataset = np.arange(
+            corpus_id * 160,
+            corpus_id * 160 + 16 * 2,
+            dtype=np.float16,
+        ).reshape(16, 2)
+        source_arrays.append(dataset)
+        first = tmp_path / f"indexed-{corpus_id}-0.npy"
+        second = tmp_path / f"indexed-{corpus_id}-1.npy"
+        np.save(first, dataset[:8])
+        np.save(second, dataset[8:])
+        source_paths.append((first, second))
+
+    selection = _selection()
+    for corpus_id in range(3):
+        for shard_id in range(2):
+            path = source_paths[corpus_id][shard_id]
+            selection["ranges"][2 * corpus_id + shard_id]["shard"] = {
+                "canonical_path": str(path),
+                "bytes": path.stat().st_size,
+                "sha256": f"synthetic-{corpus_id}-{shard_id}",
+                "rows": 8,
+            }
+    ordered_global_rows = np.asarray([41, 10, 24, 19, 33, 14], dtype=np.int64)
+    source = IndexedInventoryFp16Array(
+        ordered_global_rows,
+        selection,
+        dimension=2,
+    )
+    expected = np.stack([
+        source_arrays[2][9],
+        source_arrays[0][10],
+        source_arrays[1][8],
+        source_arrays[1][3],
+        source_arrays[2][1],
+        source_arrays[0][14],
+    ])
+    assert source.shape == (6, 2)
+    assert source.dtype == np.dtype("<f2")
+    assert np.array_equal(source[:], expected)
+    assert np.array_equal(source[[5, 0, 2]], expected[[5, 0, 2]])
+    assert np.array_equal(source[-1], expected[-1])
+    assert len(source.segments) == 6
+    with pytest.raises(IndexError, match="logical row"):
+        _ = source[6]
+
+
+def test_indexed_inventory_fp16_array_rejects_duplicate_rows(tmp_path) -> None:
+    path = tmp_path / "rows.npy"
+    np.save(path, np.zeros((8, 2), dtype=np.float16))
+    selection = {
+        "selected_rows": 8,
+        "ranges": [{
+            "dataset": "only",
+            "dataset_row_start": 0,
+            "dataset_row_stop": 8,
+            "global_row_start": 0,
+            "global_row_stop": 8,
+            "shard_row_start": 0,
+            "shard_row_stop": 8,
+            "shard": {
+                "canonical_path": str(path),
+                "bytes": path.stat().st_size,
+                "sha256": "synthetic",
+                "rows": 8,
+            },
+        }],
+    }
+    with pytest.raises(HistoricalJinaSelectionError, match="unique"):
+        IndexedInventoryFp16Array(
+            np.asarray([1, 1], dtype=np.int64), selection, dimension=2
+        )

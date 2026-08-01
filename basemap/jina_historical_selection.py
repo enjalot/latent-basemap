@@ -15,6 +15,7 @@ silently shrink the training set instead of replacing excluded copies.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import os
 from pathlib import Path
 from typing import Any
 
@@ -433,3 +434,121 @@ def verify_embedding_rows(
         "exact_array_equal": True,
         "source_shards_opened": len(arrays),
     }
+
+
+class IndexedInventoryFp16Array:
+    """Exact lazy fp16 view over an arbitrary ordered inventory selection.
+
+    ``InventoryFp16Array`` serves a contiguous global interval.  The historical
+    policy treatment instead preserves a shuffled order and skips excluded
+    copies, so its logical row IDs are an index into arbitrary R0087 global
+    rows.  This adapter groups each request by inventory range and reads the
+    original fp16 shards without materializing another multi-gigabyte source
+    file.
+    """
+
+    def __init__(
+        self,
+        global_rows: Any,
+        inventory_or_selection: Mapping[str, Any],
+        *,
+        dimension: int,
+    ) -> None:
+        rows = np.asarray(global_rows, dtype=np.int64)
+        ranges, selected_rows = _validated_ranges(inventory_or_selection)
+        if (
+            rows.ndim != 1
+            or not len(rows)
+            or np.any(rows < 0)
+            or np.any(rows >= selected_rows)
+            or len(np.unique(rows)) != len(rows)
+            or dimension <= 0
+        ):
+            raise HistoricalJinaSelectionError(
+                "indexed inventory rows must be unique, in range, and nonempty"
+            )
+        self.global_rows = rows.copy()
+        self.shape = (len(rows), int(dimension))
+        self.dtype = np.dtype("<f2")
+        self._ranges = ranges
+        self._global_stops = np.asarray(
+            [int(item["global_row_stop"]) for item in ranges], dtype=np.int64
+        )
+        self._arrays: dict[str, np.ndarray] = {}
+        self.segments: list[dict[str, Any]] = []
+        seen_paths: set[str] = set()
+        for item in ranges:
+            shard = item.get("shard")
+            if not isinstance(shard, Mapping):
+                raise HistoricalJinaSelectionError(
+                    "inventory range lacks a shard signature"
+                )
+            path = os.path.realpath(str(shard.get("canonical_path") or ""))
+            declared_bytes = int(shard.get("bytes", -1))
+            shard_rows = int(shard.get("rows", -1))
+            if (
+                not path
+                or not os.path.isfile(path)
+                or os.path.getsize(path) != declared_bytes
+                or shard_rows <= 0
+            ):
+                raise HistoricalJinaSelectionError(
+                    "inventory fp16 shard is missing or has wrong size"
+                )
+            array = self._arrays.get(path)
+            if array is None:
+                array = np.load(path, mmap_mode="r", allow_pickle=False)
+                if (
+                    array.dtype != self.dtype
+                    or array.shape != (shard_rows, self.shape[1])
+                    or not array.flags.c_contiguous
+                ):
+                    raise HistoricalJinaSelectionError(
+                        "inventory fp16 shard geometry changed"
+                    )
+                self._arrays[path] = array
+            if path not in seen_paths:
+                self.segments.append({
+                    "canonical_path": path,
+                    "kind": "file",
+                    "bytes": declared_bytes,
+                    "sha256": str(shard.get("sha256") or ""),
+                    "rows": shard_rows,
+                })
+                seen_paths.add(path)
+
+    def __len__(self) -> int:
+        return self.shape[0]
+
+    def __getitem__(self, key: Any) -> np.ndarray:
+        scalar = isinstance(key, (int, np.integer))
+        if isinstance(key, slice):
+            start, stop, step = key.indices(len(self))
+            logical = np.arange(start, stop, step, dtype=np.int64)
+        else:
+            logical = np.asarray([int(key)] if scalar else key, dtype=np.int64)
+        logical_shape = logical.shape
+        flat = logical.reshape(-1)
+        flat = np.where(flat < 0, flat + len(self), flat)
+        if np.any(flat < 0) or np.any(flat >= len(self)):
+            raise IndexError("indexed inventory logical row is out of range")
+        selected = self.global_rows[flat]
+        range_ids = np.searchsorted(self._global_stops, selected, side="right")
+        output = np.empty((len(flat), self.shape[1]), dtype=self.dtype)
+        for range_id in np.unique(range_ids):
+            mask = range_ids == range_id
+            item = self._ranges[int(range_id)]
+            shard = item["shard"]
+            path = os.path.realpath(str(shard["canonical_path"]))
+            local = (
+                selected[mask]
+                - int(item["global_row_start"])
+                + int(item["shard_row_start"])
+            )
+            if np.any(local < 0) or np.any(local >= int(shard["rows"])):
+                raise HistoricalJinaSelectionError(
+                    "indexed inventory row exceeds its source shard"
+                )
+            output[mask] = self._arrays[path][local]
+        shaped = output.reshape(logical_shape + (self.shape[1],))
+        return shaped[0] if scalar else shaped
