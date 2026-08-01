@@ -115,8 +115,12 @@ def _contrast(
 
 
 def build_decision(cells: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
-    if tuple(cells) != CELL_ORDER:
-        raise Round0134Error("functional cells are missing or reordered")
+    if len(cells) != len(CELL_ORDER) or set(cells) != set(CELL_ORDER):
+        raise Round0134Error("functional cells are missing or unexpected")
+    # The immutable JSON writer sorts object keys.  Restore the registered cell
+    # order explicitly instead of treating a serialization detail as evidence
+    # that the scientific cells changed.
+    cells = {key: cells[key] for key in CELL_ORDER}
     contrasts = {
         "pre_r0115_seed42": _contrast(
             name="pre_r0115_seed42",

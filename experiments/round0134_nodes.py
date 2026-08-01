@@ -171,8 +171,101 @@ def _authenticate_r0104_fp16(
     }
 
 
+def _load_frozen_query_truth(
+    path: str,
+    *,
+    expected_key: str,
+    expected_policy: Mapping[str, Any],
+    expected_payload_sha256: str,
+) -> dict[str, Any]:
+    """Authenticate the reviewed R0037 truth without rebuilding it.
+
+    ``panel_v2.load_query_truth`` deliberately requires the archived builder's
+    ``cross_knn`` source hash to equal the *current* source hash.  That is the
+    right guard for a truth archive being reused as current implementation
+    evidence, but R0134's contract is different: it reuses the already reviewed
+    R0037 neighbor bytes verbatim while scoring all maps with the current
+    evaluator.  Later performance-only edits to ``cross_knn`` therefore cannot
+    be allowed to make those frozen bytes unreadable.
+
+    This narrow compatibility loader retains every content and semantic check:
+    exact archive fields, complete key identity, the accepted R0037 policy,
+    payload hash, shape, dtype, bounds, and per-row uniqueness.  It omits only
+    the invalid comparison between a historical builder hash and current source
+    text.  The expected policy and payload are themselves sealed in R0037's
+    accepted shared-reference receipt.
+    """
+    from basemap.panel_v2 import QUERY_TRUTH_SCHEMA, _validate_truth_neighbors
+
+    with np.load(path, allow_pickle=False) as archive:
+        required = {
+            "key",
+            "k",
+            "query_rows",
+            "corpus_cardinality",
+            "payload_sha256",
+            "neighbors",
+            "meta",
+        }
+        if set(archive.files) != required:
+            raise Round0134Error("R0037 query truth archive fields changed")
+        meta = json.loads(str(archive["meta"]))
+        if not isinstance(meta, dict) or set(meta) != {
+            "schema",
+            "key_parts",
+            "build_wall_s",
+        }:
+            raise Round0134Error("R0037 query truth metadata changed")
+        key_parts = meta.get("key_parts")
+        if (
+            meta.get("schema") != QUERY_TRUTH_SCHEMA
+            or not isinstance(key_parts, dict)
+            or key_parts.get("schema") != QUERY_TRUTH_SCHEMA
+            or key_parts.get("policy") != dict(expected_policy)
+        ):
+            raise Round0134Error("R0037 query truth policy changed")
+        key = str(archive["key"])
+        if (
+            key != expected_key
+            or sha256_bytes(canonical_json(key_parts)) != expected_key
+        ):
+            raise Round0134Error("R0037 query truth complete identity changed")
+        k = int(archive["k"])
+        query_rows = int(archive["query_rows"])
+        corpus_cardinality = int(archive["corpus_cardinality"])
+        neighbors = np.asarray(archive["neighbors"])
+        try:
+            _validate_truth_neighbors(
+                neighbors,
+                k=k,
+                query_rows=query_rows,
+                corpus_cardinality=corpus_cardinality,
+            )
+        except ValueError as exc:
+            raise Round0134Error("R0037 query truth neighbors changed") from exc
+        payload_sha256 = str(archive["payload_sha256"])
+        if (
+            payload_sha256 != expected_payload_sha256
+            or ordered_array_sha256(neighbors) != expected_payload_sha256
+        ):
+            raise Round0134Error("R0037 query truth payload changed")
+        return {
+            "schema": QUERY_TRUTH_SCHEMA,
+            "key": key,
+            "key_parts": key_parts,
+            "k": k,
+            "query_rows": query_rows,
+            "corpus_cardinality": corpus_cardinality,
+            "neighbors": neighbors.copy(),
+            "payload_sha256": payload_sha256,
+            "build_wall_s": meta.get("build_wall_s"),
+            "historical_builder_policy_authenticated": True,
+            "current_builder_source_hash_required": False,
+        }
+
+
 def _load_reference(job: Mapping[str, Any]):
-    from basemap.panel_v2 import load_hiD_reference, load_query_truth
+    from basemap.panel_v2 import load_hiD_reference
 
     shared, shared_signature = _read_json_signature(
         job["shared_reference_receipt"],
@@ -186,10 +279,11 @@ def _load_reference(job: Mapping[str, Any]):
         shared["high_d_reference"]["canonical_path"],
         expected_key=shared["high_d_reference_key"],
     )
-    truth = load_query_truth(
+    truth = _load_frozen_query_truth(
         shared["query_truth"]["canonical_path"],
         expected_key=shared["query_truth_key"],
-        expected_candidate_compute_backend="cuda",
+        expected_policy=shared["query_truth_exactness"],
+        expected_payload_sha256=shared["query_truth_payload_sha256"],
     )
     if (
         truth["neighbors"].shape != (QUERY_ROWS, 10)
@@ -205,6 +299,47 @@ def _load_reference(job: Mapping[str, Any]):
         for key, value in job["centroids"].items()
     }
     return shared, shared_signature, reference, truth, centroids
+
+
+def _load_shared_evaluation_inputs(
+    job: Mapping[str, Any],
+) -> tuple[dict[str, Any], Any, np.ndarray]:
+    """Load the exact R0037 scoring views, not just their storage arrays."""
+    source_signature = _signature(job["source"], label="R0037 2M source")
+    source_storage = np.load(
+        source_signature["canonical_path"], mmap_mode="r", allow_pickle=False
+    )
+    if (
+        source_storage.shape != (SOURCE_ROWS, SOURCE_DIMENSION)
+        or source_storage.dtype != np.dtype("<f2")
+        or not source_storage.flags.c_contiguous
+    ):
+        raise Round0134Error("R0037 2M source shape/dtype changed")
+
+    # R0037's frozen high-D reference and historical transforms used the
+    # full-768 PrefixL2NormalizedArray view.  At 768 dimensions it does not
+    # renormalize, but it does expose fp32 scoring slices and the exact source
+    # path identity required by the shared-reference key.  Passing the raw fp16
+    # memmap would be numerically close but would not be the registered view.
+    from basemap.round0027_program import input_array
+
+    source = input_array(
+        SOURCE_DIMENSION, path=source_signature["canonical_path"]
+    )
+    queries = np.load(
+        job["query_embeddings"]["canonical_path"],
+        mmap_mode="r",
+        allow_pickle=False,
+    )
+    # R0037 intentionally materialized held-out queries as fp32 scoring rows;
+    # this is sealed in the 61,440,128-byte query artifact and its truth key.
+    if (
+        queries.shape != (QUERY_ROWS, SOURCE_DIMENSION)
+        or queries.dtype != np.dtype("<f4")
+        or not queries.flags.c_contiguous
+    ):
+        raise Round0134Error("R0037 held-out query shape/dtype changed")
+    return source_signature, source, queries
 
 
 def _projection_metrics(
@@ -317,12 +452,7 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> dict[str, An
         str(job["outputs"][0]), label="R0134 functional showdown panel"
     )
     started = time.monotonic()
-    source_signature = _signature(job["source"], label="R0037 2M source")
-    source = np.load(
-        source_signature["canonical_path"], mmap_mode="r", allow_pickle=False
-    )
-    if source.shape != (SOURCE_ROWS, SOURCE_DIMENSION) or source.dtype != np.dtype("<f2"):
-        raise Round0134Error("R0037 2M source shape/dtype changed")
+    source_signature, source, queries = _load_shared_evaluation_inputs(job)
     (
         shared,
         shared_signature,
@@ -330,12 +460,6 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> dict[str, An
         truth,
         centroids,
     ) = _load_reference(job)
-    queries = np.load(
-        job["query_embeddings"]["canonical_path"], mmap_mode="r", allow_pickle=False
-    )
-    if queries.shape != (QUERY_ROWS, SOURCE_DIMENSION) or queries.dtype != np.dtype("<f2"):
-        raise Round0134Error("R0037 held-out query shape/dtype changed")
-
     from basemap.panel_v2 import reset_process_cuda_peak, score_panel
 
     reset_process_cuda_peak()
@@ -513,6 +637,20 @@ def run_decision(active: Mapping[str, Any], job: Mapping[str, Any]) -> dict[str,
     with open(panel_path, encoding="utf-8") as handle:
         panel = json.load(handle)
     validate_seal(panel, label="R0134 functional showdown panel")
+    recovery = job.get("recovery_kind") is not None
+    if recovery:
+        panel_signature = _signature(
+            job["panel_receipt"], label="R0134 immutable recovery panel"
+        )
+        if (
+            panel_signature["canonical_path"] != panel_path
+            or panel.get("release_sha") != job.get("panel_release_sha")
+            or job.get("recovery_kind")
+            != "cpu-decision-from-immutable-attempt-3-panel"
+        ):
+            raise Round0134Error("R0134 recovery panel lineage changed")
+    elif panel.get("release_sha") != active["manifest"]["release_sha"]:
+        raise Round0134Error("R0134 panel/decision release changed")
     if panel.get("schema") != PANEL_SCHEMA or panel.get("round_id") != ROUND_ID:
         raise Round0134Error("R0134 panel identity changed")
     decision = build_decision(panel["cells"])
@@ -521,6 +659,8 @@ def run_decision(active: Mapping[str, Any], job: Mapping[str, Any]) -> dict[str,
             **decision,
             "release_sha": active["manifest"]["release_sha"],
             "panel": expected_input_signature(panel_path),
+            "panel_release_sha": panel.get("release_sha"),
+            "decision_recovery": recovery,
             "capability": "jina-density-functional-showdown-v1",
             "next_branch": (
                 "density-v3-current-recipe-calibration-and-frozen-25m-replays"
