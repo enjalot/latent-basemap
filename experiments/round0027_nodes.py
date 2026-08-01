@@ -276,7 +276,10 @@ def run_sampler_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
         "positive_lr_optimizer_steps": CANARY_UPDATES,
         "optimizer_steps_succeeded": CANARY_UPDATES,
         "stop_reason": "bench_cap",
-        "budget_satisfied": True,
+        # The canary intentionally stops below the production LR horizon.  A
+        # passing diagnostic must be honest about that partial budget; only
+        # the subsequent production train may report full closure.
+        "budget_satisfied": False,
         "n_pos_edges": GRAPH_EDGES,
         "nonfinite_loss_skips": 0,
         "nonfinite_gradient_skips": 0,

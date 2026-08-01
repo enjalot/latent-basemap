@@ -182,3 +182,5 @@ def test_short_device_canary_disables_only_full_budget_requirement(monkeypatch):
     assert captured["total_steps_estimate"] == 500_000
     production = round0027_nodes._new_model(config)
     assert production.require_full_budget is True
+    canary_source = inspect.getsource(round0027_nodes.run_sampler_canary)
+    assert '"budget_satisfied": False' in canary_source
