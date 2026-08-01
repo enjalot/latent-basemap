@@ -4,6 +4,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from experiments import prepare_round0146_queue
 from basemap.round0142_jina_universality import MAP_ORDER, PROBE_ORDER
 from basemap.round0146_projection_predictors import (
     PREDICTOR_ORDER,
@@ -20,6 +21,11 @@ def _unit_random(rows: int, seed: int) -> np.ndarray:
     values = np.random.RandomState(seed).normal(size=(rows, 768)).astype(np.float32)
     values /= np.linalg.norm(values, axis=1, keepdims=True)
     return values
+
+
+def test_cpu_queue_uses_independent_execution_checkout() -> None:
+    assert prepare_round0146_queue.RELEASE_ROOT.endswith("latent-basemap-cpu-run")
+    assert prepare_round0146_queue.RELEASE_ROOT != "/home/enjalot/code/latent-basemap-run"
 
 
 def test_systematic_positions_are_unique_bounded_and_seeded() -> None:

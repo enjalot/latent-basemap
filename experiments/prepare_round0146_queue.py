@@ -44,7 +44,11 @@ from experiments.prepare_round0020_0022_queues import (
 
 
 ROUND_ROOT = "/data/latent-basemap/runs/round-0146"
-RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
+# CPU-only analysis must not share the mutable checkout pointer used by the
+# active GPU queue.  The environment below is still the sealed, read-only run
+# environment, but this independent checkout can stay pinned to R0146 while a
+# different release remains pinned in latent-basemap-run.
+RELEASE_ROOT = "/home/enjalot/code/latent-basemap-cpu-run"
 ROUND_FILE_GLOB = os.path.join(LAB_ROOT, "round-0146-*.md")
 RESULT_FILE_GLOB = os.path.join(LAB_ROOT, "result-0142-*.md")
 REVIEW_FILE_GLOB = os.path.join(LAB_ROOT, "review-0142-*.md")
