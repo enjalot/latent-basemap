@@ -163,6 +163,11 @@ body {
 }
 .chip b { color: var(--fg); font-weight: 600; }
 .chip.ok { color: var(--ok); } .chip.warn { color: var(--warn); } .chip.bad { color: var(--bad); }
+/* honest record of omitted probes/metrics — full-width line under the chips */
+.chips .withheld {
+  flex-basis: 100%; font-size: 11px; color: var(--muted);
+  font-style: italic; margin-top: 4px; line-height: 1.4;
+}
 
 .vh-side { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
 .tabs { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
@@ -287,6 +292,9 @@ body {
 }
 .plist button .r { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
 .plist button.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--card)); }
+/* long query list scrolls within a bounded height so the recall card above it
+   stays visible instead of pushing 200 buttons between them */
+.plist.qscroll { max-height: 300px; overflow-y: auto; }
 
 /* query side card */
 .qcard { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 12px; }

@@ -273,7 +273,8 @@ def _linked_projections(registry: dict, entry: dict) -> list[dict]:
 
 # --------------------------------------------------------- grid / metrics ---
 
-def _emit_grids(mt, source, data: Path, layer_key: str, extent, row_filter):
+def _emit_grids(mt, source, data: Path, layer_key: str, extent, row_filter,
+                skipped=None):
     """Write grid-<layer>-<L>.bin for every level, dropping any that would
     exceed the static-fetch size cap. Returns the emitted level list."""
     grids = mt.bin_all_levels(source, LEVELS, extent, row_filter=row_filter)
@@ -281,7 +282,11 @@ def _emit_grids(mt, source, data: Path, layer_key: str, extent, row_filter):
     for lvl in LEVELS:
         idx, cnt = grids[lvl]
         if 16 + 8 * len(idx) > MAX_GRID_BYTES:
-            print(f"  {layer_key}: L{lvl} bin {16 + 8 * len(idx)}B > cap; dropped")
+            msg = (f"{layer_key}: L{lvl} grid omitted "
+                   f"({16 + 8 * len(idx)}B > {MAX_GRID_BYTES}B static-fetch cap)")
+            print(f"  {msg}")
+            if skipped is not None:
+                skipped.append(msg)
             continue
         mt.write_grid(str(data / f"grid-{layer_key}-{lvl}.bin"), lvl, idx, cnt)
         emitted.append(lvl)
@@ -305,17 +310,24 @@ def _metric_artifacts(map_kind: str, coords_dir: Path) -> dict:
             "ood": ood}
 
 
-def _build_metrics(map_kind: str, coords_dir: Path, data: Path, mm, extent) -> dict:
+def _build_metrics(map_kind: str, coords_dir: Path, data: Path, mm, extent,
+                   skipped=None) -> dict:
     a = _metric_artifacts(map_kind, coords_dir)
     if a["kind"] == "r0108":
         if not a["core_panel_npz"].is_file():
-            print(f"  metrics: core panel npz missing ({a['core_panel_npz']})")
+            msg = f"anchor/query metrics omitted: core panel npz missing ({a['core_panel_npz'].name})"
+            print(f"  {msg}")
+            if skipped is not None:
+                skipped.append(msg)
             return {}
         result = mm.build_r0108_metrics(
             a["core_panel_npz"], a["ood"], data, extent=extent)
     else:
         if not a["reference_npz"].is_file():
-            print(f"  metrics: reference npz missing ({a['reference_npz']})")
+            msg = f"anchor/query metrics omitted: high-d reference npz missing ({a['reference_npz'].name})"
+            print(f"  {msg}")
+            if skipped is not None:
+                skipped.append(msg)
             return {}
         result = mm.build_r0102_metrics(
             a["reference_npz"], coords_dir, a["density_v2_npz"], a["ood"], data,
@@ -376,19 +388,24 @@ def _build_one(entry: dict, registry: dict, site_dir: Path,
         print(f"  {map_id}: MapSource/extent failed: {exc}; skip")
         return None
 
+    # Honest record of anything this build omits; surfaced in the viewer header.
+    skipped: list[str] = []
+
     manifest_layers: list[dict] = []
     for layer in _plan_layers(entry, map_kind, mt):
         try:
             emitted, rows = _emit_grids(mt, source, data, layer["key"], extent,
-                                        layer["row_filter"])
+                                        layer["row_filter"], skipped=skipped)
         except Exception as exc:
             print(f"  {map_id}: grids({layer['key']}) failed: {exc}")
             if layer["key"] == "all":
                 return None  # base layer is mandatory
+            skipped.append(f"subset layer '{layer['key']}' omitted: grid build failed ({exc})")
             continue
         if not emitted:
             if layer["key"] == "all":
                 return None
+            skipped.append(f"subset layer '{layer['key']}' omitted: no grid level within size cap")
             continue
         lyr = {
             "key": layer["key"], "label": layer["label"], "kind": "grid",
@@ -405,6 +422,7 @@ def _build_one(entry: dict, registry: dict, site_dir: Path,
                                  SUPER_TILE, map_kind, cache_dir=cache_dir)
             except Exception as exc:
                 print(f"  {map_id}: samples({layer['key']}) failed: {exc}")
+                skipped.append(f"text samples for '{layer['key']}' omitted ({exc})")
 
     # Linked OOD probe corpora as point layers.
     for proj in _linked_projections(registry, entry):
@@ -412,14 +430,17 @@ def _build_one(entry: dict, registry: dict, site_dir: Path,
         probe = proj.get("projection", {}).get("probe", proj["map_id"])
         key = f"probe-{probe}"
         if npz is None or not npz.is_file():
+            skipped.append(f"probe point layer '{key}' omitted: coordinates npz missing")
             continue
         try:
             xy = _load_probe_corpus_xy(npz)
             if xy is None or len(xy) == 0:
+                skipped.append(f"probe point layer '{key}' omitted: no probe_corpus_coords")
                 continue
             mt.write_points(str(data / f"points-{key}.bin"), xy)
         except Exception as exc:
             print(f"  {map_id}: write_points({key}) failed: {exc}")
+            skipped.append(f"probe point layer '{key}' omitted: write failed ({exc})")
             continue
         manifest_layers.append({
             "key": key,
@@ -430,9 +451,11 @@ def _build_one(entry: dict, registry: dict, site_dir: Path,
     # Metric packets (anchors + OOD queries).
     metrics = {}
     try:
-        metrics = _build_metrics(map_kind, coords_dir, data, mm, extent)
+        metrics = _build_metrics(map_kind, coords_dir, data, mm, extent,
+                                 skipped=skipped)
     except Exception as exc:
         print(f"  {map_id}: build_metrics failed: {exc}")
+        skipped.append(f"anchor/query metrics omitted: build failed ({exc})")
 
     panel = entry.get("panel", {})
     manifest = {
@@ -450,6 +473,7 @@ def _build_one(entry: dict, registry: dict, site_dir: Path,
         "super_tile": SUPER_TILE,
         "layers": manifest_layers,
         "metrics": metrics,
+        "skipped": skipped,
         "provenance": {
             "training_round": entry.get("training_round"),
             "eval_round": entry.get("round_id"),

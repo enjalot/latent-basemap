@@ -206,14 +206,32 @@ def main():
         "metrics": {
             "anchors": {"file": "metrics-anchors.bin", "count": int(len(anc_xy)),
                         "score": "local expansion (log2 vs median)",
-                        "summary": {"ffr": 0.6386}},
+                        "summary": {
+                            "score_label": "local expansion (log2 vs median)",
+                            "median_radius_ratio": 0.007785199377497385,
+                            "log2_ratio_min": -3.8437292514041324,
+                            "log2_ratio_median": -2.9595440747593902e-08,
+                            "log2_ratio_max": 8.61285278115153,
+                            "expanded_frac": 0.5,
+                            "ffr": 0.6386363636363636,
+                            "recall_at_10": 0.002450284090909091,
+                            "recall_at_50_of_high10": 0.01104403409090909,
+                        }},
             "probes": [{"key": p["key"], "label": p["label"],
                         "queries": len(p["queries"]), "recall50": p["recall50"]}
                        for p in probes],
         },
+        # Honest record of omissions (item 25) — synthetic examples so the
+        # viewer's "withheld:" note renders in the gate.
+        "skipped": [
+            "subset layer 'pile' omitted: no grid level within size cap",
+            "text samples for 'redpajama' omitted (truncated shard)",
+        ],
         "provenance": {"training_round": "0000", "eval_round": "0000",
                        "evidence_status": "accepted (synthetic)",
-                       "panel": {}},
+                       "panel": {"ffr": 0.6386363636363636,
+                                 "density": 0.15773929111469354,
+                                 "purity_k1024": 0.8966}},
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2))
     print(f"wrote fixture to {out} ({len(list(out.iterdir()))} files)")

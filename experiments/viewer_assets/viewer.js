@@ -32,6 +32,11 @@
   const RAMP_LIGHT = ["#cde2fb","#b7d3f6","#9ec5f4","#86b6ef","#6da7ec","#5598e7",
                       "#3987e5","#2a78d6","#256abf","#1c5cab","#184f95","#104281","#0d366b"];
   const RAMP_DARK = RAMP_LIGHT.slice().reverse();
+  // Accent (orange) sequential ramp — used for an ACTIVE grid subset overlay so
+  // it reads as distinct from the muted blue base density at a glance.
+  const RAMP_ACCENT_LIGHT = ["#fbe4d6","#f7ccb0","#f2ae86","#ec8f5e","#e5713b",
+                             "#d1541f","#ad4216","#823110"];
+  const RAMP_ACCENT_DARK = RAMP_ACCENT_LIGHT.slice().reverse();
   // Diverging anchors ramp: blue (below median) <-> gray <-> red (above median).
   const ANCHOR_LIGHT = ["#256abf","#6da7ec","#f0efec","#ec835a","#d03b3b"];
   const ANCHOR_DARK  = ["#3987e5","#6da7ec","#383835","#ec835a","#d03b3b"];
@@ -50,6 +55,30 @@
     return `rgb(${Math.round(a[0] + (b[0]-a[0])*f)},${Math.round(a[1] + (b[1]-a[1])*f)},${Math.round(a[2] + (b[2]-a[2])*f)})`;
   }
   const fmt = (n) => Number(n).toLocaleString("en-US");
+  // Round a numeric metric to <=4 significant figures for display. Non-numeric
+  // values pass through untouched.
+  function sig4(v) {
+    const n = Number(v);
+    if (!isFinite(n)) return String(v);
+    return String(Number(n.toPrecision(4)));
+  }
+  const rampGradient = (stops) => `linear-gradient(to right, ${stops.join(",")})`;
+  // Human labels for anchor-summary keys; recall metrics carry an explicit
+  // "(sparse, secondary)" honesty tag (item 24).
+  const METRIC_LABELS = {
+    median_radius_ratio: "median radius ratio",
+    log2_ratio_min: "log2 ratio min",
+    log2_ratio_p10: "log2 ratio p10",
+    log2_ratio_median: "log2 ratio median",
+    log2_ratio_p90: "log2 ratio p90",
+    log2_ratio_max: "log2 ratio max",
+    expanded_frac: "expanded fraction",
+    ffr: "FFR",
+    n_anchors: "anchors",
+    recall_at_10: "recall@10 (sparse, secondary)",
+    recall_at_50_of_high10: "recall@50-of-high10 (sparse, secondary)",
+  };
+  const metricLabel = (k) => METRIC_LABELS[k] || k;
 
   // ---- state ---------------------------------------------------------------
   const S = {
@@ -173,6 +202,7 @@
 
   // ---- drawing -------------------------------------------------------------
   const ramp = () => (isDark() ? RAMP_DARK : RAMP_LIGHT);
+  const accentRamp = () => (isDark() ? RAMP_ACCENT_DARK : RAMP_ACCENT_LIGHT);
   const anchorRamp = () => (isDark() ? ANCHOR_DARK : ANCHOR_LIGHT);
   function isDark() {
     if (S.theme === "dark") return true;
@@ -193,8 +223,9 @@
     S.canvas.height = Math.round(S.cssH * S.dpr);
   }
 
-  function drawGridLayer(g, key, muted) {
+  function drawGridLayer(g, key, muted, stops) {
     if (!g) return;
+    stops = stops || ramp();
     const ctx = S.ctx, L = g.level, e = S.extent;
     const cw = (e.w / L) * S.cssW / (S.view[1] - S.view[0]);
     const ch = (e.h / L) * S.cssH / (S.view[3] - S.view[2]);
@@ -208,7 +239,7 @@
       const px = sx(xData), py = sy(yData);
       if (px < -w || px > S.cssW + w || py < -h || py > S.cssH + h) continue;
       const t = Math.log(g.counts[i] + 1) / denom;
-      ctx.fillStyle = rampSample(ramp(), t);
+      ctx.fillStyle = rampSample(stops, t);
       ctx.fillRect(px - cw/2, py - ch/2, w, h);
     }
     ctx.globalAlpha = 1;
@@ -245,14 +276,20 @@
       if (o.kind === "grid") {
         const oLevel = pickLevel(o.levels || base.levels);
         getGrid(o.key, oLevel);
-        drawGridLayer(bestGrid(o.key, oLevel, o.levels || base.levels), o.key, false);
+        // Active subset drawn in the accent (orange) sequential ramp so it is
+        // unmistakable against the muted blue base density.
+        const og = bestGrid(o.key, oLevel, o.levels || base.levels);
+        drawGridLayer(og, o.key, false, accentRamp());
+        updateLegend("density", og ? og.max : 1, o);
       } else {
         const xy = S.pointsCache.get(o.key);
         if (xy) drawPointsLayer(o.key, xy, css("--accent"), 2.6);
         else loadPoints(o.key);
+        updateLegend("density", g ? g.max : 1, o);
       }
+    } else {
+      updateLegend("density", g ? g.max : 1);
     }
-    updateLegend("density", g ? g.max : 1);
   }
 
   function drawAnchors() {
@@ -328,21 +365,52 @@
   }
 
   // ---- legend --------------------------------------------------------------
-  function updateLegend(kind, maxCount) {
+  function updateLegend(kind, maxCount, overlay) {
     const el = $("legend");
     if (kind === "density") {
-      const ticks = [];
       const cap = Math.max(1, maxCount);
-      for (let v = 1; v <= cap; v *= 10) {
-        const pos = Math.log(v + 1) / Math.log(cap + 1);
-        ticks.push(`<span style="left:${(pos*100).toFixed(1)}%">${fmt(v)}</span>`);
-      }
-      ticks.push(`<span style="left:100%">${fmt(cap)}</span>`);
+      const isSubset = overlay && overlay.kind === "grid";
+      const title = overlay
+        ? `Showing: ${escText(overlay.label)} — ${fmt(overlay.rows)} ` +
+          `${overlay.kind === "points" ? "points (accent markers)" : "rows (base density muted)"}`
+        : "rows per bin (log scale)";
+      const barBg = isSubset
+        ? rampGradient(accentRamp())
+        : "var(--ramp-legend)";
+      // Points overlay: no per-bin count ramp applies to the markers; keep the
+      // base density ramp label but skip the count ticks.
+      const showTicks = overlay ? isSubset : true;
       el.innerHTML =
-        `<div class="legend-title">rows per bin (log scale)</div>` +
-        `<div class="ramp-bar" style="background:var(--ramp-legend)"></div>` +
-        `<div class="ramp-ticks">${ticks.join("")}</div>`;
-    } else {
+        `<div class="legend-title">${title}</div>` +
+        `<div class="ramp-bar" style="background:${barBg}"></div>` +
+        `<div class="ramp-ticks"></div>`;
+      el.hidden = false;
+      if (showTicks) {
+        // Place decade ticks left->right, dropping any whose LABEL box would
+        // overlap the previous tick or the right-anchored cap label, so ticks
+        // never mash into an illegible run (item 4). Measure the real bar width.
+        const bar = el.querySelector(".ramp-bar");
+        const barW = (bar && bar.getBoundingClientRect().width) || 220;
+        const denom = Math.log(cap + 1);
+        const CHAR_PX = 6.2, PAD = 5;                 // ~10.5px tabular label
+        const labW = (v) => Math.max(8, String(fmt(v)).length * CHAR_PX);
+        const capLeft = barW - labW(cap);             // cap is right-anchored at 100%
+        const kept = [];
+        let lastRight = -Infinity;
+        for (let v = 1; v < cap; v *= 10) {
+          const pos = Math.log(v + 1) / denom, cx = pos * barW;
+          const half = labW(v) / 2, left = cx - half, right = cx + half;
+          if (right + PAD > capLeft) continue;        // would touch the cap label
+          if (left < lastRight + PAD) continue;       // would touch the previous label
+          kept.push({ v, pos }); lastRight = right;
+        }
+        kept.push({ v: cap, pos: 1 });                // always show the max
+        el.querySelector(".ramp-ticks").innerHTML =
+          kept.map((t) => `<span style="left:${(t.pos*100).toFixed(1)}%">${fmt(t.v)}</span>`).join("");
+      }
+      return;
+    }
+    {
       const label = (S.manifest.metrics && S.manifest.metrics.anchors && S.manifest.metrics.anchors.score) || "score";
       el.innerHTML =
         `<div class="legend-title">${escText(label)}</div>` +
@@ -469,6 +537,29 @@
   }
   function escLabel(s) { return s; }
 
+  // Nearest-point hover for an active `points`-kind overlay in map mode (item
+  // 10). Returns true if a point was hit and a tooltip shown.
+  function hoverPoints(key, label, group, clientX, clientY, localX, localY) {
+    const xy = S.pointsCache.get(key);
+    if (!xy || !xy.length) return false;
+    let best = -1, bd = 12 * 12;
+    for (let i = 0; i < xy.length; i += 2) {
+      const px = sx(xy[i]) - localX, py = sy(xy[i+1]) - localY;
+      const d = px*px + py*py; if (d < bd) { bd = d; best = i; }
+    }
+    if (best < 0) return false;
+    const t = tip(); t.innerHTML = "";
+    const head = document.createElement("div");
+    const c = document.createElement("div"); c.className = "tt-count"; c.textContent = label;
+    head.appendChild(c);
+    if (group) { const g = document.createElement("div"); g.className = "tt-group"; g.textContent = group; head.appendChild(g); }
+    const co = document.createElement("div"); co.className = "tt-coords";
+    co.textContent = `x ${xy[best].toFixed(3)}, y ${xy[best+1].toFixed(3)}`;
+    head.appendChild(co); t.appendChild(head);
+    t.hidden = false; positionTip(clientX, clientY);
+    return true;
+  }
+
   // ---- header / panel rendering -------------------------------------------
   function renderHeader() {
     const m = S.manifest;
@@ -493,14 +584,24 @@
       const cls = /accept/.test(st) ? "ok" : /reject|fail/.test(st) ? "bad" : "warn";
       chips.push(["evidence", p.evidence_status, cls]);
     }
-    if (m.metrics && m.metrics.anchors && m.metrics.anchors.summary) {
-      for (const [k, v] of Object.entries(m.metrics.anchors.summary)) chips.push([k, v, ""]);
-    }
+    // Curated headline panel metrics only — rounded, human-labeled. The full
+    // anchor distribution (log2 percentiles, recall, …) lives in Metrics→Anchors.
+    const panel = p.panel || {};
+    if (panel.ffr != null) chips.push(["FFR", sig4(panel.ffr), ""]);
+    if (panel.density != null) chips.push(["density", sig4(panel.density), ""]);
+    if (panel.purity_k1024 != null) chips.push(["purity@1024", sig4(panel.purity_k1024), ""]);
     for (const [k, v, cls] of chips) {
       const c = document.createElement("span"); c.className = "chip" + (cls ? " " + cls : "");
       const b = document.createElement("b"); b.textContent = String(v);
       c.appendChild(document.createTextNode(k + " ")); c.appendChild(b);
       prov.appendChild(c);
+    }
+    // Honest record of what this build omitted (item 25), sourced from the
+    // manifest "skipped" array the builder now populates.
+    if (Array.isArray(m.skipped) && m.skipped.length) {
+      const w = document.createElement("div"); w.className = "withheld";
+      w.textContent = "withheld: " + m.skipped.join(" · ");
+      prov.appendChild(w);
     }
   }
 
@@ -546,7 +647,7 @@
       };
       sec.appendChild(sel);
       const h2 = document.createElement("div"); h2.className = "hint";
-      h2.textContent = "Grid subsets recolor by count on the same ramp; point subsets draw as accent markers.";
+      h2.textContent = "Grid subsets recolor by count on the orange accent ramp (base density mutes to blue); point subsets draw as accent markers.";
       sec.appendChild(h2);
     } else {
       const em = document.createElement("div"); em.className = "hint"; em.textContent = "No subset layers in this map.";
@@ -585,8 +686,10 @@
       sec.appendChild(d);
       if (m.anchors.summary) {
         for (const [k, v] of Object.entries(m.anchors.summary)) {
+          if (k === "score_label") continue; // already shown as the section label
           const row = document.createElement("div"); row.className = "hint";
-          row.textContent = `${k}: ${v}`; sec.appendChild(row);
+          const val = (typeof v === "number") ? sig4(v) : v;
+          row.textContent = `${metricLabel(k)}: ${val}`; sec.appendChild(row);
         }
       }
       panel.appendChild(sec);
@@ -634,7 +737,10 @@
       const qhint = document.createElement("div"); qhint.className = "hint";
       qhint.textContent = "Click a query to trace its 10 true neighbors.";
       qsec.appendChild(qhint);
-      const ql = document.createElement("div"); ql.className = "plist";
+      // Recall card first, so it stays visible above the long (scrollable)
+      // query list instead of being buried under ~200 buttons (item 15).
+      if (S.query) qsec.appendChild(queryCard(S.query));
+      const ql = document.createElement("div"); ql.className = "plist qscroll";
       const qs = (S.probe.queries || []).slice(0, 200);
       qs.forEach((q, i) => {
         const b = document.createElement("button");
@@ -650,8 +756,6 @@
       qsec.appendChild(ql);
       panel.appendChild(qsec);
     }
-
-    if (S.query) panel.appendChild(queryCard(S.query));
   }
 
   function queryCard(q) {
@@ -739,6 +843,12 @@
       const lx = e.clientX - r.left, ly = e.clientY - r.top;
       if (S.mode === "map" || (S.mode === "metrics" && S.metricMode === "queries")) {
         if (S.mode === "map") {
+          // An active point overlay takes hover priority so its markers are
+          // identifiable; otherwise fall through to grid-bin hover.
+          if (S.overlay && S.overlay.kind === "points" &&
+              hoverPoints(S.overlay.key, S.overlay.label, S.overlay.group, e.clientX, e.clientY, lx, ly)) {
+            S.hoverCell = null; return;
+          }
           const L = S.manifest.sample_level, e2 = S.extent;
           const cx = Math.floor((dataX(lx) - e2.x0) / (e2.w / L)), cy = Math.floor((dataY(ly) - e2.y0) / (e2.h / L));
           S.hoverCell = (cx>=0&&cy>=0&&cx<L&&cy<L) ? cy*L+cx : null;
