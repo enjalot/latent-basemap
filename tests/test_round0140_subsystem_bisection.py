@@ -65,6 +65,14 @@ def test_selector_identifies_trainer_side_when_host_cells_fail_but_repro_restore
     assert decision["historical_reproduction_restores"] is True
 
 
+def test_selector_preserves_asymmetric_current_only_restore_as_interaction():
+    decision = build_decision(_cells(0.99, 0.01, 0.99))
+    assert decision["outcome"] == "subsystem-interaction-unresolved"
+    assert decision["next_action"] == (
+        "issue-one-cell-current-graph-historical-device-interaction"
+    )
+
+
 def test_selector_refuses_causal_claim_when_historical_recipe_does_not_reproduce():
     decision = build_decision(_cells(0.01, 0.01, 0.01))
     assert decision["outcome"] == "historical-recipe-not-reproduced-current-release"

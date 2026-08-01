@@ -217,7 +217,7 @@ def build_decision(cells: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     elif current_restores and graph_swap_restores:
         outcome = "historical-row-universe-restores-with-current-trainer"
         next_action = "recover-and-test-row-policy-on-current-population"
-    elif not graph_swap_restores:
+    elif not current_restores and not graph_swap_restores:
         outcome = "current-host-trainer-subsystem-does-not-restore"
         next_action = "validate-historical-trainer-subsystem-before-scale"
     else:
