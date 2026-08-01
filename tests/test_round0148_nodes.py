@@ -224,6 +224,31 @@ def test_positive_r0147_review_is_required(monkeypatch, tmp_path: Path) -> None:
         prepare._require_positive_r0147_review()
 
 
+def test_positive_r0147_decision_is_required(monkeypatch, tmp_path: Path) -> None:
+    path = tmp_path / "decision.json"
+    body = {
+        "schema": "round0147-historical-row-policy-decision-v1",
+        "round_id": "0147",
+        "capability": "jina-2m-historical-row-policy-duplicate-control-v1",
+        "outcome": "eligible-historical-row-policy-restores",
+        "duplicate_control_compatible_with_restoration": True,
+        "diverse_scale_transfer_claimed": False,
+    }
+    body["identity_sha256"] = sha256_bytes(canonical_json(body))
+    path.write_text(json.dumps(body), encoding="utf-8")
+    monkeypatch.setattr(prepare, "R0147_DECISION", str(path))
+    assert prepare._require_positive_r0147_decision()["canonical_path"] == str(path)
+
+    body["outcome"] = "eligible-historical-row-policy-does-not-restore"
+    unsigned = {
+        key: value for key, value in body.items() if key != "identity_sha256"
+    }
+    body["identity_sha256"] = sha256_bytes(canonical_json(unsigned))
+    path.write_text(json.dumps(body), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="exact positive"):
+        prepare._require_positive_r0147_decision()
+
+
 def test_dependency_terminal_must_bind_unchanged_queue(tmp_path: Path) -> None:
     queue_path = tmp_path / "queue.json"
     queue_path.write_text(json.dumps({"round_id": "0147"}), encoding="utf-8")
@@ -264,6 +289,9 @@ def test_queue_materializes_complete_conditional_job_graph(
     round_signature = prepare.expected_input_signature(str(round_file))
     monkeypatch.setattr(
         prepare, "_require_positive_r0147_review", lambda: round_signature
+    )
+    monkeypatch.setattr(
+        prepare, "_require_positive_r0147_decision", lambda: round_signature
     )
     monkeypatch.setattr(prepare, "_require_r0132_review", lambda: round_signature)
 

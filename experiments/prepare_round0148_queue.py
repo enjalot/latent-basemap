@@ -20,6 +20,7 @@ from basemap.output_safety import (
 )
 from basemap.round0104_training import validate_substrate_manifest
 from basemap.round0105_search import ELIGIBILITY_PATH
+from basemap.round0108_evaluation import validate_seal
 from basemap.round0148_english_anchor import (
     CAPABILITY,
     DENSITY_V2_FLOOR,
@@ -41,6 +42,11 @@ R0132_REVIEW = os.path.join(LAB_ROOT, "review-0132-2026-08-01.md")
 
 R0147_QUEUE = "/data/latent-basemap/runs/round-0147/queue/queue.json"
 R0147_TERMINAL = "/data/latent-basemap/runs/round-0147/queue/runner-terminal.json"
+R0147_DECISION = os.path.join(
+    "/data/latent-basemap/runs/round-0147/queue/artifacts",
+    "jina-2m-historical-row-policy-duplicate-control-v1",
+    "decision.json",
+)
 R0132_QUEUE = "/data/latent-basemap/runs/round-0132/queue/queue.json"
 R0132_TERMINAL = "/data/latent-basemap/runs/round-0132/queue/runner-terminal.json"
 R0132_ARTIFACTS = "/data/latent-basemap/runs/round-0132/queue/artifacts"
@@ -95,6 +101,26 @@ def _require_positive_r0147_review() -> dict[str, Any]:
             "R0148 requires exactly one accepted positive R0147 review"
         )
     return expected_input_signature(candidates[0])
+
+
+def _require_positive_r0147_decision() -> dict[str, Any]:
+    """Bind the exact branch artifact instead of inferring it from review prose."""
+    with open(R0147_DECISION, encoding="utf-8") as handle:
+        decision = json.load(handle)
+    validate_seal(decision, label="R0147 row-policy decision")
+    if (
+        decision.get("schema")
+        != "round0147-historical-row-policy-decision-v1"
+        or decision.get("round_id") != "0147"
+        or decision.get("capability")
+        != "jina-2m-historical-row-policy-duplicate-control-v1"
+        or decision.get("outcome")
+        != "eligible-historical-row-policy-restores"
+        or decision.get("duplicate_control_compatible_with_restoration") is not True
+        or decision.get("diverse_scale_transfer_claimed") is not False
+    ):
+        raise RuntimeError("R0148 requires the exact positive R0147 decision")
+    return expected_input_signature(R0147_DECISION)
 
 
 def _require_r0132_review() -> dict[str, Any]:
@@ -174,6 +200,7 @@ def prepare_round0148(
     if _frontmatter(round_file).get("base_commit") != release_sha:
         raise RuntimeError("R0148 round base_commit differs from release")
     r0147_review = _require_positive_r0147_review()
+    r0147_decision = _require_positive_r0147_decision()
     r0132_review = _require_r0132_review()
     r0147_queue, r0147_queue_signature, r0147_terminal = _require_clean_execution(
         R0147_QUEUE, R0147_TERMINAL, round_id="0147"
@@ -201,6 +228,7 @@ def prepare_round0148(
     common = _dedupe([
         expected_input_signature(round_file),
         r0147_review,
+        r0147_decision,
         r0132_review,
         r0147_queue_signature,
         r0147_terminal,
