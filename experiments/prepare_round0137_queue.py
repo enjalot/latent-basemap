@@ -11,6 +11,8 @@ import sys
 from collections.abc import Mapping
 from typing import Any
 
+import numpy as np
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from basemap.artifact_identity import expected_input_signature
@@ -29,11 +31,12 @@ R0037_SHARED = (
     "shared-reference/receipt.json"
 )
 R0134_PANEL = (
-    "/data/latent-basemap/runs/round-0134/queue/artifacts/"
+    "/data/latent-basemap/runs/round-0134/queue-attempt-3-exact-views/artifacts/"
     "functional-showdown/functional-showdown.json"
 )
 R0134_DECISION = (
-    "/data/latent-basemap/runs/round-0134/queue/artifacts/decision/decision.json"
+    "/data/latent-basemap/runs/round-0134/"
+    "queue-attempt-5-decision-recovery-a3adb61/artifacts/decision/decision.json"
 )
 
 REVIEW_CAPABILITIES = {
@@ -153,6 +156,102 @@ def _require_negative_r0134() -> tuple[dict[str, Any], dict[str, Any]]:
     return panel_signature, decision_signature
 
 
+def _preissuance_cpu_smoke() -> dict[str, Any]:
+    """Exercise the inherited model-to-functional-selector path without CUDA.
+
+    R0137 trains with the already reviewed R0104 receipt schema.  The accepted
+    R0104 fp16 model is therefore a safe stand-in for checking model loading,
+    the exact R0037 source/query scoring views, frozen reference/truth loading,
+    transform geometry, sealing, canonical JSON key order, and selector
+    execution before a new 500k-update train is allowed to start.
+    """
+    from basemap.artifact_identity import canonical_json
+    from basemap.round0108_evaluation import seal, validate_seal
+    from basemap.round0137_graph_bridge import (
+        CONTROL,
+        HISTORICAL,
+        PANEL_SCHEMA,
+        TREATMENT,
+        build_decision,
+    )
+    from experiments import round0104_nodes as r0104
+    from experiments.round0134_nodes import (
+        _load_reference,
+        _load_shared_evaluation_inputs,
+    )
+
+    r0104_queue_path = (
+        "/data/latent-basemap/runs/round-0104/queue-attempt-3/queue.json"
+    )
+    r0134_queue_path = (
+        "/data/latent-basemap/runs/round-0134/"
+        "queue-attempt-3-exact-views/queue.json"
+    )
+    r0104_queue = _read_json(r0104_queue_path)
+    r0134_queue = _read_json(r0134_queue_path)
+    score_job = next(
+        job for job in r0104_queue["jobs"]
+        if job.get("id") == "score_fp16_control"
+    )
+    panel_job = next(
+        job for job in r0134_queue["jobs"]
+        if job.get("id") == "functional_showdown_panel"
+    )
+
+    model, train, train_signature, _shared, _config_sha = r0104._authenticate_model(
+        score_job, device="cpu"
+    )
+    source_signature, source, queries = _load_shared_evaluation_inputs(panel_job)
+    _reference_receipt, reference_signature, _reference, truth, _centroids = (
+        _load_reference(panel_job)
+    )
+    source_probe = model.transform(source[:32], batch_size=16)
+    query_probe = model.transform(queries[:32], batch_size=16)
+    if (
+        source_probe.shape != (32, 2)
+        or query_probe.shape != (32, 2)
+        or not np.isfinite(source_probe).all()
+        or not np.isfinite(query_probe).all()
+        or truth["neighbors"].shape != (20_000, 10)
+    ):
+        raise RuntimeError("R0137 CPU train-to-panel smoke failed")
+
+    panel = _read_json(R0134_PANEL)
+    source_cells = panel.get("cells") or {}
+    cells = {
+        HISTORICAL: source_cells["historical_r0037_seed42"],
+        CONTROL: source_cells["current_r0104_fp16_seed42"],
+        # The control is a schema-valid stand-in; this smoke checks plumbing,
+        # not the still-unobserved treatment value.
+        TREATMENT: source_cells["current_r0104_fp16_seed42"],
+    }
+    synthetic_panel = seal({
+        "schema": PANEL_SCHEMA,
+        "round_id": ROUND_ID,
+        "cells": cells,
+        "smoke_only": True,
+    })
+    validate_seal(synthetic_panel, label="R0137 preissuance smoke panel")
+    canonical_cells = json.loads(canonical_json(synthetic_panel))["cells"]
+    decision = build_decision(canonical_cells)
+    if decision.get("high_recall_graph_sufficient") is not False:
+        # A copied current control cannot restore every historical metric in
+        # the observed negative R0134 branch.
+        raise RuntimeError("R0137 CPU selector smoke changed the observed branch")
+    return {
+        "passed": True,
+        "cuda_used": False,
+        "stand_in": "accepted R0104 fp16 seed42 model/receipt",
+        "train_receipt": train_signature,
+        "model": train["model"],
+        "source": source_signature,
+        "reference_receipt": reference_signature,
+        "source_probe_shape": list(source_probe.shape),
+        "query_probe_shape": list(query_probe.shape),
+        "canonical_selector_outcome": decision["outcome"],
+    }
+
+
 def prepare_round0137(
     *, release_sha: str, queue_root: str = os.path.join(ROUND_ROOT, "queue")
 ) -> str:
@@ -165,6 +264,7 @@ def prepare_round0137(
         for signature in _accepted_review(round_id, capability)
     ])
     r0134_panel, r0134_decision = _require_negative_r0134()
+    cpu_smoke = _preissuance_cpu_smoke()
     proof = source_prefix_proof()
     shared_signature = expected_input_signature(R0037_SHARED)
     shared = _read_json(R0037_SHARED)
@@ -294,6 +394,7 @@ def prepare_round0137(
         "capability_dependencies": list(REVIEW_CAPABILITIES.values()),
         "capabilities_produced": [CAPABILITY],
         "training_performed": True,
+        "preissuance_cpu_smoke": cpu_smoke,
         "gpu_hours": {
             "minimum": GPU_HOURS_MINIMUM,
             "expected": GPU_HOURS_EXPECTED,

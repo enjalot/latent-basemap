@@ -49,8 +49,12 @@ def _contrast(
 
 
 def build_decision(cells: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
-    if tuple(cells) != CELL_ORDER:
-        raise Round0137Error("graph-bridge functional cells are reordered")
+    if set(cells) != set(CELL_ORDER) or len(cells) != len(CELL_ORDER):
+        raise Round0137Error("graph-bridge functional cells are missing or unexpected")
+    # The immutable JSON writer canonicalizes mapping keys.  Restore the
+    # preregistered order after exact-set authentication instead of treating
+    # JSON object insertion order as scientific evidence.
+    cells = {key: cells[key] for key in CELL_ORDER}
     versus_control = _contrast(cells[CONTROL], cells[TREATMENT])
     versus_historical = _contrast(cells[HISTORICAL], cells[TREATMENT])
     restores_historical = versus_historical[
