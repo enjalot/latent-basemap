@@ -16,6 +16,7 @@ from basemap.jina_historical_selection import (
     materialize_indexed_fp16_npy,
     validate_historical_provenance,
     verify_embedding_rows,
+    verify_full_embedding_array,
 )
 
 
@@ -219,6 +220,16 @@ def test_indexed_inventory_fp16_array_preserves_arbitrary_order(tmp_path) -> Non
     assert np.array_equal(
         np.load(staged_path, mmap_mode="r", allow_pickle=False), expected
     )
+    full = verify_full_embedding_array(staged_path, source, block_rows=2)
+    assert full["validated_rows"] == 6
+    assert full["exact_array_equal"] is True
+    assert full["source_shards_opened"] == 5
+    changed = expected.copy()
+    changed[4, 0] += 1
+    changed_path = tmp_path / "changed-full.npy"
+    np.save(changed_path, changed)
+    with pytest.raises(HistoricalJinaSelectionError, match="at row 4"):
+        verify_full_embedding_array(changed_path, source, block_rows=2)
     with pytest.raises(IndexError, match="logical row"):
         _ = source[6]
 

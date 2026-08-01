@@ -15,6 +15,7 @@ silently shrink the training set instead of replacing excluded copies.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -611,3 +612,45 @@ def materialize_indexed_fp16_npy(
 
     atomic_build_new_file(output, build, immutable=True)
     return expected_input_signature(output)
+
+
+def verify_full_embedding_array(
+    historical_embedding_path: str | Path,
+    source: IndexedInventoryFp16Array,
+    *,
+    block_rows: int = 16_384,
+) -> dict[str, Any]:
+    """Prove full byte equality between an old array and mapped source rows."""
+    if block_rows <= 0:
+        raise ValueError("block_rows must be positive")
+    historical = np.load(
+        historical_embedding_path, mmap_mode="r", allow_pickle=False
+    )
+    if (
+        historical.shape != source.shape
+        or historical.dtype != source.dtype
+        or not historical.flags.c_contiguous
+    ):
+        raise HistoricalJinaSelectionError(
+            "historical embedding geometry differs from mapped source"
+        )
+    digest = hashlib.sha256()
+    for start in range(0, len(source), block_rows):
+        stop = min(start + block_rows, len(source))
+        observed = np.ascontiguousarray(historical[start:stop])
+        expected = source[start:stop]
+        if not np.array_equal(observed, expected):
+            unequal = np.flatnonzero(np.any(observed != expected, axis=1))
+            first = start + int(unequal[0]) if len(unequal) else start
+            raise HistoricalJinaSelectionError(
+                f"mapped source differs from historical embedding at row {first}"
+            )
+        digest.update(observed.tobytes(order="C"))
+    return {
+        "validated_rows": len(source),
+        "dimension": source.shape[1],
+        "dtype": source.dtype.str,
+        "payload_sha256": digest.hexdigest(),
+        "exact_array_equal": True,
+        "source_shards_opened": len(source.segments),
+    }
