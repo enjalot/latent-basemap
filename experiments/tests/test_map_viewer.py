@@ -226,7 +226,10 @@ def test_round_page_splice(patched, registry, tmp_path):
     assert "existing body" in body  # original content preserved
     assert "<!-- viewer:start -->" in body and "<!-- viewer:end -->" in body
     assert "Interactive viewer" in body
+    # Primary link is the React app; legacy vanilla viewer stays reachable.
+    assert "../app/index.html#/map/round-0108-r0107-diverse-jina-25m-seed42" in body
     assert "../viewer/round-0108-r0107-diverse-jina-25m-seed42/index.html" in body
+    assert "legacy viewer" in body
 
 
 def test_round_page_splice_idempotent(patched, registry, tmp_path):
@@ -290,6 +293,10 @@ def test_index_card_injection(patched, registry, tmp_path):
     assert 'class="cardgrid"' in body
     assert 'class="mapcard"' in body
     assert "open viewer" in body
+    # Primary button targets the React app; legacy viewer is a secondary link.
+    assert "app/index.html#/map/round-0108-r0107-diverse-jina-25m-seed42" in body
+    assert "legacy viewer" in body
+    assert "viewer/round-0108-r0107-diverse-jina-25m-seed42/index.html" in body
     # Metric chips: FFR value + density_v2 pass badge (0.72 >= 0.60 floor).
     assert "FFR 0.6386" in body
     assert "density_v2 0.7200 ✓" in body
@@ -330,3 +337,171 @@ def test_density_fail_chip(patched, tmp_path):
     card = map_registry._viewer_card(built[0], entry)
     assert "density_v2 0.4100 ✗" in card
     assert 'chip bad' in card
+
+
+# ------------------------------------------------------- maps-index tests ---
+
+def test_maps_index_schema(patched, registry, tmp_path):
+    import map_viewer
+    site = tmp_path / "site"
+    map_viewer.build_map_viewers(registry, site)
+
+    index = json.loads((site / "maps-index.json").read_text())
+    assert index["schema"] == "basemap-maps-index-v1"
+    assert "generated_utc" in index
+    assert isinstance(index["maps"], list) and len(index["maps"]) == 1
+    m = index["maps"][0]
+    for key in ("map_id", "title", "kind", "round_id", "rows_total", "rows_note",
+                "data", "thumbnail", "evidence_status", "metrics", "probes"):
+        assert key in m, f"maps-index entry missing {key}"
+    # The 25M jina map is surfaced as an atlas kind.
+    assert m["kind"] == "atlas"
+    assert m["map_id"] == "round-0108-r0107-diverse-jina-25m-seed42"
+    assert m["rows_total"] == 24_948_663
+    assert m["data"] == "viewer/round-0108-r0107-diverse-jina-25m-seed42/data/"
+    assert m["thumbnail"] == "viewer/round-0108-r0107-diverse-jina-25m-seed42/thumb.png"
+    assert m["metrics"]["ffr"] == 0.6386
+    assert m["metrics"]["density_v2"] == 0.72
+    # Probe list carried from the metrics fragment.
+    assert m["probes"] and m["probes"][0]["key"] == "pol_Latn"
+
+
+# ------------------------------------------------ projection-map viewers ----
+
+def _write_projection_npz(path: Path, *, corpus=100, queries=5, truth=True):
+    import numpy as np
+    rng = np.random.RandomState(0)
+    arrays = {
+        "probe_corpus_coords": rng.uniform(-3, 3, (corpus, 2)).astype(np.float32),
+        "probe_query_coords": rng.uniform(-3, 3, (queries, 2)).astype(np.float32),
+        "probe_corpus_ids": np.arange(corpus),
+        "probe_query_ids": np.arange(queries),
+    }
+    if truth:
+        arrays["exact_high_d_top10"] = rng.randint(0, corpus, (queries, 10))
+        arrays["low_d_top50"] = rng.randint(0, corpus, (queries, 50))
+    np.savez(path, **arrays)
+
+
+@pytest.fixture
+def projection_registry(tmp_path):
+    import numpy as np
+    # Base map coordinate chunks + a semantic-render sample-id sidecar.
+    base = tmp_path / "base_coords"
+    chunk = base / "chunk-00000"
+    chunk.mkdir(parents=True)
+    np.save(chunk / "coordinates.npy",
+            np.random.RandomState(1).uniform(-4, 4, (120, 2)).astype(np.float32))
+    sample_ids = tmp_path / "sample-semantic-ids.npy"
+    np.save(sample_ids, np.arange(120, dtype=np.int64))
+
+    npz = tmp_path / "pol_Latn-coordinates.npz"
+    _write_projection_npz(npz, corpus=100, queries=5, truth=True)
+
+    entry = {
+        "map_id": "round-0108-r0107-diverse-jina-25m-seed42-pol-latn-projection",
+        "round_id": "0108",
+        "kind": "projection-map",
+        "evidence_status": "review:accepted",
+        "base_map": "25M diverse-Jina atlas — seed 42",
+        "base_coordinates": {"dir": f"gsv:{base}"},
+        "base_sample_ids": {"path": f"gsv:{sample_ids}"},
+        "projection": {
+            "probe": "pol_Latn",
+            "display_name": "Held-out Polish",
+            "coordinates": f"gsv:{npz}",
+            "coordinate_signature": {"sha256": "proj-sha-1"},
+            "corpus_rows": 100,
+            "query_rows": 5,
+            "ffr": 0.19,
+            "control_ffr": 0.42,
+            "retention": 0.88,
+            "verdict": "projected",
+        },
+    }
+    return {"schema": "basemap-map-registry-v2", "maps": [entry],
+            "counts": {}, "generated_utc": "2026-08-01T00:00:00+00:00"}
+
+
+def test_projection_manifest_build(projection_registry, tmp_path):
+    # Real map_tiles + map_metrics_extract + projection_gallery (no monkeypatch).
+    import map_viewer
+    site = tmp_path / "site"
+    built = map_viewer.build_map_viewers(projection_registry, site)
+    # Round-map build list is empty; the projection viewer is built separately.
+    assert built == []
+
+    map_id = "round-0108-r0107-diverse-jina-25m-seed42-pol-latn-projection"
+    data = site / "viewer" / map_id / "data"
+    manifest = json.loads((data / "manifest.json").read_text())
+
+    assert manifest["schema"] == "basemap-viewer-manifest-v1"
+    assert manifest["map_kind"] == "projection"
+    assert manifest["kind"] == "projection-map"
+    assert manifest["coordinates_receipt_sha"] == "proj-sha-1"
+    assert len(manifest["extent"]) == 4
+
+    layers = {l["key"]: l for l in manifest["layers"]}
+    assert set(layers) == {"base-context", "corpus", "queries"}
+    assert layers["base-context"]["label"] == "training-map context"
+    assert layers["base-context"]["kind"] == "points"
+    # sampled_of honesty: 30k-recipe sample of the base map's rows.
+    assert "sampled_of" in layers["base-context"]
+    assert layers["base-context"]["sampled_of"] == 120
+    assert layers["base-context"]["rows"] <= 120
+    # accent passthrough survives into the manifest layer schema.
+    assert layers["corpus"]["accent"] == "a1"
+    assert layers["base-context"]["accent"] == "a2"
+
+    # Point binaries on disk.
+    assert (data / "points-base-context.bin").is_file()
+    assert (data / "points-corpus.bin").is_file()
+    assert (data / "points-queries.bin").is_file()
+
+    # Embedded truth -> metrics-queries.json emitted with a probe packet.
+    assert (data / "metrics-queries.json").is_file()
+    packet = json.loads((data / "metrics-queries.json").read_text())
+    assert packet["probes"] and packet["probes"][0]["key"] == "pol_Latn"
+    assert manifest["metrics"]["probes"][0]["queries"] == 5
+
+    # maps-index.json includes the projection entry.
+    index = json.loads((site / "maps-index.json").read_text())
+    proj_entries = [m for m in index["maps"] if m["kind"] == "projection-map"]
+    assert len(proj_entries) == 1
+    assert proj_entries[0]["map_id"] == map_id
+    assert proj_entries[0]["data"] == f"viewer/{map_id}/data/"
+
+
+def test_projection_manifest_no_truth_skips_queries(projection_registry, tmp_path):
+    import map_viewer
+    # Rewrite the npz without embedded truth: metrics-queries.json must be absent.
+    npz = Path(projection_registry["maps"][0]["projection"]["coordinates"]
+               .removeprefix("gsv:"))
+    _write_projection_npz(npz, corpus=100, queries=5, truth=False)
+
+    site = tmp_path / "site"
+    map_viewer.build_map_viewers(projection_registry, site)
+    map_id = projection_registry["maps"][0]["map_id"]
+    data = site / "viewer" / map_id / "data"
+
+    assert not (data / "metrics-queries.json").is_file()
+    manifest = json.loads((data / "manifest.json").read_text())
+    assert manifest["metrics"] == {}
+    assert any("query metrics omitted" in s for s in manifest["skipped"])
+
+
+def test_projection_idempotency(projection_registry, tmp_path):
+    import map_viewer
+    site = tmp_path / "site"
+    map_viewer.build_map_viewers(projection_registry, site)
+    map_id = projection_registry["maps"][0]["map_id"]
+    manifest_path = site / "viewer" / map_id / "data" / "manifest.json"
+    first = json.loads(manifest_path.read_text())["generated_utc"]
+
+    # Unchanged coordinate signature -> manifest untouched.
+    map_viewer.build_map_viewers(projection_registry, site)
+    assert json.loads(manifest_path.read_text())["generated_utc"] == first
+
+    # force rewrites.
+    map_viewer.build_map_viewers(projection_registry, site, force=True)
+    assert json.loads(manifest_path.read_text())["generated_utc"] != first

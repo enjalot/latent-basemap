@@ -49,6 +49,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 MANIFEST_SCHEMA = "basemap-viewer-manifest-v1"
+MAPS_INDEX_SCHEMA = "basemap-maps-index-v1"
+
+# Label required by the addendum for the 30k deterministic base sample.
+BASE_CONTEXT_LABEL = "training-map context"
+
+# Optional per-layer passthrough fields (addendum: honesty + accent hints).
+LAYER_PASSTHROUGH = ("sampled_of", "accent")
 
 # Full-map grid resolution ladder. write_grid returns the levels it actually
 # emitted (it may drop 1024 for a subset layer whose bin would exceed 2 MB).
@@ -133,6 +140,20 @@ def _import_siblings():
     except ImportError:  # package-qualified execution
         from experiments import map_tiles, map_metrics_extract  # type: ignore
     return map_tiles, map_metrics_extract
+
+
+def _import_projection_gallery():
+    """Reuse projection_gallery's sampling/id recipe (import only — never edit)."""
+    try:
+        import projection_gallery  # type: ignore
+    except ImportError:  # package-qualified execution
+        from experiments import projection_gallery  # type: ignore
+    return projection_gallery
+
+
+def _app_href(map_id: str, prefix: str = "") -> str:
+    """Hash-routed React app URL for one map (relative to the given prefix)."""
+    return f"{prefix}app/index.html#/map/{map_id}"
 
 
 # ------------------------------------------------------------ thumbnails ----
@@ -221,6 +242,16 @@ def _instantiate(template: str, config: dict) -> str:
 
 
 # --------------------------------------------------------- layer planning ---
+
+def _apply_passthrough(layer: dict, plan: dict) -> None:
+    """Copy optional honesty/accent fields (sampled_of, accent) into a manifest
+    layer when the layer plan carries them. Grid layers without them are
+    unchanged (addendum layer-schema addition)."""
+    for field in LAYER_PASSTHROUGH:
+        val = plan.get(field)
+        if val is not None:
+            layer[field] = val
+
 
 def _subset_label(map_kind: str, key: str, mt) -> tuple[str, str | None]:
     """Human (label, group) for a subset key, best-effort."""
@@ -343,6 +374,98 @@ def _load_probe_corpus_xy(npz_path: Path):
         return np.asarray(z["probe_corpus_coords"], dtype=np.float32)
 
 
+# ------------------------------------------------------- index descriptors --
+
+def _probe_summaries(manifest: dict) -> list[dict]:
+    """Compact per-probe list for maps-index.json (key/label/queries/recall50)."""
+    out = []
+    for p in ((manifest.get("metrics") or {}).get("probes") or []):
+        if isinstance(p, dict):
+            out.append({k: p.get(k) for k in ("key", "label", "queries", "recall50")
+                        if k in p})
+    return out
+
+
+def _round_descriptor(entry: dict, manifest: dict, viewer_rel: str,
+                      thumb_exists: bool) -> dict:
+    """Descriptor consumed by both the registry card grid and maps-index.json."""
+    map_kind = manifest.get("map_kind")
+    kind = "atlas" if map_kind == "jina-25m" else "round-map"
+    panel = (manifest.get("provenance") or {}).get("panel") or {}
+    thumb_rel = f"{viewer_rel}/thumb.png"
+    return {
+        "map_id": entry["map_id"],
+        "round_id": entry.get("round_id"),
+        "kind": kind,
+        "title": manifest.get("title") or _title(entry),
+        "rows_total": manifest.get("rows_total"),
+        "rows_note": manifest.get("rows_note"),
+        "evidence_status": entry.get("evidence_status"),
+        "data": f"{viewer_rel}/data/",
+        "thumbnail": thumb_rel if thumb_exists else None,
+        "metrics": {"ffr": panel.get("ffr"), "density_v2": panel.get("density")},
+        "probes": _probe_summaries(manifest),
+        # Retained for the registry card grid (legacy viewer link + thumb).
+        "viewer_rel": f"{viewer_rel}/index.html",
+        "thumb_rel": thumb_rel,
+    }
+
+
+def _projection_descriptor(entry: dict, manifest: dict, viewer_rel: str,
+                           thumb_exists: bool) -> dict:
+    proj = entry.get("projection", {}) or {}
+    probes = _probe_summaries(manifest)
+    if not probes:
+        probes = [{"key": proj.get("probe"), "label": proj.get("display_name")}]
+    thumb_rel = f"{viewer_rel}/thumb.png"
+    return {
+        "map_id": entry["map_id"],
+        "round_id": entry.get("round_id"),
+        "kind": "projection-map",
+        "title": manifest.get("title"),
+        "rows_total": manifest.get("rows_total"),
+        "rows_note": manifest.get("rows_note"),
+        "evidence_status": entry.get("evidence_status"),
+        "data": f"{viewer_rel}/data/",
+        "thumbnail": thumb_rel if thumb_exists else None,
+        "metrics": {"ffr": proj.get("ffr"), "control_ffr": proj.get("control_ffr")},
+        "probes": probes,
+        "viewer_rel": f"{viewer_rel}/index.html",
+        "thumb_rel": thumb_rel,
+    }
+
+
+def write_maps_index(site_dir: Path, round_built: list[dict],
+                     projection_built: list[dict]) -> dict:
+    """Emit maps-index.json (schema basemap-maps-index-v1) at the site root.
+
+    One entry per map that has viewer data — atlas/round maps and the new
+    projection-map manifests. Consumed by the React gallery route.
+    """
+    maps = []
+    for d in list(round_built) + list(projection_built):
+        maps.append({
+            "map_id": d.get("map_id"),
+            "title": d.get("title"),
+            "kind": d.get("kind"),
+            "round_id": d.get("round_id"),
+            "rows_total": d.get("rows_total"),
+            "rows_note": d.get("rows_note"),
+            "data": d.get("data"),
+            "thumbnail": d.get("thumbnail"),
+            "evidence_status": d.get("evidence_status"),
+            "metrics": d.get("metrics") or {},
+            "probes": d.get("probes") or [],
+        })
+    index = {
+        "schema": MAPS_INDEX_SCHEMA,
+        "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "maps": maps,
+    }
+    (site_dir / "maps-index.json").write_text(json.dumps(index, indent=1))
+    return index
+
+
 # --------------------------------------------------------------- build ------
 
 def _build_one(entry: dict, registry: dict, site_dir: Path,
@@ -356,14 +479,6 @@ def _build_one(entry: dict, registry: dict, site_dir: Path,
     out = site_dir / viewer_rel
     data = out / "data"
     manifest_path = data / "manifest.json"
-    thumb_rel = f"{viewer_rel}/thumb.png"
-
-    built = {
-        "map_id": map_id, "round_id": entry.get("round_id"),
-        "viewer_rel": f"{viewer_rel}/index.html", "thumb_rel": thumb_rel,
-        "title": _title(entry), "rows_total": _rows_total(entry),
-        "evidence_status": entry.get("evidence_status"),
-    }
 
     # Idempotency: skip a rebuild when the coordinates receipt is unchanged.
     if not force and manifest_path.is_file():
@@ -372,7 +487,8 @@ def _build_one(entry: dict, registry: dict, site_dir: Path,
         except (OSError, json.JSONDecodeError):
             prev = {}
         if prev.get("coordinates_receipt_sha") == receipt_sha and receipt_sha:
-            return built  # already current
+            return _round_descriptor(entry, prev, viewer_rel,
+                                     (out / "thumb.png").is_file())  # already current
 
     if coords_dir is None or not coords_dir.is_dir():
         print(f"  {map_id}: coordinates dir missing ({coords_dir}); skip")
@@ -413,6 +529,7 @@ def _build_one(entry: dict, registry: dict, site_dir: Path,
         }
         if layer["group"]:
             lyr["group"] = layer["group"]
+        _apply_passthrough(lyr, layer)
         manifest_layers.append(lyr)
         if layer["samples"]:
             try:
@@ -446,6 +563,7 @@ def _build_one(entry: dict, registry: dict, site_dir: Path,
             "key": key,
             "label": proj["projection"].get("display_name", key),
             "kind": "points", "rows": int(len(xy)), "group": "held-out",
+            "accent": "a1",
         })
 
     # Metric packets (anchors + OOD queries).
@@ -491,7 +609,7 @@ def _build_one(entry: dict, registry: dict, site_dir: Path,
     manifest_path.write_text(json.dumps(manifest, indent=1))
 
     # Thumbnail from the level-256 base grid.
-    _write_thumbnail(data / "grid-all-256.bin", out / "thumb.png")
+    thumb_written = _write_thumbnail(data / "grid-all-256.bin", out / "thumb.png")
 
     # Instantiate the page from B's template.
     config = {
@@ -508,6 +626,270 @@ def _build_one(entry: dict, registry: dict, site_dir: Path,
         "round_href": f"../../round-{entry.get('round_id')}/index.html",
     }
     (out / "index.html").write_text(_instantiate(_load_template(), config))
+    return _round_descriptor(entry, manifest, viewer_rel, thumb_written)
+
+
+# ------------------------------------------------- projection-map viewers ---
+
+def _should_build_projection(entry: dict, only) -> bool:
+    if entry.get("kind") != "projection-map":
+        return False
+    if not _strip((entry.get("projection") or {}).get("coordinates")):
+        return False
+    if only:
+        wanted = set(only)
+        return entry.get("map_id") in wanted or entry.get("round_id") in wanted
+    return True
+
+
+def _base_total_rows(entry: dict, registry: dict, fallback: int | None) -> int | None:
+    """Total row count of the base map a projection was projected through.
+
+    The honest denominator for the 30k ``training-map context`` sample. Matches
+    the projection's base coordinate dir to the base round-map's registry entry;
+    falls back to the semantic-render sample pool size, then to ``fallback``.
+    """
+    base = _strip((entry.get("base_coordinates") or {}).get("dir"))
+    if base is not None:
+        for m in registry.get("maps", []):
+            if m.get("kind") != "round-map":
+                continue
+            cdir = _strip((m.get("coordinates") or {}).get("dir"))
+            if cdir is None:
+                continue
+            if cdir == base or base == cdir or cdir in base.parents or base in cdir.parents:
+                rows = _rows_total(m)
+                if rows:
+                    return int(rows)
+    pool = _base_sample_pool(entry)
+    if pool:
+        return int(pool)
+    return int(fallback) if fallback else None
+
+
+def _base_sample_pool(entry: dict) -> int | None:
+    sid = _strip((entry.get("base_sample_ids") or {}).get("path"))
+    if sid is None or not sid.is_file():
+        return None
+    try:
+        import numpy as np
+        return int(len(np.load(sid, allow_pickle=False, mmap_mode="r")))
+    except Exception:
+        return None
+
+
+def _write_points_thumbnail(layers, out_png: Path, extent, size: int = 256) -> bool:
+    """Scatter base/corpus/query points to a small PNG (or skip -> False)."""
+    try:
+        import numpy as np
+        from PIL import Image
+    except ImportError:
+        return False
+    layers = [(np.asarray(xy, dtype=np.float64), rgb) for xy, rgb in layers if len(xy)]
+    if not layers:
+        return False
+    xmin, ymin, xmax, ymax = extent
+    if not (xmax > xmin and ymax > ymin):
+        return False
+    img = np.empty((size, size, 3), dtype=np.uint8)
+    img[:] = np.array([248, 249, 252], dtype=np.uint8)  # light card background
+    for xy, rgb in layers:
+        m = np.isfinite(xy).all(axis=1)
+        xy = xy[m]
+        if not len(xy):
+            continue
+        px = ((xy[:, 0] - xmin) / (xmax - xmin) * (size - 1)).astype(int)
+        py = ((xy[:, 1] - ymin) / (ymax - ymin) * (size - 1)).astype(int)
+        py = size - 1 - py  # screen orientation: top = max y
+        ok = (px >= 0) & (px < size) & (py >= 0) & (py < size)
+        img[py[ok], px[ok]] = np.array(rgb, dtype=np.uint8)
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(img, mode="RGB").save(out_png)
+    return True
+
+
+def _build_projection_one(entry: dict, registry: dict, site_dir: Path,
+                          mt, mm, pg, *, force: bool) -> dict | None:
+    """Build viewer/<map_id>/data for one projection-map (same manifest contract)."""
+    import numpy as np
+
+    map_id = entry["map_id"]
+    proj = entry.get("projection", {}) or {}
+    npz = _strip(proj.get("coordinates"))
+    viewer_rel = _viewer_rel(entry)
+    out = site_dir / viewer_rel
+    data = out / "data"
+    manifest_path = data / "manifest.json"
+    receipt_sha = (proj.get("coordinate_signature") or {}).get("sha256")
+
+    # Idempotency: skip when the immutable coordinate npz signature is unchanged.
+    if not force and manifest_path.is_file():
+        try:
+            prev = json.loads(manifest_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            prev = {}
+        if receipt_sha and prev.get("coordinates_receipt_sha") == receipt_sha:
+            return _projection_descriptor(entry, prev, viewer_rel,
+                                          (out / "thumb.png").is_file())
+
+    if npz is None or not npz.is_file():
+        return None
+    data.mkdir(parents=True, exist_ok=True)
+    skipped: list[str] = []
+
+    with np.load(npz, allow_pickle=False) as archive:
+        corpus_xy = np.asarray(archive["probe_corpus_coords"], dtype=np.float32)
+        query_xy = np.asarray(archive["probe_query_coords"], dtype=np.float32)
+    corpus_total = int(len(corpus_xy))
+    corpus_rows = pg._sample_rows(corpus_total, pg.CORPUS_SAMPLE_N,
+                                  label=map_id + ":corpus")
+    corpus_sample = corpus_xy[corpus_rows]
+
+    # Base-context: the 30k deterministic sample from projection_gallery's recipe.
+    try:
+        base_ids, base_xy = pg._base_coordinates(entry)
+    except Exception as exc:
+        base_ids = np.empty((0,), np.int64)
+        base_xy = np.empty((0, 2), np.float32)
+        skipped.append(f"base-context layer omitted: {exc}")
+    base_total = _base_total_rows(entry, registry, len(base_ids))
+
+    layers: list[dict] = []
+    if len(base_xy):
+        mt.write_points(str(data / "points-base-context.bin"), base_xy)
+        base_layer = {
+            "key": "base-context", "label": BASE_CONTEXT_LABEL, "kind": "points",
+            "rows": int(len(base_xy)), "group": "context", "accent": "a2",
+        }
+        if base_total:
+            base_layer["sampled_of"] = int(base_total)
+        layers.append(base_layer)
+    elif not skipped:
+        skipped.append("base-context layer omitted: base coordinates unavailable")
+
+    display = proj.get("display_name") or "probe"
+    mt.write_points(str(data / "points-corpus.bin"), corpus_sample)
+    corpus_layer = {
+        "key": "corpus", "label": f"{display} corpus", "kind": "points",
+        "rows": int(len(corpus_sample)), "group": "probe", "accent": "a1",
+    }
+    if corpus_total > len(corpus_sample):
+        corpus_layer["sampled_of"] = corpus_total
+    layers.append(corpus_layer)
+
+    mt.write_points(str(data / "points-queries.bin"), query_xy)
+    layers.append({
+        "key": "queries", "label": f"{display} held-out queries", "kind": "points",
+        "rows": int(len(query_xy)), "group": "probe-queries", "accent": "a2",
+    })
+
+    # Extent over the union of all point layers (grid extent has no meaning here).
+    parts = [a for a in (base_xy, corpus_sample, query_xy) if len(a)]
+    allxy = np.concatenate(parts, axis=0) if parts else np.zeros((1, 2), np.float32)
+    finite = allxy[np.isfinite(allxy).all(axis=1)]
+    if len(finite):
+        xmin, ymin = (float(v) for v in finite.min(axis=0))
+        xmax, ymax = (float(v) for v in finite.max(axis=0))
+        px = (xmax - xmin or 1.0) * 0.04
+        py = (ymax - ymin or 1.0) * 0.04
+        extent = [xmin - px, ymin - py, xmax + px, ymax + py]
+    else:
+        extent = [-1.0, -1.0, 1.0, 1.0]
+
+    # metrics-queries.json only when the npz embeds exact_high_d_top10 + low_d_top50.
+    metrics: dict = {}
+    try:
+        res = mm.build_probe_packet(npz, key=proj.get("probe") or map_id,
+                                    label=display)
+        if res.skipped:
+            skipped.append(f"query metrics omitted: {res.reason}")
+        else:
+            mm.write_queries_json(data / "metrics-queries.json", [res.packet])
+            metrics = {"probes": [{"key": res.key, "label": res.label,
+                                   "queries": res.n_queries,
+                                   "recall50": res.recall50}]}
+    except Exception as exc:
+        skipped.append(f"query metrics omitted: build failed ({exc})")
+
+    title = f"{display} on {entry.get('base_map') or 'basemap'}"
+    manifest = {
+        "schema": MANIFEST_SCHEMA,
+        "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "map_id": map_id,
+        "round_id": entry.get("round_id"),
+        "title": title,
+        "rows_total": proj.get("corpus_rows") or corpus_total,
+        "rows_note": ("OOD probe corpus projected through the registered base map; "
+                      "browser point layers are deterministic samples — metrics "
+                      "come from the full registered panel"),
+        "map_kind": "projection",
+        "kind": "projection-map",
+        "base_map": entry.get("base_map"),
+        "extent": extent,
+        "levels": [],
+        "sample_level": SAMPLE_LEVEL,
+        "super_tile": SUPER_TILE,
+        "layers": layers,
+        "metrics": metrics,
+        "skipped": skipped,
+        "provenance": {
+            "eval_round": entry.get("round_id"),
+            "evidence_status": entry.get("evidence_status"),
+            "base_map": entry.get("base_map"),
+            "probe": proj.get("probe"),
+            "ffr": proj.get("ffr"),
+            "control_ffr": proj.get("control_ffr"),
+            "retention": proj.get("retention"),
+            "verdict": proj.get("verdict"),
+        },
+        "coordinates_receipt_sha": receipt_sha,
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=1))
+
+    thumb_written = _write_points_thumbnail(
+        [(base_xy, (139, 146, 156)), (corpus_sample, (49, 120, 198)),
+         (query_xy, (229, 72, 77))],
+        out / "thumb.png", extent)
+
+    # A minimal landing page so the viewer dir is not a bare 404; the React app
+    # is the primary surface and reads data/ directly.
+    config = {
+        "dataDir": "data", "manifest": "data/manifest.json", "assets": ASSETS_REL,
+        "map_id": map_id, "title": title, "round_id": entry.get("round_id"),
+        "registry_href": "../../index.html", "app_href": _app_href(map_id, "../../"),
+    }
+    (out / "index.html").write_text(_instantiate(_load_template(), config))
+
+    return _projection_descriptor(entry, manifest, viewer_rel, thumb_written)
+
+
+def build_projection_viewers(registry: dict, site_dir: Path, mt, mm,
+                             only=None, force: bool = False) -> list[dict]:
+    """Build viewer/<map_id>/data manifests for every registry projection-map.
+
+    Reuses projection_gallery's sampling/id recipe by import (never edits it or
+    the legacy projections/ pages). Returns one descriptor per built projection.
+    """
+    site_dir = Path(site_dir)
+    targets = [e for e in registry.get("maps", []) if _should_build_projection(e, only)]
+    if not targets:
+        return []
+    try:
+        pg = _import_projection_gallery()
+    except Exception as exc:
+        print(f"  projection viewers skipped (import failed): {exc}")
+        return []
+
+    built: list[dict] = []
+    for entry in targets:
+        try:
+            descriptor = _build_projection_one(entry, registry, site_dir,
+                                                mt, mm, pg, force=force)
+        except Exception as exc:  # one bad projection must not sink the rest
+            print(f"  projection viewer failed for {entry.get('map_id')}: {exc}")
+            descriptor = None
+        if descriptor:
+            built.append(descriptor)
     return built
 
 
@@ -515,9 +897,10 @@ def build_map_viewers(registry: dict, site_dir: Path,
                       only=None, force: bool = False) -> list[dict]:
     """Build interactive viewers for allowlisted round/atlas maps.
 
-    Returns one descriptor per map that has a viewer (built or already-current),
-    used by the registry index card grid. Splices a ``viewer:start/end`` block
-    into each round page, mirroring the projection gallery.
+    Returns one descriptor per round/atlas map that has a viewer (built or
+    already-current), used by the registry index card grid. Also builds the
+    projection-map viewers, splices a ``viewer:start/end`` block into each round
+    page, and emits maps-index.json at the site root.
     """
     site_dir = Path(site_dir)
     mt, mm = _import_siblings()
@@ -536,6 +919,11 @@ def build_map_viewers(registry: dict, site_dir: Path,
             built.append(descriptor)
 
     _splice_round_pages(site_dir, built)
+
+    projection_built = build_projection_viewers(
+        registry, site_dir, mt, mm, only=only, force=force)
+
+    write_maps_index(site_dir, built, projection_built)
     return built
 
 
@@ -548,8 +936,9 @@ def _splice_round_pages(site_dir: Path, built: list[dict]) -> None:
         page_dir = site_dir / f"round-{round_id}"
         page_dir.mkdir(exist_ok=True)
         links = "".join(
-            f'<li><a href="../{html.escape(i["viewer_rel"])}">'
-            f'{html.escape(i["title"])}</a> — interactive viewer</li>'
+            f'<li><a href="../{html.escape(_app_href(i["map_id"]))}">'
+            f'{html.escape(i["title"] or i["map_id"])}</a> — interactive viewer'
+            f' · <a href="../{html.escape(i["viewer_rel"])}">legacy viewer</a></li>'
             for i in items
         )
         block = ("<!-- viewer:start -->"

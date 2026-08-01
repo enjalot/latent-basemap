@@ -892,6 +892,9 @@ dt { color: var(--muted); } dd { margin: 0; overflow-wrap: anywhere; }
              padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line);
              background: var(--bg); font-size: 13px; font-weight: 600; }
 .viewerbtn:hover { border-color: var(--ok); }
+.legacybtn { display: inline-block; text-align: center; margin-top: 4px; font-size: 12px;
+             color: var(--muted); text-decoration: none; }
+.legacybtn:hover { text-decoration: underline; }
 """
 
 
@@ -936,13 +939,21 @@ def _viewer_card(built: dict, entry: dict | None) -> str:
                  f'loading="lazy">' if thumb else "")
     rows_line = f'{_fmt(rows)} rows' if rows else ""
     evidence = built.get("evidence_status") or (entry or {}).get("evidence_status") or ""
+    # Primary link is the React app (deployed to <site>/app/); the vanilla
+    # viewer page stays reachable as a small secondary "legacy viewer" link.
+    app_href = f'app/index.html#/map/{html.escape(built["map_id"])}'
+    legacy = ""
+    if built.get("viewer_rel"):
+        legacy = (f'<a class="legacybtn" href="{html.escape(built["viewer_rel"])}">'
+                  f'legacy viewer</a>')
     return (
         '<div class="mapcard">'
         f'{thumb_tag}'
         f'<h3>{html.escape(built.get("title") or built.get("map_id"))}</h3>'
         f'<div class="meta">{html.escape(rows_line)}</div>'
         f'<div class="chips">{_badge(evidence)}{ffr_chip}{dens_chip}</div>'
-        f'<a class="viewerbtn" href="{html.escape(built["viewer_rel"])}">open viewer →</a>'
+        f'<a class="viewerbtn" href="{app_href}">open viewer →</a>'
+        f'{legacy}'
         '</div>'
     )
 
@@ -1002,8 +1013,15 @@ def publish(registry: dict) -> None:
     for m in sorted(projections, key=lambda x: x.get("date") or "", reverse=True):
         p = m["projection"]
         page = f'projections/{m["map_id"]}/index.html'
+        # A projection gains a React-app viewer when its coordinate npz exists
+        # (the same condition map_viewer uses to build viewer/<map_id>/data/).
+        npz_path = Path((p.get("coordinates") or "").removeprefix("gsv:"))
+        app_link = ""
+        if npz_path.is_file():
+            app_link = (f' · <a href="app/index.html#/map/{html.escape(m["map_id"])}">'
+                        f'app</a>')
         projection_rows.append(
-            f'<tr><td><a href="{page}">{html.escape(m["map_id"])}</a></td>'
+            f'<tr><td><a href="{page}">{html.escape(m["map_id"])}</a>{app_link}</td>'
             f'<td>{html.escape(str(m.get("base_map") or ""))}</td>'
             f'<td class="num">{_fmt(p.get("corpus_rows"))}</td>'
             f'<td class="num">{_fmt(p.get("ffr"))}</td>'
