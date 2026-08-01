@@ -146,7 +146,9 @@ def _panel_config():
     )
 
 
-def _new_model(config: dict[str, Any]):
+def _new_model(
+    config: dict[str, Any], *, require_full_budget: bool = True
+):
     from basemap.pumap.parametric_umap import ParametricUMAP
 
     model = config["model"]
@@ -176,7 +178,7 @@ def _new_model(config: dict[str, Any]):
         lr_schedule="cosine",
         warmup_steps=train["warmup_successful_updates"],
         total_steps_estimate=train["successful_positive_lr_updates"],
-        require_full_budget=True,
+        require_full_budget=require_full_budget,
         require_graph_manifest=True,
         required_input_pipeline=execution["required_pipeline"],
         use_amp=train["use_amp"],
@@ -237,7 +239,11 @@ def run_sampler_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
     torch.manual_seed(cell["seed"])
     torch.cuda.manual_seed_all(cell["seed"])
     X = input_array(cell["dimension"])
-    model = _new_model(config)
+    # A canary is deliberately capped below the production LR horizon.  It
+    # must still exercise the exact production schedule and sampler, but it
+    # cannot claim (or require) full-budget closure.  The full train keeps the
+    # default fail-closed value above.
+    model = _new_model(config, require_full_budget=False)
     model._max_train_steps = CANARY_UPDATES
     model._bench_warmup = 50
     model._perf_profile = True
@@ -270,7 +276,10 @@ def run_sampler_canary(active: dict[str, Any], job: dict[str, Any]) -> None:
         "positive_lr_optimizer_steps": CANARY_UPDATES,
         "optimizer_steps_succeeded": CANARY_UPDATES,
         "stop_reason": "bench_cap",
-        "budget_satisfied": True,
+        # The canary intentionally stops below the production LR horizon.  A
+        # passing diagnostic must be honest about that partial budget; only
+        # the subsequent production train may report full closure.
+        "budget_satisfied": False,
         "n_pos_edges": GRAPH_EDGES,
         "nonfinite_loss_skips": 0,
         "nonfinite_gradient_skips": 0,
