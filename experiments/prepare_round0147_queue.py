@@ -25,6 +25,7 @@ from basemap.jina_historical_selection import (
     load_historical_provenance,
 )
 from basemap.output_safety import (
+    atomic_build_new_file,
     atomic_write_new_json,
     create_fresh_directory,
     ensure_data_directory,
@@ -362,8 +363,9 @@ def _cpu_smoke(
     inventory: Mapping[str, Any],
     excluded: np.ndarray,
     model_signature: Mapping[str, Any],
+    output_root: str,
 ) -> dict[str, Any]:
-    """Exercise real row selection, model reload, accounting closure, and selector."""
+    """Reach checkpoint publication, reload, panel, accounting, and selector."""
     if os.environ.get("CUDA_VISIBLE_DEVICES") not in {"", "-1"}:
         raise RuntimeError("R0147 CPU smoke requires CUDA_VISIBLE_DEVICES='' or '-1'")
     started = time.monotonic()
@@ -378,9 +380,43 @@ def _cpu_smoke(
     from basemap.pumap.parametric_umap import ParametricUMAP
 
     model = ParametricUMAP.load(model_signature["canonical_path"], device="cpu")
-    coordinates = np.asarray(model.transform(sample, batch_size=16), dtype=np.float32)
+    checkpoint_path = os.path.join(output_root, "cpu-smoke-model.pt")
+    atomic_build_new_file(checkpoint_path, model.save, immutable=True)
+    checkpoint_signature = expected_input_signature(checkpoint_path)
+    reloaded = ParametricUMAP.load(checkpoint_path, device="cpu")
+    coordinates = np.asarray(
+        reloaded.transform(sample, batch_size=16), dtype=np.float32
+    )
     if coordinates.shape != (32, 2) or not np.isfinite(coordinates).all():
         raise RuntimeError("R0147 CPU smoke model transform failed")
+    from basemap.panel_v2 import PanelV2Config, score_panel
+
+    panel = score_panel(
+        sample,
+        coordinates,
+        config=PanelV2Config(
+            frac=0.25,
+            k_clust=(),
+            k_density=5,
+            k_hit=5,
+            n_anchors=8,
+            corpus_chunk=32,
+            block_elems=100_000,
+            rerank_byte_cap=10_000_000,
+            peak_byte_cap=50_000_000,
+        ),
+        provenance={
+            "round_id": ROUND_ID,
+            "scope": "CPU smoke over 32 real treatment rows",
+            "checkpoint": checkpoint_signature,
+        },
+    )
+    if (
+        panel.get("guards", {}).get("coords_finite") is not True
+        or panel.get("guards", {}).get("coords_collapsed") is not False
+        or not np.isfinite(float(panel.get("ffr", np.nan)))
+    ):
+        raise RuntimeError("R0147 CPU smoke panel failed")
 
     fake_graph = {
         "canonical_path": "/preflight/not-a-runtime-graph.npz",
@@ -462,12 +498,21 @@ def _cpu_smoke(
         "round_id": ROUND_ID,
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
         "scope": (
-            "real selector -> reviewed control reload/transform -> production "
-            "config -> post-fit accounting closure -> sealed selector"
+            "real selector -> reviewed control -> atomic checkpoint publication "
+            "and reload -> actual panel interface -> production config -> "
+            "post-fit accounting closure -> sealed selector"
         ),
         "model": dict(model_signature),
+        "published_checkpoint": checkpoint_signature,
         "sample_rows": len(sample),
         "coordinates_finite": True,
+        "panel": {
+            "schema": panel["schema"],
+            "ffr": panel["ffr"],
+            "recall_at_k": panel["recall@k"],
+            "density": panel["density"],
+            "guards": panel["guards"],
+        },
         "selection_summary": selected["summary"],
         "training_config_sha256": config_sha,
         "accounting_mismatches": mismatches,
@@ -574,15 +619,13 @@ def prepare_round0147(
     )
     pytest_signature = expected_input_signature(pytest_path)
     smoke_path = os.path.join(preflight, "cpu-smoke.json")
-    atomic_write_new_json(
-        smoke_path,
-        _cpu_smoke(
-            inventory=inventory,
-            excluded=excluded,
-            model_signature=control_train["model"],
-        ),
-        immutable=True,
+    smoke = _cpu_smoke(
+        inventory=inventory,
+        excluded=excluded,
+        model_signature=control_train["model"],
+        output_root=preflight,
     )
+    atomic_write_new_json(smoke_path, smoke, immutable=True)
     smoke_signature = expected_input_signature(smoke_path)
     external_inputs = _dedupe([
         round_signature,
@@ -602,6 +645,7 @@ def prepare_round0147(
             for item in CENTROIDS.values()
         ],
         pytest_signature,
+        smoke["published_checkpoint"],
         smoke_signature,
     ])
 
