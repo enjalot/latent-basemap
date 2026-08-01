@@ -53,9 +53,13 @@ def build_decision(cells: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
         raise Round0137Error("graph-bridge functional cells are reordered")
     versus_control = _contrast(cells[CONTROL], cells[TREATMENT])
     versus_historical = _contrast(cells[HISTORICAL], cells[TREATMENT])
-    restores = versus_historical[
+    restores_historical = versus_historical[
         "candidate_at_least_baseline_on_all_metrics"
     ]
+    preserves_control = versus_control[
+        "candidate_at_least_baseline_on_all_metrics"
+    ]
+    restores = restores_historical and preserves_control
     regresses_control = not versus_control[
         "candidate_at_least_baseline_on_all_metrics"
     ]
@@ -72,13 +76,15 @@ def build_decision(cells: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
             "metrics": list(METRIC_ORDER),
             "point_comparison": "candidate >= baseline",
             "absolute_tolerance": COMPARISON_TOLERANCE,
-            "historical_restoration_requires_all_metrics": True,
+            "restoration_requires_all_metrics_vs_historical_and_control": True,
             "no_density_floor_or_posthoc_margin": True,
         },
         "treatment_vs_current_control": versus_control,
         "treatment_vs_historical_target": versus_historical,
         "outcome": outcome,
         "high_recall_graph_sufficient": restores,
+        "restores_historical_on_all_metrics": restores_historical,
+        "preserves_current_control_on_all_metrics": preserves_control,
         "sampler_bridge_authorized": not restores,
         "training_performed": True,
         "registered_density_floor_changed": False,

@@ -69,6 +69,21 @@ def test_graph_treatment_that_regresses_control_is_called_out():
     assert decision["sampler_bridge_authorized"] is True
 
 
+def test_matching_historical_is_not_sufficient_if_control_is_regressed():
+    cells = _cells(historical=0.5, control=0.5, treatment=0.5)
+    # Purity fidelity is separately directional. Make the historical target
+    # weaker than control there and treatment match it, which must not qualify
+    # as a Pareto restoration.
+    cells[HISTORICAL]["panel"]["purity"]["k256"] = 2.0
+    cells[TREATMENT]["panel"]["purity"]["k256"] = 2.0
+    decision = build_decision(cells)
+    assert decision["restores_historical_on_all_metrics"] is True
+    assert decision["preserves_current_control_on_all_metrics"] is False
+    assert decision["high_recall_graph_sufficient"] is False
+    assert decision["outcome"] == "high-recall-graph-regresses-current-control"
+    assert decision["sampler_bridge_authorized"] is True
+
+
 def test_cell_order_is_frozen():
     cells = _cells(historical=0.6, control=0.5, treatment=0.6)
     assert tuple(cells) == CELL_ORDER
