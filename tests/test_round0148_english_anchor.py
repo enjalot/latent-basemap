@@ -17,6 +17,7 @@ from basemap.round0148_english_anchor import (
     OUTCOME_INVALID,
     OUTCOME_OOD,
     OUTCOME_RESCUED,
+    REGISTERED_GROUP_COUNTS,
     Round0148Error,
     build_subset_plan,
     english_anchor_decision,
@@ -25,30 +26,7 @@ from basemap.round0148_english_anchor import (
 )
 
 
-REAL_COUNTS = {
-    "fineweb-edu-sample-10BT-chunked-500-jina-v5-nano": 2_878_533,
-    "RedPajama-Data-V2-sample-10B-chunked-500-jina-v5-nano": 2_814_846,
-    "pile-uncopyrighted-chunked-500-jina-v5-nano": 3_385_908,
-    "arb_Arab": 835_367,
-    "ces_Latn": 835_247,
-    "cmn_Hani": 835_129,
-    "deu_Latn": 835_318,
-    "ell_Grek": 835_334,
-    "fra_Latn": 835_364,
-    "hin_Deva": 834_703,
-    "ind_Latn": 835_315,
-    "ita_Latn": 835_220,
-    "jpn_Jpan": 835_089,
-    "kor_Hang": 834_542,
-    "nld_Latn": 835_392,
-    "por_Latn": 835_398,
-    "rus_Cyrl": 835_325,
-    "spa_Latn": 835_299,
-    "swe_Latn": 835_309,
-    "tha_Thai": 835_305,
-    "tur_Latn": 835_338,
-    "vie_Latn": 835_382,
-}
+REAL_COUNTS = dict(REGISTERED_GROUP_COUNTS)
 
 EXPECTED_LANGUAGE_QUOTAS = {
     "arb_Arab": 178_716,
@@ -102,7 +80,7 @@ def test_languages_reuse_exact_r0132_rank_namespace() -> None:
 def test_population_drift_fails_closed() -> None:
     changed = copy.deepcopy(REAL_COUNTS)
     changed[GROUPS[0]] -= 1
-    with pytest.raises(Round0148Error, match="full retained population"):
+    with pytest.raises(Round0148Error, match="registered English-anchor"):
         english_anchor_quotas(changed)
 
 

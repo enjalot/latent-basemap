@@ -24,6 +24,7 @@ from basemap.round0148_english_anchor import (
     CAPABILITY,
     DENSITY_V2_FLOOR,
     OOD_METRICS,
+    REGISTERED_GROUP_COUNTS,
     ROUND_ID,
     build_subset_plan,
 )
@@ -410,25 +411,7 @@ def prepare_round0148(
                 "proportional 19-language remainder at fixed 12,474,331 rows "
                 "transfer R0147 restoration without breaking density or OOD?"
             ),
-            "population_plan": build_subset_plan({
-                group: count for group, count in (
-                    # The identity is checked again from the live inventory by
-                    # the selector; this compact literal only seals the queue.
-                    ("fineweb-edu-sample-10BT-chunked-500-jina-v5-nano", 2_878_533),
-                    ("RedPajama-Data-V2-sample-10B-chunked-500-jina-v5-nano", 2_814_846),
-                    ("pile-uncopyrighted-chunked-500-jina-v5-nano", 3_385_908),
-                    ("arb_Arab", 835_367), ("ces_Latn", 835_247),
-                    ("cmn_Hani", 835_129), ("deu_Latn", 835_318),
-                    ("ell_Grek", 835_334), ("fra_Latn", 835_364),
-                    ("hin_Deva", 834_703), ("ind_Latn", 835_315),
-                    ("ita_Latn", 835_220), ("jpn_Jpan", 835_089),
-                    ("kor_Hang", 834_542), ("nld_Latn", 835_392),
-                    ("por_Latn", 835_398), ("rus_Cyrl", 835_325),
-                    ("spa_Latn", 835_299), ("swe_Latn", 835_309),
-                    ("tha_Thai", 835_305), ("tur_Latn", 835_338),
-                    ("vie_Latn", 835_382),
-                )
-            }),
+            "population_plan": build_subset_plan(REGISTERED_GROUP_COUNTS),
             "functional_floors": "unchanged R0140 restoration floors",
             "density_v2_floor": DENSITY_V2_FLOOR,
             "density_floor_recalibration": False,

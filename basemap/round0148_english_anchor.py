@@ -53,6 +53,30 @@ OUTCOME_INVALID = "invalid-execution"
 
 ENGLISH_GROUPS = GROUPS[:3]
 LANGUAGE_GROUPS = GROUPS[3:]
+REGISTERED_GROUP_COUNTS = {
+    "fineweb-edu-sample-10BT-chunked-500-jina-v5-nano": 2_878_533,
+    "RedPajama-Data-V2-sample-10B-chunked-500-jina-v5-nano": 2_814_846,
+    "pile-uncopyrighted-chunked-500-jina-v5-nano": 3_385_908,
+    "arb_Arab": 835_367,
+    "ces_Latn": 835_247,
+    "cmn_Hani": 835_129,
+    "deu_Latn": 835_318,
+    "ell_Grek": 835_334,
+    "fra_Latn": 835_364,
+    "hin_Deva": 834_703,
+    "ind_Latn": 835_315,
+    "ita_Latn": 835_220,
+    "jpn_Jpan": 835_089,
+    "kor_Hang": 834_542,
+    "nld_Latn": 835_392,
+    "por_Latn": 835_398,
+    "rus_Cyrl": 835_325,
+    "spa_Latn": 835_299,
+    "swe_Latn": 835_309,
+    "tha_Thai": 835_305,
+    "tur_Latn": 835_338,
+    "vie_Latn": 835_382,
+}
 
 
 class Round0148Error(RuntimeError):
@@ -109,6 +133,8 @@ def english_anchor_quotas(
     if set(group_counts) != set(GROUPS):
         raise Round0148Error("English-anchor group-count keys changed")
     counts = {group: int(group_counts[group]) for group in GROUPS}
+    if counts != REGISTERED_GROUP_COUNTS:
+        raise Round0148Error("registered English-anchor group counts changed")
     if any(value <= 0 for value in counts.values()):
         raise Round0148Error("every source group must be nonempty")
     if sum(counts.values()) != FULL_RETAINED_ROWS:
