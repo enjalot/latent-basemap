@@ -712,11 +712,27 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         _signature(cell["query_coordinates"], label=f"{key} query coordinates")
         cells[key] = dict(cell)
 
+    train_release_shas = job.get("train_release_shas")
+    if train_release_shas is None:
+        train_release_shas = {
+            cell: active["manifest"]["release_sha"] for cell in NEW_CELLS
+        }
+    if (
+        not isinstance(train_release_shas, Mapping)
+        or set(train_release_shas) != set(NEW_CELLS)
+        or any(
+            not isinstance(train_release_shas[cell], str)
+            or len(train_release_shas[cell]) != 40
+            for cell in NEW_CELLS
+        )
+    ):
+        raise Round0140Error("R0140 train-release lineage is malformed")
+
     for cell in NEW_CELLS:
         model, train, train_signature = _authenticate_new_model(
             cell=cell,
             train_output=str(job["train_outputs"][cell]),
-            release_sha=active["manifest"]["release_sha"],
+            release_sha=str(train_release_shas[cell]),
         )
         coordinates = np.asarray(
             model.transform(source, batch_size=TRANSFORM_BATCH_ROWS), dtype=np.float32
@@ -774,6 +790,7 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "training": {
                 "train": train_signature,
                 "model": train["model"],
+                "release_sha": str(train_release_shas[cell]),
                 "actual_pipeline": (
                     train.get("exact_execution_receipt")
                     or train.get("actual_pipeline")
