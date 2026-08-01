@@ -202,6 +202,12 @@ def run_build_shared(active: dict[str, Any], job: dict[str, Any]) -> None:
         np.ascontiguousarray(X[quality_ids]), GRAPH_K
     )
     truth = _without_self(truth_raw, quality_ids, GRAPH_K - 1)
+    forced_nprobe = job.get("forced_nprobe")
+    if forced_nprobe is not None and (
+        not isinstance(forced_nprobe, int)
+        or forced_nprobe not in GRAPH_NPROBE_GRID
+    ):
+        raise Round0104Error("forced graph nprobe is outside the registered grid")
     cells: dict[str, Any] = {}
     selected: int | None = None
     for nprobe in GRAPH_NPROBE_GRID:
@@ -230,6 +236,10 @@ def run_build_shared(active: dict[str, Any], job: dict[str, Any]) -> None:
         }
         if passed and selected is None:
             selected = nprobe
+    if forced_nprobe is not None:
+        if not cells[str(forced_nprobe)]["passed"]:
+            raise Round0104Error("forced graph nprobe did not pass qualification")
+        selected = forced_nprobe
     del exact
     if selected is None:
         raise Round0104Error("no registered IVF-Flat graph cell passed recall")
@@ -335,7 +345,11 @@ def run_build_shared(active: dict[str, Any], job: dict[str, Any]) -> None:
         },
         "endpoint_cosine": endpoint_probe,
         "post_hoc_identity_verified": True,
-        "verified_by": "round0104-self-contained-paired-builder-v2",
+        "verified_by": (
+            "round0104-self-contained-paired-builder-v2"
+            if forced_nprobe is None
+            else f"round{active['manifest']['round_id']}-fixed-nprobe-bridge-v1"
+        ),
     }
     manifest_path = os.path.join(output, "graph-manifest.json")
     atomic_write_new_json(manifest_path, graph_manifest, immutable=True)
@@ -390,7 +404,7 @@ def run_build_shared(active: dict[str, Any], job: dict[str, Any]) -> None:
     )
     receipt_body = {
         "schema": _schema(active, "paired-shared-evidence"),
-        "round_id": ROUND_ID,
+        "round_id": str(active["manifest"]["round_id"]),
         "release_sha": active["manifest"]["release_sha"],
         "source_prefix_proof": proof,
         "graph": graph_signature,
@@ -410,7 +424,7 @@ def run_build_shared(active: dict[str, Any], job: dict[str, Any]) -> None:
         "query_truth": expected_input_signature(truth_path),
         "query_truth_key": truth["key"],
         "query_truth_payload_sha256": truth["payload_sha256"],
-        "shared_across_arms": list(ARMS),
+        "shared_across_arms": list(job.get("shared_arms", ARMS)),
         "performance": {
             "materialize_seconds": materialize_seconds,
             "ivf_train_seconds": train_seconds,
@@ -430,8 +444,9 @@ def _load_shared(job: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]
     path = os.path.join(str(job["shared_output"]), "receipt.json")
     receipt = _read_sealed(path, label="R0104 shared evidence")
     if (
-        receipt.get("round_id") != ROUND_ID
-        or receipt.get("shared_across_arms") != list(ARMS)
+        receipt.get("round_id") != str(job.get("shared_round_id", ROUND_ID))
+        or receipt.get("shared_across_arms")
+        != list(job.get("shared_arms", ARMS))
         or int(receipt.get("graph_edges", -1)) <= 0
     ):
         raise Round0104Error("R0104 shared evidence content changed")
@@ -665,7 +680,7 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
     }
     receipt = {
         "schema": _schema(active, "paired-train-receipt"),
-        "round_id": ROUND_ID,
+        "round_id": str(active["manifest"]["round_id"]),
         "arm": arm,
         "release_sha": active["manifest"]["release_sha"],
         "production_config_sha256": config_sha,
