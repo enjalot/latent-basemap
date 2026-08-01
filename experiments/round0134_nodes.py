@@ -171,8 +171,101 @@ def _authenticate_r0104_fp16(
     }
 
 
+def _load_frozen_query_truth(
+    path: str,
+    *,
+    expected_key: str,
+    expected_policy: Mapping[str, Any],
+    expected_payload_sha256: str,
+) -> dict[str, Any]:
+    """Authenticate the reviewed R0037 truth without rebuilding it.
+
+    ``panel_v2.load_query_truth`` deliberately requires the archived builder's
+    ``cross_knn`` source hash to equal the *current* source hash.  That is the
+    right guard for a truth archive being reused as current implementation
+    evidence, but R0134's contract is different: it reuses the already reviewed
+    R0037 neighbor bytes verbatim while scoring all maps with the current
+    evaluator.  Later performance-only edits to ``cross_knn`` therefore cannot
+    be allowed to make those frozen bytes unreadable.
+
+    This narrow compatibility loader retains every content and semantic check:
+    exact archive fields, complete key identity, the accepted R0037 policy,
+    payload hash, shape, dtype, bounds, and per-row uniqueness.  It omits only
+    the invalid comparison between a historical builder hash and current source
+    text.  The expected policy and payload are themselves sealed in R0037's
+    accepted shared-reference receipt.
+    """
+    from basemap.panel_v2 import QUERY_TRUTH_SCHEMA, _validate_truth_neighbors
+
+    with np.load(path, allow_pickle=False) as archive:
+        required = {
+            "key",
+            "k",
+            "query_rows",
+            "corpus_cardinality",
+            "payload_sha256",
+            "neighbors",
+            "meta",
+        }
+        if set(archive.files) != required:
+            raise Round0134Error("R0037 query truth archive fields changed")
+        meta = json.loads(str(archive["meta"]))
+        if not isinstance(meta, dict) or set(meta) != {
+            "schema",
+            "key_parts",
+            "build_wall_s",
+        }:
+            raise Round0134Error("R0037 query truth metadata changed")
+        key_parts = meta.get("key_parts")
+        if (
+            meta.get("schema") != QUERY_TRUTH_SCHEMA
+            or not isinstance(key_parts, dict)
+            or key_parts.get("schema") != QUERY_TRUTH_SCHEMA
+            or key_parts.get("policy") != dict(expected_policy)
+        ):
+            raise Round0134Error("R0037 query truth policy changed")
+        key = str(archive["key"])
+        if (
+            key != expected_key
+            or sha256_bytes(canonical_json(key_parts)) != expected_key
+        ):
+            raise Round0134Error("R0037 query truth complete identity changed")
+        k = int(archive["k"])
+        query_rows = int(archive["query_rows"])
+        corpus_cardinality = int(archive["corpus_cardinality"])
+        neighbors = np.asarray(archive["neighbors"])
+        try:
+            _validate_truth_neighbors(
+                neighbors,
+                k=k,
+                query_rows=query_rows,
+                corpus_cardinality=corpus_cardinality,
+            )
+        except ValueError as exc:
+            raise Round0134Error("R0037 query truth neighbors changed") from exc
+        payload_sha256 = str(archive["payload_sha256"])
+        if (
+            payload_sha256 != expected_payload_sha256
+            or ordered_array_sha256(neighbors) != expected_payload_sha256
+        ):
+            raise Round0134Error("R0037 query truth payload changed")
+        return {
+            "schema": QUERY_TRUTH_SCHEMA,
+            "key": key,
+            "key_parts": key_parts,
+            "k": k,
+            "query_rows": query_rows,
+            "corpus_cardinality": corpus_cardinality,
+            "neighbors": neighbors.copy(),
+            "payload_sha256": payload_sha256,
+            "build_wall_s": meta.get("build_wall_s"),
+            "historical_builder_policy_authenticated": True,
+            "current_builder_source_hash_required": False,
+        }
+
+
 def _load_reference(job: Mapping[str, Any]):
-    from basemap.panel_v2 import load_hiD_reference, load_query_truth
+    from basemap.panel_v2 import load_hiD_reference
 
     shared, shared_signature = _read_json_signature(
         job["shared_reference_receipt"],
@@ -186,10 +279,11 @@ def _load_reference(job: Mapping[str, Any]):
         shared["high_d_reference"]["canonical_path"],
         expected_key=shared["high_d_reference_key"],
     )
-    truth = load_query_truth(
+    truth = _load_frozen_query_truth(
         shared["query_truth"]["canonical_path"],
         expected_key=shared["query_truth_key"],
-        expected_candidate_compute_backend="cuda",
+        expected_policy=shared["query_truth_exactness"],
+        expected_payload_sha256=shared["query_truth_payload_sha256"],
     )
     if (
         truth["neighbors"].shape != (QUERY_ROWS, 10)

@@ -24,6 +24,13 @@ from experiments.prepare_round0134_queue import (
     REVIEW_CAPABILITIES,
     SOURCE_ROWS,
 )
+from experiments.round0134_nodes import _load_frozen_query_truth
+
+
+R0037_SHARED_RECEIPT = (
+    "/data/latent-basemap/runs/round-0037/queue/artifacts/"
+    "shared-reference/receipt.json"
+)
 
 
 def _cell(
@@ -142,3 +149,29 @@ def test_raw_two_seed_contrast_is_seed_matched():
     assert decision["contrasts"]["pre_r0115_seed42"]["current_cells"] == [
         CURRENT_R0104_SEED42
     ]
+
+
+def test_reviewed_r0037_query_truth_survives_current_builder_source_drift():
+    import json
+
+    with open(R0037_SHARED_RECEIPT, encoding="utf-8") as handle:
+        shared = json.load(handle)
+    truth = _load_frozen_query_truth(
+        shared["query_truth"]["canonical_path"],
+        expected_key=shared["query_truth_key"],
+        expected_policy=shared["query_truth_exactness"],
+        expected_payload_sha256=shared["query_truth_payload_sha256"],
+    )
+    assert truth["neighbors"].shape == (20_000, 10)
+    assert truth["corpus_cardinality"] == 2_000_000
+    assert truth["historical_builder_policy_authenticated"] is True
+
+    changed = dict(shared["query_truth_exactness"])
+    changed["implementation_sha256"] = "0" * 64
+    with pytest.raises(Round0134Error, match="policy changed"):
+        _load_frozen_query_truth(
+            shared["query_truth"]["canonical_path"],
+            expected_key=shared["query_truth_key"],
+            expected_policy=changed,
+            expected_payload_sha256=shared["query_truth_payload_sha256"],
+        )

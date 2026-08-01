@@ -146,6 +146,7 @@ def _authorize_release(round_path: str, release_sha: str) -> None:
     ).splitlines()
     allowed = {
         "experiments/prepare_round0134_queue.py",
+        "experiments/round0134_nodes.py",
         "tests/test_round0134_functional_showdown.py",
     }
     if not changed or set(changed) - allowed:
