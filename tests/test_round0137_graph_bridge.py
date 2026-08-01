@@ -84,7 +84,13 @@ def test_registered_metrics_dependencies_and_budget_are_bounded():
         "projection_ffr",
         "ood_recall_at_10",
     )
-    assert set(REVIEW_CAPABILITIES) == {"0037", "0103", "0104", "0134"}
+    assert set(REVIEW_CAPABILITIES) == {
+        "0037",
+        "0103",
+        "0104",
+        "0122",
+        "0134",
+    }
     assert (
         GPU_HOURS_MINIMUM,
         GPU_HOURS_EXPECTED,

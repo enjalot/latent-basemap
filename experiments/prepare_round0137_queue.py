@@ -40,6 +40,7 @@ REVIEW_CAPABILITIES = {
     "0037": "jina-mrl-seed42-screen-v1",
     "0103": "jina-diverse-25m-full768-int8-substrate-v1",
     "0104": "jina-full768-host-int8-training-validation-v1",
+    "0122": "jina-density-provenance-representation-bridge-v1",
     "0134": "jina-density-functional-showdown-v1",
 }
 
