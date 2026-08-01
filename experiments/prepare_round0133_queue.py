@@ -101,15 +101,15 @@ R0132_OOD_ROOT = os.path.join(R0132_ARTIFACTS, "matched-ood")
 R0132_OOD = os.path.join(R0132_OOD_ROOT, "matched-ood.json")
 R0132_DECISION = os.path.join(R0132_ARTIFACTS, "decision", "decision.json")
 
-GPU_HOURS_MINIMUM = 1.6
-GPU_HOURS_EXPECTED = 2.0
-GPU_HOURS_P90 = 2.59
+GPU_HOURS_MINIMUM = 1.7
+GPU_HOURS_EXPECTED = 1.85
+GPU_HOURS_P90 = 2.20
 GPU_HOURS_MAXIMUM = 3.5
 P90_NODE_SECONDS = {
-    "train_u12_seed43": 8_000.0,
-    "transform_seed43_models_on_u12": 300.0,
-    "score_matched_native_seed43": 600.0,
-    "score_matched_ood_seed43": 430.0,
+    "train_u12_seed43": 7_300.0,
+    "transform_seed43_models_on_u12": 120.0,
+    "score_matched_native_seed43": 250.0,
+    "score_matched_ood_seed43": 250.0,
 }
 P90_GPU_TOTAL_SECONDS = sum(P90_NODE_SECONDS.values())
 

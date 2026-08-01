@@ -517,8 +517,8 @@ def test_registered_provisional_budget_matches_draft():
         GPU_HOURS_EXPECTED,
         GPU_HOURS_P90,
         GPU_HOURS_MAXIMUM,
-    ) == (1.6, 2.0, 2.59, 3.5)
-    assert P90_GPU_TOTAL_SECONDS == 9_330.0
+    ) == (1.7, 1.85, 2.20, 3.5)
+    assert P90_GPU_TOTAL_SECONDS == 7_920.0
 
 
 def test_cuda_hidden_actual_train_seal_reload_transform_panel_smoke(
