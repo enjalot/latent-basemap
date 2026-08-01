@@ -77,6 +77,9 @@ def test_real_candidate_quota_and_nested_intersection_close() -> None:
     assert plan["common_intersection_rows"] == 7_934_687
     assert plan["english_rows_added_vs_u12"] == 4_539_644
     assert plan["language_rows_removed_vs_u12"] == 4_539_644
+    assert plan["identity_sha256"] == (
+        "ee4a911a9d458dc8a6bb3107e1cbb0964beb0255cd85957c7270f3a93992f1d6"
+    )
     body = {key: value for key, value in plan.items() if key != "identity_sha256"}
     assert plan["identity_sha256"] == sha256_bytes(canonical_json(body))
 
