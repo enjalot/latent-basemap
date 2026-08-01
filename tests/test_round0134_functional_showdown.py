@@ -5,6 +5,7 @@ import math
 import numpy as np
 import pytest
 
+from basemap.artifact_identity import expected_input_signature
 from basemap.round0134_functional_showdown import (
     CELL_ORDER,
     CURRENT_R0104_SEED42,
@@ -23,12 +24,16 @@ from experiments.prepare_round0134_queue import (
     GPU_HOURS_MINIMUM,
     GPU_HOURS_P90,
     REVIEW_CAPABILITIES,
+    RECOVERY_PANEL,
+    RECOVERY_PANEL_RELEASE,
     SOURCE_ROWS,
+    _recovery_panel_inputs,
 )
 from experiments.round0134_nodes import (
     _load_frozen_query_truth,
     _load_reference,
     _load_shared_evaluation_inputs,
+    run_decision,
 )
 
 
@@ -206,3 +211,27 @@ def test_real_r0037_source_query_and_reference_views_close_before_cuda():
     assert resolved["key"] == reference["key"]
     assert source.dtype == np.dtype("<f4")
     assert queries.dtype == np.dtype("<f4")
+
+
+def test_cpu_recovery_applies_frozen_selector_to_immutable_attempt3_panel(tmp_path):
+    panel, signatures = _recovery_panel_inputs(RECOVERY_PANEL)
+    assert signatures[0] == expected_input_signature(RECOVERY_PANEL)
+    assert panel["release_sha"] == RECOVERY_PANEL_RELEASE
+
+    output = tmp_path / "decision"
+    decision = run_decision(
+        {"manifest": {"round_id": "0134", "release_sha": "recovery-release"}},
+        {
+            "outputs": [str(output)],
+            "panel_output": str(RECOVERY_PANEL.rsplit("/", 1)[0]),
+            "panel_receipt": signatures[0],
+            "panel_release_sha": RECOVERY_PANEL_RELEASE,
+            "recovery_kind": "cpu-decision-from-immutable-attempt-3-panel",
+        },
+    )
+    assert decision["decision_recovery"] is True
+    assert decision["panel"] == signatures[0]
+    assert set(decision["contrasts"]) == {
+        "pre_r0115_seed42",
+        "raw_current_two_seed",
+    }

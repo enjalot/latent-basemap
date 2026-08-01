@@ -637,6 +637,20 @@ def run_decision(active: Mapping[str, Any], job: Mapping[str, Any]) -> dict[str,
     with open(panel_path, encoding="utf-8") as handle:
         panel = json.load(handle)
     validate_seal(panel, label="R0134 functional showdown panel")
+    recovery = job.get("recovery_kind") is not None
+    if recovery:
+        panel_signature = _signature(
+            job["panel_receipt"], label="R0134 immutable recovery panel"
+        )
+        if (
+            panel_signature["canonical_path"] != panel_path
+            or panel.get("release_sha") != job.get("panel_release_sha")
+            or job.get("recovery_kind")
+            != "cpu-decision-from-immutable-attempt-3-panel"
+        ):
+            raise Round0134Error("R0134 recovery panel lineage changed")
+    elif panel.get("release_sha") != active["manifest"]["release_sha"]:
+        raise Round0134Error("R0134 panel/decision release changed")
     if panel.get("schema") != PANEL_SCHEMA or panel.get("round_id") != ROUND_ID:
         raise Round0134Error("R0134 panel identity changed")
     decision = build_decision(panel["cells"])
@@ -645,6 +659,8 @@ def run_decision(active: Mapping[str, Any], job: Mapping[str, Any]) -> dict[str,
             **decision,
             "release_sha": active["manifest"]["release_sha"],
             "panel": expected_input_signature(panel_path),
+            "panel_release_sha": panel.get("release_sha"),
+            "decision_recovery": recovery,
             "capability": "jina-density-functional-showdown-v1",
             "next_branch": (
                 "density-v3-current-recipe-calibration-and-frozen-25m-replays"
