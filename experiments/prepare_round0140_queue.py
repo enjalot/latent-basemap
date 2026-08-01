@@ -96,8 +96,14 @@ def _issued_round(release_sha: str) -> tuple[str, dict[str, Any]]:
     ]
     if len(candidates) != 1:
         raise RuntimeError(f"R0140 requires exactly one issued round; found {len(candidates)}")
-    if _frontmatter(candidates[0]).get("base_commit") != release_sha:
-        raise RuntimeError("R0140 issued base_commit differs from release")
+    registered = str(_frontmatter(candidates[0]).get("base_commit") or "")
+    if registered != release_sha:
+        with open(candidates[0], encoding="utf-8") as handle:
+            corrections = re.findall(
+                r"Corrected execution release: `([0-9a-f]{40})`", handle.read()
+            )
+        if not corrections or corrections[-1] != release_sha:
+            raise RuntimeError("R0140 issued release and correction addendum differ")
     return candidates[0], expected_input_signature(candidates[0])
 
 
