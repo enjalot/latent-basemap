@@ -8,15 +8,18 @@ removing R0087-ineligible exact copies with size-preserving replacement.
 """
 from __future__ import annotations
 
+import copy
 from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
 
+from .artifact_identity import canonical_json, sha256_bytes
 from .round0140_subsystem_bisection import (
     CURRENT_GRAPH_CURRENT_HOST,
     METRICS,
     RESTORATION_FLOORS,
+    host_train_config,
     metric_view,
 )
 
@@ -29,6 +32,72 @@ ROWS = 2_000_000
 
 class Round0147Error(RuntimeError):
     """The conditional row-policy contrast is malformed."""
+
+
+def treatment_preprocessing_stamp(
+    *,
+    source_sha256: str,
+    selection_sha256: str,
+) -> dict[str, Any]:
+    """Name the exact size-preserving historical-eligibility treatment."""
+    body = {
+        "schema": "round0147-eligible-historical-input-preprocessing-v1",
+        "source_rows": [0, ROWS],
+        "source_dimension": 768,
+        "effective_dimension": 768,
+        "compute_dtype": "<f4",
+        "operation": "exact-staged-fp16-to-device-fp32",
+        "l2_renormalized_for_training": False,
+        "row_universe": (
+            "first-2m-r0087-eligible-rows-in-r0037-historical-shuffle-order"
+        ),
+        "size_preserving": True,
+        "source_sha256": source_sha256,
+        "selection_sha256": selection_sha256,
+    }
+    return {**body, "identity_sha256": sha256_bytes(canonical_json(body))}
+
+
+def treatment_train_config(
+    *,
+    graph_signature: Mapping[str, Any],
+    graph_manifest_signature: Mapping[str, Any],
+    graph_edges: int,
+    source_sha256: str,
+    selection_sha256: str,
+) -> tuple[dict[str, Any], str]:
+    """Freeze the current host trainer on the eligible historical population."""
+    config, _ = host_train_config(
+        cell=CURRENT_GRAPH_CURRENT_HOST,
+        graph_signature=graph_signature,
+        graph_manifest_signature=graph_manifest_signature,
+        graph_edges=graph_edges,
+    )
+    config = copy.deepcopy(config)
+    stamp = treatment_preprocessing_stamp(
+        source_sha256=source_sha256,
+        selection_sha256=selection_sha256,
+    )
+    config.update({
+        "schema": "round0147-eligible-historical-host-train-config-v1",
+        "arm": TREATMENT,
+        "causal_matrix": {
+            "row_policy": (
+                "historical-order-and-composition-with-r0087-exact-family-eligibility"
+            ),
+            "graph_subsystem": "current-r0104-style-rebuilt-on-treatment",
+            "trainer_subsystem": "current-r0104-host",
+            "row_policy_includes_induced_graph_change": True,
+        },
+        "input_preprocessing": stamp,
+    })
+    config["execution"]["expected_pipeline_stamp"].update({
+        "source_representation": "fp16-control",
+        "row_universe": stamp["row_universe"],
+        "source_sha256": source_sha256,
+        "selection_sha256": selection_sha256,
+    })
+    return config, sha256_bytes(canonical_json(config))
 
 
 def _floor_test(values: Mapping[str, float]) -> dict[str, Any]:

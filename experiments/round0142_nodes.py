@@ -17,7 +17,6 @@ from basemap.output_safety import (
     create_fresh_directory,
 )
 from basemap.round0112_prompt_substrate import OUTPUT_DTYPE
-from basemap.round0141_prompted_multilingual import validate_environment_freeze
 from basemap.round0142_jina_universality import (
     CAPABILITY,
     COMMON_CORPUS_ROWS,
@@ -39,12 +38,6 @@ from basemap.round0142_jina_universality import (
     validate_seal,
 )
 from experiments.round0108_nodes import _probe_score
-from experiments.round0116_nodes import (
-    _encode_document,
-    _float32_norm_guard,
-    _load_document_model,
-    _stored_array_guard,
-)
 
 
 def _signature(expected: Mapping[str, Any], *, label: str) -> dict[str, Any]:
@@ -69,6 +62,8 @@ def _read_sealed(path: str, *, label: str) -> dict[str, Any]:
 
 
 def _verified_model() -> tuple[Any, dict[str, Any], list[dict[str, Any]]]:
+    from experiments.round0116_nodes import _load_document_model
+
     model, runtime, members = _load_document_model()
     return model, runtime, [dict(item) for item in members]
 
@@ -94,6 +89,9 @@ def _cosine_rows(left: np.ndarray, right: np.ndarray) -> np.ndarray:
 def run_raw_model_canary(
     active: Mapping[str, Any], job: Mapping[str, Any]
 ) -> None:
+    from basemap.round0141_prompted_multilingual import validate_environment_freeze
+    from experiments.round0116_nodes import _encode_document, _float32_norm_guard
+
     output = create_fresh_directory(
         str(job["outputs"][0]), label="R0142 raw Jina model canary"
     )
@@ -154,6 +152,13 @@ def run_raw_model_canary(
 def run_embed_common_corpus(
     active: Mapping[str, Any], job: Mapping[str, Any]
 ) -> None:
+    from basemap.round0141_prompted_multilingual import validate_environment_freeze
+    from experiments.round0116_nodes import (
+        _encode_document,
+        _float32_norm_guard,
+        _stored_array_guard,
+    )
+
     name = str(job.get("probe") or "")
     if name not in COMMON_CORPUS_ROWS:
         raise Round0142Error(f"unknown Common Corpus probe {name!r}")
