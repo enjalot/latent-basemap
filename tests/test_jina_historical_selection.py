@@ -208,7 +208,7 @@ def test_indexed_inventory_fp16_array_preserves_arbitrary_order(tmp_path) -> Non
     assert np.array_equal(source[:], expected)
     assert np.array_equal(source[[5, 0, 2]], expected[[5, 0, 2]])
     assert np.array_equal(source[-1], expected[-1])
-    assert len(source.segments) == 6
+    assert len(source.segments) == 5
     staged_path = tmp_path / "staged.npy"
     signature = materialize_indexed_fp16_npy(
         staged_path, source, block_rows=2

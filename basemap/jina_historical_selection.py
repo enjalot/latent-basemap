@@ -475,10 +475,14 @@ class IndexedInventoryFp16Array:
         self._global_stops = np.asarray(
             [int(item["global_row_stop"]) for item in ranges], dtype=np.int64
         )
+        used_range_ids = np.unique(
+            np.searchsorted(self._global_stops, self.global_rows, side="right")
+        )
         self._arrays: dict[str, np.ndarray] = {}
         self.segments: list[dict[str, Any]] = []
         seen_paths: set[str] = set()
-        for item in ranges:
+        for range_id in used_range_ids:
+            item = ranges[int(range_id)]
             shard = item.get("shard")
             if not isinstance(shard, Mapping):
                 raise HistoricalJinaSelectionError(
@@ -538,6 +542,7 @@ class IndexedInventoryFp16Array:
         output = np.empty((len(flat), self.shape[1]), dtype=self.dtype)
         for range_id in np.unique(range_ids):
             mask = range_ids == range_id
+            positions = np.flatnonzero(mask)
             item = self._ranges[int(range_id)]
             shard = item["shard"]
             path = os.path.realpath(str(shard["canonical_path"]))
@@ -550,7 +555,11 @@ class IndexedInventoryFp16Array:
                 raise HistoricalJinaSelectionError(
                     "indexed inventory row exceeds its source shard"
                 )
-            output[mask] = self._arrays[path][local]
+            # Historical shuffle order is intentionally random.  Sort only the
+            # physical shard reads, then scatter back to logical order, so a
+            # one-time staging pass does not force pathological mmap access.
+            read_order = np.argsort(local, kind="stable")
+            output[positions[read_order]] = self._arrays[path][local[read_order]]
         shaped = output.reshape(logical_shape + (self.shape[1],))
         return shaped[0] if scalar else shaped
 
