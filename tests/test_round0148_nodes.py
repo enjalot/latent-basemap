@@ -4,6 +4,8 @@ import copy
 import json
 from pathlib import Path
 
+import numpy as np
+
 from basemap.artifact_identity import canonical_json, sha256_bytes
 from basemap.round0107_training import (
     BATCH_SIZE,
@@ -30,6 +32,7 @@ from experiments.round0148_nodes import (
 )
 import pytest
 from experiments import prepare_round0148_queue as prepare
+from experiments import round0132_nodes
 
 
 def _valid_bundle() -> tuple[dict, dict, dict]:
@@ -319,3 +322,40 @@ def test_queue_materializes_complete_conditional_job_graph(
     assert "r0108_calibration" in decision
     assert queue["release_sha"] == release
     assert queue["scientific_contract"]["density_floor_recalibration"] is False
+
+
+def test_reused_matched_probe_supports_honest_r0148_cell_names(monkeypatch) -> None:
+    class FirstTwo:
+        def transform(self, values, **_kwargs):
+            return np.asarray(values[:, :2], dtype=np.float32)
+
+    rng = np.random.RandomState(148)
+    corpus = rng.normal(size=(64, 768)).astype(np.float32)
+    queries = rng.normal(size=(8, 768)).astype(np.float32)
+    truth = np.tile(np.arange(10, dtype=np.int64), (len(queries), 1))
+    low = np.tile(np.arange(50, dtype=np.int64), (len(queries), 1))
+    monkeypatch.setattr(
+        round0132_nodes,
+        "exact_cosine_topk",
+        lambda *_args, **_kwargs: (truth, {"synthetic": True}),
+    )
+    import basemap.panel_v2 as panel_v2
+
+    monkeypatch.setattr(panel_v2, "cross_knn", lambda *_args, **_kwargs: low)
+    report = round0132_nodes._matched_probe(
+        name="synthetic",
+        corpus=corpus,
+        queries=queries,
+        control_model=FirstTwo(),
+        treatment_model=FirstTwo(),
+        duplicate_policy="diagnostic",
+        cell_labels=("control_r0132_u12", "candidate_english_anchor"),
+    )
+    assert set(report["cells"]) == {
+        "control_r0132_u12",
+        "candidate_english_anchor",
+    }
+    assert {
+        "control_r0132_u12_low_neighbors_top50",
+        "candidate_english_anchor_low_neighbors_top50",
+    } <= set(report["arrays"])
