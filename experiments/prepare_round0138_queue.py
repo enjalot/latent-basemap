@@ -9,8 +9,11 @@ import json
 import os
 import re
 import sys
+import tempfile
 from collections.abc import Mapping
 from typing import Any
+
+import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -44,11 +47,12 @@ R0104_SHARED = (
     "shared/receipt.json"
 )
 R0134_PANEL = (
-    "/data/latent-basemap/runs/round-0134/queue/artifacts/"
+    "/data/latent-basemap/runs/round-0134/queue-attempt-3-exact-views/artifacts/"
     "functional-showdown/functional-showdown.json"
 )
 R0134_DECISION = (
-    "/data/latent-basemap/runs/round-0134/queue/artifacts/decision/decision.json"
+    "/data/latent-basemap/runs/round-0134/"
+    "queue-attempt-5-decision-recovery-a3adb61/artifacts/decision/decision.json"
 )
 R0137_DECISION = (
     "/data/latent-basemap/runs/round-0137/queue/artifacts/decision/decision.json"
@@ -218,6 +222,120 @@ def _write_device_manifest(
     return expected_input_signature(path)
 
 
+def _preissuance_cpu_smoke(
+    *,
+    graph: Mapping[str, Any],
+    device_manifest: Mapping[str, Any],
+    graph_edges: int,
+) -> dict[str, Any]:
+    """Exercise the device-train receipt through canonical selector on CPU."""
+    from basemap.artifact_identity import canonical_json
+    from basemap.round0108_evaluation import seal, validate_seal
+    from basemap.round0138_sampler_bridge import (
+        CONTROL,
+        HISTORICAL,
+        PANEL_SCHEMA,
+        TREATMENT,
+        build_decision,
+    )
+    from experiments.round0134_nodes import (
+        _load_reference,
+        _load_shared_evaluation_inputs,
+    )
+    from experiments.round0138_nodes import _authenticate_model
+
+    r0037_model = expected_input_signature(
+        "/data/latent-basemap/runs/round-0037/queue/artifacts/"
+        "d768_s42/train/model.pt"
+    )
+    r0134_queue = _read_json(
+        "/data/latent-basemap/runs/round-0134/"
+        "queue-attempt-3-exact-views/queue.json"
+    )
+    panel_job = next(
+        job for job in r0134_queue["jobs"]
+        if job.get("id") == "functional_showdown_panel"
+    )
+    config, config_sha = train_config(
+        graph_signature=graph,
+        graph_manifest_signature=device_manifest,
+        graph_edges=graph_edges,
+    )
+    with tempfile.TemporaryDirectory(prefix="round0138-cpu-smoke-") as temp_root:
+        train_receipt = seal({
+            "schema": "round0138-device-sampler-train-receipt-v1",
+            "round_id": ROUND_ID,
+            "release_sha": "preissuance-cpu-smoke",
+            "production_config_sha256": config_sha,
+            "model": r0037_model,
+            "graph": dict(graph),
+            "graph_manifest": dict(device_manifest),
+            "train_accounting": {"optimizer_steps_succeeded": 500_000},
+            "exact_execution_receipt": {
+                **config["execution"]["expected_pipeline_stamp"],
+                "pipeline": "device",
+                "sampler_class": "DeviceEdgeSampler",
+            },
+            "smoke_only": True,
+        })
+        train_path = os.path.join(temp_root, "train-receipt.json")
+        atomic_write_new_json(train_path, train_receipt, immutable=True)
+        model, authenticated, train_signature, _digest = _authenticate_model(
+            {
+                "train_output": temp_root,
+                "graph": dict(graph),
+                "device_graph_manifest": dict(device_manifest),
+                "graph_edges": graph_edges,
+            },
+            device="cpu",
+        )
+        source_signature, source, queries = _load_shared_evaluation_inputs(panel_job)
+        _shared, reference_signature, _reference, truth, _centroids = (
+            _load_reference(panel_job)
+        )
+        source_probe = model.transform(source[:32], batch_size=16)
+        query_probe = model.transform(queries[:32], batch_size=16)
+        if (
+            source_probe.shape != (32, 2)
+            or query_probe.shape != (32, 2)
+            or not np.isfinite(source_probe).all()
+            or not np.isfinite(query_probe).all()
+            or truth["neighbors"].shape != (20_000, 10)
+        ):
+            raise RuntimeError("R0138 CPU train-to-panel smoke failed")
+
+        panel = _read_json(R0134_PANEL)
+        source_cells = panel.get("cells") or {}
+        cells = {
+            HISTORICAL: source_cells["historical_r0037_seed42"],
+            CONTROL: source_cells["current_r0104_fp16_seed42"],
+            TREATMENT: source_cells["current_r0104_fp16_seed42"],
+        }
+        synthetic_panel = seal({
+            "schema": PANEL_SCHEMA,
+            "round_id": ROUND_ID,
+            "cells": cells,
+            "smoke_only": True,
+        })
+        validate_seal(synthetic_panel, label="R0138 preissuance smoke panel")
+        canonical_cells = json.loads(canonical_json(synthetic_panel))["cells"]
+        decision = build_decision(canonical_cells)
+        if decision.get("device_sampler_sufficient") is not False:
+            raise RuntimeError("R0138 CPU selector smoke changed the observed branch")
+        return {
+            "passed": True,
+            "cuda_used": False,
+            "stand_in": "accepted R0037 device seed42 model",
+            "synthetic_train_receipt_sha256": train_signature["sha256"],
+            "model": authenticated["model"],
+            "source": source_signature,
+            "reference_receipt": reference_signature,
+            "source_probe_shape": list(source_probe.shape),
+            "query_probe_shape": list(query_probe.shape),
+            "canonical_selector_outcome": decision["outcome"],
+        }
+
+
 def prepare_round0138(
     *, release_sha: str, queue_root: str = os.path.join(ROUND_ROOT, "queue")
 ) -> str:
@@ -241,6 +359,16 @@ def prepare_round0138(
     )
     if graph != r0104_shared["graph"] or parent_manifest != r0104_shared["graph_manifest"]:
         raise RuntimeError("R0104 graph evidence changed")
+
+    with tempfile.TemporaryDirectory(prefix="round0138-adapter-smoke-") as smoke_root:
+        smoke_manifest = _write_device_manifest(
+            root=smoke_root, graph=graph, parent_signature=parent_manifest
+        )
+        cpu_smoke = _preissuance_cpu_smoke(
+            graph=graph,
+            device_manifest=smoke_manifest,
+            graph_edges=int(r0104_shared["graph_edges"]),
+        )
 
     shared_signature = expected_input_signature(R0037_SHARED)
     shared = _read_json(R0037_SHARED)
@@ -361,6 +489,7 @@ def prepare_round0138(
         "capability_dependencies": list(REVIEW_CAPABILITIES.values()),
         "capabilities_produced": [CAPABILITY],
         "training_performed": True,
+        "preissuance_cpu_smoke": cpu_smoke,
         "gpu_hours": {
             "minimum": GPU_HOURS_MINIMUM,
             "expected": GPU_HOURS_EXPECTED,

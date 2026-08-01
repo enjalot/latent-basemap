@@ -49,8 +49,12 @@ from basemap.round0138_sampler_bridge import (
 )
 from experiments import round0104_nodes as r0104
 from experiments.round0027_nodes import _panel_config
-from experiments.round0119_nodes import SOURCE_DIMENSION, SOURCE_ROWS
-from experiments.round0134_nodes import _load_reference, _projection_metrics
+from experiments.round0119_nodes import SOURCE_ROWS
+from experiments.round0134_nodes import (
+    _load_reference,
+    _load_shared_evaluation_inputs,
+    _projection_metrics,
+)
 
 
 TRANSFORM_BATCH_ROWS = 8_192
@@ -261,7 +265,7 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> dict[str, An
     return {**receipt, "receipt": expected_input_signature(path)}
 
 
-def _authenticate_model(job: Mapping[str, Any]):
+def _authenticate_model(job: Mapping[str, Any], *, device: str = "cuda"):
     train_path = os.path.join(str(job["train_output"]), "train-receipt.json")
     train = _read_sealed(expected_input_signature(train_path), label="R0138 train")
     graph_signature = _signature(job["graph"], label="R0104 graph")
@@ -286,7 +290,7 @@ def _authenticate_model(job: Mapping[str, Any]):
     model_signature = _signature(train["model"], label="R0138 model")
     from basemap.pumap.parametric_umap import ParametricUMAP
 
-    model = ParametricUMAP.load(model_signature["canonical_path"], device="cuda")
+    model = ParametricUMAP.load(model_signature["canonical_path"], device=device)
     expected = config["model"]
     observed = {
         "architecture": model.architecture,
@@ -376,21 +380,7 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> dict[str, An
     source_cells = r0134.get("cells")
     if not isinstance(source_cells, Mapping):
         raise Round0138Error("R0134 functional cells are missing")
-    source = np.load(
-        _signature(job["source"], label="R0037 source")["canonical_path"],
-        mmap_mode="r", allow_pickle=False,
-    )
-    queries = np.load(
-        _signature(job["query_embeddings"], label="R0037 queries")["canonical_path"],
-        mmap_mode="r", allow_pickle=False,
-    )
-    if (
-        source.shape != (SOURCE_ROWS, SOURCE_DIMENSION)
-        or source.dtype != np.dtype("<f2")
-        or queries.shape != (20_000, SOURCE_DIMENSION)
-        or queries.dtype != np.dtype("<f2")
-    ):
-        raise Round0138Error("R0138 functional source/query geometry changed")
+    source_signature, source, queries = _load_shared_evaluation_inputs(job)
     shared, shared_signature, reference, truth, centroids = _load_reference(job)
     model, train, train_signature, config_sha = _authenticate_model(job)
     coordinates = np.asarray(
@@ -426,7 +416,7 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> dict[str, An
             "round_id": ROUND_ID,
             "cell": TREATMENT,
             "release_sha": active["manifest"]["release_sha"],
-            "source": job["source"],
+            "source": source_signature,
             "coordinates": coords_signature,
             "shared_reference_receipt": shared_signature,
         },

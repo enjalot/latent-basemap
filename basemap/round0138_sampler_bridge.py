@@ -111,8 +111,11 @@ def _contrast(
 
 
 def build_decision(cells: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
-    if tuple(cells) != CELL_ORDER:
-        raise Round0138Error("sampler-bridge functional cells are reordered")
+    if set(cells) != set(CELL_ORDER) or len(cells) != len(CELL_ORDER):
+        raise Round0138Error("sampler-bridge functional cells are missing or unexpected")
+    # Canonical JSON sorts object keys.  Authenticate the exact cell set, then
+    # restore the preregistered order before applying the frozen selector.
+    cells = {key: cells[key] for key in CELL_ORDER}
     versus_control = _contrast(cells[CONTROL], cells[TREATMENT])
     versus_historical = _contrast(cells[HISTORICAL], cells[TREATMENT])
     restores_historical = versus_historical[

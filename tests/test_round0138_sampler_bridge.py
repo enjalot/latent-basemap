@@ -22,6 +22,12 @@ from experiments.prepare_round0138_queue import (
     GPU_HOURS_MINIMUM,
     GPU_HOURS_P90,
     REVIEW_CAPABILITIES,
+    R0134_DECISION,
+    R0134_PANEL,
+    R0104_SHARED,
+    _preissuance_cpu_smoke,
+    _read_json,
+    _write_device_manifest,
 )
 
 
@@ -119,11 +125,13 @@ def test_sampler_nonrestoration_is_explicit():
     assert decision["device_sampler_sufficient"] is False
 
 
-def test_cell_order_is_frozen():
+def test_canonical_json_key_order_restores_preregistered_cell_order():
     cells = _cells(historical=0.6, control=0.5, treatment=0.6)
     assert tuple(cells) == CELL_ORDER
-    with pytest.raises(Round0138Error, match="reordered"):
-        build_decision(dict(reversed(list(cells.items()))))
+    assert build_decision(dict(reversed(list(cells.items())))) == build_decision(cells)
+    del cells[HISTORICAL]
+    with pytest.raises(Round0138Error, match="missing or unexpected"):
+        build_decision(cells)
 
 
 def test_dependencies_and_budget_are_bounded():
@@ -141,3 +149,29 @@ def test_dependencies_and_budget_are_bounded():
         GPU_HOURS_P90,
         GPU_HOURS_MAXIMUM,
     ) == (1.20, 1.55, 2.00, 2.50)
+
+
+def test_exact_corrected_r0134_receipts_are_bound():
+    assert "queue-attempt-3-exact-views" in R0134_PANEL
+    assert "queue-attempt-5-decision-recovery-a3adb61" in R0134_DECISION
+
+
+def test_preissuance_cpu_smoke_closes_train_receipt_to_selector_path(tmp_path):
+    shared = _read_json(R0104_SHARED)
+    graph = shared["graph"]
+    parent = shared["graph_manifest"]
+    manifest = _write_device_manifest(
+        root=str(tmp_path), graph=graph, parent_signature=parent
+    )
+    receipt = _preissuance_cpu_smoke(
+        graph=graph,
+        device_manifest=manifest,
+        graph_edges=int(shared["graph_edges"]),
+    )
+    assert receipt["passed"] is True
+    assert receipt["cuda_used"] is False
+    assert receipt["source_probe_shape"] == [32, 2]
+    assert receipt["query_probe_shape"] == [32, 2]
+    assert receipt["canonical_selector_outcome"] == (
+        "device-sampler-insufficient-to-restore-function"
+    )
