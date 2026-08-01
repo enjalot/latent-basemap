@@ -112,10 +112,12 @@ def test_purity_overseparation_is_not_treated_as_unbounded_improvement():
     assert "pre_r0115_seed42:purity_fidelity_k256" in decision["failed_cells"]
 
 
-def test_cell_order_is_an_authenticated_selector_input():
+def test_json_key_sorting_restores_registered_cell_order_without_changing_values():
     cells = _cells()
     reordered = dict(reversed(list(cells.items())))
-    with pytest.raises(Round0134Error, match="reordered"):
+    assert build_decision(reordered) == build_decision(cells)
+    del reordered[HISTORICAL_SEED42]
+    with pytest.raises(Round0134Error, match="missing or unexpected"):
         build_decision(reordered)
 
 
