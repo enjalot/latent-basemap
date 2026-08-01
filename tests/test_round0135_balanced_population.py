@@ -161,3 +161,24 @@ def test_census_requires_closed_family_offsets(
     selection = subject.build_candidate_selection(_inventory())
     with pytest.raises(subject.Round0135Error, match="census is malformed"):
         subject.build_balanced_population(selection, census)
+
+
+def test_candidate_census_adapts_only_the_r0087_cardinality_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_small_contract(monkeypatch)
+    selection = subject.build_candidate_selection(_inventory())
+    observed: dict[str, object] = {}
+
+    def fake_duplicate_census(value):
+        observed.update(value)
+        return _census()
+
+    monkeypatch.setattr(subject, "duplicate_census", fake_duplicate_census)
+    census = subject.census_candidates(selection)
+    assert census["summary"]["row_count"] == 12
+    np.testing.assert_array_equal(
+        census["arrays"]["excluded_rows"], np.asarray([3, 7, 8])
+    )
+    assert observed["selected_rows"] == 12
+    assert observed["candidate_rows"] == 12

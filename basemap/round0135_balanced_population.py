@@ -10,6 +10,7 @@ from .round0087_inventory import (
     FINEWEB,
     PILE,
     REDPAJAMA,
+    duplicate_census,
     language_code,
 )
 from .round0105_search import GROUPS
@@ -250,6 +251,24 @@ def _validate_census(
     ):
         raise Round0135Error("candidate duplicate census is malformed")
     return output
+
+
+def census_candidates(selection: Mapping[str, Any]) -> dict[str, Any]:
+    """Run the reviewed R0087 byte-exact census over the frozen candidates."""
+    candidate_rows = int(selection.get("candidate_rows", -1))
+    if (
+        selection.get("complete") is not True
+        or candidate_rows <= 0
+        or not selection.get("ranges")
+    ):
+        raise Round0135Error("candidate selection is incomplete")
+    # R0087 calls this cardinality ``selected_rows``. Keep that adapter at
+    # this boundary rather than weakening either round's public contract.
+    adapted = dict(selection)
+    adapted["selected_rows"] = candidate_rows
+    census = duplicate_census(adapted)
+    _validate_census(census, candidate_rows=candidate_rows)
+    return census
 
 
 def _membership(sorted_rows: np.ndarray, values: np.ndarray) -> np.ndarray:
