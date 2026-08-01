@@ -8,10 +8,18 @@ from basemap.artifact_identity import canonical_json, sha256_bytes
 from basemap.round0105_search import GROUPS
 from basemap.round0132_scale_bridge import HALF_RETAINED_ROWS, SUBSET_NAMESPACE
 from basemap.round0148_english_anchor import (
+    DENSITY_V2_FLOOR,
     ENGLISH_GROUPS,
     LANGUAGE_GROUPS,
+    OOD_METRICS,
+    OUTCOME_DENSITY,
+    OUTCOME_FUNCTIONAL,
+    OUTCOME_INVALID,
+    OUTCOME_OOD,
+    OUTCOME_RESCUED,
     Round0148Error,
     build_subset_plan,
+    english_anchor_decision,
     english_anchor_quotas,
     ranking_namespace,
 )
@@ -108,3 +116,78 @@ def test_group_key_drift_fails_closed() -> None:
 def test_unknown_namespace_group_fails_closed() -> None:
     with pytest.raises(Round0148Error, match="unknown registered"):
         ranking_namespace("not-a-group")
+
+
+def _functional(*, ffr: float = 0.60) -> dict:
+    return {
+        "panel": {
+            "ffr": ffr,
+            "purity": {
+                "k256": 0.95,
+                "k1024": 0.96,
+            },
+        },
+        "projection": {"ffr": 0.54, "recall_at_10": 0.0100},
+    }
+
+
+def _ood(value: float = 0.25) -> dict[str, float]:
+    return {key: value for key in OOD_METRICS}
+
+
+def test_rescue_selector_requires_function_density_and_ood_together() -> None:
+    result = english_anchor_decision(
+        validity_checks={"train": True, "panels": True},
+        candidate_functional_cell=_functional(),
+        density_v2=DENSITY_V2_FLOOR,
+        control_ood=_ood(),
+        candidate_ood=_ood(0.25 * 0.97),
+    )
+    assert result["outcome"] == OUTCOME_RESCUED
+    assert result["functional"]["passed"] is True
+    assert result["density_v2"]["passed"] is True
+    assert result["matched_ood"]["passed"] is True
+    assert result["registered_density_floor_changed"] is False
+    assert result["twenty_five_million_transfer_claimed"] is False
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "outcome"),
+    [
+        ({"validity_checks": {"train": False}}, OUTCOME_INVALID),
+        ({"candidate_functional_cell": _functional(ffr=0.55)}, OUTCOME_FUNCTIONAL),
+        ({"density_v2": DENSITY_V2_FLOOR - 1e-12}, OUTCOME_DENSITY),
+        ({"candidate_ood": _ood(0.25 * 0.969)}, OUTCOME_OOD),
+    ],
+)
+def test_rescue_selector_branch_order_is_frozen(kwargs: dict, outcome: str) -> None:
+    arguments = {
+        "validity_checks": {"train": True},
+        "candidate_functional_cell": _functional(),
+        "density_v2": DENSITY_V2_FLOOR,
+        "control_ood": _ood(),
+        "candidate_ood": _ood(),
+    }
+    arguments.update(kwargs)
+    assert english_anchor_decision(**arguments)["outcome"] == outcome
+
+
+def test_rescue_selector_rejects_nonfinite_or_zero_control() -> None:
+    with pytest.raises(Round0148Error, match="finite"):
+        english_anchor_decision(
+            validity_checks={"train": True},
+            candidate_functional_cell=_functional(),
+            density_v2=float("nan"),
+            control_ood=_ood(),
+            candidate_ood=_ood(),
+        )
+    control = _ood()
+    control[OOD_METRICS[0]] = 0.0
+    with pytest.raises(Round0148Error, match="positive"):
+        english_anchor_decision(
+            validity_checks={"train": True},
+            candidate_functional_cell=_functional(),
+            density_v2=DENSITY_V2_FLOOR,
+            control_ood=control,
+            candidate_ood=_ood(),
+        )

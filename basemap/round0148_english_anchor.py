@@ -15,22 +15,41 @@ an unrelated second sample.
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any
 
 from .artifact_identity import canonical_json, sha256_bytes
 from .round0105_search import GROUPS
 from .round0132_scale_bridge import (
+    METRIC_RETENTION,
     FULL_RETAINED_ROWS,
     HALF_RETAINED_ROWS,
     SUBSET_NAMESPACE,
     largest_remainder_quotas,
 )
+from .round0147_row_policy import RESTORATION_FLOORS, metric_view
 
 
 ROUND_ID = "0148"
 CAPABILITY = "jina-diverse-12p5m-english-anchor-row-policy-v1"
 SUBSET_SCHEMA = "round0148-english-anchor-subset-plan-v1"
+
+# R0108 registered this floor before any current diverse-Jina map was scored.
+# R0134 explicitly blocks recalibration, and the owner-issued campaign requires
+# the unchanged density-v2 floor for the first 12.5M rescue rung.
+DENSITY_V2_FLOOR = 0.17589389755990817
+OOD_METRICS = (
+    "fineweb_recall_at_50_of_high10",
+    "polish_recall_at_50_of_high10",
+    "in_mix_median_recall_at_50_of_high10",
+)
+
+OUTCOME_RESCUED = "english-anchor-12p5m-restores-atlas-quality"
+OUTCOME_FUNCTIONAL = "english-anchor-12p5m-functional-restoration-failed"
+OUTCOME_DENSITY = "english-anchor-12p5m-density-v2-failed"
+OUTCOME_OOD = "english-anchor-12p5m-ood-noninferiority-failed"
+OUTCOME_INVALID = "invalid-execution"
 
 ENGLISH_GROUPS = GROUPS[:3]
 LANGUAGE_GROUPS = GROUPS[3:]
@@ -170,3 +189,96 @@ def build_subset_plan(group_counts: Mapping[str, int]) -> dict[str, Any]:
         },
     }
     return {**body, "identity_sha256": sha256_bytes(canonical_json(body))}
+
+
+def english_anchor_decision(
+    *,
+    validity_checks: Mapping[str, bool],
+    candidate_functional_cell: Mapping[str, Any],
+    density_v2: float,
+    control_ood: Mapping[str, float],
+    candidate_ood: Mapping[str, float],
+) -> dict[str, Any]:
+    """Apply the frozen first-rung rescue selector without tuning branches.
+
+    Functional restoration is absolute against the pre-R0140 floors rather
+    than a post-hoc comparison with R0132.  Density uses the unchanged R0108
+    floor.  OOD is a matched same-probe comparison against the accepted R0132
+    U12 seed-42 map; all three registered summaries must retain at least 97%.
+    """
+    validity = {str(key): bool(value) for key, value in validity_checks.items()}
+    if not validity:
+        raise Round0148Error("at least one execution validity check is required")
+    functional = metric_view(candidate_functional_cell)
+    if set(functional) != set(RESTORATION_FLOORS):
+        raise Round0148Error("candidate functional metric set changed")
+    density = float(density_v2)
+    control = {key: float(control_ood[key]) for key in OOD_METRICS}
+    candidate = {key: float(candidate_ood[key]) for key in OOD_METRICS}
+    finite = [*functional.values(), density, *control.values(), *candidate.values()]
+    if not all(math.isfinite(value) for value in finite):
+        raise Round0148Error("rescue selector metrics must be finite")
+    if any(value <= 0 for value in control.values()):
+        raise Round0148Error("matched OOD control values must be positive")
+
+    functional_checks = {
+        key: functional[key] >= float(floor)
+        for key, floor in RESTORATION_FLOORS.items()
+    }
+    ood_ratios = {
+        key: candidate[key] / control[key]
+        for key in OOD_METRICS
+    }
+    ood_checks = {
+        key: ood_ratios[key] >= METRIC_RETENTION
+        for key in OOD_METRICS
+    }
+    density_pass = density >= DENSITY_V2_FLOOR
+
+    if not all(validity.values()):
+        outcome = OUTCOME_INVALID
+        next_action = "repair-invalid-execution-without-interpreting-map-quality"
+    elif not all(functional_checks.values()):
+        outcome = OUTCOME_FUNCTIONAL
+        next_action = "do-not-run-25m-rescue-localize-population-dose"
+    elif not density_pass:
+        outcome = OUTCOME_DENSITY
+        next_action = "do-not-run-25m-rescue-keep-density-floor-frozen"
+    elif not all(ood_checks.values()):
+        outcome = OUTCOME_OOD
+        next_action = "do-not-run-25m-rescue-localize-english-language-tradeoff"
+    else:
+        outcome = OUTCOME_RESCUED
+        next_action = "review-before-preregistering-25m-row-policy-transfer"
+
+    return {
+        "schema": "round0148-english-anchor-rescue-decision-v1",
+        "round_id": ROUND_ID,
+        "capability": CAPABILITY,
+        "validity_checks": validity,
+        "functional": {
+            "metrics": functional,
+            "floors": dict(RESTORATION_FLOORS),
+            "checks": functional_checks,
+            "passed": all(functional_checks.values()),
+        },
+        "density_v2": {
+            "value": density,
+            "registered_floor": DENSITY_V2_FLOOR,
+            "passed": density_pass,
+        },
+        "matched_ood": {
+            "control_r0132_u12": control,
+            "candidate_english_anchor": candidate,
+            "candidate_over_control": ood_ratios,
+            "retention_floor": METRIC_RETENTION,
+            "checks": ood_checks,
+            "passed": all(ood_checks.values()),
+        },
+        "outcome": outcome,
+        "next_action": next_action,
+        "registered_density_floor_changed": False,
+        "map_registry_state_changed": False,
+        "production_or_publishing_claimed": False,
+        "twenty_five_million_transfer_claimed": False,
+    }
