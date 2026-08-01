@@ -179,6 +179,8 @@ def run_decision(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 
 
 def run_job(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
+    if active.get("manifest", {}).get("round_id") != ROUND_ID:
+        raise Round0150Error("R0150 handler requires its exact queue manifest")
     action = str(job.get("action") or "")
     handlers = {
         "train_raw_seed43": run_raw_train,

@@ -16,6 +16,7 @@ from basemap.round0150_seed_replay import (
     drop_seed43_train_config,
     raw_seed43_train_config,
 )
+from experiments.round0150_nodes import run_job
 
 
 RAW = CURRENT_GRAPH_CURRENT_HOST
@@ -155,3 +156,8 @@ def test_selector_rejects_inconsistent_parent_outcome() -> None:
     parent["outcome"] = "drop-only-historical-row-policy-restores"
     with pytest.raises(Round0150Error, match="outcome"):
         build_decision(parent, {RAW: cell(passed=True), DROP_ONLY: cell(passed=True)})
+
+
+def test_handler_rejects_wrong_round_manifest_before_dispatch() -> None:
+    with pytest.raises(Round0150Error, match="exact queue manifest"):
+        run_job({"manifest": {"round_id": "0149"}}, {"action": "unknown"})
