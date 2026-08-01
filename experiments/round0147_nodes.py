@@ -81,6 +81,19 @@ from experiments.round0134_nodes import (
 TRANSFORM_BATCH_ROWS = 8_192
 RENDER_ROWS = 100_000
 RENDER_SEED = 14_700
+EVALUATION_ROWS = ROWS
+ARTIFACT_SCHEMA_PREFIX = "round0147"
+ROW_UNIVERSE = (
+    "first-2m-r0087-eligible-rows-in-r0037-historical-shuffle-order"
+)
+TREATMENT_ROLE = "size-preserving-historical-eligibility-treatment"
+SOURCE_PROOF_ROW_ORDER = (
+    "historical R0037 shuffle order after R0087 eligibility filtering and "
+    "size-preserving replacement"
+)
+GRAPH_METRIC_INPUT = "exact staged R0147 fp16 treatment normalized in fp32"
+GRAPH_SEMANTICS = "R0104 current builder on R0147 treatment rows"
+GRAPH_VERIFIED_BY = "round0147-current-graph-eligible-historical-builder-v1"
 
 
 def _signature(expected: Mapping[str, Any], *, label: str) -> dict[str, Any]:
@@ -165,15 +178,18 @@ class TreatmentHostFp16Array(HostFp16MaterializedArray):
         device: str,
         buffer_rows: int,
     ) -> None:
-        super().__init__(source, device=device, buffer_rows=buffer_rows)
+        super().__init__(
+            source,
+            device=device,
+            buffer_rows=buffer_rows,
+            expected_rows=ROWS,
+        )
         self._source = source
 
     def execution_stamp(self) -> dict[str, Any]:
         return {
             **super().execution_stamp(),
-            "row_universe": (
-                "first-2m-r0087-eligible-rows-in-r0037-historical-shuffle-order"
-            ),
+            "row_universe": ROW_UNIVERSE,
             "source_sha256": self._source.signature["sha256"],
             "selection_sha256": self._source.selection_signature["sha256"],
         }
@@ -277,7 +293,7 @@ def _source_proof(selection_output: str) -> tuple[StagedTreatmentArray, dict[str
     receipt, receipt_signature = _selection_receipt(selection_output)
     source = StagedTreatmentArray(receipt)
     proof = {
-        "schema": "round0147-eligible-historical-source-proof-v1",
+        "schema": f"{ARTIFACT_SCHEMA_PREFIX}-eligible-historical-source-proof-v1",
         "rows": ROWS,
         "dimension": DIMENSION,
         "dtype": "<f2",
@@ -286,10 +302,7 @@ def _source_proof(selection_output: str) -> tuple[StagedTreatmentArray, dict[str
         "selection_arrays": source.selection_signature,
         "selection_summary": receipt["selection_summary"],
         "segments": source.segments,
-        "row_order": (
-            "historical R0037 shuffle order after R0087 eligibility filtering and "
-            "size-preserving replacement"
-        ),
+        "row_order": SOURCE_PROOF_ROW_ORDER,
     }
     return source, proof
 
@@ -446,7 +459,7 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "directed": True,
         "k": GRAPH_K,
         "metric": "cosine",
-        "metric_input": "exact staged R0147 fp16 treatment normalized in fp32",
+        "metric_input": GRAPH_METRIC_INPUT,
         "weight_semantics": "fuzzy_simplicial_set(k50)",
         "graph_path": os.path.basename(graph_path),
         "graph_sha256": graph_signature["sha256"],
@@ -465,17 +478,17 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 "p10_recall_floor": GRAPH_P10_RECALL_FLOOR,
                 "self_inclusive_k": GRAPH_K,
             },
-            "semantics": "R0104 current builder on R0147 treatment rows",
+            "semantics": GRAPH_SEMANTICS,
             "row_policy_includes_induced_graph_change": True,
         },
         "endpoint_cosine": endpoint,
         "post_hoc_identity_verified": True,
-        "verified_by": "round0147-current-graph-eligible-historical-builder-v1",
+        "verified_by": GRAPH_VERIFIED_BY,
     }
     manifest_path = os.path.join(output, "graph-manifest.json")
     atomic_write_new_json(manifest_path, manifest, immutable=True)
     receipt = seal({
-        "schema": "round0147-current-graph-receipt-v1",
+        "schema": f"{ARTIFACT_SCHEMA_PREFIX}-current-graph-receipt-v1",
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
         "source_proof": proof,
@@ -619,6 +632,7 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         graph,
         arm="fp16_control",
         required_pipeline=r0104.PIPELINE,
+        expected_rows=ROWS,
     )
     output = create_fresh_directory(
         str(job["outputs"][0]), label="R0147 eligible historical train output"
@@ -627,7 +641,7 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     atomic_write_new_json(
         config_path,
         seal({
-            "schema": "round0147-host-production-config-v1",
+            "schema": f"{ARTIFACT_SCHEMA_PREFIX}-host-production-config-v1",
             "round_id": ROUND_ID,
             "cell": TREATMENT,
             "config": config,
@@ -689,7 +703,7 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     atomic_build_new_file(model_path, model.save, immutable=True)
     free_bytes, total_bytes = torch.cuda.mem_get_info("cuda")
     receipt = seal({
-        "schema": "round0147-host-train-receipt-v1",
+        "schema": f"{ARTIFACT_SCHEMA_PREFIX}-host-train-receipt-v1",
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
         "cell": TREATMENT,
@@ -741,7 +755,7 @@ def _authenticate_model(
         or receipt.get("cell") != TREATMENT
         or exact.get("pipeline") != "host_weighted_jina_paired"
         or exact.get("row_universe")
-        != "first-2m-r0087-eligible-rows-in-r0037-historical-shuffle-order"
+        != ROW_UNIVERSE
     ):
         raise Round0147Error("R0147 train execution stamp changed")
     model_signature = _signature(receipt["model"], label="R0147 model")
@@ -769,7 +783,9 @@ def _render_pair(
 
     root = create_fresh_directory(os.path.join(output, "renders"), label="R0147 render")
     sample = np.sort(
-        np.random.RandomState(RENDER_SEED).choice(ROWS, RENDER_ROWS, replace=False)
+        np.random.RandomState(RENDER_SEED).choice(
+            EVALUATION_ROWS, RENDER_ROWS, replace=False
+        )
     )
     sample_path = os.path.join(root, "sample-row-ids.npy")
     atomic_save_new_npy(sample_path, sample, immutable=True)
@@ -816,7 +832,7 @@ def _render_pair(
     plt.close(figure)
     os.chmod(path, 0o444)
     receipt = seal({
-        "schema": "round0147-row-policy-render-v1",
+        "schema": f"{ARTIFACT_SCHEMA_PREFIX}-row-policy-render-v1",
         "round_id": ROUND_ID,
         "sample": expected_input_signature(sample_path),
         "sample_seed": RENDER_SEED,
@@ -862,7 +878,7 @@ def run_functional_panel(
         model.transform(queries, batch_size=TRANSFORM_BATCH_ROWS), dtype=np.float32
     )
     if (
-        coordinates.shape != (ROWS, 2)
+        coordinates.shape != (EVALUATION_ROWS, 2)
         or query_coordinates.shape != (20_000, 2)
         or not np.isfinite(coordinates).all()
         or not np.isfinite(query_coordinates).all()
@@ -907,7 +923,7 @@ def run_functional_panel(
         raise Round0147Error("R0147 treatment panel guards failed")
     treatment = {
         "seed": SEED,
-        "role": "size-preserving-historical-eligibility-treatment",
+        "role": TREATMENT_ROLE,
         "training": {
             "train": train_signature,
             "model": train["model"],
@@ -931,11 +947,11 @@ def run_functional_panel(
     )
     selection, selection_signature = _selection_receipt(str(job["selection_output"]))
     receipt = seal({
-        "schema": "round0147-historical-row-policy-functional-panel-v1",
+        "schema": f"{ARTIFACT_SCHEMA_PREFIX}-historical-row-policy-functional-panel-v1",
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
         "source": source_signature,
-        "source_rows": ROWS,
+        "source_rows": EVALUATION_ROWS,
         "evaluation_universe": "exact R0037 fixed functional universe",
         "training_population_differs_by_registered_row_policy": True,
         "row_policy_includes_induced_graph_change": True,
@@ -1075,7 +1091,7 @@ def run_universality_panel(
         del corpus, queries
         gc.collect()
     panel = seal({
-        "schema": "round0147-row-policy-universality-panel-v1",
+        "schema": f"{ARTIFACT_SCHEMA_PREFIX}-row-policy-universality-panel-v1",
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
         "map_key": map_key,

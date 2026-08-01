@@ -118,6 +118,16 @@ class Round0104Error(Round0034PipelineError):
     """The registered paired R0104 contract was violated."""
 
 
+def negative_sampling_stamp(rows: int) -> str:
+    """Describe the real non-self universe while preserving existing 2M stamps."""
+    rows = int(rows)
+    if rows <= 1:
+        raise Round0104Error("negative sampling requires at least two rows")
+    if rows == ROWS:
+        return "uniform-2m-row-universe-nonself"
+    return f"uniform-{rows}-row-universe-nonself"
+
+
 def seal(body: Mapping[str, Any]) -> dict[str, Any]:
     value = dict(body)
     return {**value, "identity_sha256": sha256_bytes(canonical_json(value))}
@@ -378,10 +388,12 @@ class HostFp16MaterializedArray:
         *,
         device: str,
         buffer_rows: int,
+        expected_rows: int = ROWS,
     ) -> None:
         import torch
 
-        if source.shape != (ROWS, DIMENSION) or buffer_rows <= 0:
+        self.expected_rows = int(expected_rows)
+        if source.shape != (self.expected_rows, DIMENSION) or buffer_rows <= 0:
             raise Round0104Error("invalid host-fp16 training source")
         self.source = source
         self.shape = source.shape
@@ -425,9 +437,9 @@ class HostFp16MaterializedArray:
             or right.shape != left.shape
             or len(left) > self.buffer_rows
             or np.any(left < 0)
-            or np.any(left >= ROWS)
+            or np.any(left >= self.expected_rows)
             or np.any(right < 0)
-            or np.any(right >= ROWS)
+            or np.any(right >= self.expected_rows)
         ):
             raise Round0104Error("fp16 endpoint rows are invalid")
         return left, right
@@ -659,7 +671,7 @@ def train_config(
         "sampler_class": SAMPLER_CLASS,
         "positive_sampling": "weighted_with_replacement",
         "positive_destination_policy": "queue-local-fp16-fuzzy-k50",
-        "negative_sampling": "uniform-2m-row-universe-nonself",
+        "negative_sampling": negative_sampling_stamp(ROWS),
         "graph_degree": "variable-fuzzy-k50-edge-universe",
         "host_prefetch": "single-producer-two-pinned-slot",
         "endpoint_forward": "fused-source-destination",
@@ -781,8 +793,8 @@ class PairedHostWeightedJinaSampler:
         self._consumer_batches = 0
         if (
             arm not in ARMS
-            or len(dataset) != ROWS
-            or self.n_nodes != ROWS
+            or len(dataset) != self.n_nodes
+            or self.n_nodes <= 1
             or self.sources.ndim != 1
             or self.targets.shape != self.sources.shape
             or self.weights.shape != self.sources.shape
@@ -790,8 +802,8 @@ class PairedHostWeightedJinaSampler:
             or self.num_neg <= 0
             or self.sources.min(initial=0) < 0
             or self.targets.min(initial=0) < 0
-            or self.sources.max(initial=0) >= ROWS
-            or self.targets.max(initial=0) >= ROWS
+            or self.sources.max(initial=0) >= self.n_nodes
+            or self.targets.max(initial=0) >= self.n_nodes
             or not np.isfinite(self.weights).all()
             or np.any(self.weights <= 0)
         ):
@@ -883,7 +895,7 @@ class PairedHostWeightedJinaSampler:
             "sampler_class": SAMPLER_CLASS,
             "positive_sampling": "weighted_with_replacement",
             "positive_destination_policy": "queue-local-fp16-fuzzy-k50",
-            "negative_sampling": "uniform-2m-row-universe-nonself",
+            "negative_sampling": negative_sampling_stamp(self.n_nodes),
             "graph_degree": "variable-fuzzy-k50-edge-universe",
             "host_prefetch": "single-producer-two-pinned-slot",
             "host_prefetch_producer_batches": self._producer_batches,
@@ -914,6 +926,7 @@ class Round0104TrainingInput:
         *,
         arm: str,
         required_pipeline: str,
+        expected_rows: int = ROWS,
     ) -> None:
         self.dataset = dataset
         self.graph = dict(graph)
@@ -921,7 +934,8 @@ class Round0104TrainingInput:
         self.required_pipeline = required_pipeline
         self.shape = dataset.shape
         self._last_sampler: PairedHostWeightedJinaSampler | None = None
-        if self.shape != (ROWS, DIMENSION) or arm not in ARMS:
+        self.expected_rows = int(expected_rows)
+        if self.shape != (self.expected_rows, DIMENSION) or arm not in ARMS:
             raise Round0104Error("paired training input geometry changed")
 
     def __len__(self) -> int:
