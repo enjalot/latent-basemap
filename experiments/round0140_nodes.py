@@ -75,6 +75,7 @@ from experiments.round0134_nodes import (
 TRANSFORM_BATCH_ROWS = 8_192
 RENDER_ROWS = 100_000
 RENDER_SEED = 13_400
+ARTIFACT_SCHEMA_PREFIX = "round0140"
 
 
 def _signature(expected: Mapping[str, Any], *, label: str) -> dict[str, Any]:
@@ -447,7 +448,7 @@ def run_host_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     atomic_write_new_json(
         config_path,
         seal({
-            "schema": "round0140-host-production-config-v1",
+            "schema": f"{ARTIFACT_SCHEMA_PREFIX}-host-production-config-v1",
             "round_id": ROUND_ID,
             "cell": cell,
             "config": config,
@@ -545,7 +546,7 @@ def run_host_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     atomic_build_new_file(model_path, model.save, immutable=True)
     free_bytes, total_bytes = torch.cuda.mem_get_info("cuda")
     receipt = seal({
-        "schema": "round0140-host-train-receipt-v1",
+        "schema": f"{ARTIFACT_SCHEMA_PREFIX}-host-train-receipt-v1",
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
         "cell": cell,
@@ -675,7 +676,7 @@ def _render(
     plt.close(figure)
     os.chmod(path, 0o444)
     receipt = seal({
-        "schema": "round0140-subsystem-bisection-render-v1",
+        "schema": f"{ARTIFACT_SCHEMA_PREFIX}-subsystem-bisection-render-v1",
         "round_id": ROUND_ID,
         "sample": expected_input_signature(sample_path),
         "sample_seed": RENDER_SEED,
@@ -820,7 +821,7 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         labels=np.asarray(reference["labels"][256], dtype=np.int32),
     )
     receipt = seal({
-        "schema": "round0140-fixed-row-functional-panel-v1",
+        "schema": f"{ARTIFACT_SCHEMA_PREFIX}-fixed-row-functional-panel-v1",
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
         "source": source_signature,

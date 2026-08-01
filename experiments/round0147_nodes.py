@@ -94,6 +94,9 @@ SOURCE_PROOF_ROW_ORDER = (
 GRAPH_METRIC_INPUT = "exact staged R0147 fp16 treatment normalized in fp32"
 GRAPH_SEMANTICS = "R0104 current builder on R0147 treatment rows"
 GRAPH_VERIFIED_BY = "round0147-current-graph-eligible-historical-builder-v1"
+GRAPH_RECEIPT_ROUND_ID: str | None = None
+CONTROL_PANEL_ROUND_ID = "0140"
+REQUIRE_CONTROL_RESTORATION = True
 
 
 def _signature(expected: Mapping[str, Any], *, label: str) -> dict[str, Any]:
@@ -521,7 +524,8 @@ def _graph_bundle(output: str) -> dict[str, Any]:
     receipt = _read_sealed(
         expected_input_signature(receipt_path), label="R0147 graph receipt"
     )
-    if receipt.get("round_id") != ROUND_ID:
+    expected_round_id = GRAPH_RECEIPT_ROUND_ID or ROUND_ID
+    if receipt.get("round_id") != expected_round_id:
         raise Round0147Error("R0147 graph receipt identity changed")
     graph_signature = _signature(receipt["graph"], label="R0147 graph")
     manifest_signature = _signature(
@@ -855,13 +859,16 @@ def run_functional_panel(
     )
     started = time.monotonic()
     r0140 = _read_sealed(job["r0140_panel"], label="accepted R0140 panel")
-    if r0140.get("round_id") != "0140":
+    if r0140.get("round_id") != CONTROL_PANEL_ROUND_ID:
         raise Round0147Error("accepted R0140 panel identity changed")
     control = r0140.get("cells", {}).get(CURRENT_GRAPH_CURRENT_HOST)
     if not isinstance(control, Mapping):
         raise Round0147Error("R0140 restoring control is absent")
     control_metrics = metric_view(control)
-    if not all(control_metrics[key] >= RESTORATION_FLOORS[key] for key in RESTORATION_FLOORS):
+    if REQUIRE_CONTROL_RESTORATION and not all(
+        control_metrics[key] >= RESTORATION_FLOORS[key]
+        for key in RESTORATION_FLOORS
+    ):
         raise Round0147Error("R0140 activation control no longer restores")
     source_signature, source, queries = _load_shared_evaluation_inputs(job)
     _shared, shared_signature, reference, truth, centroids = _load_reference(job)
