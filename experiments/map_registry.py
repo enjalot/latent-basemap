@@ -875,6 +875,23 @@ img.render { max-width: 100%; border: 1px solid var(--line); border-radius: 6px;
 code { font-size: 12.5px; background: var(--card); padding: 1px 5px; border-radius: 4px; }
 dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; margin: 8px 0; }
 dt { color: var(--muted); } dd { margin: 0; overflow-wrap: anywhere; }
+.cardgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+            gap: 14px; margin: 12px 0 8px; }
+.mapcard { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+           padding: 12px 13px; display: flex; flex-direction: column; gap: 8px; }
+.mapcard .thumb { width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 7px;
+                  border: 1px solid var(--line); background: #fff; }
+.mapcard h3 { font-size: 0.98rem; margin: 0; line-height: 1.25; overflow-wrap: anywhere; }
+.mapcard .meta { color: var(--muted); font-size: 12px; }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.chip { padding: 1px 8px; border-radius: 9px; font-size: 12px; background: var(--bg);
+        border: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.chip.ok { color: var(--ok); border-color: var(--ok); }
+.chip.bad { color: var(--bad); border-color: var(--bad); }
+.viewerbtn { margin-top: auto; display: inline-block; text-align: center; text-decoration: none;
+             padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line);
+             background: var(--bg); font-size: 13px; font-weight: 600; }
+.viewerbtn:hover { border-color: var(--ok); }
 """
 
 
@@ -891,6 +908,66 @@ def _fmt(v, digits=4):
     if isinstance(v, float): return f"{v:.{digits}f}"
     if isinstance(v, int) and v >= 1_000_000: return f"{v/1e6:.0f}M"
     return html.escape(str(v))
+
+
+DENSITY_FLOOR = 0.60  # density_v2 pass threshold (density_at_least_0_60)
+
+
+def _viewer_card(built: dict, entry: dict | None) -> str:
+    """Render one map card: thumbnail, title, rows, evidence badge, metric chips."""
+    panel = (entry or {}).get("panel", {}) if entry else {}
+    ffr = panel.get("ffr")
+    density = panel.get("density")
+    rows = built.get("rows_total")
+    checks_pass = panel.get("decision_checks_all_pass")
+
+    ffr_cls = "ok" if checks_pass else ""
+    ffr_chip = f'<span class="chip {ffr_cls}">FFR {_fmt(ffr)}</span>'
+    if density is None:
+        dens_chip = '<span class="chip">density_v2 —</span>'
+    else:
+        dens_ok = density >= DENSITY_FLOOR
+        mark = "✓" if dens_ok else "✗"
+        dens_chip = (f'<span class="chip {"ok" if dens_ok else "bad"}">'
+                     f'density_v2 {_fmt(density)} {mark}</span>')
+
+    thumb = built.get("thumb_rel")
+    thumb_tag = (f'<img class="thumb" src="{html.escape(thumb)}" alt="density thumbnail" '
+                 f'loading="lazy">' if thumb else "")
+    rows_line = f'{_fmt(rows)} rows' if rows else ""
+    evidence = built.get("evidence_status") or (entry or {}).get("evidence_status") or ""
+    return (
+        '<div class="mapcard">'
+        f'{thumb_tag}'
+        f'<h3>{html.escape(built.get("title") or built.get("map_id"))}</h3>'
+        f'<div class="meta">{html.escape(rows_line)}</div>'
+        f'<div class="chips">{_badge(evidence)}{ffr_chip}{dens_chip}</div>'
+        f'<a class="viewerbtn" href="{html.escape(built["viewer_rel"])}">open viewer →</a>'
+        '</div>'
+    )
+
+
+def _inject_viewer_cards(site_dir: Path, registry: dict, built: list[dict]) -> None:
+    """Splice the viewer card grid into index.html between the section markers."""
+    index_path = site_dir / "index.html"
+    if not index_path.is_file() or not built:
+        return
+    by_id = {m.get("map_id"): m for m in registry.get("maps", [])}
+    order = {m.get("map_id"): i for i, m in enumerate(
+        sorted((m for m in registry.get("maps", []) if m.get("kind") == "round-map"),
+               key=lambda x: x.get("date") or "", reverse=True))}
+    cards = "".join(
+        _viewer_card(b, by_id.get(b["map_id"]))
+        for b in sorted(built, key=lambda b: order.get(b["map_id"], 1 << 30))
+    )
+    block = ('<!-- viewer-cards:start --><h2>Interactive maps</h2>'
+             '<p class="muted">Binned density viewers with sampled tooltips, '
+             'corpus/language overlays, and live quality-metric exemplars.</p>'
+             f'<div class="cardgrid">{cards}</div><!-- viewer-cards:end -->')
+    body = index_path.read_text()
+    body = re.sub(r"<!-- viewer-cards:start -->.*?<!-- viewer-cards:end -->",
+                  block, body, flags=re.DOTALL)
+    index_path.write_text(body)
 
 
 def publish(registry: dict) -> None:
@@ -953,6 +1030,7 @@ def publish(registry: dict) -> None:
 {registry["counts"]["pre_round_checkpoints"]} pre-protocol checkpoints ·
 <a href="../basemap-gallery/">old gallery (2026-07-01)</a> ·
 <a href="http://gsv.local:8710/">roundwatch</a></p>
+<!-- viewer-cards:start --><!-- viewer-cards:end -->
 <h2>Projection maps</h2>
 <p class="muted">Foreign-domain corpora and held-out queries projected through a registered basemap. Browser plots are deterministic samples; metrics use the complete registered panel.</p>
 <div class="scroll"><table>
@@ -1047,9 +1125,22 @@ def publish(registry: dict) -> None:
     except Exception as exc:
         print(f"projection explorer generation failed: {exc}")
 
+    viewer_count = 0
+    try:
+        try:
+            from experiments.map_viewer import build_map_viewers
+        except ModuleNotFoundError:  # direct script execution
+            from map_viewer import build_map_viewers
+        built = build_map_viewers(registry, SITE_DIR)
+        _inject_viewer_cards(SITE_DIR, registry, built)
+        viewer_count = len(built)
+    except Exception as exc:  # viewer build is best-effort; index must still stand
+        print(f"map viewer generation failed: {exc}")
+
     print(
-        f"published {len(round_maps)+len(legacy)} map pages and "
-        f"{projection_count} projection explorers -> {SITE_DIR}  ({SITE_URL}/)"
+        f"published {len(round_maps)+len(legacy)} map pages, "
+        f"{projection_count} projection explorers and "
+        f"{viewer_count} interactive viewers -> {SITE_DIR}  ({SITE_URL}/)"
     )
 
 
