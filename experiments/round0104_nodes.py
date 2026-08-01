@@ -711,7 +711,7 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> None:
     gc.collect()
 
 
-def _authenticate_model(job: Mapping[str, Any]):
+def _authenticate_model(job: Mapping[str, Any], *, device: str = "cuda"):
     arm = _arm(job)
     shared, shared_signature = _load_shared(job)
     config, config_sha = train_config(
@@ -731,7 +731,7 @@ def _authenticate_model(job: Mapping[str, Any]):
     model_path = verify_signature(train["model"], label=f"R0104 {arm} model")
     from basemap.pumap.parametric_umap import ParametricUMAP
 
-    model = ParametricUMAP.load(model_path, device="cuda")
+    model = ParametricUMAP.load(model_path, device=device)
     expected = config["model"]
     observed = {
         "architecture": model.architecture,

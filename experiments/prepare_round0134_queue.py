@@ -15,7 +15,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from basemap.artifact_identity import expected_input_signature
+from basemap.artifact_identity import canonical_json, expected_input_signature, sha256_bytes
 from basemap.output_safety import (
     atomic_write_new_json,
     create_fresh_directory,
@@ -29,6 +29,7 @@ from basemap.round0134_functional_showdown import (
     CURRENT_RAW_SEED43,
     HISTORICAL_SEED42,
     HISTORICAL_SEED43,
+    PANEL_SCHEMA,
     ROUND_ID,
 )
 from experiments.prepare_round0020_0022_queues import (
@@ -51,6 +52,22 @@ SHARED_RECEIPT = (
     "shared-reference/receipt.json"
 )
 SOURCE = "/data/latent-basemap/jina-en-2M-nested/train/data-00000.npy"
+RECOVERY_PANEL = (
+    "/data/latent-basemap/runs/round-0134/queue-attempt-3-exact-views/"
+    "artifacts/functional-showdown/functional-showdown.json"
+)
+RECOVERY_PANEL_DONE = (
+    "/data/latent-basemap/runs/round-0134/queue-attempt-3-exact-views/"
+    "artifacts/functional_showdown_panel.done.json"
+)
+RECOVERY_QUEUE = (
+    "/data/latent-basemap/runs/round-0134/queue-attempt-3-exact-views/queue.json"
+)
+RECOVERY_TERMINAL = (
+    "/data/latent-basemap/runs/round-0134/queue-attempt-3-exact-views/"
+    "runner-terminal.json"
+)
+RECOVERY_PANEL_RELEASE = "97fd5e994fe9d0ffb639522c6c25197b236d33cb"
 
 REVIEW_CAPABILITIES = {
     "0037": "jina-mrl-seed42-screen-v1",
@@ -145,7 +162,9 @@ def _authorize_release(round_path: str, release_sha: str) -> None:
         text=True,
     ).splitlines()
     allowed = {
+        "basemap/round0134_functional_showdown.py",
         "experiments/prepare_round0134_queue.py",
+        "experiments/round0134_nodes.py",
         "tests/test_round0134_functional_showdown.py",
     }
     if not changed or set(changed) - allowed:
@@ -253,8 +272,51 @@ def _embedded_signatures(value: Any) -> list[dict[str, Any]]:
     return output
 
 
+def _recovery_panel_inputs(path: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    if os.path.realpath(path) != os.path.realpath(RECOVERY_PANEL):
+        raise RuntimeError("R0134 decision recovery may consume only the exact attempt-3 panel")
+    signatures = [
+        expected_input_signature(item)
+        for item in (RECOVERY_PANEL, RECOVERY_PANEL_DONE, RECOVERY_QUEUE, RECOVERY_TERMINAL)
+    ]
+    panel = _read_json(RECOVERY_PANEL)
+    body = {key: value for key, value in panel.items() if key != "identity_sha256"}
+    done = _read_json(RECOVERY_PANEL_DONE)
+    queue = _read_json(RECOVERY_QUEUE)
+    terminal = _read_json(RECOVERY_TERMINAL)
+    if (
+        panel.get("identity_sha256") != sha256_bytes(canonical_json(body))
+        or panel.get("schema") != PANEL_SCHEMA
+        or panel.get("round_id") != ROUND_ID
+        or panel.get("release_sha") != RECOVERY_PANEL_RELEASE
+        or panel.get("training_performed") is not False
+        or len(panel.get("cells") or {}) != len(CELL_ORDER)
+        or set(panel.get("cells") or {}) != set(CELL_ORDER)
+        or done.get("returncode") != 0
+        or done.get("release_sha") != RECOVERY_PANEL_RELEASE
+        or queue.get("release_sha") != RECOVERY_PANEL_RELEASE
+        or terminal.get("verdict") != "failed"
+        or terminal.get("completed_jobs") != ["functional_showdown_panel"]
+        or terminal.get("release_checkout_at_finish", {}).get("head")
+        != RECOVERY_PANEL_RELEASE
+        or terminal.get("gpu_wall_accounting_complete") is not True
+    ):
+        raise RuntimeError("R0134 attempt-3 panel recovery evidence is ineligible")
+    queue_signature = signatures[2]
+    if (
+        done.get("queue_manifest_sha256") != queue_signature["sha256"]
+        or terminal.get("queue_manifest_sha256") != queue_signature["sha256"]
+        or terminal.get("queue_manifest_unchanged") is not True
+    ):
+        raise RuntimeError("R0134 attempt-3 queue/panel lineage changed")
+    return panel, signatures
+
+
 def prepare_round0134(
-    *, release_sha: str, queue_root: str = os.path.join(ROUND_ROOT, "queue")
+    *,
+    release_sha: str,
+    queue_root: str = os.path.join(ROUND_ROOT, "queue"),
+    recovery_panel: str | None = None,
 ) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0134 release SHA must be one full commit")
@@ -358,6 +420,30 @@ def prepare_round0134(
             "panel_output": panel_output,
         },
     ]
+    recovery_inputs: list[dict[str, Any]] = []
+    if recovery_panel is not None:
+        _panel, recovery_inputs = _recovery_panel_inputs(recovery_panel)
+        panel_signature = recovery_inputs[0]
+        jobs = [
+            {
+                "id": "functional_showdown_decision",
+                "action": "functional_showdown_decision",
+                "handler_module": "experiments.round0134_nodes",
+                "handler_callable": "run_job",
+                "deps": [],
+                "outputs": [decision_output],
+                "done_marker": os.path.join(
+                    artifacts, "functional_showdown_decision.done.json"
+                ),
+                "expected_inputs": _dedupe([*common, *recovery_inputs]),
+                "p90_wall_s": 30.0,
+                "node_policy": {"gpu_required": False, "training_performed": False},
+                "panel_output": os.path.dirname(panel_signature["canonical_path"]),
+                "panel_receipt": panel_signature,
+                "panel_release_sha": RECOVERY_PANEL_RELEASE,
+                "recovery_kind": "cpu-decision-from-immutable-attempt-3-panel",
+            }
+        ]
     queue = _base_manifest(
         round_id=ROUND_ID,
         release_sha=release_sha,
@@ -365,13 +451,15 @@ def prepare_round0134(
         queue_root=queue_root,
         gpu_hours_cap=GPU_HOURS_MAXIMUM,
         execution_authority="autonomous-gpu",
-        gpu=True,
+        gpu=recovery_panel is None,
     )
     queue.update(
         {
             "schema": "round0134-functional-showdown-queue-v1",
             "repo_root": RELEASE_ROOT,
-            "queue_class": "gpu-research",
+            "queue_class": (
+                "gpu-research" if recovery_panel is None else "cpu-decision-recovery"
+            ),
             "required_reviews": list(REVIEW_CAPABILITIES),
             "capability_dependencies": list(REVIEW_CAPABILITIES.values()),
             "capabilities_produced": [CAPABILITY],
@@ -404,6 +492,7 @@ def prepare_round0134(
                 "threshold_or_floor_changed": False,
                 "training_or_graph_build": False,
                 "side_by_side_renders": True,
+                "immutable_panel_recovery": recovery_panel is not None,
             },
             "jobs": jobs,
         }
@@ -417,8 +506,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-sha", required=True)
     parser.add_argument("--queue-root", default=os.path.join(ROUND_ROOT, "queue"))
+    parser.add_argument("--recovery-panel")
     args = parser.parse_args(argv)
-    print(prepare_round0134(release_sha=args.release_sha, queue_root=args.queue_root))
+    print(
+        prepare_round0134(
+            release_sha=args.release_sha,
+            queue_root=args.queue_root,
+            recovery_panel=args.recovery_panel,
+        )
+    )
     return 0
 
 

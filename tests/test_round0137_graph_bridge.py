@@ -19,6 +19,10 @@ from experiments.prepare_round0137_queue import (
     GPU_HOURS_MINIMUM,
     GPU_HOURS_P90,
     REVIEW_CAPABILITIES,
+    R0134_DECISION,
+    R0134_PANEL,
+    _preissuance_cpu_smoke,
+    _require_negative_r0134,
 )
 
 
@@ -84,11 +88,13 @@ def test_matching_historical_is_not_sufficient_if_control_is_regressed():
     assert decision["sampler_bridge_authorized"] is True
 
 
-def test_cell_order_is_frozen():
+def test_canonical_json_key_order_restores_preregistered_cell_order():
     cells = _cells(historical=0.6, control=0.5, treatment=0.6)
     assert tuple(cells) == CELL_ORDER
-    with pytest.raises(Round0137Error, match="reordered"):
-        build_decision(dict(reversed(list(cells.items()))))
+    assert build_decision(dict(reversed(list(cells.items())))) == build_decision(cells)
+    del cells[HISTORICAL]
+    with pytest.raises(Round0137Error, match="missing or unexpected"):
+        build_decision(cells)
 
 
 def test_registered_metrics_dependencies_and_budget_are_bounded():
@@ -123,3 +129,22 @@ def test_r0104_extension_keeps_default_selector_and_scopes_override():
     assert "forced_nprobe not in GRAPH_NPROBE_GRID" in source
     assert 'list(job.get("shared_arms", ARMS))' in source
     assert 'str(job.get("shared_round_id", ROUND_ID))' in source
+
+
+def test_exact_corrected_r0134_branch_receipts_are_bound():
+    assert "queue-attempt-3-exact-views" in R0134_PANEL
+    assert "queue-attempt-5-decision-recovery-a3adb61" in R0134_DECISION
+    panel, decision = _require_negative_r0134()
+    assert panel["canonical_path"] == R0134_PANEL
+    assert decision["canonical_path"] == R0134_DECISION
+
+
+def test_preissuance_cpu_smoke_closes_model_to_selector_path():
+    receipt = _preissuance_cpu_smoke()
+    assert receipt["passed"] is True
+    assert receipt["cuda_used"] is False
+    assert receipt["source_probe_shape"] == [32, 2]
+    assert receipt["query_probe_shape"] == [32, 2]
+    assert receipt["canonical_selector_outcome"] == (
+        "high-recall-graph-insufficient-to-restore-function"
+    )

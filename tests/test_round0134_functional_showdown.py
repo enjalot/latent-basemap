@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pytest
 
+from basemap.artifact_identity import expected_input_signature
 from basemap.round0134_functional_showdown import (
     CELL_ORDER,
     CURRENT_R0104_SEED42,
@@ -22,7 +24,22 @@ from experiments.prepare_round0134_queue import (
     GPU_HOURS_MINIMUM,
     GPU_HOURS_P90,
     REVIEW_CAPABILITIES,
+    RECOVERY_PANEL,
+    RECOVERY_PANEL_RELEASE,
     SOURCE_ROWS,
+    _recovery_panel_inputs,
+)
+from experiments.round0134_nodes import (
+    _load_frozen_query_truth,
+    _load_reference,
+    _load_shared_evaluation_inputs,
+    run_decision,
+)
+
+
+R0037_SHARED_RECEIPT = (
+    "/data/latent-basemap/runs/round-0037/queue/artifacts/"
+    "shared-reference/receipt.json"
 )
 
 
@@ -100,10 +117,12 @@ def test_purity_overseparation_is_not_treated_as_unbounded_improvement():
     assert "pre_r0115_seed42:purity_fidelity_k256" in decision["failed_cells"]
 
 
-def test_cell_order_is_an_authenticated_selector_input():
+def test_json_key_sorting_restores_registered_cell_order_without_changing_values():
     cells = _cells()
     reordered = dict(reversed(list(cells.items())))
-    with pytest.raises(Round0134Error, match="reordered"):
+    assert build_decision(reordered) == build_decision(cells)
+    del reordered[HISTORICAL_SEED42]
+    with pytest.raises(Round0134Error, match="missing or unexpected"):
         build_decision(reordered)
 
 
@@ -142,3 +161,77 @@ def test_raw_two_seed_contrast_is_seed_matched():
     assert decision["contrasts"]["pre_r0115_seed42"]["current_cells"] == [
         CURRENT_R0104_SEED42
     ]
+
+
+def test_reviewed_r0037_query_truth_survives_current_builder_source_drift():
+    import json
+
+    with open(R0037_SHARED_RECEIPT, encoding="utf-8") as handle:
+        shared = json.load(handle)
+    truth = _load_frozen_query_truth(
+        shared["query_truth"]["canonical_path"],
+        expected_key=shared["query_truth_key"],
+        expected_policy=shared["query_truth_exactness"],
+        expected_payload_sha256=shared["query_truth_payload_sha256"],
+    )
+    assert truth["neighbors"].shape == (20_000, 10)
+    assert truth["corpus_cardinality"] == 2_000_000
+    assert truth["historical_builder_policy_authenticated"] is True
+
+    changed = dict(shared["query_truth_exactness"])
+    changed["implementation_sha256"] = "0" * 64
+    with pytest.raises(Round0134Error, match="policy changed"):
+        _load_frozen_query_truth(
+            shared["query_truth"]["canonical_path"],
+            expected_key=shared["query_truth_key"],
+            expected_policy=changed,
+            expected_payload_sha256=shared["query_truth_payload_sha256"],
+        )
+
+
+def test_real_r0037_source_query_and_reference_views_close_before_cuda():
+    import json
+
+    from basemap.panel_v2 import _resolve_reference, sample_anchors
+    from experiments.round0027_nodes import _panel_config
+
+    with open(
+        "/data/latent-basemap/runs/round-0134/queue/queue.json",
+        encoding="utf-8",
+    ) as handle:
+        job = json.load(handle)["jobs"][0]
+    _source_signature, source, queries = _load_shared_evaluation_inputs(job)
+    _shared, _shared_signature, reference, _truth, centroids = _load_reference(job)
+    config = _panel_config()
+    anchors = sample_anchors(len(source), config)
+    resolved, reused = _resolve_reference(
+        source, anchors, config, centroids, reference
+    )
+    assert reused is True
+    assert resolved["key"] == reference["key"]
+    assert source.dtype == np.dtype("<f4")
+    assert queries.dtype == np.dtype("<f4")
+
+
+def test_cpu_recovery_applies_frozen_selector_to_immutable_attempt3_panel(tmp_path):
+    panel, signatures = _recovery_panel_inputs(RECOVERY_PANEL)
+    assert signatures[0] == expected_input_signature(RECOVERY_PANEL)
+    assert panel["release_sha"] == RECOVERY_PANEL_RELEASE
+
+    output = tmp_path / "decision"
+    decision = run_decision(
+        {"manifest": {"round_id": "0134", "release_sha": "recovery-release"}},
+        {
+            "outputs": [str(output)],
+            "panel_output": str(RECOVERY_PANEL.rsplit("/", 1)[0]),
+            "panel_receipt": signatures[0],
+            "panel_release_sha": RECOVERY_PANEL_RELEASE,
+            "recovery_kind": "cpu-decision-from-immutable-attempt-3-panel",
+        },
+    )
+    assert decision["decision_recovery"] is True
+    assert decision["panel"] == signatures[0]
+    assert set(decision["contrasts"]) == {
+        "pre_r0115_seed42",
+        "raw_current_two_seed",
+    }
