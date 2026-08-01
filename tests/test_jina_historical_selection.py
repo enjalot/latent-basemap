@@ -3,6 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from basemap.artifact_identity import expected_input_signature
+
 from basemap.jina_historical_selection import (
     HISTORICAL_CORPORA,
     HistoricalJinaSelectionError,
@@ -186,7 +188,7 @@ def test_indexed_inventory_fp16_array_preserves_arbitrary_order(tmp_path) -> Non
             selection["ranges"][2 * corpus_id + shard_id]["shard"] = {
                 "canonical_path": str(path),
                 "bytes": path.stat().st_size,
-                "sha256": f"synthetic-{corpus_id}-{shard_id}",
+                "sha256": expected_input_signature(path)["sha256"],
                 "rows": 8,
             }
     ordered_global_rows = np.asarray([41, 10, 24, 19, 33, 14], dtype=np.int64)
@@ -237,7 +239,7 @@ def test_indexed_inventory_fp16_array_rejects_duplicate_rows(tmp_path) -> None:
             "shard": {
                 "canonical_path": str(path),
                 "bytes": path.stat().st_size,
-                "sha256": "synthetic",
+                "sha256": expected_input_signature(path)["sha256"],
                 "rows": 8,
             },
         }],

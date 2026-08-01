@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 import os
 from pathlib import Path
+import re
 from typing import Any
 
 import numpy as np
@@ -491,11 +492,21 @@ class IndexedInventoryFp16Array:
             path = os.path.realpath(str(shard.get("canonical_path") or ""))
             declared_bytes = int(shard.get("bytes", -1))
             shard_rows = int(shard.get("rows", -1))
+            declared_sha256 = str(shard.get("sha256") or "")
+            local_start = int(item.get("shard_row_start", -1))
+            local_stop = int(item.get("shard_row_stop", -1))
+            range_width = int(item["global_row_stop"]) - int(
+                item["global_row_start"]
+            )
             if (
                 not path
                 or not os.path.isfile(path)
                 or os.path.getsize(path) != declared_bytes
                 or shard_rows <= 0
+                or not re.fullmatch(r"[0-9a-f]{64}", declared_sha256)
+                or local_start < 0
+                or local_stop - local_start != range_width
+                or local_stop > shard_rows
             ):
                 raise HistoricalJinaSelectionError(
                     "inventory fp16 shard is missing or has wrong size"
@@ -517,7 +528,7 @@ class IndexedInventoryFp16Array:
                     "canonical_path": path,
                     "kind": "file",
                     "bytes": declared_bytes,
-                    "sha256": str(shard.get("sha256") or ""),
+                    "sha256": declared_sha256,
                     "rows": shard_rows,
                 })
                 seen_paths.add(path)
