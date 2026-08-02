@@ -441,6 +441,74 @@ def run_functional_density(
     gc.collect()
 
 
+def _authenticate_functional_density(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Recompute the density evidence and authenticate functional arrays."""
+    from experiments.round0085_nodes import density_v2_calibration
+
+    cell = value.get("functional_cell") or {}
+    coordinates_spec = cell.get("coordinates") or {}
+    queries_spec = cell.get("query_coordinates") or {}
+    arrays_spec = value.get("density_arrays") or {}
+    _signature(str(coordinates_spec.get("canonical_path") or ""), coordinates_spec)
+    _signature(str(queries_spec.get("canonical_path") or ""), queries_spec)
+    _signature(str(arrays_spec.get("canonical_path") or ""), arrays_spec)
+    coordinates = np.load(
+        str(coordinates_spec["canonical_path"]), mmap_mode="r", allow_pickle=False
+    )
+    queries = np.load(
+        str(queries_spec["canonical_path"]), mmap_mode="r", allow_pickle=False
+    )
+    if (
+        coordinates.shape != (2_000_000, 2)
+        or queries.shape != (20_000, 2)
+        or coordinates.dtype != np.float32
+        or queries.dtype != np.float32
+        or not np.isfinite(coordinates).all()
+        or not np.isfinite(queries).all()
+    ):
+        raise Round0152Error("R0152 functional coordinate evidence changed")
+    key = "prefix_drop_12p5m_seed42"
+    with np.load(str(arrays_spec["canonical_path"]), allow_pickle=False) as arrays:
+        high = np.asarray(arrays["high_radius"], dtype=np.float64)
+        low = np.asarray(arrays[f"{key}__low_radius"], dtype=np.float64)
+        stored_bootstrap = np.asarray(
+            arrays[f"{key}__bootstrap"], dtype=np.float64
+        )
+        stored_null = np.asarray(
+            arrays[f"{key}__permuted_null"], dtype=np.float64
+        )
+    if high.shape != (10_000,) or low.shape != high.shape:
+        raise Round0152Error("R0152 fixed density arrays changed geometry")
+    summary, bootstrap, null = density_v2_calibration(
+        high,
+        low,
+        bootstrap_draws=1_000,
+        bootstrap_seed=10_801,
+        null_draws=1_000,
+        null_seed=10_802,
+    )
+    density_cell = value.get("density_cell") or {}
+    density_lineage = value.get("density_universe") or {}
+    if (
+        density_cell.get("density_v2") != summary
+        or not np.array_equal(stored_bootstrap, bootstrap)
+        or not np.array_equal(stored_null, null)
+        or density_lineage.get("registered_floor")
+        != 0.17589389755990817
+        or density_cell.get("clears_unchanged_registered_floor")
+        != (float(summary["correlation"]) >= 0.17589389755990817)
+        or not all((value.get("checks") or {}).values())
+    ):
+        raise Round0152Error("R0152 fixed density evidence does not recompute")
+    return {
+        "coordinates": dict(coordinates_spec),
+        "query_coordinates": dict(queries_spec),
+        "density_arrays": dict(arrays_spec),
+        "density_v2_recomputed": summary,
+        "bootstrap_and_null_recomputed": True,
+    }
+
+
 def run_decision(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     output = create_fresh_directory(
         str(job["outputs"][0]), label="R0152 rescue decision"
@@ -471,6 +539,7 @@ def run_decision(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     authenticated_train = inherited._authenticate_half_train(active, job)
     authenticated_native = inherited._authenticate_native_selector(native)
     authenticated_ood = inherited._authenticate_ood_metrics(ood)
+    authenticated_functional = _authenticate_functional_density(functional)
     model_lineage = functional.get("model_lineage") or {}
     if (
         model_lineage.get("train_receipt") != authenticated_train["train_receipt"]
@@ -500,6 +569,9 @@ def run_decision(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "ood_selector_recomputed": (
             authenticated_ood.get("gating_summaries_recomputed") is True
         ),
+        "fixed_density_bootstrap_and_null_recomputed": (
+            authenticated_functional.get("bootstrap_and_null_recomputed") is True
+        ),
     }
     decision = build_decision(validity_checks=validity, quality=quality)
     receipt = seal({
@@ -511,6 +583,7 @@ def run_decision(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "authenticated_train_execution": authenticated_train,
         "authenticated_native_selector": authenticated_native,
         "authenticated_ood_metrics": authenticated_ood,
+        "authenticated_functional_density": authenticated_functional,
         "training_performed": True,
         "map_registry_state_changed": False,
     })
