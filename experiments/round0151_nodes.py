@@ -22,6 +22,8 @@ from basemap.round0150_seed_replay import CAPABILITY as R0150_CAPABILITY
 from basemap.round0151_scale_census import (
     CAPABILITY,
     EXPECTED_DROPPED_ROWS,
+    EXPECTED_GROUP_IDS_ORDERED_SHA256,
+    EXPECTED_MAPPING_ORDERED_SHA256,
     EXPECTED_RETAINED_ROWS,
     EXPECTED_U12_OVERLAP,
     FULL_RAW_ROWS,
@@ -105,6 +107,8 @@ def run_census(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     u12_path = _require_signature(job["u12_mapping"], label="R0132 U12 mapping")
     u12 = np.load(u12_path, mmap_mode="r", allow_pickle=False)
     comparison = compare_to_u12(mapping, u12)
+    mapping_ordered_sha256 = ordered_array_sha256(mapping)
+    group_ids_ordered_sha256 = ordered_array_sha256(group_ids)
     if (
         census["full_raw_rows"] != FULL_RAW_ROWS
         or census["raw_prefix_target"] != RAW_PREFIX_TARGET
@@ -112,6 +116,8 @@ def run_census(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         or census["dropped_rows"] != EXPECTED_DROPPED_ROWS
         or comparison["overlap_rows"] != EXPECTED_U12_OVERLAP
         or comparison["distinct"] is not True
+        or mapping_ordered_sha256 != EXPECTED_MAPPING_ORDERED_SHA256
+        or group_ids_ordered_sha256 != EXPECTED_GROUP_IDS_ORDERED_SHA256
     ):
         raise Round0151Error("registered prefix/drop-only census changed")
 
@@ -156,7 +162,9 @@ def run_census(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "quotas": census["quotas"],
         "groups": groups,
         "mapping": mapping_signature,
+        "mapping_ordered_sha256": mapping_ordered_sha256,
         "group_ids": group_ids_signature,
+        "group_ids_ordered_sha256": group_ids_ordered_sha256,
         "u12_comparison": comparison,
         "checks": {
             "every_group_present": True,
