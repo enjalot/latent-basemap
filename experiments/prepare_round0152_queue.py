@@ -57,7 +57,7 @@ from experiments.prepare_round0138_queue import (
     _embedded_signatures,
     _frontmatter,
 )
-from experiments.round0152_nodes import GRAPH_PART_NAMES
+from experiments.round0152_nodes import GRAPH_PART_NAMES, INDEX_FILENAME
 
 
 ROUND_ROOT = "/data/latent-basemap/runs/round-0152"
@@ -70,7 +70,6 @@ R0151_CENSUS = os.path.join(R0151_OUTPUT, "census.json")
 R0151_MAPPING = os.path.join(R0151_OUTPUT, "compact-to-global.i64.npy")
 R0151_GROUP_IDS = os.path.join(R0151_OUTPUT, "compact-group-ids.u8.npy")
 R0140_QUEUE = "/data/latent-basemap/runs/round-0140/queue-attempt-2/queue.json"
-INDEX_FILENAME = "jina-diverse-12p5m.ivfpq"
 
 GPU_HOURS_MINIMUM = 2.1
 GPU_HOURS_EXPECTED = 2.55

@@ -68,6 +68,7 @@ from experiments.round0106_nodes import GraphNodeContract
 
 
 GRAPH_PART_NAMES = ("groups-a", "groups-b", "groups-c")
+INDEX_FILENAME = inherited.INDEX_FILENAME
 INHERITED_NODE_OVERRIDES = {
     "SEARCH_POSITIVE_OUTCOME": (
         "qualified-fixed-r0105-policy-on-prefix-drop-universe"
