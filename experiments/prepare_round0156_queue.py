@@ -56,6 +56,13 @@ PARENT_OUTPUT = os.path.join(
 PARENT_CENSUS = os.path.join(PARENT_OUTPUT, "census.json")
 PARENT_MAPPING = os.path.join(PARENT_OUTPUT, "compact-to-global.i64.npy")
 PARENT_GROUP_IDS = os.path.join(PARENT_OUTPUT, "compact-group-ids.u8.npy")
+ISSUED_BASE_COMMIT = "a53d266b04bfea6589d7e5a9879b8f713b11a021"
+_BASE_ISSUED_ROUND = base._issued_round
+_MECHANICAL_CORRECTION_FILES = {
+    "experiments/prepare_round0156_queue.py",
+    "experiments/round0106_nodes.py",
+    "tests/test_round0156_scale_rescue.py",
+}
 
 GPU_HOURS_MINIMUM = 2.10
 GPU_HOURS_EXPECTED = 2.55
@@ -84,6 +91,43 @@ REVIEW_CAPABILITIES = {
     "0140": "jina-2m-subsystem-bisection-v1",
     "0155": PARENT_CAPABILITY,
 }
+
+
+def _issued_round(release_sha: str) -> tuple[str, dict[str, Any]]:
+    """Bind the issued contract while admitting only this setup correction."""
+    path, signature = _BASE_ISSUED_ROUND(ISSUED_BASE_COMMIT)
+    if release_sha == ISSUED_BASE_COMMIT:
+        return path, signature
+    ancestor = subprocess.run(
+        [
+            "git",
+            "-C",
+            RELEASE_ROOT,
+            "merge-base",
+            "--is-ancestor",
+            ISSUED_BASE_COMMIT,
+            release_sha,
+        ],
+        check=False,
+        timeout=10,
+    )
+    changed = subprocess.run(
+        [
+            "git",
+            "-C",
+            RELEASE_ROOT,
+            "diff",
+            "--name-only",
+            f"{ISSUED_BASE_COMMIT}..{release_sha}",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    ).stdout.splitlines()
+    if ancestor.returncode != 0 or not set(changed) <= _MECHANICAL_CORRECTION_FILES:
+        raise RuntimeError("R0156 release exceeds the authorized setup correction")
+    return path, signature
 
 
 def _pytest_receipt(release_sha: str) -> dict[str, Any]:
@@ -147,6 +191,7 @@ def _configured() -> Iterator[None]:
         "ROUND_ROOT": ROUND_ROOT,
         "RELEASE_ROOT": RELEASE_ROOT,
         "ROUND_FILE_GLOB": ROUND_FILE_GLOB,
+        "_issued_round": _issued_round,
         "HANDLER_MODULE": "experiments.round0156_nodes",
         "QUEUE_SCHEMA": "round0156-historical-prefix-rescue-queue-v1",
         "PARENT_ROUND_ID": PARENT_ROUND_ID,

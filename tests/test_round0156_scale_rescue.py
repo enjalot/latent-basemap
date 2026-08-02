@@ -47,6 +47,7 @@ def test_r0156_queue_wrapper_uses_new_paths_and_handler() -> None:
         assert prepare_round0156_queue.base.R0151_CENSUS.endswith("/census.json")
         assert "/round-0155/" in prepare_round0156_queue.base.R0151_CENSUS
         assert prepare_round0156_queue.base.HANDLER_MODULE == "experiments.round0156_nodes"
+        assert prepare_round0156_queue.base._issued_round == prepare_round0156_queue._issued_round
     assert prepare_round0156_queue.base.ROUND_ID == original_round
 
 
