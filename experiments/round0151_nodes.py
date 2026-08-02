@@ -15,7 +15,7 @@ from basemap.output_safety import (
     atomic_write_new_json,
     create_fresh_directory,
 )
-from basemap.round0105_search import GROUPS, group_ranges
+from basemap.round0105_search import GROUPS
 from basemap.round0108_evaluation import seal, validate_seal
 from basemap.round0132_scale_bridge import SUBSET_SCHEMA
 from basemap.round0150_seed_replay import CAPABILITY as R0150_CAPABILITY
@@ -32,6 +32,7 @@ from basemap.round0151_scale_census import (
     Round0151Error,
     build_prefix_drop_mapping,
     compare_to_u12,
+    inventory_group_ranges,
 )
 
 
@@ -87,11 +88,7 @@ def run_census(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     with np.load(eligibility_path, allow_pickle=False) as archive:
         excluded = np.asarray(archive["excluded_rows"], dtype=np.int64)
 
-    substrate, substrate_signature = _read_json(
-        _require_signature(job["substrate"], label="R0103 substrate"),
-        label="accepted R0103 substrate",
-    )
-    ranges = group_ranges(substrate)
+    ranges = inventory_group_ranges(inventory["selection"])
     mapping, group_ids, census = build_prefix_drop_mapping(ranges, excluded)
 
     u12_manifest, u12_manifest_signature = _read_json(
@@ -144,7 +141,6 @@ def run_census(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "activation": activation_signature,
         "inventory": inventory_signature,
         "eligibility": dict(job["eligibility"]),
-        "substrate": substrate_signature,
         "u12_manifest": u12_manifest_signature,
         "u12_mapping": dict(job["u12_mapping"]),
         "selector": {

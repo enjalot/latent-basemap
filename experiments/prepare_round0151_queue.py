@@ -20,7 +20,7 @@ from basemap.output_safety import (
     create_fresh_directory,
     ensure_data_directory,
 )
-from basemap.round0105_search import ELIGIBILITY_PATH, SUBSTRATE_MANIFEST_PATH
+from basemap.round0105_search import ELIGIBILITY_PATH
 from basemap.round0108_evaluation import seal, validate_seal
 from basemap.round0132_scale_bridge import SCALE_POLICY_CAPABILITY
 from basemap.round0150_seed_replay import CAPABILITY as R0150_CAPABILITY
@@ -163,7 +163,6 @@ def prepare_round0151(
     )
     u12, u12_signature = _read_sealed(U12_MANIFEST, label="accepted R0132 U12")
     eligibility_signature = expected_input_signature(ELIGIBILITY_PATH)
-    substrate_signature = expected_input_signature(SUBSTRATE_MANIFEST_PATH)
     u12_mapping_signature = expected_input_signature(U12_MAPPING)
     if (
         inventory.get("duplicate_control", {}).get("eligibility")
@@ -186,7 +185,6 @@ def prepare_round0151(
         activation_signature,
         inventory_signature,
         eligibility_signature,
-        substrate_signature,
         u12_signature,
         u12_mapping_signature,
         pytest_signature,
@@ -237,7 +235,6 @@ def prepare_round0151(
             "r0150_decision": activation_signature,
             "inventory": inventory_signature,
             "eligibility": eligibility_signature,
-            "substrate": substrate_signature,
             "u12_manifest": u12_signature,
             "u12_mapping": u12_mapping_signature,
             "handler_module": "experiments.round0151_nodes",

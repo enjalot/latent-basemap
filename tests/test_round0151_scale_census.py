@@ -9,6 +9,7 @@ from basemap.round0151_scale_census import (
     Round0151Error,
     build_prefix_drop_mapping,
     compare_to_u12,
+    inventory_group_ranges,
     largest_remainder_prefix_quotas,
 )
 
@@ -18,6 +19,33 @@ def toy_ranges(rows_per_group: int = 4) -> dict[str, tuple[int, int]]:
         group: (index * rows_per_group, (index + 1) * rows_per_group)
         for index, group in enumerate(GROUPS)
     }
+
+
+def toy_selection(rows_per_group: int = 4) -> dict[str, object]:
+    ranges = toy_ranges(rows_per_group)
+    datasets = [
+        group if index < 3 else f"fineweb2-{group}-chunked-500-jina-v5-nano"
+        for index, group in enumerate(GROUPS)
+    ]
+    return {
+        "source_order": datasets,
+        "ranges": [
+            {
+                "dataset": dataset,
+                "global_row_start": ranges[group][0],
+                "global_row_stop": ranges[group][1],
+            }
+            for group, dataset in zip(GROUPS, datasets, strict=True)
+        ],
+    }
+
+
+def test_inventory_group_ranges_reconstructs_registered_order() -> None:
+    assert inventory_group_ranges(toy_selection(), expected_rows=88) == toy_ranges()
+    changed = toy_selection()
+    changed["source_order"] = list(reversed(changed["source_order"]))
+    with pytest.raises(Round0151Error, match="order changed"):
+        inventory_group_ranges(changed, expected_rows=88)
 
 
 def test_prefix_quotas_close_with_registered_tie_break() -> None:
