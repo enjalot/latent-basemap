@@ -388,7 +388,10 @@ def _prior_posttrain_attempts(
         expected_input_signature(graph_manifest),
     ])
     graph = _read_json(graph_manifest)
-    for signature in [graph.get("compact_mapping"), *(graph.get("outputs") or [])]:
+    graph_outputs = graph.get("outputs")
+    if not isinstance(graph_outputs, dict):
+        raise RuntimeError("R0156 prior graph output index is incomplete")
+    for signature in [graph.get("compact_mapping"), *graph_outputs.values()]:
         if not isinstance(signature, dict):
             raise RuntimeError("R0156 prior graph seal is incomplete")
         observed = expected_input_signature(str(signature["canonical_path"]))
