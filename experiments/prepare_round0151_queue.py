@@ -27,6 +27,8 @@ from basemap.round0150_seed_replay import CAPABILITY as R0150_CAPABILITY
 from basemap.round0151_scale_census import (
     CAPABILITY,
     EXPECTED_DROPPED_ROWS,
+    EXPECTED_GROUP_IDS_ORDERED_SHA256,
+    EXPECTED_MAPPING_ORDERED_SHA256,
     EXPECTED_RETAINED_ROWS,
     EXPECTED_U12_OVERLAP,
     FULL_RAW_ROWS,
@@ -219,6 +221,8 @@ def prepare_round0151(
             "expected_retained_rows": EXPECTED_RETAINED_ROWS,
             "expected_dropped_rows": EXPECTED_DROPPED_ROWS,
             "expected_u12_overlap": EXPECTED_U12_OVERLAP,
+            "expected_mapping_ordered_sha256": EXPECTED_MAPPING_ORDERED_SHA256,
+            "expected_group_ids_ordered_sha256": EXPECTED_GROUP_IDS_ORDERED_SHA256,
             "allocation": "integer-largest-remainder across the 22 raw R0087 groups",
             "within_group": "raw global-row prefix then R0087 exclusions without replacement",
             "must_differ_from_r0132_u12": True,
