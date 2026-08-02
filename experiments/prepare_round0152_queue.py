@@ -63,6 +63,21 @@ from experiments.round0152_nodes import GRAPH_PART_NAMES, INDEX_FILENAME
 ROUND_ROOT = "/data/latent-basemap/runs/round-0152"
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE_GLOB = os.path.join(LAB_ROOT, "round-0152-*.md")
+HANDLER_MODULE = "experiments.round0152_nodes"
+QUEUE_SCHEMA = "round0152-prefix-drop-rescue-queue-v1"
+PARENT_ROUND_ID = "0151"
+SCIENTIFIC_QUESTION = (
+    "does the replicated 2M prefix/drop-only package transfer to a distinct "
+    "diverse 12.5M population?"
+)
+SCIENTIFIC_ESTIMAND = (
+    "population plus induced graph plus coverage-aligned horizon; not a unique "
+    "duplicate, row-order, cardinality, graph, dose, or pure-N effect"
+)
+POSITIVE_BRANCH = (
+    "release candidate for a separate 25M prefix/drop round and later reviewed "
+    "registry promotion"
+)
 R0151_OUTPUT = os.path.join(
     "/data/latent-basemap/runs/round-0151/queue/artifacts", R0151_CAPABILITY
 )
@@ -132,7 +147,7 @@ def _accepted_activation() -> tuple[list[dict[str, Any]], dict[str, Any], dict[s
     mapping = expected_input_signature(R0151_MAPPING)
     group_ids = expected_input_signature(R0151_GROUP_IDS)
     if (
-        census.get("round_id") != "0151"
+        census.get("round_id") != PARENT_ROUND_ID
         or census.get("capability") != R0151_CAPABILITY
         or census.get("retained_rows") != RETAINED_ROWS
         or census.get("mapping") != mapping
@@ -241,7 +256,7 @@ def _job(
     return {
         "id": node_id,
         "action": action,
-        "handler_module": "experiments.round0152_nodes",
+        "handler_module": HANDLER_MODULE,
         "handler_callable": "run_job",
         "deps": deps,
         "outputs": [output],
@@ -496,7 +511,7 @@ def prepare_round0152(
         gpu=True,
     )
     queue.update({
-        "schema": "round0152-prefix-drop-rescue-queue-v1",
+        "schema": QUEUE_SCHEMA,
         "repo_root": RELEASE_ROOT,
         "queue_class": "gpu-research",
         "required_reviews": list(REVIEW_CAPABILITIES),
@@ -504,8 +519,8 @@ def prepare_round0152(
         "capabilities_produced": [CAPABILITY],
         "training_performed": True,
         "scientific_contract": {
-            "question": "does the replicated 2M prefix/drop-only package transfer to a distinct diverse 12.5M population?",
-            "estimand": "population plus induced graph plus coverage-aligned horizon; not a unique duplicate, row-order, cardinality, graph, dose, or pure-N effect",
+            "question": SCIENTIFIC_QUESTION,
+            "estimand": SCIENTIFIC_ESTIMAND,
             "rows": RETAINED_ROWS,
             "mapping_ordered_sha256": EXPECTED_MAPPING_ORDERED_SHA256,
             "graph": {"k_nonself": GRAPH_K, "fresh": True, "resumable_parts": list(GRAPH_PART_NAMES)},
@@ -520,7 +535,7 @@ def prepare_round0152(
                 "projection_ffr_in_ood_panel": "diagnostic only",
             },
             "native_matched_panel": "diagnostic geometry plus execution validity",
-            "positive_branch": "release candidate for a separate 25M prefix/drop round and later reviewed registry promotion",
+            "positive_branch": POSITIVE_BRANCH,
             "registry_mutation": False,
             "production_or_publishing": False,
             "decision_schema": DECISION_SCHEMA,

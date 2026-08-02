@@ -36,6 +36,7 @@ from basemap.round0152_scale_rescue import (
     CAPABILITY,
     DECISION_SCHEMA,
     FUNCTIONAL_SCHEMA,
+    GRAPH_DEGREE,
     GRAPH_K,
     GRAPH_PART_SCHEMA,
     GRAPH_SCHEMA,
@@ -45,6 +46,7 @@ from basemap.round0152_scale_rescue import (
     N_NEIGHBORS,
     OOD_SCHEMA,
     PARENT_CAPABILITY,
+    PARENT_ROUND_ID,
     PIPELINE,
     PIPELINE_SCHEMA,
     POSITIVE_DESTINATION_POLICY,
@@ -68,6 +70,7 @@ from experiments.round0106_nodes import GraphNodeContract
 
 
 GRAPH_PART_NAMES = ("groups-a", "groups-b", "groups-c")
+PARENT_CENSUS_FIELD = "r0151_census"
 INDEX_FILENAME = inherited.INDEX_FILENAME
 INHERITED_NODE_OVERRIDES = {
     "SEARCH_POSITIVE_OUTCOME": (
@@ -186,7 +189,7 @@ def run_materialize_subset(active: Mapping[str, Any], job: Mapping[str, Any]) ->
     census = _read_json(census_path)
     validate_seal(census, label="accepted R0151 census")
     if (
-        census.get("round_id") != "0151"
+        census.get("round_id") != PARENT_ROUND_ID
         or census.get("capability") != PARENT_CAPABILITY
         or census.get("retained_rows") != RETAINED_ROWS
         or census.get("replacement_rows") != 0
@@ -251,7 +254,7 @@ def run_materialize_subset(active: Mapping[str, Any], job: Mapping[str, Any]) ->
         "schema": SUBSET_SCHEMA,
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
-        "r0151_census": dict(job["census"]),
+        PARENT_CENSUS_FIELD: dict(job["census"]),
         "selected_rows": RETAINED_ROWS,
         "full_raw_rows": ROW_COUNT,
         "selector": census["selector"],
@@ -313,12 +316,12 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
             "pipeline_schema": PIPELINE_SCHEMA,
             "sampler_class": SAMPLER_CLASS,
             "positive_destination_policy": POSITIVE_DESTINATION_POLICY,
-            "graph_degree": "variable-symmetric-fuzzy-k15-topology",
+            "graph_degree": GRAPH_DEGREE,
             "update_rule": UPDATE_RULE,
         },
         training_input_kwargs={
             "positive_destination_policy": POSITIVE_DESTINATION_POLICY,
-            "graph_degree": "variable-symmetric-fuzzy-k15-topology",
+            "graph_degree": GRAPH_DEGREE,
         },
     )
 

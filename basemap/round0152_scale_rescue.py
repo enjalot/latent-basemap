@@ -19,6 +19,7 @@ from .round0140_subsystem_bisection import METRICS, RESTORATION_FLOORS, metric_v
 ROUND_ID = "0152"
 CAPABILITY = "jina-diverse-12p5m-prefix-drop-rescue-v1"
 PARENT_CAPABILITY = "jina-diverse-12p5m-prefix-drop-only-census-v1"
+PARENT_ROUND_ID = "0151"
 RETAINED_ROWS = 12_485_206
 RAW_PREFIX_ROWS = 12_500_000
 FULL_RETAINED_ROWS = 24_948_663
@@ -47,12 +48,14 @@ POSITIVE_DESTINATION_POLICY = (
     "R0152-global-prefix-drop-retained-fuzzy-tconorm-graph"
 )
 UPDATE_RULE = "ceil(actual-R0152-directed-fuzzy-edges/409)"
+GRAPH_DEGREE = "variable-symmetric-fuzzy-k15-topology"
 
 DENSITY_FLOOR = 0.17589389755990817
 OOD_RETENTION = 0.97
 OUTCOME_PASS = "prefix-drop-only-12p5m-rescue-passes"
 OUTCOME_FAIL = "prefix-drop-only-12p5m-rescue-fails"
 OUTCOME_INVALID = "invalid-execution"
+FULL_25M_TEST_ON_PASS = True
 
 
 class Round0152Error(RuntimeError):
@@ -162,7 +165,9 @@ def build_decision(
         "validity_checks": dict(validity_checks),
         "quality_selector": dict(quality),
         "atlas_rescue_candidate_released": outcome == OUTCOME_PASS,
-        "full_25m_prefix_drop_test_released": outcome == OUTCOME_PASS,
+        "full_25m_prefix_drop_test_released": (
+            outcome == OUTCOME_PASS and FULL_25M_TEST_ON_PASS
+        ),
         "registry_promotion_released": False,
         "production_ready": False,
         "unique_duplicate_or_cardinality_cause_claimed": False,
@@ -205,7 +210,7 @@ def validate_train_execution(
         "negative_sampling": (
             f"uniform-{RETAINED_ROWS:,}-compact-retained-rows-nonself"
         ),
-        "graph_degree": "variable-symmetric-fuzzy-k15-topology",
+        "graph_degree": GRAPH_DEGREE,
         "host_prefetch": "single-producer-two-pinned-slot",
         "endpoint_forward": "fused-source-destination",
         "valid_canonical_edge_count": edges,
