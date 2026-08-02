@@ -10,6 +10,7 @@ from basemap.round0159_seed_margin_proposal import (
     Round0159Error,
     build_margin_proposal,
 )
+from experiments import prepare_round0159_queue, round0159_nodes
 
 
 def _family(offset: float) -> dict[int, dict[str, float]]:
@@ -50,3 +51,8 @@ def test_incomplete_seed_matrix_is_rejected() -> None:
     with pytest.raises(Round0159Error, match="seed matrix changed"):
         build_margin_proposal(raw, _family(0.0))
 
+
+def test_queue_prep_and_handler_import_without_assuming_default_r0158_queue() -> None:
+    assert callable(prepare_round0159_queue._dynamic_result_evidence)
+    assert callable(round0159_nodes.run_job)
+    assert not hasattr(prepare_round0159_queue, "R0158_EVIDENCE")

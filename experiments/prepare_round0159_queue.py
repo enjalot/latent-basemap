@@ -42,10 +42,6 @@ R0154_EVIDENCE = (
     "/data/latent-basemap/runs/round-0154/queue/artifacts/"
     "jina-2m-raw-seed44-45-calibration-v1/seed-evidence.json"
 )
-R0158_EVIDENCE = (
-    "/data/latent-basemap/runs/round-0158/queue/artifacts/"
-    "jina-2m-drop-only-seed44-45-calibration-v1/seed-evidence.json"
-)
 STATIC_REVIEWS = (
     os.path.join(LAB_ROOT, "review-0140-2026-08-01-01.md"),
     os.path.join(LAB_ROOT, "review-0149-2026-08-02.md"),
@@ -83,6 +79,54 @@ def _dynamic_review(round_id: str) -> dict[str, Any]:
     return _accepted_review(accepted[0], round_id=round_id)
 
 
+def _dynamic_result_evidence(
+    round_id: str, *, capability: str, filename: str
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Resolve the accepted result's actual queue instead of assuming `queue/`."""
+    results = [
+        path
+        for path in sorted(glob.glob(os.path.join(LAB_ROOT, f"result-{round_id}-*.md")))
+        if _frontmatter(path).get("status") == "complete"
+    ]
+    if len(results) != 1:
+        raise RuntimeError(
+            f"R0159 requires one complete Result {round_id}; found {len(results)}"
+        )
+    frontmatter = _frontmatter(results[0])
+    queue_path = str(frontmatter.get("queue_manifest") or "")
+    if queue_path.startswith("gsv:"):
+        queue_path = queue_path[4:]
+    queue_signature = expected_input_signature(queue_path)
+    with open(queue_path, encoding="utf-8") as handle:
+        queue = json.load(handle)
+    terminal_path = os.path.join(os.path.dirname(queue_path), "runner-terminal.json")
+    terminal_signature = expected_input_signature(terminal_path)
+    with open(terminal_path, encoding="utf-8") as handle:
+        terminal = json.load(handle)
+    if (
+        queue.get("round_id") != round_id
+        or capability not in (queue.get("capabilities_produced") or [])
+        or terminal.get("round_id") != round_id
+        or terminal.get("verdict") != "succeeded"
+        or terminal.get("queue_manifest_sha256") != queue_signature["sha256"]
+    ):
+        raise RuntimeError(f"R0159 Result {round_id} queue lineage changed")
+    outputs = [
+        str(output)
+        for job in queue.get("jobs", [])
+        for output in (job.get("outputs") or [])
+        if os.path.basename(str(output)) == capability
+    ]
+    if len(outputs) != 1:
+        raise RuntimeError(f"R0159 Result {round_id} capability output changed")
+    evidence = expected_input_signature(os.path.join(outputs[0], filename))
+    return evidence, [
+        expected_input_signature(results[0]),
+        queue_signature,
+        terminal_signature,
+    ]
+
+
 def prepare_round0159(
     *, release_sha: str, queue_root: str = os.path.join(ROUND_ROOT, "queue")
 ) -> str:
@@ -99,15 +143,22 @@ def prepare_round0159(
         _dynamic_review("0154"),
         _dynamic_review("0158"),
     ]
+    r0158_evidence, r0158_lineage = _dynamic_result_evidence(
+        "0158",
+        capability="jina-2m-drop-only-seed44-45-calibration-v1",
+        filename="seed-evidence.json",
+    )
     sources = {
         "r0140_panel": expected_input_signature(R0140_PANEL),
         "r0149_panel": expected_input_signature(R0149_PANEL),
         "r0150_panel": expected_input_signature(R0150_PANEL),
         "r0153_density": expected_input_signature(R0153_DENSITY),
         "r0154_evidence": expected_input_signature(R0154_EVIDENCE),
-        "r0158_evidence": expected_input_signature(R0158_EVIDENCE),
+        "r0158_evidence": r0158_evidence,
     }
-    expected_inputs = _dedupe([round_signature, *reviews, *sources.values()])
+    expected_inputs = _dedupe([
+        round_signature, *reviews, *r0158_lineage, *sources.values()
+    ])
     queue_root = create_fresh_directory(queue_root, label="R0159 CPU queue")
     artifacts = ensure_data_directory(os.path.join(queue_root, "artifacts"))
     output = os.path.join(artifacts, CAPABILITY)
@@ -183,4 +234,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
