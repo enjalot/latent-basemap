@@ -15,13 +15,15 @@ from basemap.output_safety import (
     atomic_write_new_json,
     create_fresh_directory,
 )
-from basemap.panel_v2 import PanelV2Config, _self_knn, sample_anchors
-from basemap.round0104_training import L2NormalizedArray
-from basemap.round0108_evaluation import (
+from basemap.panel_v2 import (
+    PanelV2Config,
+    _self_knn,
     process_cuda_peak,
     reset_process_cuda_peak,
-    seal,
+    sample_anchors,
 )
+from basemap.round0104_training import L2NormalizedArray
+from basemap.round0108_evaluation import seal
 from basemap.round0113_prompt_contrast import validate_seal as validate_prompt_seal
 from basemap.round0157_prompted_density import (
     ANCHORS,
@@ -247,4 +249,3 @@ def run_job(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     if str(job.get("action") or "") != "recover_native_prompted_density_v2":
         raise Round0157Error("unknown R0157 action")
     run_recovery(active, job)
-

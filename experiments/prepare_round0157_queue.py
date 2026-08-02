@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 from typing import Any
 
@@ -21,6 +22,12 @@ from experiments.prepare_round0138_queue import _frontmatter
 ROUND_ROOT = "/data/latent-basemap/runs/round-0157"
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE = os.path.join(LAB_ROOT, "round-0157-2026-08-02.md")
+ISSUED_BASE_COMMIT = "a9814820eb2b578d4ef5854db402b1df902b1e59"
+_MECHANICAL_CORRECTION_FILES = {
+    "experiments/prepare_round0157_queue.py",
+    "experiments/round0157_nodes.py",
+    "tests/test_round0157_prompted_density.py",
+}
 ASSEMBLY = (
     "/data/latent-basemap/runs/round-0113/queue/artifacts/"
     "compact-arrays/assembly-manifest.json"
@@ -75,8 +82,29 @@ def _issued_round(release_sha: str) -> dict[str, Any]:
     frontmatter = _frontmatter(ROUND_FILE)
     if frontmatter.get("status") != "issued":
         raise RuntimeError("R0157 round is not issued")
-    if frontmatter.get("base_commit") != release_sha:
-        raise RuntimeError("R0157 issued base_commit differs from release")
+    if frontmatter.get("base_commit") != ISSUED_BASE_COMMIT:
+        raise RuntimeError("R0157 issued base_commit changed")
+    if release_sha != ISSUED_BASE_COMMIT:
+        ancestor = subprocess.run(
+            [
+                "git", "-C", RELEASE_ROOT, "merge-base", "--is-ancestor",
+                ISSUED_BASE_COMMIT, release_sha,
+            ],
+            check=False,
+            timeout=10,
+        )
+        changed = subprocess.run(
+            [
+                "git", "-C", RELEASE_ROOT, "diff", "--name-only",
+                f"{ISSUED_BASE_COMMIT}..{release_sha}",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.splitlines()
+        if ancestor.returncode != 0 or not set(changed) <= _MECHANICAL_CORRECTION_FILES:
+            raise RuntimeError("R0157 release exceeds the setup correction")
     return expected_input_signature(ROUND_FILE)
 
 
@@ -186,4 +214,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

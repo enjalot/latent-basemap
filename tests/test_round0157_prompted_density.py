@@ -12,7 +12,7 @@ from basemap.round0157_prompted_density import (
     density_v2_from_radii,
     transcribe_native_prompted_score,
 )
-from experiments import prepare_round0157_queue
+from experiments import prepare_round0157_queue, round0157_nodes
 
 
 def _signature() -> dict[str, object]:
@@ -80,4 +80,4 @@ def test_density_v2_is_deterministic_and_validated() -> None:
 def test_queue_is_no_training_and_uses_gpu_run_checkout() -> None:
     assert prepare_round0157_queue.RELEASE_ROOT.endswith("latent-basemap-run")
     assert prepare_round0157_queue.ROUND_ROOT.endswith("round-0157")
-
+    assert callable(round0157_nodes.run_job)
