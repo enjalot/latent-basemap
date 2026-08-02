@@ -8,8 +8,14 @@ from basemap.round0156_scale_rescue import (
     PARENT_CAPABILITY,
     PARENT_ROUND_ID,
     OUTCOME_PASS,
+    PIPELINE,
+    PIPELINE_SCHEMA,
+    POSITIVE_DESTINATION_POLICY,
+    RETAINED_ROWS,
     ROUND_ID,
+    TRAIN_CONFIG_SCHEMA,
 )
+from basemap.round0107_training import SAMPLER_CLASS, train_config
 from experiments import prepare_round0156_queue, round0156_nodes
 from experiments import round0106_nodes
 
@@ -74,3 +80,35 @@ def test_r0156_graph_helper_registers_exact_universe_and_contract(tmp_path) -> N
         contract=contract,
         universe_rows=12_485_206,
     ) is None
+
+
+def test_r0156_real_train_config_variant_is_registered() -> None:
+    signature = {
+        "canonical_path": "/synthetic/r0156-graph.json",
+        "bytes": 1,
+        "sha256": "0" * 64,
+        "kind": "file",
+    }
+    graph = {
+        "directed_edge_count": 295_373_928,
+        "schema": "round0156-historical-prefix-fuzzy-graph-v1",
+        "round_id": ROUND_ID,
+        "compact_mapping": signature,
+        "outputs": [signature, signature, signature],
+    }
+    config, digest = train_config(
+        graph_manifest=graph,
+        graph_signature=signature,
+        schema=TRAIN_CONFIG_SCHEMA,
+        update_rule="ceil(actual-R0156-directed-fuzzy-edges/409)",
+        positive_destination_policy=POSITIVE_DESTINATION_POLICY,
+        graph_degree=GRAPH_DEGREE,
+        compact_retained_rows=RETAINED_ROWS,
+        pipeline=PIPELINE,
+        pipeline_schema=PIPELINE_SCHEMA,
+        sampler_class=SAMPLER_CLASS,
+    )
+    assert config["input"]["rows"] == RETAINED_ROWS
+    assert config["execution"]["expected_pipeline_stamp"]["pipeline"] == PIPELINE
+    assert config["optimizer"]["successful_positive_lr_updates"] == 722_186
+    assert len(digest) == 64

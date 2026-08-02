@@ -59,6 +59,7 @@ PARENT_GROUP_IDS = os.path.join(PARENT_OUTPUT, "compact-group-ids.u8.npy")
 ISSUED_BASE_COMMIT = "a53d266b04bfea6589d7e5a9879b8f713b11a021"
 _BASE_ISSUED_ROUND = base._issued_round
 _MECHANICAL_CORRECTION_FILES = {
+    "basemap/round0107_training.py",
     "experiments/prepare_round0156_queue.py",
     "experiments/round0106_nodes.py",
     "tests/test_round0156_scale_rescue.py",
