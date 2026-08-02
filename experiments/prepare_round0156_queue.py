@@ -64,6 +64,7 @@ _MECHANICAL_CORRECTION_FILES = {
     "basemap/round0107_training.py",
     "experiments/prepare_round0156_queue.py",
     "experiments/round0106_nodes.py",
+    "experiments/round0132_nodes.py",
     "tests/test_round0156_scale_rescue.py",
 }
 
@@ -290,14 +291,23 @@ def _read_json(path: str) -> dict[str, Any]:
 
 def _prior_posttrain_attempts(
     prior_queue_roots: list[str], *, release_sha: str
-) -> tuple[dict[str, Any], list[dict[str, Any]], float]:
+) -> tuple[
+    dict[str, Any],
+    list[dict[str, Any]],
+    float,
+    list[str],
+    str,
+    list[str],
+    list[str],
+]:
     """Authenticate every failed attempt and the final reusable train prefix."""
     if not prior_queue_roots:
         raise RuntimeError("R0156 posttrain continuation requires prior queues")
     inputs: list[dict[str, Any]] = []
     total_gpu_wall_s = 0.0
-    source_queue: dict[str, Any] | None = None
-    source_root = ""
+    attempts: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    prior_releases: list[str] = []
+    reused_posttrain: list[str] = []
     seen: set[str] = set()
     for raw_root in prior_queue_roots:
         root = os.path.realpath(raw_root)
@@ -332,6 +342,7 @@ def _prior_posttrain_attempts(
         )
         if ancestor.returncode != 0:
             raise RuntimeError("R0156 prior release is not an ancestor of correction")
+        prior_releases.append(prior_release)
         wall = float(terminal.get("gpu_wall_s") or -1.0)
         if not (0.0 < wall < GPU_HOURS_MAXIMUM * 3600.0):
             raise RuntimeError("R0156 prior GPU accounting is invalid")
@@ -340,11 +351,34 @@ def _prior_posttrain_attempts(
         for name in sorted(os.listdir(os.path.join(root, "artifacts"))):
             if name.endswith(".failed.json") or name.endswith(".done.json"):
                 inputs.append(expected_input_signature(os.path.join(root, "artifacts", name)))
-        source_queue = queue
-        source_root = root
+        jobs_by_id = {str(job["id"]): job for job in queue.get("jobs", [])}
+        for node in terminal.get("completed_jobs") or []:
+            if node not in _POSTTRAIN_JOB_IDS or node not in jobs_by_id:
+                continue
+            reused_posttrain.append(node)
+            for output in jobs_by_id[node].get("outputs") or []:
+                if os.path.isdir(output):
+                    for directory, _, files in os.walk(output):
+                        for name in sorted(files):
+                            inputs.append(expected_input_signature(os.path.join(directory, name)))
+                elif os.path.isfile(output):
+                    inputs.append(expected_input_signature(output))
+        attempts.append((root, queue, terminal))
 
-    assert source_queue is not None
-    terminal = _read_json(os.path.join(source_root, "runner-terminal.json"))
+    latest_root, template_queue, latest_terminal = attempts[-1]
+    completed_posttrain = [
+        node
+        for node in (latest_terminal.get("completed_jobs") or [])
+        if node in _POSTTRAIN_JOB_IDS
+    ]
+    if completed_posttrain != list(_POSTTRAIN_JOB_IDS[: len(completed_posttrain)]):
+        raise RuntimeError("R0156 posttrain completion is not a reusable prefix")
+    remaining_jobs = list(_POSTTRAIN_JOB_IDS[len(completed_posttrain) :])
+    if not remaining_jobs or not str(latest_terminal.get("stop_reason") or "").startswith(
+        f"node {remaining_jobs[0]} exited 1"
+    ):
+        raise RuntimeError("R0156 latest attempt does not stop at the next suffix node")
+
     required_prefix = [
         "materialize_prefix_drop_subset",
         "build_search_index",
@@ -355,25 +389,32 @@ def _prior_posttrain_attempts(
         "assemble_graph",
         "train_map",
     ]
-    if (
-        terminal.get("completed_jobs") != required_prefix
-        or not str(terminal.get("stop_reason") or "").startswith(
-            "node transform_map exited 1"
-        )
-    ):
-        raise RuntimeError("R0156 final prior attempt is not the sealed train prefix")
-    jobs = {str(job["id"]): job for job in source_queue.get("jobs", [])}
-    if not all(node in jobs for node in _POSTTRAIN_JOB_IDS):
-        raise RuntimeError("R0156 prior queue lacks the posttrain graph")
-    train_output = str(jobs["transform_map"]["train_output"])
-    graph_manifest = str(jobs["transform_map"]["graph_manifest"])
+    train_attempts = [
+        (root, queue, terminal)
+        for root, queue, terminal in attempts
+        if terminal.get("completed_jobs") == required_prefix
+        and "transform_map" in {
+            str(job["id"]): job for job in queue.get("jobs", [])
+        }
+    ]
+    if not train_attempts:
+        raise RuntimeError("R0156 has no authenticated sealed train prefix")
+    _train_root, train_queue, _train_terminal = train_attempts[-1]
+    train_jobs = {str(job["id"]): job for job in train_queue.get("jobs", [])}
+    template_jobs = {
+        str(job["id"]): job for job in template_queue.get("jobs", [])
+    }
+    if not all(node in template_jobs for node in remaining_jobs):
+        raise RuntimeError("R0156 latest queue lacks its remaining suffix")
+    train_output = str(train_jobs["transform_map"]["train_output"])
+    graph_manifest = str(train_jobs["transform_map"]["graph_manifest"])
     train_receipt_path = os.path.join(train_output, "train-receipt.json")
     train_receipt = _read_json(train_receipt_path)
     base.validate_seal(train_receipt, label="R0156 prior train receipt")
     accounting = train_receipt.get("train_accounting") or {}
     if (
         train_receipt.get("round_id") != ROUND_ID
-        or train_receipt.get("release_sha") != source_queue.get("release_sha")
+        or train_receipt.get("release_sha") != train_queue.get("release_sha")
         or accounting.get("optimizer_steps_succeeded") != 722_186
         or accounting.get("positive_lr_optimizer_steps") != 722_186
         or accounting.get("amp_overflow_skips") != 0
@@ -398,14 +439,23 @@ def _prior_posttrain_attempts(
         if observed != signature:
             raise RuntimeError("R0156 prior graph payload changed")
         inputs.append(observed)
-    subset_output = str(jobs["score_matched_native"]["subset_output"])
+    subset_output = str(train_jobs["score_matched_native"]["subset_output"])
     for name in sorted(os.listdir(subset_output)):
         path = os.path.join(subset_output, name)
         if os.path.isfile(path):
             inputs.append(expected_input_signature(path))
     if total_gpu_wall_s >= GPU_HOURS_MAXIMUM * 3600.0:
         raise RuntimeError("R0156 failed attempts exhausted the registered GPU cap")
-    return source_queue, base._dedupe(inputs), total_gpu_wall_s
+    reused_jobs = [*required_prefix, *dict.fromkeys(reused_posttrain)]
+    return (
+        template_queue,
+        base._dedupe(inputs),
+        total_gpu_wall_s,
+        remaining_jobs,
+        str(train_receipt["release_sha"]),
+        prior_releases,
+        reused_jobs,
+    )
 
 
 def prepare_round0156_posttrain_continuation(
@@ -417,9 +467,15 @@ def prepare_round0156_posttrain_continuation(
     """Prepare only the immutable train's transform/panel/decision suffix."""
     with _configured():
         round_path, _round_signature = _issued_round(release_sha)
-        source_queue, prior_inputs, prior_gpu_wall_s = _prior_posttrain_attempts(
-            prior_queue_roots, release_sha=release_sha
-        )
+        (
+            source_queue,
+            prior_inputs,
+            prior_gpu_wall_s,
+            remaining_jobs,
+            train_release_sha,
+            prior_releases,
+            reused_jobs,
+        ) = _prior_posttrain_attempts(prior_queue_roots, release_sha=release_sha)
         queue_root = base.create_fresh_directory(
             queue_root, label="R0156 posttrain continuation queue"
         )
@@ -438,32 +494,29 @@ def prepare_round0156_posttrain_continuation(
             node: os.path.join(
                 artifacts, os.path.basename(str(source_jobs[node]["outputs"][0]))
             )
-            for node in _POSTTRAIN_JOB_IDS
+            for node in remaining_jobs
         }
         jobs: list[dict[str, Any]] = []
-        for node in _POSTTRAIN_JOB_IDS:
+        for node in remaining_jobs:
             job = copy.deepcopy(source_jobs[node])
             job["outputs"] = [new_outputs[node]]
             job["done_marker"] = os.path.join(artifacts, f"{node}.done.json")
+            job["train_release_sha"] = train_release_sha
             job["expected_inputs"] = base._dedupe([
                 *job.get("expected_inputs", []), *continuation_inputs
             ])
-            if node == "transform_map":
-                job["deps"] = []
-            elif node == "score_matched_native":
-                job["deps"] = ["transform_map"]
+            job["deps"] = [
+                dep for dep in job.get("deps", []) if dep in remaining_jobs
+            ]
+            if node == "score_matched_native" and "transform_map" in new_outputs:
                 job["transform_output"] = new_outputs["transform_map"]
-            elif node in {"score_matched_ood", "score_functional_density"}:
-                job["deps"] = ["transform_map"]
-            else:
-                job["deps"] = [
-                    "score_matched_native",
-                    "score_matched_ood",
-                    "score_functional_density",
-                ]
-                job["native_output"] = new_outputs["score_matched_native"]
-                job["ood_output"] = new_outputs["score_matched_ood"]
-                job["functional_output"] = new_outputs["score_functional_density"]
+            if node == "decide_rescue":
+                if "score_matched_native" in new_outputs:
+                    job["native_output"] = new_outputs["score_matched_native"]
+                if "score_matched_ood" in new_outputs:
+                    job["ood_output"] = new_outputs["score_matched_ood"]
+                if "score_functional_density" in new_outputs:
+                    job["functional_output"] = new_outputs["score_functional_density"]
             jobs.append(job)
 
         remaining_cap = GPU_HOURS_MAXIMUM - prior_gpu_wall_s / 3600.0
@@ -480,24 +533,20 @@ def prepare_round0156_posttrain_continuation(
         scientific_contract["release_smoke"] = smoke
         scientific_contract["setup_retry"] = {
             "prior_queue_roots": [os.path.realpath(path) for path in prior_queue_roots],
-            "prior_releases": [
-                _read_json(os.path.join(path, "queue.json"))["release_sha"]
-                for path in prior_queue_roots
-            ],
+            "prior_releases": prior_releases,
             "prior_gpu_wall_s": prior_gpu_wall_s,
-            "successful_prefix_reused_without_reexecution": [
-                "materialize_prefix_drop_subset",
-                "build_search_index",
-                "qualify_fixed_search",
-                "three_graph_parts",
-                "assemble_graph",
-                "train_map",
-            ],
-            "continuation_jobs": list(_POSTTRAIN_JOB_IDS),
+            "successful_prefix_reused_without_reexecution": reused_jobs,
+            "continuation_jobs": remaining_jobs,
             "remaining_gpu_hours_cap": remaining_cap,
             "science_contract_changed": False,
             "training_performed_in_continuation": False,
         }
+        p90_by_node = {
+            node: P90_GPU_SECONDS[node]
+            for node in remaining_jobs
+            if node in P90_GPU_SECONDS
+        }
+        remaining_p90_s = sum(p90_by_node.values())
         manifest.update({
             "schema": "round0156-historical-prefix-posttrain-continuation-queue-v1",
             "repo_root": RELEASE_ROOT,
@@ -508,24 +557,15 @@ def prepare_round0156_posttrain_continuation(
             "training_performed": False,
             "scientific_contract": scientific_contract,
             "gpu_hours": {
-                "minimum": 0.05,
-                "expected": 0.35,
-                "p90": 0.75,
+                "minimum": 0.0 if remaining_p90_s == 0 else 0.01,
+                "expected": min(0.35, remaining_p90_s / 7200.0),
+                "p90": remaining_p90_s / 3600.0,
                 "maximum": remaining_cap,
                 "prior_attempt_gpu_wall_s": prior_gpu_wall_s,
             },
             "p90_gpu_seconds": {
-                "transform_map": P90_GPU_SECONDS["transform_map"],
-                "score_matched_native": P90_GPU_SECONDS["score_matched_native"],
-                "score_matched_ood": P90_GPU_SECONDS["score_matched_ood"],
-                "score_functional_density": P90_GPU_SECONDS["score_functional_density"],
-                "total": sum(
-                    P90_GPU_SECONDS[key]
-                    for key in (
-                        "transform_map", "score_matched_native",
-                        "score_matched_ood", "score_functional_density",
-                    )
-                ),
+                **p90_by_node,
+                "total": remaining_p90_s,
                 "prior_attempt_gpu_wall_s": prior_gpu_wall_s,
             },
             "jobs": jobs,

@@ -1827,6 +1827,27 @@ def run_score_ood(
     return {**receipt, "receipt": expected_input_signature(path)}
 
 
+def _expected_half_train_release(
+    active: Mapping[str, Any], job: Mapping[str, Any]
+) -> str:
+    """Bind an adopted train only to an explicit fail-closed setup retry."""
+    active_release = str(active["manifest"]["release_sha"])
+    expected_train_release = str(job.get("train_release_sha") or active_release)
+    if expected_train_release != active_release:
+        retry = (
+            (active["manifest"].get("scientific_contract") or {})
+            .get("setup_retry")
+            or {}
+        )
+        if (
+            expected_train_release not in (retry.get("prior_releases") or [])
+            or retry.get("science_contract_changed") is not False
+            or retry.get("training_performed_in_continuation") is not False
+        ):
+            raise Round0132Error("R0132 adopted train release is not authenticated")
+    return expected_train_release
+
+
 def _authenticate_half_train(
     active: Mapping[str, Any], job: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -1839,9 +1860,10 @@ def _authenticate_half_train(
     validate_seal(train, label="R0132 train receipt")
     validate_seal(graph, label="R0132 graph manifest")
     graph_signature = _signature(graph_path, label="R0132 graph manifest")
+    expected_train_release = _expected_half_train_release(active, job)
     if (
-        train.get("release_sha") != active["manifest"]["release_sha"]
-        or graph.get("release_sha") != active["manifest"]["release_sha"]
+        train.get("release_sha") != expected_train_release
+        or graph.get("release_sha") != expected_train_release
         or train.get("graph_manifest") != graph_signature
         or (config.get("config") or {}).get("graph", {}).get("manifest")
         != graph_signature

@@ -18,7 +18,7 @@ from basemap.round0156_scale_rescue import (
 from basemap.round0107_training import SAMPLER_CLASS, train_config
 from basemap.round0108_evaluation import CompactInt8DequantizedArray
 from experiments import prepare_round0156_queue, round0156_nodes
-from experiments import round0106_nodes
+from experiments import round0106_nodes, round0132_nodes
 
 
 def test_r0156_uses_scale_native_k15_not_small_map_k50() -> None:
@@ -152,3 +152,43 @@ def test_r0156_compact_mapping_is_registered_for_posttrain_evaluation(
     mapping = _MappingStub()
     source = CompactInt8DequantizedArray(mapping)
     assert source.shape == (RETAINED_ROWS, 768)
+
+
+def test_r0156_posttrain_continuation_authenticates_adopted_train_release() -> None:
+    active = {
+        "manifest": {
+            "release_sha": "b" * 40,
+            "scientific_contract": {
+                "setup_retry": {
+                    "prior_releases": ["a" * 40],
+                    "science_contract_changed": False,
+                    "training_performed_in_continuation": False,
+                }
+            },
+        }
+    }
+    assert round0132_nodes._expected_half_train_release(
+        active, {"train_release_sha": "a" * 40}
+    ) == "a" * 40
+
+
+def test_r0156_posttrain_continuation_rejects_unbound_train_release() -> None:
+    import pytest
+    from basemap.round0132_scale_bridge import Round0132Error
+
+    active = {
+        "manifest": {
+            "release_sha": "b" * 40,
+            "scientific_contract": {
+                "setup_retry": {
+                    "prior_releases": [],
+                    "science_contract_changed": False,
+                    "training_performed_in_continuation": False,
+                }
+            },
+        }
+    }
+    with pytest.raises(Round0132Error, match="not authenticated"):
+        round0132_nodes._expected_half_train_release(
+            active, {"train_release_sha": "a" * 40}
+        )
