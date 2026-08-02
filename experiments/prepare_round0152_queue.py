@@ -70,6 +70,7 @@ R0151_CENSUS = os.path.join(R0151_OUTPUT, "census.json")
 R0151_MAPPING = os.path.join(R0151_OUTPUT, "compact-to-global.i64.npy")
 R0151_GROUP_IDS = os.path.join(R0151_OUTPUT, "compact-group-ids.u8.npy")
 R0140_QUEUE = "/data/latent-basemap/runs/round-0140/queue-attempt-2/queue.json"
+INDEX_FILENAME = "jina-diverse-12p5m.ivfpq"
 
 GPU_HOURS_MINIMUM = 2.1
 GPU_HOURS_EXPECTED = 2.55
@@ -307,7 +308,8 @@ def prepare_round0152(
 
     subset_output = os.path.join(artifacts, "prefix-drop-subset")
     index_output = os.path.join(artifacts, "prefix-drop-search-index")
-    index_path = os.path.join(index_output, "jina-diverse-prefix-drop-12p5m.ivfpq")
+    # The reviewed inherited R0132 builder publishes this exact basename.
+    index_path = os.path.join(index_output, INDEX_FILENAME)
     qualification_output = os.path.join(artifacts, "prefix-drop-search-qualification")
     part_outputs = {
         part: os.path.join(artifacts, f"prefix-drop-graph-part-{part}")

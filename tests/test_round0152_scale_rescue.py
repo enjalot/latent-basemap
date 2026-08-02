@@ -34,7 +34,11 @@ from basemap.round0152_scale_rescue import (
     validate_train_execution,
 )
 from experiments import round0132_nodes
-from experiments.round0152_nodes import _configured_inherited_contract
+from experiments import prepare_round0152_queue
+from experiments.round0152_nodes import (
+    _configured_inherited_contract,
+    _subset_paths,
+)
 
 
 def _functional_cell(delta: float = 0.0) -> dict:
@@ -271,9 +275,41 @@ def test_shared_trainer_accepts_only_the_exact_r0152_variant():
 def test_inherited_r0132_configuration_is_bounded_and_restored():
     original_round = round0132_nodes.ROUND_ID
     original_rows = round0132_nodes.HALF_RETAINED_ROWS
+    original_subset_paths = round0132_nodes._subset_paths
+    original_map_key = round0132_nodes.TRANSFORM_MAP_KEY
     with _configured_inherited_contract():
         assert round0132_nodes.ROUND_ID == ROUND_ID
         assert round0132_nodes.HALF_RETAINED_ROWS == RETAINED_ROWS
         assert round0132_nodes.GRAPH_CONTRACT.round_id == ROUND_ID
+        assert round0132_nodes._subset_paths("/tmp/subset") == _subset_paths(
+            "/tmp/subset"
+        )
+        assert round0132_nodes._subset_paths("/tmp/subset")["excluded"].endswith(
+            "excluded-from-prefix-drop.i64.npy"
+        )
+        assert (
+            round0132_nodes.SEARCH_POSITIVE_OUTCOME
+            == "qualified-fixed-r0105-policy-on-prefix-drop-universe"
+        )
+        assert (
+            round0132_nodes.SEARCH_EXACT_UNIVERSE_CHECK
+            == "candidate_universe_is_exact_prefix_drop_subset"
+        )
+        assert (
+            round0132_nodes.TRANSFORM_MAP_KEY
+            == "r0152-diverse-jina-prefix-drop-12p5m-seed42"
+        )
+        assert round0132_nodes.NATIVE_TREATMENT_KEY == (
+            "accepted_25m_on_r0151_rows"
+        )
+        assert round0132_nodes.NATIVE_SHARED_ROWS_CHECK == (
+            "same_r0151_candidate_rows"
+        )
     assert round0132_nodes.ROUND_ID == original_round
     assert round0132_nodes.HALF_RETAINED_ROWS == original_rows
+    assert round0132_nodes._subset_paths is original_subset_paths
+    assert round0132_nodes.TRANSFORM_MAP_KEY == original_map_key
+
+
+def test_queue_uses_the_exact_inherited_index_basename():
+    assert prepare_round0152_queue.INDEX_FILENAME == "jina-diverse-12p5m.ivfpq"
