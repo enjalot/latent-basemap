@@ -47,6 +47,14 @@ _R0132_PIPELINE_SCHEMA = "round0132-host-weighted-jina-diverse-pipeline-v1"
 _R0132_POSITIVE_DESTINATION_POLICY = (
     "R0132-global-half-retained-fuzzy-tconorm-graph"
 )
+_R0152_RETAINED_ROWS = 12_485_206
+_R0152_PIPELINE = "host_weighted_jina_diverse_12p5m_prefix_drop"
+_R0152_PIPELINE_SCHEMA = (
+    "round0152-host-weighted-jina-diverse-prefix-drop-pipeline-v1"
+)
+_R0152_POSITIVE_DESTINATION_POLICY = (
+    "R0152-global-prefix-drop-retained-fuzzy-tconorm-graph"
+)
 
 
 class Round0107Error(RuntimeError):
@@ -77,7 +85,15 @@ def _validate_legacy_or_r0132_variant(
         and str(positive_destination_policy)
         == _R0132_POSITIVE_DESTINATION_POLICY
     )
-    if not (legacy or r0132):
+    r0152 = (
+        int(rows) == _R0152_RETAINED_ROWS
+        and str(pipeline) == _R0152_PIPELINE
+        and str(pipeline_schema) == _R0152_PIPELINE_SCHEMA
+        and str(sampler_class) == SAMPLER_CLASS
+        and str(positive_destination_policy)
+        == _R0152_POSITIVE_DESTINATION_POLICY
+    )
+    if not (legacy or r0132 or r0152):
         raise Round0107Error("training pipeline variant is not registered")
 
 
