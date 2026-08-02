@@ -562,7 +562,10 @@ class CompactInt8DequantizedArray:
         self.mapping = mapping
         if (
             mapping.ndim != 1
-            or len(mapping) not in {RETAINED_ROWS, 12_474_331}
+            # Registered compact universes that reuse the R0103 int8 substrate.
+            # R0156 is the historical-prefix 12.5M treatment; keeping the
+            # cardinality explicit preserves the fail-closed mapping check.
+            or len(mapping) not in {RETAINED_ROWS, 12_474_331, 12_485_206}
             or mapping.dtype != np.int64
             or int(mapping[0]) < 0
             or int(mapping[-1]) >= ROW_COUNT

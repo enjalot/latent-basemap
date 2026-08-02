@@ -16,6 +16,7 @@ from basemap.round0156_scale_rescue import (
     TRAIN_CONFIG_SCHEMA,
 )
 from basemap.round0107_training import SAMPLER_CLASS, train_config
+from basemap.round0108_evaluation import CompactInt8DequantizedArray
 from experiments import prepare_round0156_queue, round0156_nodes
 from experiments import round0106_nodes
 
@@ -112,3 +113,42 @@ def test_r0156_real_train_config_variant_is_registered() -> None:
     assert config["execution"]["expected_pipeline_stamp"]["pipeline"] == PIPELINE
     assert config["optimizer"]["successful_positive_lr_updates"] == 722_186
     assert len(digest) == 64
+
+
+def test_r0156_compact_mapping_is_registered_for_posttrain_evaluation(
+    monkeypatch,
+) -> None:
+    """Catch the real transform admission that follows the expensive train."""
+    import numpy as np
+    from basemap import round0108_evaluation
+
+    class _MemmapStub:
+        def __init__(self, *_args, **kwargs):
+            self.shape = kwargs["shape"]
+
+    monkeypatch.setattr(round0108_evaluation, "validate_substrate_manifest", lambda **_: {
+        "payloads": {
+            "int8": {"canonical_path": "/synthetic/embeddings.i8"},
+            "scales": {"canonical_path": "/synthetic/scales.f16"},
+        }
+    })
+    monkeypatch.setattr(round0108_evaluation.np, "memmap", _MemmapStub)
+    class _MappingStub:
+        ndim = 1
+        dtype = np.dtype("int64")
+
+        def __len__(self):
+            return RETAINED_ROWS
+
+        def __getitem__(self, key):
+            if key == 0:
+                return 0
+            if key == -1:
+                return RETAINED_ROWS - 1
+            if isinstance(key, slice):
+                return np.array([1, 2] if key.start == 1 else [0, 1], dtype=np.int64)
+            raise AssertionError(key)
+
+    mapping = _MappingStub()
+    source = CompactInt8DequantizedArray(mapping)
+    assert source.shape == (RETAINED_ROWS, 768)

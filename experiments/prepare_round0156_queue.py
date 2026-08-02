@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from contextlib import contextmanager
 import json
 import os
@@ -59,6 +60,7 @@ PARENT_GROUP_IDS = os.path.join(PARENT_OUTPUT, "compact-group-ids.u8.npy")
 ISSUED_BASE_COMMIT = "a53d266b04bfea6589d7e5a9879b8f713b11a021"
 _BASE_ISSUED_ROUND = base._issued_round
 _MECHANICAL_CORRECTION_FILES = {
+    "basemap/round0108_evaluation.py",
     "basemap/round0107_training.py",
     "experiments/prepare_round0156_queue.py",
     "experiments/round0106_nodes.py",
@@ -269,16 +271,285 @@ def prepare_round0156(
         return base.prepare_round0152(release_sha=release_sha, queue_root=queue_root)
 
 
+_POSTTRAIN_JOB_IDS = (
+    "transform_map",
+    "score_matched_native",
+    "score_matched_ood",
+    "score_functional_density",
+    "decide_rescue",
+)
+
+
+def _read_json(path: str) -> dict[str, Any]:
+    with open(path, encoding="utf-8") as handle:
+        value = json.load(handle)
+    if not isinstance(value, dict):
+        raise RuntimeError(f"JSON object required: {path}")
+    return value
+
+
+def _prior_posttrain_attempts(
+    prior_queue_roots: list[str], *, release_sha: str
+) -> tuple[dict[str, Any], list[dict[str, Any]], float]:
+    """Authenticate every failed attempt and the final reusable train prefix."""
+    if not prior_queue_roots:
+        raise RuntimeError("R0156 posttrain continuation requires prior queues")
+    inputs: list[dict[str, Any]] = []
+    total_gpu_wall_s = 0.0
+    source_queue: dict[str, Any] | None = None
+    source_root = ""
+    seen: set[str] = set()
+    for raw_root in prior_queue_roots:
+        root = os.path.realpath(raw_root)
+        if root in seen:
+            raise RuntimeError("R0156 prior queue roots must be unique")
+        seen.add(root)
+        queue_path = os.path.join(root, "queue.json")
+        terminal_path = os.path.join(root, "runner-terminal.json")
+        queue_signature = expected_input_signature(queue_path)
+        terminal_signature = expected_input_signature(terminal_path)
+        queue = _read_json(queue_path)
+        terminal = _read_json(terminal_path)
+        if (
+            queue.get("round_id") != ROUND_ID
+            or terminal.get("round_id") != ROUND_ID
+            or terminal.get("verdict") != "failed"
+            or terminal.get("queue_manifest_sha256") != queue_signature["sha256"]
+            or terminal.get("queue_manifest_unchanged") is not True
+            or terminal.get("release_checkout_unchanged") is not True
+            or terminal.get("gpu_wall_accounting_complete") is not True
+            or terminal.get("boundary_problems") != []
+        ):
+            raise RuntimeError(f"R0156 prior attempt is not reusable: {root}")
+        prior_release = str(queue.get("release_sha") or "")
+        ancestor = subprocess.run(
+            [
+                "git", "-C", RELEASE_ROOT, "merge-base", "--is-ancestor",
+                prior_release, release_sha,
+            ],
+            check=False,
+            timeout=10,
+        )
+        if ancestor.returncode != 0:
+            raise RuntimeError("R0156 prior release is not an ancestor of correction")
+        wall = float(terminal.get("gpu_wall_s") or -1.0)
+        if not (0.0 < wall < GPU_HOURS_MAXIMUM * 3600.0):
+            raise RuntimeError("R0156 prior GPU accounting is invalid")
+        total_gpu_wall_s += wall
+        inputs.extend([queue_signature, terminal_signature])
+        for name in sorted(os.listdir(os.path.join(root, "artifacts"))):
+            if name.endswith(".failed.json") or name.endswith(".done.json"):
+                inputs.append(expected_input_signature(os.path.join(root, "artifacts", name)))
+        source_queue = queue
+        source_root = root
+
+    assert source_queue is not None
+    terminal = _read_json(os.path.join(source_root, "runner-terminal.json"))
+    required_prefix = [
+        "materialize_prefix_drop_subset",
+        "build_search_index",
+        "qualify_fixed_search",
+        "build_graph_part_groups-a",
+        "build_graph_part_groups-b",
+        "build_graph_part_groups-c",
+        "assemble_graph",
+        "train_map",
+    ]
+    if (
+        terminal.get("completed_jobs") != required_prefix
+        or not str(terminal.get("stop_reason") or "").startswith(
+            "node transform_map exited 1"
+        )
+    ):
+        raise RuntimeError("R0156 final prior attempt is not the sealed train prefix")
+    jobs = {str(job["id"]): job for job in source_queue.get("jobs", [])}
+    if not all(node in jobs for node in _POSTTRAIN_JOB_IDS):
+        raise RuntimeError("R0156 prior queue lacks the posttrain graph")
+    train_output = str(jobs["transform_map"]["train_output"])
+    graph_manifest = str(jobs["transform_map"]["graph_manifest"])
+    train_receipt_path = os.path.join(train_output, "train-receipt.json")
+    train_receipt = _read_json(train_receipt_path)
+    base.validate_seal(train_receipt, label="R0156 prior train receipt")
+    accounting = train_receipt.get("train_accounting") or {}
+    if (
+        train_receipt.get("round_id") != ROUND_ID
+        or train_receipt.get("release_sha") != source_queue.get("release_sha")
+        or accounting.get("optimizer_steps_succeeded") != 722_186
+        or accounting.get("positive_lr_optimizer_steps") != 722_186
+        or accounting.get("amp_overflow_skips") != 0
+        or accounting.get("nonfinite_loss_skips") != 0
+        or accounting.get("nonfinite_gradient_skips") != 0
+    ):
+        raise RuntimeError("R0156 prior train accounting cannot be adopted")
+    inputs.extend([
+        expected_input_signature(train_receipt_path),
+        expected_input_signature(os.path.join(train_output, "model.pt")),
+        expected_input_signature(os.path.join(train_output, "production-config.json")),
+        expected_input_signature(graph_manifest),
+    ])
+    graph = _read_json(graph_manifest)
+    for signature in [graph.get("compact_mapping"), *(graph.get("outputs") or [])]:
+        if not isinstance(signature, dict):
+            raise RuntimeError("R0156 prior graph seal is incomplete")
+        observed = expected_input_signature(str(signature["canonical_path"]))
+        if observed != signature:
+            raise RuntimeError("R0156 prior graph payload changed")
+        inputs.append(observed)
+    subset_output = str(jobs["score_matched_native"]["subset_output"])
+    for name in sorted(os.listdir(subset_output)):
+        path = os.path.join(subset_output, name)
+        if os.path.isfile(path):
+            inputs.append(expected_input_signature(path))
+    if total_gpu_wall_s >= GPU_HOURS_MAXIMUM * 3600.0:
+        raise RuntimeError("R0156 failed attempts exhausted the registered GPU cap")
+    return source_queue, base._dedupe(inputs), total_gpu_wall_s
+
+
+def prepare_round0156_posttrain_continuation(
+    *,
+    release_sha: str,
+    queue_root: str,
+    prior_queue_roots: list[str],
+) -> str:
+    """Prepare only the immutable train's transform/panel/decision suffix."""
+    with _configured():
+        round_path, _round_signature = _issued_round(release_sha)
+        source_queue, prior_inputs, prior_gpu_wall_s = _prior_posttrain_attempts(
+            prior_queue_roots, release_sha=release_sha
+        )
+        queue_root = base.create_fresh_directory(
+            queue_root, label="R0156 posttrain continuation queue"
+        )
+        artifacts = base.ensure_data_directory(os.path.join(queue_root, "artifacts"))
+        preflight = base.ensure_data_directory(os.path.join(queue_root, "preflight"))
+        smoke_path = os.path.join(preflight, "release-pytest-and-cpu-path-smoke.json")
+        base.atomic_write_new_json(
+            smoke_path, _pytest_receipt(release_sha), immutable=True
+        )
+        smoke = expected_input_signature(smoke_path)
+        continuation_inputs = base._dedupe([*prior_inputs, smoke])
+        source_jobs = {
+            str(job["id"]): job for job in source_queue.get("jobs", [])
+        }
+        new_outputs = {
+            node: os.path.join(
+                artifacts, os.path.basename(str(source_jobs[node]["outputs"][0]))
+            )
+            for node in _POSTTRAIN_JOB_IDS
+        }
+        jobs: list[dict[str, Any]] = []
+        for node in _POSTTRAIN_JOB_IDS:
+            job = copy.deepcopy(source_jobs[node])
+            job["outputs"] = [new_outputs[node]]
+            job["done_marker"] = os.path.join(artifacts, f"{node}.done.json")
+            job["expected_inputs"] = base._dedupe([
+                *job.get("expected_inputs", []), *continuation_inputs
+            ])
+            if node == "transform_map":
+                job["deps"] = []
+            elif node == "score_matched_native":
+                job["deps"] = ["transform_map"]
+                job["transform_output"] = new_outputs["transform_map"]
+            elif node in {"score_matched_ood", "score_functional_density"}:
+                job["deps"] = ["transform_map"]
+            else:
+                job["deps"] = [
+                    "score_matched_native",
+                    "score_matched_ood",
+                    "score_functional_density",
+                ]
+                job["native_output"] = new_outputs["score_matched_native"]
+                job["ood_output"] = new_outputs["score_matched_ood"]
+                job["functional_output"] = new_outputs["score_functional_density"]
+            jobs.append(job)
+
+        remaining_cap = GPU_HOURS_MAXIMUM - prior_gpu_wall_s / 3600.0
+        manifest = base._base_manifest(
+            round_id=ROUND_ID,
+            release_sha=release_sha,
+            round_file=round_path,
+            queue_root=queue_root,
+            gpu_hours_cap=remaining_cap,
+            execution_authority="autonomous-gpu",
+            gpu=True,
+        )
+        scientific_contract = copy.deepcopy(source_queue["scientific_contract"])
+        scientific_contract["release_smoke"] = smoke
+        scientific_contract["setup_retry"] = {
+            "prior_queue_roots": [os.path.realpath(path) for path in prior_queue_roots],
+            "prior_releases": [
+                _read_json(os.path.join(path, "queue.json"))["release_sha"]
+                for path in prior_queue_roots
+            ],
+            "prior_gpu_wall_s": prior_gpu_wall_s,
+            "successful_prefix_reused_without_reexecution": [
+                "materialize_prefix_drop_subset",
+                "build_search_index",
+                "qualify_fixed_search",
+                "three_graph_parts",
+                "assemble_graph",
+                "train_map",
+            ],
+            "continuation_jobs": list(_POSTTRAIN_JOB_IDS),
+            "remaining_gpu_hours_cap": remaining_cap,
+            "science_contract_changed": False,
+            "training_performed_in_continuation": False,
+        }
+        manifest.update({
+            "schema": "round0156-historical-prefix-posttrain-continuation-queue-v1",
+            "repo_root": RELEASE_ROOT,
+            "queue_class": "gpu-research",
+            "required_reviews": list(REVIEW_CAPABILITIES),
+            "capability_dependencies": list(REVIEW_CAPABILITIES.values()),
+            "capabilities_produced": [CAPABILITY],
+            "training_performed": False,
+            "scientific_contract": scientific_contract,
+            "gpu_hours": {
+                "minimum": 0.05,
+                "expected": 0.35,
+                "p90": 0.75,
+                "maximum": remaining_cap,
+                "prior_attempt_gpu_wall_s": prior_gpu_wall_s,
+            },
+            "p90_gpu_seconds": {
+                "transform_map": P90_GPU_SECONDS["transform_map"],
+                "score_matched_native": P90_GPU_SECONDS["score_matched_native"],
+                "score_matched_ood": P90_GPU_SECONDS["score_matched_ood"],
+                "score_functional_density": P90_GPU_SECONDS["score_functional_density"],
+                "total": sum(
+                    P90_GPU_SECONDS[key]
+                    for key in (
+                        "transform_map", "score_matched_native",
+                        "score_matched_ood", "score_functional_density",
+                    )
+                ),
+                "prior_attempt_gpu_wall_s": prior_gpu_wall_s,
+            },
+            "jobs": jobs,
+        })
+        path = os.path.join(queue_root, "queue.json")
+        base.atomic_write_new_json(path, manifest, immutable=True)
+        return path
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-sha", required=True)
     parser.add_argument("--queue-root", default=os.path.join(ROUND_ROOT, "queue"))
+    parser.add_argument("--prior-queue-root", action="append", default=[])
     args = parser.parse_args(argv)
-    print(json.dumps({
-        "queue_manifest": prepare_round0156(
+    queue_manifest = (
+        prepare_round0156_posttrain_continuation(
+            release_sha=args.release_sha,
+            queue_root=args.queue_root,
+            prior_queue_roots=args.prior_queue_root,
+        )
+        if args.prior_queue_root
+        else prepare_round0156(
             release_sha=args.release_sha, queue_root=args.queue_root
         )
-    }, indent=2, sort_keys=True))
+    )
+    print(json.dumps({"queue_manifest": queue_manifest}, indent=2, sort_keys=True))
     return 0
 
 
