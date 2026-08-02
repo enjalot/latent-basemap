@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import copy
+import json
+from pathlib import Path
 
+import numpy as np
 import pytest
 
 from basemap.artifact_identity import canonical_json, sha256_bytes
@@ -33,8 +36,7 @@ from basemap.round0152_scale_rescue import (
     quality_selector,
     validate_train_execution,
 )
-from experiments import round0132_nodes
-from experiments import prepare_round0152_queue
+from experiments import prepare_round0152_queue, round0132_nodes, round0152_nodes
 from experiments.round0152_nodes import (
     _configured_inherited_contract,
     _subset_paths,
@@ -314,3 +316,79 @@ def test_inherited_r0132_configuration_is_bounded_and_restored():
 def test_queue_uses_the_exact_inherited_index_basename():
     assert prepare_round0152_queue.INDEX_FILENAME == round0132_nodes.INDEX_FILENAME
     assert prepare_round0152_queue.INDEX_FILENAME == "jina-diverse-12p5m.ivfpq"
+
+
+def test_materializer_writes_manifest_only_after_array_signatures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    mapping = np.asarray([0, 2, 4], dtype=np.int64)
+    group_ids = np.asarray([0, 0, 1], dtype=np.uint8)
+    mapping_path = tmp_path / "candidate.npy"
+    group_ids_path = tmp_path / "groups.npy"
+    np.save(mapping_path, mapping)
+    np.save(group_ids_path, group_ids)
+    mapping_signature = round0152_nodes._signature(str(mapping_path))
+    group_ids_signature = round0152_nodes._signature(str(group_ids_path))
+    census_path = tmp_path / "census.json"
+    census_path.write_text(json.dumps({
+        "round_id": "0151",
+        "capability": round0152_nodes.PARENT_CAPABILITY,
+        "retained_rows": 3,
+        "replacement_rows": 0,
+        "mapping": mapping_signature,
+        "group_ids": group_ids_signature,
+        "mapping_ordered_sha256": "mapping-hash",
+        "group_ids_ordered_sha256": "group-hash",
+        "groups": {
+            "a": {"retained_rows": 2},
+            "b": {"retained_rows": 1},
+        },
+        "selector": {"row_policy": "fixture"},
+        "checks": {"closed": True},
+    }), encoding="utf-8")
+    census_signature = round0152_nodes._signature(str(census_path))
+
+    monkeypatch.setattr(round0152_nodes, "RETAINED_ROWS", 3)
+    monkeypatch.setattr(round0152_nodes, "ROW_COUNT", 5)
+    monkeypatch.setattr(round0152_nodes, "GROUPS", ("a", "b"))
+    monkeypatch.setattr(
+        round0152_nodes, "EXPECTED_MAPPING_ORDERED_SHA256", "mapping-hash"
+    )
+    monkeypatch.setattr(
+        round0152_nodes, "EXPECTED_GROUP_IDS_ORDERED_SHA256", "group-hash"
+    )
+    monkeypatch.setattr(round0152_nodes, "validate_seal", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        round0152_nodes,
+        "ordered_array_sha256",
+        lambda value: "mapping-hash" if value.dtype == np.int64 else "group-hash",
+    )
+    monkeypatch.setattr(
+        round0152_nodes,
+        "create_fresh_directory",
+        lambda path, **_kwargs: str(Path(path).mkdir() or path),
+    )
+    monkeypatch.setattr(
+        round0152_nodes,
+        "atomic_save_new_npy",
+        lambda path, value, **_kwargs: np.save(path, value),
+    )
+    monkeypatch.setattr(
+        round0152_nodes,
+        "atomic_write_new_json",
+        lambda path, value, **_kwargs: Path(path).write_text(
+            json.dumps(value), encoding="utf-8"
+        ),
+    )
+
+    output = tmp_path / "output"
+    round0152_nodes.run_materialize_subset(
+        {"manifest": {"release_sha": "a" * 40}},
+        {
+            "outputs": [str(output)],
+            "census": census_signature,
+            "mapping": mapping_signature,
+            "group_ids": group_ids_signature,
+        },
+    )
+    assert (output / "subset-manifest.json").is_file()

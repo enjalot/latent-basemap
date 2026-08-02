@@ -241,7 +241,12 @@ def run_materialize_subset(active: Mapping[str, Any], job: Mapping[str, Any]) ->
     atomic_save_new_npy(paths["mapping"], mapping, immutable=True)
     atomic_save_new_npy(paths["group_ids"], group_ids, immutable=True)
     atomic_save_new_npy(paths["excluded"], excluded, immutable=True)
-    signatures = {name: _signature(path) for name, path in paths.items()}
+    # The manifest is assembled from these arrays and written below.  Do not
+    # try to hash ``paths["manifest"]`` before that file exists.
+    signatures = {
+        name: _signature(paths[name])
+        for name in ("mapping", "group_ids", "excluded")
+    }
     manifest = seal({
         "schema": SUBSET_SCHEMA,
         "round_id": ROUND_ID,
