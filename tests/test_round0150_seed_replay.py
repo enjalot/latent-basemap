@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from experiments import prepare_round0150_queue as queue_prep
 from basemap.round0140_subsystem_bisection import (
     CURRENT_GRAPH_CURRENT_HOST,
     METRICS,
@@ -161,3 +162,38 @@ def test_selector_rejects_inconsistent_parent_outcome() -> None:
 def test_handler_rejects_wrong_round_manifest_before_dispatch() -> None:
     with pytest.raises(Round0150Error, match="exact queue manifest"):
         run_job({"manifest": {"round_id": "0149"}}, {"action": "unknown"})
+
+
+def test_queue_activation_rejects_a_reviewed_negative_parent(monkeypatch) -> None:
+    selection_signature = signature("7")
+    sealed = iter(
+        [
+            (
+                {
+                    "round_id": "0149",
+                    "capability": R0149_CAPABILITY,
+                    "outcome": "drop-only-historical-row-policy-does-not-restore",
+                    "selection_receipt": selection_signature,
+                },
+                signature("6"),
+            ),
+            (
+                {
+                    "round_id": "0149",
+                    "target_rows": 1_989_633,
+                    "replacement_rows": 0,
+                },
+                selection_signature,
+            ),
+            ({"round_id": "0140"}, signature("8")),
+            (
+                {"round_id": "0149", "source_proof": {"rows": 1_989_633}},
+                signature("9"),
+            ),
+        ]
+    )
+    monkeypatch.setattr(queue_prep, "_accepted_review", lambda *args: [])
+    monkeypatch.setattr(queue_prep, "_read_sealed", lambda *args, **kwargs: next(sealed))
+
+    with pytest.raises(RuntimeError, match="accepted activation changed"):
+        queue_prep._accepted_activation()
