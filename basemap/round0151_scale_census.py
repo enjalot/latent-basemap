@@ -35,6 +35,47 @@ class Round0151Error(RuntimeError):
     """The preregistered prefix/drop-only census is malformed."""
 
 
+def inventory_group_ranges(
+    selection: Mapping[str, Any], *, expected_rows: int = FULL_RAW_ROWS
+) -> dict[str, tuple[int, int]]:
+    """Recover the exact 22 contiguous groups from the R0087 selection."""
+    expected_datasets = [
+        group if index < 3 else f"fineweb2-{group}-chunked-500-jina-v5-nano"
+        for index, group in enumerate(GROUPS)
+    ]
+    if selection.get("source_order") != expected_datasets:
+        raise Round0151Error("R0087 source-group order changed")
+    rows = selection.get("ranges")
+    if not isinstance(rows, list) or not rows:
+        raise Round0151Error("R0087 selection ranges are absent")
+    ranges: dict[str, tuple[int, int]] = {}
+    cursor = 0
+    group_index = 0
+    for row in rows:
+        if not isinstance(row, Mapping) or group_index >= len(GROUPS):
+            raise Round0151Error("R0087 selection range is malformed")
+        dataset = str(row.get("dataset") or "")
+        while dataset != expected_datasets[group_index]:
+            group_index += 1
+            if group_index >= len(GROUPS) or dataset != expected_datasets[group_index]:
+                raise Round0151Error("R0087 selection range order changed")
+        start = int(row.get("global_row_start", -1))
+        stop = int(row.get("global_row_stop", -1))
+        if start != cursor or stop <= start:
+            raise Round0151Error("R0087 global selection ranges are not contiguous")
+        group = GROUPS[group_index]
+        prior_start = ranges.get(group, (start, start))[0]
+        ranges[group] = (prior_start, stop)
+        cursor = stop
+    if (
+        set(ranges) != set(GROUPS)
+        or cursor != expected_rows
+        or any(ranges[group][1] - ranges[group][0] <= 0 for group in GROUPS)
+    ):
+        raise Round0151Error("R0087 group ranges do not close")
+    return ranges
+
+
 def largest_remainder_prefix_quotas(
     group_counts: Mapping[str, int], *, target: int = RAW_PREFIX_TARGET
 ) -> dict[str, int]:
