@@ -94,6 +94,7 @@ def r0149(*, drop_passed: bool) -> dict[str, object]:
 
 def test_configs_retag_only_the_registered_seed() -> None:
     raw, raw_digest = raw_seed43_train_config(
+        cell=RAW,
         graph_signature=signature("1"),
         graph_manifest_signature=signature("2"),
         graph_edges=123,
@@ -115,6 +116,23 @@ def test_configs_retag_only_the_registered_seed() -> None:
     assert drop["execution"]["expected_pipeline_stamp"]["negative_sampling"] == (
         "uniform-1989633-row-universe-nonself"
     )
+
+
+def test_raw_config_preserves_inherited_factory_interface_and_arm() -> None:
+    raw, _digest = raw_seed43_train_config(
+        cell=RAW,
+        graph_signature=signature("1"),
+        graph_manifest_signature=signature("2"),
+        graph_edges=123,
+    )
+    assert raw["arm"] == RAW
+    with pytest.raises(Round0150Error, match="registered raw arm"):
+        raw_seed43_train_config(
+            cell="historical_graph_current_host",
+            graph_signature=signature("1"),
+            graph_manifest_signature=signature("2"),
+            graph_edges=123,
+        )
 
 
 def test_selector_releases_scale_candidate_only_on_two_seed_replication() -> None:

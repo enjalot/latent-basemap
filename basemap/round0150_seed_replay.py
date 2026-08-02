@@ -61,12 +61,18 @@ def _retag_seed(config: Mapping[str, Any], *, schema: str) -> tuple[dict[str, An
 
 def raw_seed43_train_config(
     *,
+    cell: str = RAW,
     graph_signature: Mapping[str, Any],
     graph_manifest_signature: Mapping[str, Any],
     graph_edges: int,
 ) -> tuple[dict[str, Any], str]:
+    # ``round0140_nodes.run_host_train`` supplies the selected cell to its
+    # configurable factory.  Keep that inherited interface explicit while
+    # refusing to let the seed replay silently select a different arm.
+    if cell != RAW:
+        raise Round0150Error("raw seed-43 config requires the registered raw arm")
     config, _digest = host_train_config(
-        cell=RAW,
+        cell=cell,
         graph_signature=graph_signature,
         graph_manifest_signature=graph_manifest_signature,
         graph_edges=graph_edges,
