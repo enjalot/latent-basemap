@@ -145,6 +145,7 @@ from experiments.build_weighted_graph import phase_c_join
 
 
 GRAPH_PART_NAMES = ("groups-a", "groups-b", "groups-c")
+INDEX_FILENAME = "jina-diverse-12p5m.ivfpq"
 GRAPH_CONTRACT = GraphNodeContract(
     round_id=ROUND_ID,
     k=GRAPH_K,
@@ -452,7 +453,7 @@ def run_build_index(
     assembled = faiss.index_gpu_to_cpu(gpu)
     _require_geometry(assembled, ntotal=HALF_RETAINED_ROWS)
     validation = _validate_subset_index_ids(assembled, subset["mapping"])
-    index_path = os.path.join(output, "jina-diverse-12p5m.ivfpq")
+    index_path = os.path.join(output, INDEX_FILENAME)
     index_signature = _write_index_new(assembled, index_path)
     receipt = seal({
         "schema": INDEX_SCHEMA,

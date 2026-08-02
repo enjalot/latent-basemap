@@ -312,4 +312,5 @@ def test_inherited_r0132_configuration_is_bounded_and_restored():
 
 
 def test_queue_uses_the_exact_inherited_index_basename():
+    assert prepare_round0152_queue.INDEX_FILENAME == round0132_nodes.INDEX_FILENAME
     assert prepare_round0152_queue.INDEX_FILENAME == "jina-diverse-12p5m.ivfpq"
