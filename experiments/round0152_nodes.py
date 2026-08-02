@@ -68,6 +68,36 @@ from experiments.round0106_nodes import GraphNodeContract
 
 
 GRAPH_PART_NAMES = ("groups-a", "groups-b", "groups-c")
+INHERITED_NODE_OVERRIDES = {
+    "SEARCH_POSITIVE_OUTCOME": (
+        "qualified-fixed-r0105-policy-on-prefix-drop-universe"
+    ),
+    "SEARCH_NEGATIVE_OUTCOME": (
+        "fixed-r0105-policy-failed-closed-on-prefix-drop-universe"
+    ),
+    "SEARCH_EXACT_UNIVERSE_CHECK": (
+        "candidate_universe_is_exact_prefix_drop_subset"
+    ),
+    "GRAPH_CANDIDATE_UNIVERSE": "exact R0151 prefix/drop-only subset",
+    "TRANSFORM_MAP_KEY": "r0152-diverse-jina-prefix-drop-12p5m-seed42",
+    "TRANSFORM_SCIENTIFIC_UNIVERSE": (
+        "R0151 exact 12,485,206-row prefix/drop-only population"
+    ),
+    "TRANSFORM_ROW_ORDER": "R0151 prefix/drop-only compact order",
+    "NATIVE_TREATMENT_KEY": "accepted_25m_on_r0151_rows",
+    "NATIVE_SHARED_ROWS_CHECK": "same_r0151_candidate_rows",
+    "NATIVE_GLOBAL_FFR_ROLE": "diagnostic-only; execution-validity evidence",
+}
+
+
+def _subset_paths(root: str) -> dict[str, str]:
+    """R0152 subset paths consumed by the inherited R0132 mechanics."""
+    return {
+        "manifest": os.path.join(root, "subset-manifest.json"),
+        "mapping": os.path.join(root, "compact-to-global.i64.npy"),
+        "group_ids": os.path.join(root, "compact-group-ids.u8.npy"),
+        "excluded": os.path.join(root, "excluded-from-prefix-drop.i64.npy"),
+    }
 
 
 @contextmanager
@@ -95,11 +125,17 @@ def _configured_inherited_contract():
     }
     old_contract = {name: getattr(r0132_contract, name) for name in values}
     old_nodes = {name: getattr(inherited, name) for name in values}
+    old_node_overrides = {
+        name: getattr(inherited, name) for name in INHERITED_NODE_OVERRIDES
+    }
     old_graph_contract = inherited.GRAPH_CONTRACT
     old_validator = inherited.validate_train_execution
+    old_subset_paths = inherited._subset_paths
     try:
         for name, value in values.items():
             setattr(r0132_contract, name, value)
+            setattr(inherited, name, value)
+        for name, value in INHERITED_NODE_OVERRIDES.items():
             setattr(inherited, name, value)
         inherited.GRAPH_CONTRACT = GraphNodeContract(
             round_id=ROUND_ID,
@@ -110,14 +146,18 @@ def _configured_inherited_contract():
             graph_schema=GRAPH_SCHEMA,
         )
         inherited.validate_train_execution = validate_train_execution
+        inherited._subset_paths = _subset_paths
         yield
     finally:
         for name, value in old_contract.items():
             setattr(r0132_contract, name, value)
         for name, value in old_nodes.items():
             setattr(inherited, name, value)
+        for name, value in old_node_overrides.items():
+            setattr(inherited, name, value)
         inherited.GRAPH_CONTRACT = old_graph_contract
         inherited.validate_train_execution = old_validator
+        inherited._subset_paths = old_subset_paths
 
 
 def _read_json(path: str) -> dict[str, Any]:
@@ -196,11 +236,7 @@ def run_materialize_subset(active: Mapping[str, Any], job: Mapping[str, Any]) ->
     if len(excluded) != ROW_COUNT - RETAINED_ROWS:
         raise Round0152Error("R0152 complement did not close")
 
-    paths = {
-        "mapping": os.path.join(output, "compact-to-global.i64.npy"),
-        "group_ids": os.path.join(output, "compact-group-ids.u8.npy"),
-        "excluded": os.path.join(output, "excluded-from-prefix-drop.i64.npy"),
-    }
+    paths = _subset_paths(output)
     atomic_save_new_npy(paths["mapping"], mapping, immutable=True)
     atomic_save_new_npy(paths["group_ids"], group_ids, immutable=True)
     atomic_save_new_npy(paths["excluded"], excluded, immutable=True)

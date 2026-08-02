@@ -157,6 +157,18 @@ FULL_GRAPH_SCHEMA = "round0106-jina-diverse-25m-fuzzy-graph-v1"
 FULL_TRAIN_SCHEMA = "round0107-diverse-jina-train-receipt-v1"
 FULL_PRODUCTION_SCHEMA = "round0107-production-config-v1"
 TRANSFORM_SCHEMA_R0132 = TRANSFORM_SCHEMA
+SEARCH_POSITIVE_OUTCOME = "qualified-fixed-r0105-policy-on-half-universe"
+SEARCH_NEGATIVE_OUTCOME = "fixed-r0105-policy-failed-closed-on-half-universe"
+SEARCH_EXACT_UNIVERSE_CHECK = "candidate_universe_is_exact_half_subset"
+GRAPH_CANDIDATE_UNIVERSE = "exact R0132 half subset"
+TRANSFORM_MAP_KEY = "r0132-diverse-jina-12p5m-seed42"
+TRANSFORM_SCIENTIFIC_UNIVERSE = (
+    "R0132 deterministic 12,474,331-row half subset"
+)
+TRANSFORM_ROW_ORDER = "R0132 half compact order"
+NATIVE_TREATMENT_KEY = "treatment_25m_on_u12"
+NATIVE_SHARED_ROWS_CHECK = "same_u12_rows"
+NATIVE_GLOBAL_FFR_ROLE = "registered-noninferiority-gate"
 
 
 @lru_cache(maxsize=256)
@@ -598,13 +610,13 @@ def run_qualify_search(
             "one_local_cuda_device": (
                 faiss.get_num_gpus() == 1 and torch.cuda.device_count() == 1
             ),
-            "candidate_universe_is_exact_half_subset": True,
+            SEARCH_EXACT_UNIVERSE_CHECK: True,
             "no_graph_or_map_built": True,
         },
         "outcome": (
-            "qualified-fixed-r0105-policy-on-half-universe"
+            SEARCH_POSITIVE_OUTCOME
             if metrics["passed"]
-            else "fixed-r0105-policy-failed-closed-on-half-universe"
+            else SEARCH_NEGATIVE_OUTCOME
         ),
         "graph_build_released": metrics["passed"],
         "training_performed": False,
@@ -630,7 +642,7 @@ def _quality_admission(job: Mapping[str, Any], subset: Mapping[str, Any]) -> dic
         or value.get("subset_manifest") != subset["manifest_signature"]
         or value.get("graph_build_released") is not True
         or value.get("outcome")
-        != "qualified-fixed-r0105-policy-on-half-universe"
+        != SEARCH_POSITIVE_OUTCOME
         or not all((value.get("checks") or {}).values())
     ):
         raise Round0132Error("R0132 graph search admission is not positive")
@@ -780,7 +792,7 @@ def run_graph_part(
             for value in receipts
         ],
         "pipeline": {
-            "candidate_universe": "exact R0132 half subset",
+            "candidate_universe": GRAPH_CANDIDATE_UNIVERSE,
             "nprobe": SEARCH_NPROBE,
             "shortlist_width": SEARCH_SHORTLIST_WIDTH,
             "exact_native_rerank": True,
@@ -1176,14 +1188,14 @@ def run_transform(
     receipt = coordinate_seal({
         "schema": TRANSFORM_SCHEMA_R0132,
         "round_id": ROUND_ID,
-        "map_key": "r0132-diverse-jina-12p5m-seed42",
+        "map_key": TRANSFORM_MAP_KEY,
         "model": bundle["train"]["model"],
         "train_receipt": bundle["train_signature"],
         "production_config": bundle["config_signature"],
         "graph_manifest": bundle["graph_signature"],
         "compact_mapping": bundle["graph"]["compact_mapping"],
         "substrate": source.substrate["signature"],
-        "scientific_universe": "R0132 deterministic 12,474,331-row half subset",
+        "scientific_universe": TRANSFORM_SCIENTIFIC_UNIVERSE,
         "input_preprocessing": (
             "signed-int8 times exact fp16 row scale to device fp32; no L2 "
             "renormalization before model"
@@ -1199,7 +1211,7 @@ def run_transform(
             "row_count": HALF_RETAINED_ROWS,
             "dimension": 2,
             "dtype": "<f4",
-            "row_order": "R0132 half compact order",
+            "row_order": TRANSFORM_ROW_ORDER,
             "ordered_chunks": members,
         },
         "inference": {
@@ -1499,7 +1511,7 @@ def run_score_native(
             **control_metrics,
             "finite_noncollapsed": control_finite,
         },
-        "treatment_25m_on_u12": {
+        NATIVE_TREATMENT_KEY: {
             **treatment_metrics,
             "finite_noncollapsed": treatment_finite,
         },
@@ -1510,7 +1522,7 @@ def run_score_native(
             "can_gate_or_rescue": False,
             "calibration": _signature(str(job["stale_calibration"]), label="R0108 calibration"),
         },
-        "native_global_ffr_role": "registered-noninferiority-gate",
+        "native_global_ffr_role": NATIVE_GLOBAL_FFR_ROLE,
         "ood_projection_ffr_role": "diagnostic-only",
         "truth": {
             "computed_once_and_shared_by_both_maps": True,
@@ -1521,7 +1533,7 @@ def run_score_native(
         "low_d_guards": {"control": control_guard, "treatment": treatment_guard},
         "arrays": expected_input_signature(arrays_path),
         "checks": {
-            "same_u12_rows": True,
+            NATIVE_SHARED_ROWS_CHECK: True,
             "same_high_d_truth_and_anchors": True,
             "control_finite_noncollapsed": control_finite,
             "treatment_finite_noncollapsed": treatment_finite,
@@ -1857,7 +1869,7 @@ def _authenticate_half_train(
         qualification.get("schema") != QUALIFICATION_SCHEMA
         or qualification.get("graph_build_released") is not True
         or qualification.get("outcome")
-        != "qualified-fixed-r0105-policy-on-half-universe"
+        != SEARCH_POSITIVE_OUTCOME
         or fixed.get("nprobe") != SEARCH_NPROBE
         or fixed.get("shortlist_width") != SEARCH_SHORTLIST_WIDTH
         or fixed.get("policy_sweep_or_widening_performed") is not False
@@ -1987,7 +1999,7 @@ def _authenticate_native_selector(native: Mapping[str, Any]) -> dict[str, Any]:
             "treatment",
             treatment_low,
             treatment_ffr_hits,
-            "treatment_25m_on_u12",
+            NATIVE_TREATMENT_KEY,
         ),
     ):
         receipt = native.get(receipt_key) or {}
@@ -2155,7 +2167,7 @@ def run_decision(
         raise Round0132Error("R0132 panel/train lineage disagrees")
     quality = noninferiority_checks(
         control_native=native["control_12p5m"],
-        treatment_native=native["treatment_25m_on_u12"],
+        treatment_native=native[NATIVE_TREATMENT_KEY],
         control_ood=ood["control_12p5m"],
         treatment_ood=ood["treatment_25m"],
     )
