@@ -126,11 +126,7 @@ def _accepted_activation() -> tuple[
     if (
         decision.get("round_id") != "0149"
         or decision.get("capability") != R0149_CAPABILITY
-        or decision.get("outcome")
-        not in {
-            "drop-only-historical-row-policy-restores",
-            "drop-only-historical-row-policy-does-not-restore",
-        }
+        or decision.get("outcome") != "drop-only-historical-row-policy-restores"
         or selection.get("round_id") != "0149"
         or selection.get("target_rows") != DROP_ROWS
         or selection.get("replacement_rows") != 0
@@ -531,10 +527,7 @@ def prepare_round0150(
             "question": "does raw-versus-drop-only restoration replicate at paired seed 43?",
             "accepted_activation": {
                 "r0149_decision": r0149_decision_signature,
-                "allowed_outcomes": [
-                    "drop-only-historical-row-policy-restores",
-                    "drop-only-historical-row-policy-does-not-restore",
-                ],
+                "allowed_outcomes": ["drop-only-historical-row-policy-restores"],
             },
             "cells": {
                 CURRENT_GRAPH_CURRENT_HOST: {
