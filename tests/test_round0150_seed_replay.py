@@ -215,3 +215,27 @@ def test_queue_activation_rejects_a_reviewed_negative_parent(monkeypatch) -> Non
 
     with pytest.raises(RuntimeError, match="accepted activation changed"):
         queue_prep._accepted_activation()
+
+
+def test_correction_attempt_accepts_only_the_bounded_initial_setup_failure(
+    monkeypatch,
+) -> None:
+    terminal = {
+        "round_id": "0150",
+        "verdict": "failed",
+        "completed_jobs": [],
+        "stop_reason": "node train_raw_historical_seed43 exited 1 after 0.1 min",
+        "gpu_wall_s": 3.5,
+        "gpu_wall_accounting_complete": True,
+    }
+    monkeypatch.setattr(queue_prep, "_read_json", lambda _path: terminal)
+    monkeypatch.setattr(
+        queue_prep, "expected_input_signature", lambda _path: signature("a")
+    )
+    observed, observed_signature = queue_prep._initial_failed_attempt()
+    assert observed == terminal
+    assert observed_signature == signature("a")
+
+    terminal["completed_jobs"] = ["train_raw_historical_seed43"]
+    with pytest.raises(RuntimeError, match="setup-failure evidence"):
+        queue_prep._initial_failed_attempt()

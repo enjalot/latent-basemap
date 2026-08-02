@@ -54,6 +54,8 @@ from experiments.round0147_nodes import training_accounting_mismatches
 ROUND_ROOT = "/data/latent-basemap/runs/round-0150"
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE_GLOB = os.path.join(LAB_ROOT, "round-0150-*.md")
+INITIAL_QUEUE_ROOT = os.path.join(ROUND_ROOT, "queue")
+INITIAL_TERMINAL = os.path.join(INITIAL_QUEUE_ROOT, "runner-terminal.json")
 R0140_GRAPH_ROOT = (
     "/data/latent-basemap/runs/round-0140/queue/artifacts/current-graph-fixed-rows"
 )
@@ -104,6 +106,23 @@ def _issued_round(release_sha: str) -> tuple[str, dict[str, Any]]:
         if not corrections or corrections[-1] != release_sha:
             raise RuntimeError("R0150 issued release and correction addendum differ")
     return candidates[0], expected_input_signature(candidates[0])
+
+
+def _initial_failed_attempt() -> tuple[dict[str, Any], dict[str, Any]]:
+    terminal = _read_json(INITIAL_TERMINAL)
+    signature = expected_input_signature(INITIAL_TERMINAL)
+    if (
+        terminal.get("round_id") != ROUND_ID
+        or terminal.get("verdict") != "failed"
+        or terminal.get("completed_jobs") != []
+        or not str(terminal.get("stop_reason") or "").startswith(
+            "node train_raw_historical_seed43 exited 1"
+        )
+        or not 0.0 <= float(terminal.get("gpu_wall_s", -1.0)) <= 60.0
+        or terminal.get("gpu_wall_accounting_complete") is not True
+    ):
+        raise RuntimeError("R0150 initial setup-failure evidence changed")
+    return terminal, signature
 
 
 def _accepted_activation() -> tuple[
@@ -283,11 +302,14 @@ def _seed_cpu_smoke(
 
 
 def prepare_round0150(
-    *, release_sha: str, queue_root: str = os.path.join(ROUND_ROOT, "queue")
+    *, release_sha: str, queue_root: str = INITIAL_QUEUE_ROOT
 ) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0150 release SHA must be one full commit")
     round_path, round_signature = _issued_round(release_sha)
+    correction_attempt: tuple[dict[str, Any], dict[str, Any]] | None = None
+    if os.path.abspath(queue_root) != os.path.abspath(INITIAL_QUEUE_ROOT):
+        correction_attempt = _initial_failed_attempt()
     (
         r0140_review,
         r0149_review,
@@ -349,6 +371,7 @@ def prepare_round0150(
 
     external_inputs = _dedupe([
         round_signature,
+        *([correction_attempt[1]] if correction_attempt is not None else []),
         *r0140_review,
         *r0149_review,
         r0149_decision_signature,
@@ -508,7 +531,14 @@ def prepare_round0150(
         release_sha=release_sha,
         round_file=round_path,
         queue_root=queue_root,
-        gpu_hours_cap=GPU_HOURS_MAXIMUM,
+        gpu_hours_cap=(
+            GPU_HOURS_MAXIMUM
+            - (
+                float(correction_attempt[0]["gpu_wall_s"]) / 3600.0
+                if correction_attempt is not None
+                else 0.0
+            )
+        ),
         execution_authority="autonomous-gpu",
         gpu=True,
     )
@@ -569,6 +599,14 @@ def prepare_round0150(
             "release_pytest": pytest_signature,
         },
     })
+    if correction_attempt is not None:
+        queue["prior_attempts"] = [{
+            "terminal": correction_attempt[1],
+            "gpu_wall_s": float(correction_attempt[0]["gpu_wall_s"]),
+            "failure_class": "pre-training inherited-config interface mismatch",
+            "completed_jobs": [],
+        }]
+        queue["round_gpu_hours_cap"] = GPU_HOURS_MAXIMUM
     queue["p90_gpu_seconds"]["total"] = sum(queue["p90_gpu_seconds"].values())
     path = os.path.join(queue_root, "queue.json")
     atomic_write_new_json(path, queue, immutable=True)
@@ -578,7 +616,7 @@ def prepare_round0150(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-sha", required=True)
-    parser.add_argument("--queue-root", default=os.path.join(ROUND_ROOT, "queue"))
+    parser.add_argument("--queue-root", default=INITIAL_QUEUE_ROOT)
     args = parser.parse_args(argv)
     print(json.dumps({
         "queue_manifest": prepare_round0150(
