@@ -79,10 +79,16 @@ FINAL_SCAN_ROWS = 25_000_000
 ASSEMBLY_WORKERS = 8
 _R0132_RETAINED_ROWS = 12_474_331
 _R0132_PARTS = ("groups-a", "groups-b", "groups-c")
+_R0156_RETAINED_ROWS = 12_485_206
+_R0156_PARTS = ("groups-a", "groups-b", "groups-c")
 
 
 def _require_registered_universe(universe_rows: int) -> None:
-    if int(universe_rows) not in {RETAINED_ROWS, _R0132_RETAINED_ROWS}:
+    if int(universe_rows) not in {
+        RETAINED_ROWS,
+        _R0132_RETAINED_ROWS,
+        _R0156_RETAINED_ROWS,
+    }:
         raise Round0106Error("shared graph helper universe is not registered")
 
 
@@ -398,6 +404,8 @@ def _validate_shard(
     _require_registered_universe(universe_rows)
     if universe_rows == _R0132_RETAINED_ROWS and contract.round_id != "0132":
         raise Round0106Error("half-universe graph helper requires R0132 contract")
+    if universe_rows == _R0156_RETAINED_ROWS and contract.round_id != "0156":
+        raise Round0106Error("R0156 universe graph helper requires R0156 contract")
     if os.path.exists(artifact) != os.path.exists(receipt_path):
         raise Round0106Error(f"incomplete R0106 shard pair: {artifact}")
     if not os.path.exists(artifact):
@@ -1085,6 +1093,10 @@ def _partition_forward_edges(
         or (
             universe_rows == _R0132_RETAINED_ROWS
             and part_order != _R0132_PARTS
+        )
+        or (
+            universe_rows == _R0156_RETAINED_ROWS
+            and part_order != _R0156_PARTS
         )
     ):
         raise Round0106Error("shared graph helper part policy is not registered")
