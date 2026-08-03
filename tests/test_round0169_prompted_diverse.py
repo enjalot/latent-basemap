@@ -1,10 +1,13 @@
 """Decision-contract tests for the conditional prompted-diverse Q3 rung."""
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
+from basemap.artifact_identity import expected_input_signature
 from basemap.round0105_search import GROUPS
 from basemap.panel_v2 import _require_score_panel_scale_admission
 from basemap.round0113_prompt_contrast import seal
@@ -201,6 +204,64 @@ def test_q3_evaluation_action_is_reachable(monkeypatch) -> None:
     job = {"action": "evaluate_prompted_diverse_u12"}
     round0169_nodes.run_job(active, job)
     assert observed == [(active, job)]
+
+
+def test_q3_loader_accepts_only_the_reviewed_r0173_probe_identity(
+    tmp_path, monkeypatch
+) -> None:
+    """Exercise the real cross-round receipt boundary with small arrays."""
+    monkeypatch.setattr(round0169_nodes, "HELDOUT_CORPUS_ROWS", 2)
+    monkeypatch.setattr(round0169_nodes, "HELDOUT_QUERY_ROWS", 1)
+    monkeypatch.setattr(round0169_nodes, "DIMENSION", 3)
+
+    def write_probe(root, *, receipt_round_id: str) -> None:
+        root.mkdir()
+        values = {
+            "corpus_embeddings": np.ones((2, 3), dtype=np.float16),
+            "query_embeddings": np.ones((1, 3), dtype=np.float16),
+            "corpus_source_rows": np.asarray([10, 11], dtype=np.int64),
+            "query_source_rows": np.asarray([12], dtype=np.int64),
+        }
+        signatures = {}
+        for name, value in values.items():
+            path = root / f"{name}.npy"
+            np.save(path, value)
+            signatures[name] = expected_input_signature(str(path))
+        receipt = seal({
+            "schema": round0169_nodes.LANGUAGE_PROBE_SCHEMA,
+            "round_id": receipt_round_id,
+            "language": "test-language",
+            "prompt_applied": True,
+            **signatures,
+        })
+        (root / "receipt.json").write_text(
+            json.dumps(receipt), encoding="utf-8"
+        )
+
+    accepted = tmp_path / "accepted"
+    write_probe(
+        accepted,
+        receipt_round_id=round0169_nodes.LANGUAGE_RECEIPT_ROUND_ID,
+    )
+    corpus, queries, corpus_rows, query_rows, signatures = (
+        round0169_nodes._load_language_probe(str(accepted), "test-language")
+    )
+    assert corpus.shape == (2, 3)
+    assert queries.shape == (1, 3)
+    assert corpus_rows.tolist() == [10, 11]
+    assert query_rows.tolist() == [12]
+    assert set(signatures) == {
+        "receipt",
+        "corpus_embeddings",
+        "query_embeddings",
+        "corpus_source_rows",
+        "query_source_rows",
+    }
+
+    wrong = tmp_path / "wrong"
+    write_probe(wrong, receipt_round_id=round0169_nodes.ROUND_ID)
+    with pytest.raises(Round0169Error, match="prompted probe changed"):
+        round0169_nodes._load_language_probe(str(wrong), "test-language")
 
 
 def test_q3_graph_execution_requires_complete_disjoint_shards() -> None:

@@ -431,7 +431,7 @@ def _load_language_probe(
     )
     if (
         receipt.get("schema") != LANGUAGE_PROBE_SCHEMA
-        or receipt.get("round_id") != ROUND_ID
+        or receipt.get("round_id") != LANGUAGE_RECEIPT_ROUND_ID
         or receipt.get("language") != language
         or receipt.get("prompt_applied") is not True
     ):
