@@ -36,7 +36,7 @@ RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE = os.path.join(LAB_ROOT, "round-0174-2026-08-03.md")
 SMOKE_PATH = os.path.join(ROUND_ROOT, "preflight", "release-cpu-smoke.json")
 CORRECTION_SMOKE_PATH = os.path.join(
-    ROUND_ROOT, "preflight", "release-cpu-smoke-correction-1.json"
+    ROUND_ROOT, "preflight", "release-cpu-smoke-correction-2.json"
 )
 FIRST_QUEUE_ROOT = os.path.join(ROUND_ROOT, "queue")
 FIRST_QUEUE_MANIFEST = os.path.join(FIRST_QUEUE_ROOT, "queue.json")
@@ -161,7 +161,7 @@ def _issued_round(release_sha: str, *, correction: bool = False) -> dict[str, An
         if (
             "loader-supply correction" in round_text
             and release_sha in round_text
-            and "science_changed: false" in round_text
+            and "Exactly one correction queue is authorized" in round_text
         ):
             return expected_input_signature(ROUND_FILE)
     raise RuntimeError("R0174 issued round binding changed")

@@ -149,7 +149,7 @@ def test_correction_release_must_be_bound_by_round_addendum(
             "",
             "## 2026-08-03 loader-supply correction addendum",
             f"Corrected release `{release}` fixes queue prep only.",
-            "science_changed: false",
+            "Exactly one correction queue is authorized at `queue-attempt-2`.",
         )),
         encoding="utf-8",
     )
