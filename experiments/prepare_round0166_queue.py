@@ -55,6 +55,15 @@ GATES_PATH = (
     "/data/latent-basemap/runs/round-0161/queue/artifacts/"
     "jina-prompted-universe-quality-gates-v1/prompted-quality-gates.json"
 )
+HANDLER_MODULE = "experiments.round0166_nodes"
+QUEUE_SCHEMA = "round0166-prompted-english-8m-scale-queue-v1"
+QUEUE_LABEL = "R0166 GPU queue"
+GRAPH_VECTOR_STORAGE = "gpu-ivfflat-fp32"
+GPU_HOURS_CAP = 5.5
+SELECT_P90_WALL_S = 900.0
+GRAPH_P90_WALL_S = 7_200.0
+TRAIN_P90_WALL_S = 6_000.0
+EVALUATION_P90_WALL_S = 3_600.0
 
 
 def _one_document(prefix: str, round_id: str, *, status: str) -> dict[str, Any]:
@@ -259,7 +268,7 @@ def prepare_round0166(
         *accepted_inputs,
     ])
 
-    queue_root = create_fresh_directory(queue_root, label="R0166 GPU queue")
+    queue_root = create_fresh_directory(queue_root, label=QUEUE_LABEL)
     preflight = ensure_data_directory(os.path.join(queue_root, "preflight"))
     release_smoke_path = os.path.join(preflight, "release-cpu-smoke.json")
     atomic_write_new_json(
@@ -282,7 +291,7 @@ def prepare_round0166(
         {
             "id": "select_heldout_queries",
             "action": "select_heldout_queries",
-            "handler_module": "experiments.round0166_nodes",
+            "handler_module": HANDLER_MODULE,
             "handler_callable": "run_job",
             "deps": [],
             "outputs": [query_output],
@@ -294,7 +303,7 @@ def prepare_round0166(
                 r0120_signature,
                 *query_payloads,
             ]),
-            "p90_wall_s": 900.0,
+            "p90_wall_s": SELECT_P90_WALL_S,
             "population_receipt": population_signature,
             "canonical_layout": layout_signature,
             "r0116_manifest": r0116_signature,
@@ -309,13 +318,13 @@ def prepare_round0166(
         {
             "id": "build_graph_and_reference",
             "action": "build_graph_and_reference",
-            "handler_module": "experiments.round0166_nodes",
+            "handler_module": HANDLER_MODULE,
             "handler_callable": "run_job",
             "deps": ["select_heldout_queries"],
             "outputs": [graph_output],
             "done_marker": os.path.join(artifacts, "graph-reference.done.json"),
             "expected_inputs": common,
-            "p90_wall_s": 7_200.0,
+            "p90_wall_s": GRAPH_P90_WALL_S,
             "population_receipt": population_signature,
             "node_policy": {
                 "gpu_required": True,
@@ -326,13 +335,13 @@ def prepare_round0166(
         {
             "id": "train_prompted_8m",
             "action": "train_prompted_8m",
-            "handler_module": "experiments.round0166_nodes",
+            "handler_module": HANDLER_MODULE,
             "handler_callable": "run_job",
             "deps": ["build_graph_and_reference"],
             "outputs": [train_output],
             "done_marker": os.path.join(artifacts, "train.done.json"),
             "expected_inputs": common,
-            "p90_wall_s": 6_000.0,
+            "p90_wall_s": TRAIN_P90_WALL_S,
             "population_receipt": population_signature,
             "graph_manifest": graph_manifest,
             "node_policy": {
@@ -344,13 +353,13 @@ def prepare_round0166(
         {
             "id": "evaluate_prompted_8m",
             "action": "evaluate_prompted_8m",
-            "handler_module": "experiments.round0166_nodes",
+            "handler_module": HANDLER_MODULE,
             "handler_callable": "run_job",
             "deps": ["select_heldout_queries", "build_graph_and_reference", "train_prompted_8m"],
             "outputs": [evaluation_output],
             "done_marker": os.path.join(artifacts, "evaluation.done.json"),
             "expected_inputs": common,
-            "p90_wall_s": 3_600.0,
+            "p90_wall_s": EVALUATION_P90_WALL_S,
             "population_receipt": population_signature,
             "query_output": query_output,
             "graph_manifest": graph_manifest,
@@ -369,12 +378,12 @@ def prepare_round0166(
         release_sha=release_sha,
         round_file=ROUND_FILE,
         queue_root=queue_root,
-        gpu_hours_cap=5.5,
+        gpu_hours_cap=GPU_HOURS_CAP,
         execution_authority="autonomous-gpu",
         gpu=True,
     )
     queue.update({
-        "schema": "round0166-prompted-english-8m-scale-queue-v1",
+        "schema": QUEUE_SCHEMA,
         "repo_root": RELEASE_ROOT,
         "queue_class": "gpu-research",
         "required_reviews": ["0160", "0161", "0165"],
@@ -402,6 +411,7 @@ def prepare_round0166(
                 "nlist": 8_192,
                 "nprobe": 64,
                 "same_builder_parameters_and_seeds_as_r0115": True,
+                "vector_storage": GRAPH_VECTOR_STORAGE,
             },
             "training": {
                 "seed": 42,
