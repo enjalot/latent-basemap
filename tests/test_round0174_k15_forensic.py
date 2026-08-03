@@ -20,6 +20,7 @@ from basemap.round0174_k15_forensic import (
     host_train_config,
 )
 from experiments import round0140_nodes as base
+from experiments import prepare_round0174_queue as prep
 from experiments import round0174_nodes as nodes
 
 
@@ -131,6 +132,32 @@ def test_loader_supply_covers_observed_k15_graph_without_changing_dose(
     assert supply["loader_supply_epochs"] == 5
     assert supply["planned_loop_iters"] == 536_050
     assert supply["successful_update_horizon"] == 500_000
+
+
+def test_correction_release_must_be_bound_by_round_addendum(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    release = "1" * 40
+    round_path = tmp_path / "round-0174.md"
+    round_path.write_text(
+        "\n".join((
+            "---",
+            'round_id: "0174"',
+            "status: issued",
+            'base_commit: "a80259582bdfb762c7561f2bd7c44b180840dfe9"',
+            "---",
+            "",
+            "## 2026-08-03 loader-supply correction addendum",
+            f"Corrected release `{release}` fixes queue prep only.",
+            "science_changed: false",
+        )),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(prep, "ROUND_FILE", str(round_path))
+
+    with pytest.raises(RuntimeError):
+        prep._issued_round(release)
+    assert prep._issued_round(release, correction=True)["sha256"]
 
 
 def test_registered_selector_has_both_preregistered_branches() -> None:

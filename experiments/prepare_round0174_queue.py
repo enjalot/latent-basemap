@@ -144,17 +144,27 @@ def write_release_smoke(release_sha: str, *, path: str = SMOKE_PATH) -> str:
     return path
 
 
-def _issued_round(release_sha: str) -> dict[str, Any]:
+def _issued_round(release_sha: str, *, correction: bool = False) -> dict[str, Any]:
     if not os.path.isfile(ROUND_FILE):
         raise RuntimeError("R0174 issued round file is absent")
     frontmatter = _frontmatter(ROUND_FILE)
     if (
         frontmatter.get("round_id") != ROUND_ID
         or frontmatter.get("status") != "issued"
-        or frontmatter.get("base_commit") != release_sha
     ):
         raise RuntimeError("R0174 issued round binding changed")
-    return expected_input_signature(ROUND_FILE)
+    if frontmatter.get("base_commit") == release_sha:
+        return expected_input_signature(ROUND_FILE)
+    if correction:
+        with open(ROUND_FILE, encoding="utf-8") as handle:
+            round_text = handle.read()
+        if (
+            "loader-supply correction" in round_text
+            and release_sha in round_text
+            and "science_changed: false" in round_text
+        ):
+            return expected_input_signature(ROUND_FILE)
+    raise RuntimeError("R0174 issued round binding changed")
 
 
 def _accepted_negative_review_0171() -> list[dict[str, Any]]:
@@ -272,7 +282,7 @@ def prepare_round0174(
         queue_root = os.path.join(
             ROUND_ROOT, "queue-attempt-2" if correction else "queue"
         )
-    round_signature = _issued_round(release_sha)
+    round_signature = _issued_round(release_sha, correction=correction)
     review_inputs = _review_inputs()
     smoke_signature = _validated_smoke(
         release_sha,
