@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 from collections.abc import Mapping
 from typing import Any
@@ -52,9 +53,15 @@ def _accepted_review(round_id: str) -> dict[str, Any]:
 
 def _issued_round(release_sha: str) -> dict[str, Any]:
     frontmatter = _frontmatter(ROUND_FILE)
+    base_commit = str(frontmatter.get("base_commit") or "")
+    descendant = subprocess.run(
+        ["git", "-C", RELEASE_ROOT, "merge-base", "--is-ancestor", base_commit, release_sha],
+        check=False,
+        timeout=10,
+    ).returncode == 0
     if (
         frontmatter.get("status") != "issued"
-        or frontmatter.get("base_commit") != release_sha
+        or not descendant
     ):
         raise RuntimeError("R0163 round is not issued for this release")
     return expected_input_signature(ROUND_FILE)

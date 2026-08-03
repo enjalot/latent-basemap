@@ -80,7 +80,11 @@ def _validate_signature(signature: Mapping[str, Any], *, label: str) -> None:
         raise Round0163Error(f"{label} file identity changed")
     # Every selected source is below 1 GiB.  Rehash it here so the CPU node's
     # data read cannot silently consume a path that drifted after queue prep.
-    if expected_input_signature(path) != dict(signature):
+    expected = {
+        key: signature[key]
+        for key in ("kind", "canonical_path", "bytes", "sha256")
+    }
+    if expected_input_signature(path) != expected:
         raise Round0163Error(f"{label} payload changed")
 
 

@@ -8,6 +8,8 @@ from basemap.round0163_prompted_english_census import (
     population_identity,
     union_representatives,
 )
+from basemap.artifact_identity import expected_input_signature
+from experiments.round0163_nodes import _validate_signature
 
 
 def test_union_is_transitive_and_keeps_lowest_canonical_row() -> None:
@@ -47,3 +49,10 @@ def test_population_identity_binds_view_and_both_selection_arrays() -> None:
         mapping=np.asarray([0, 3, 4], dtype=np.int64),
         excluded=excluded,
     )
+
+
+def test_payload_verifier_accepts_reviewed_nonidentity_metadata(tmp_path) -> None:
+    path = tmp_path / "raw.npy"
+    path.write_bytes(b"reviewed-payload")
+    signature = expected_input_signature(str(path))
+    _validate_signature({**signature, "rows": 1}, label="synthetic raw")
