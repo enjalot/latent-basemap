@@ -149,7 +149,7 @@ def run_training_disjoint_audit(
     )
     if receipt["passed"] is not True:
         raise Round0176Error(
-            "R0176 prompted query/control rows overlap map training: "
+            f"R{ROUND_ID} prompted query/control rows overlap map training: "
             f"{receipt['blocking_query_or_control_overlap_count']} exact copies"
         )
 

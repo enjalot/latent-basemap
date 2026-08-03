@@ -553,6 +553,25 @@ def run_score_map(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         raise Round0167Error(f"unknown R0167 map {map_key!r}")
     output = create_fresh_directory(str(job["outputs"][0]), label=f"R0167 score {map_key}")
     started = time.monotonic()
+    external_sensitivity_masks: dict[str, Any] | None = None
+    sensitivity_masks_output = job.get("sensitivity_masks_output")
+    if DUPLICATE_SENSITIVITY and sensitivity_masks_output:
+        masks_path = os.path.join(
+            str(sensitivity_masks_output), "sensitivity-masks.json"
+        )
+        external_sensitivity_masks = _read_sealed(
+            masks_path, label=f"R{ROUND_ID} source-text sensitivity masks"
+        )
+        if (
+            external_sensitivity_masks.get("round_id") != ROUND_ID
+            or external_sensitivity_masks.get("map_independent") is not True
+            or external_sensitivity_masks.get("passed") is not True
+            or set(external_sensitivity_masks.get("probes") or {})
+            != set(PROBE_ORDER)
+        ):
+            raise Round0167Error(
+                "external duplicate-sensitivity mask receipt changed"
+            )
     model_signature = _signature(job["model"], label=f"{map_key} model")
     from basemap.pumap.parametric_umap import ParametricUMAP
 
@@ -636,21 +655,68 @@ def run_score_map(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             },
         }
         if DUPLICATE_SENSITIVITY:
-            keep, sensitivity_audit = _duplicate_sensitivity_mask(
-                probe_corpus=np.asarray(corpus),
-                probe_queries=np.asarray(queries),
-                control_corpus=control_corpus,
-                control_queries=control_queries,
-            )
+            if external_sensitivity_masks is None:
+                keep, sensitivity_audit = _duplicate_sensitivity_mask(
+                    probe_corpus=np.asarray(corpus),
+                    probe_queries=np.asarray(queries),
+                    control_corpus=control_corpus,
+                    control_queries=control_queries,
+                )
+            else:
+                sensitivity_audit = dict(
+                    external_sensitivity_masks["probes"][name]
+                )
+                if (
+                    int(sensitivity_audit.get("original_query_rows", -1))
+                    != len(queries)
+                    or int(sensitivity_audit.get("control_query_rows", -1))
+                    != len(control_queries)
+                ):
+                    raise Round0167Error(
+                        f"{name} external sensitivity mask shape changed"
+                    )
+                positions = np.asarray(
+                    sensitivity_audit.get("excluded_query_positions") or [],
+                    dtype=np.int64,
+                )
+                if (
+                    positions.ndim != 1
+                    or (len(positions) and (
+                        int(positions.min()) < 0
+                        or int(positions.max()) >= len(queries)
+                    ))
+                    or len(np.unique(positions)) != len(positions)
+                ):
+                    raise Round0167Error(
+                        f"{name} external sensitivity positions changed"
+                    )
+                keep = np.ones(len(queries), dtype=bool)
+                keep[positions] = False
+                if not np.any(keep):
+                    raise Round0167Error(
+                        f"{name} external sensitivity removed every query"
+                    )
+                expected_probe_rows = np.asarray(
+                    sensitivity_audit.get("excluded_probe_source_rows") or [],
+                    dtype=np.int64,
+                )
+                if not np.array_equal(
+                    expected_probe_rows,
+                    np.asarray(query_rows, dtype=np.int64)[~keep],
+                ):
+                    raise Round0167Error(
+                        f"{name} external sensitivity source rows changed"
+                    )
             excluded = ~keep
-            sensitivity_audit["excluded_probe_source_rows"] = (
-                np.asarray(query_rows, dtype=np.int64)[excluded].tolist()
-            )
-            sensitivity_audit["excluded_control_source_rows"] = (
-                np.asarray(
-                    control_query_rows, dtype=np.int64
-                )[excluded].tolist()
-            )
+            if external_sensitivity_masks is None:
+                sensitivity_audit["excluded_probe_source_rows"] = (
+                    np.asarray(query_rows, dtype=np.int64)[excluded].tolist()
+                )
+                sensitivity_audit["excluded_control_source_rows"] = (
+                    np.asarray(
+                        control_query_rows, dtype=np.int64
+                    )[excluded].tolist()
+                )
             if bool(np.all(keep)):
                 sensitivity_metrics = dict(reports[name]["metrics"])
                 sensitivity = {
@@ -1007,6 +1073,14 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                     sensitivity_eight - float(sensitivity_baseline)
                 ),
             }
+    sensitivity_mask_receipt = None
+    if job.get("sensitivity_masks_output"):
+        sensitivity_mask_receipt = expected_input_signature(
+            os.path.join(
+                str(job["sensitivity_masks_output"]),
+                "sensitivity-masks.json",
+            )
+        )
     report = seal({
         "schema": CAPABILITY,
         "round_id": ROUND_ID,
@@ -1036,6 +1110,7 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "duplicate_controlled_sensitivity_summary": (
             duplicate_sensitivity_summary
         ),
+        "source_text_sensitivity_masks": sensitivity_mask_receipt,
         "raw_comparison": {
             "r0142_retention_table": raw_table_signature,
             "r0142_rows": raw_table.get("rows"),
