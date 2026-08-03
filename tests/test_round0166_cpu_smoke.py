@@ -9,24 +9,23 @@ import pytest
 
 from basemap.panel_v2 import PanelV2Config, score_panel
 from basemap import round0113_prompt_contrast as prompt_contract
-from basemap.round0166_prompted_8m import (
-    DIMENSION,
-    MULTIPLICITY_POLICY,
-    ROUND_ID,
-    SUCCESSFUL_UPDATES,
-    scale_train_config,
-)
+from basemap.round0166_prompted_8m import DIMENSION, MULTIPLICITY_POLICY
 from experiments import round0166_nodes
 
 
-def test_round0166_train_seal_reload_panel_cpu_smoke(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
+def _run_train_seal_reload_panel_cpu_smoke(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    *,
+    config_graph_edges: int = 8,
 ) -> None:
     import torch
 
+    successful_updates = round0166_nodes.SUCCESSFUL_UPDATES
+    round_id = round0166_nodes.ROUND_ID
     rows = 7_952_419
-    producer_batches = SUCCESSFUL_UPDATES + 1
-    expected_rows = SUCCESSFUL_UPDATES * prompt_contract.BATCH_SIZE
+    producer_batches = successful_updates + 1
+    expected_rows = successful_updates * prompt_contract.BATCH_SIZE
     emitted = producer_batches * prompt_contract.POSITIVE_ROWS_PER_UPDATE
     accepted = emitted + 7
     proposals = accepted + 1_000
@@ -46,20 +45,20 @@ def test_round0166_train_seal_reload_panel_cpu_smoke(
         "bytes": 2,
         "sha256": "b" * 64,
     }
-    config, config_sha = scale_train_config(
+    config, config_sha = round0166_nodes.scale_train_config(
         graph_signature=graph_signature,
         graph_manifest_signature=manifest_signature,
-        graph_edges=8,
+        graph_edges=config_graph_edges,
         retained_rows=rows,
     )
     runtime = {
         **config["execution"]["expected_pipeline_stamp"],
-        "endpoint_gather_calls": SUCCESSFUL_UPDATES,
+        "endpoint_gather_calls": successful_updates,
         "source_rows_gathered": expected_rows,
         "destination_rows_gathered": expected_rows,
         "host_prefetch_batches_filled": producer_batches,
         "host_prefetch_producer_batches": producer_batches,
-        "host_prefetch_consumer_batches": SUCCESSFUL_UPDATES,
+        "host_prefetch_consumer_batches": successful_updates,
         "host_prefetch_source_rows_filled": producer_batches
         * prompt_contract.BATCH_SIZE,
         "host_prefetch_destination_rows_filled": producer_batches
@@ -72,13 +71,13 @@ def test_round0166_train_seal_reload_panel_cpu_smoke(
         "weight_rejection_iterations": producer_batches,
     }
     accounting: dict[str, Any] = {
-        "lr_horizon": SUCCESSFUL_UPDATES,
-        "positive_lr_optimizer_steps": SUCCESSFUL_UPDATES,
-        "scheduler_steps": SUCCESSFUL_UPDATES,
-        "attempted_batches": SUCCESSFUL_UPDATES,
-        "finite_loss_batches": SUCCESSFUL_UPDATES,
-        "optimizer_steps_attempted": SUCCESSFUL_UPDATES,
-        "optimizer_steps_succeeded": SUCCESSFUL_UPDATES,
+        "lr_horizon": successful_updates,
+        "positive_lr_optimizer_steps": successful_updates,
+        "scheduler_steps": successful_updates,
+        "attempted_batches": successful_updates,
+        "finite_loss_batches": successful_updates,
+        "optimizer_steps_attempted": successful_updates,
+        "optimizer_steps_succeeded": successful_updates,
         "amp_overflow_skips": 0,
         "nonfinite_loss_skips": 0,
         "nonfinite_gradient_skips": 0,
@@ -190,19 +189,19 @@ def test_round0166_train_seal_reload_panel_cpu_smoke(
     monkeypatch.setattr(torch.cuda, "manual_seed_all", lambda seed: None)
     monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda device: None)
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (1_000_000_000, 2_000_000_000))
-    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda device: 1_024)
-    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda device: 2_048)
+    monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda device=None: 1_024)
+    monkeypatch.setattr(torch.cuda, "max_memory_reserved", lambda device=None: 2_048)
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
 
     output = tmp_path / "train-output"
     round0166_nodes.run_train(
-        {"manifest": {"round_id": ROUND_ID, "release_sha": "f" * 40}},
+        {"manifest": {"round_id": round_id, "release_sha": "f" * 40}},
         {"graph_manifest": str(manifest_path), "outputs": [str(output)]},
     )
     with (output / "train-receipt.json").open(encoding="utf-8") as handle:
         receipt = json.load(handle)
     prompt_contract.validate_seal(receipt, label="R0166 CPU smoke receipt")
-    assert receipt["optimizer_updates"] == SUCCESSFUL_UPDATES
+    assert receipt["optimizer_updates"] == successful_updates
     assert receipt["exact_execution_receipt"]["multiplicity_policy"] == MULTIPLICITY_POLICY
     assert receipt["train_checks"]["weighted_rejection_accounting_closes"] is True
 
@@ -225,7 +224,13 @@ def test_round0166_train_seal_reload_panel_cpu_smoke(
             rerank_byte_cap=8_000_000,
             peak_byte_cap=16_000_000,
         ),
-        provenance={"round": ROUND_ID, "mode": "cpu-smoke"},
+        provenance={"round": round_id, "mode": "cpu-smoke"},
     )
     assert panel["guards"]["coords_finite"] is True
     assert panel["guards"]["coords_collapsed"] is False
+
+
+def test_round0166_train_seal_reload_panel_cpu_smoke(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _run_train_seal_reload_panel_cpu_smoke(monkeypatch, tmp_path)

@@ -68,6 +68,8 @@ def test_r0171_dispatch_binds_fp32_sharded_faiss(monkeypatch) -> None:
         "GRAPH_REFERENCE_ROW_ORDER",
         "GRAPH_REFERENCE_ANCHOR_NAMESPACE",
         "GRAPH_SHARD_ROWS",
+        "GRAPH_SOURCE_ROUND_ID",
+        "GRAPH_BUILT_IN_ROUND",
         "scale_decision",
         "scale_train_config",
         "_faiss_gpu_options",

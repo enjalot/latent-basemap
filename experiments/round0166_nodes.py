@@ -75,6 +75,10 @@ GRAPH_INDEX_DESCRIPTION = "GPU IndexIVFFlat/IP fp32 vector storage"
 GRAPH_REFERENCE_ROW_ORDER = "R0165 frozen-prefix prompted compact order"
 GRAPH_REFERENCE_ANCHOR_NAMESPACE = "R0165 compact IDs"
 GRAPH_SHARD_ROWS = 4_000_000
+# Descendant rounds may consume an already-reviewed graph without pretending
+# that they rebuilt it.  The defaults preserve every historical R0166 call.
+GRAPH_SOURCE_ROUND_ID = ROUND_ID
+GRAPH_BUILT_IN_ROUND = True
 
 
 def _faiss_gpu_options(faiss: Any) -> Any:
@@ -730,7 +734,7 @@ def _load_graph(path: str) -> dict[str, Any]:
     rows = int(manifest.get("retained_rows", -1))
     if (
         manifest.get("schema") != GRAPH_SCHEMA
-        or manifest.get("round_id") != ROUND_ID
+        or manifest.get("round_id") != GRAPH_SOURCE_ROUND_ID
         or rows <= 2_000_000
         or int(manifest.get("dimension", -1)) != DIMENSION
         or int(manifest.get("k", -1)) != GRAPH_K
@@ -760,6 +764,32 @@ def _load_graph(path: str) -> dict[str, Any]:
         "weights": weights,
         "n_nodes": rows,
     }
+
+
+def _weighted_rejection_accounting_mismatch(
+    runtime: Mapping[str, Any], *, producer_delta: int
+) -> dict[str, Any] | None:
+    """Close sampler accounting against this scale round's dynamic horizon."""
+    expected_emitted = (
+        SUCCESSFUL_UPDATES + producer_delta
+    ) * prompt_contract.POSITIVE_ROWS_PER_UPDATE
+    if (
+        int(runtime["weight_emitted_draws"]) != expected_emitted
+        or int(runtime["weight_acceptances"])
+        != int(runtime["weight_emitted_draws"])
+        + int(runtime["weight_buffered_draws"])
+        or int(runtime["weight_proposals"]) < int(runtime["weight_acceptances"])
+        or not 0 < float(runtime["weight_acceptance_rate"]) <= 1
+    ):
+        return {
+            "expected_emitted_positive_draws": expected_emitted,
+            "expected_consumed_positive_draws": (
+                SUCCESSFUL_UPDATES * prompt_contract.POSITIVE_ROWS_PER_UPDATE
+            ),
+            "producer_delta": producer_delta,
+            "runtime": runtime,
+        }
+    return None
 
 
 def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
@@ -873,7 +903,7 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "expected_rows": expected_rows,
             "runtime": runtime,
         }
-    weighted = prompt_nodes._weighted_rejection_accounting_mismatch(
+    weighted = _weighted_rejection_accounting_mismatch(
         runtime, producer_delta=producer_delta
     )
     if weighted is not None:
@@ -956,7 +986,7 @@ def _authenticate_model(
     )
     if (
         graph.get("schema") != GRAPH_SCHEMA
-        or graph.get("round_id") != ROUND_ID
+        or graph.get("round_id") != GRAPH_SOURCE_ROUND_ID
         or graph.get("population") != dict(population_signature)
         or int(graph.get("retained_rows", -1)) != rows
         or int(graph.get("directed_edge_count", -1)) <= 0
@@ -1458,7 +1488,7 @@ def run_evaluate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "prompted_floors": floors,
         "training_performed_in_round": True,
         "evaluation_node_training_performed": False,
-        "graph_built_in_round": True,
+        "graph_built_in_round": GRAPH_BUILT_IN_ROUND,
         "performance": {
             "evaluation_wall_s": time.monotonic() - started,
             "peak_allocated_bytes": int(torch.cuda.max_memory_allocated("cuda")),
