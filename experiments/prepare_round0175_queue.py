@@ -6,6 +6,7 @@ import argparse
 import glob
 import json
 import os
+import subprocess
 import sys
 from typing import Any
 
@@ -50,10 +51,24 @@ def _issued_round(release_sha: str) -> dict[str, Any]:
     if not os.path.isfile(ROUND_FILE):
         raise RuntimeError("R0175 issued round file is absent")
     frontmatter = _frontmatter(ROUND_FILE)
+    base_commit = str(frontmatter.get("base_commit") or "")
+    descendant = subprocess.run(
+        [
+            "git",
+            "-C",
+            RELEASE_ROOT,
+            "merge-base",
+            "--is-ancestor",
+            base_commit,
+            release_sha,
+        ],
+        check=False,
+        timeout=10,
+    ).returncode == 0
     if (
         frontmatter.get("round_id") != ROUND_ID
         or frontmatter.get("status") != "issued"
-        or frontmatter.get("base_commit") != release_sha
+        or not descendant
     ):
         raise RuntimeError("R0175 issued round binding changed")
     return expected_input_signature(ROUND_FILE)
