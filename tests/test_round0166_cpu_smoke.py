@@ -203,6 +203,10 @@ def _run_train_seal_reload_panel_cpu_smoke(
     prompt_contract.validate_seal(receipt, label="R0166 CPU smoke receipt")
     assert receipt["optimizer_updates"] == successful_updates
     assert receipt["exact_execution_receipt"]["multiplicity_policy"] == MULTIPLICITY_POLICY
+    assert (
+        receipt["train_accounting"]["pipeline_runtime"]
+        == receipt["exact_execution_receipt"]
+    )
     assert receipt["train_checks"]["weighted_rejection_accounting_closes"] is True
 
     checkpoint = torch.load(output / "model.pt", map_location="cpu", weights_only=True)

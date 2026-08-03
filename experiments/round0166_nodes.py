@@ -911,6 +911,11 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     if mismatches:
         raise Round0166Error(f"R0166 train accounting failed: {mismatches}")
     prompt_contract.synchronize_runtime_counters(accounting, runtime)
+    # ParametricUMAP captures the sampler's generic R0113 loader stamp before
+    # ScalePromptTrainingInput applies the bound prompted-population semantics.
+    # Keep the nested accounting view identical to the authenticated wrapper
+    # stamp instead of persisting that stale generic multiplicity label.
+    accounting["pipeline_runtime"] = dict(runtime)
     profiler = model._canary_profiler.finalize(
         bench_seconds=model._bench_seconds,
         setup_seconds=getattr(model, "_setup_seconds", None),
