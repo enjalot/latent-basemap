@@ -93,7 +93,14 @@ def _schema(stem: str) -> str:
 
 def _execution_round_id(active: Mapping[str, Any]) -> str:
     round_id = str((active.get("manifest") or {}).get("round_id", ""))
-    if round_id not in {ROUND_ID, "0115", "0117", "0124", "0129"}:
+    if round_id not in {
+        ROUND_ID,
+        "0115",
+        "0117",
+        "0124",
+        "0129",
+        "0160",
+    }:
         raise Round0113Error("R0113 scientific handler received another queue")
     return round_id
 
@@ -106,6 +113,19 @@ def _training_seed(
     # model adapter.  They keep the original seed-42 bridge and its seed-43
     # replicate explicit here so the shared evaluator cannot silently fall
     # back to the R0113 default.
+    if round_id == "0160":
+        observed = job.get("training_seed")
+        if isinstance(observed, bool):
+            raise Round0113Error("registered prompt training seed changed")
+        try:
+            observed = int(observed)
+        except (TypeError, ValueError) as error:
+            raise Round0113Error(
+                "registered prompt training seed changed"
+            ) from error
+        if observed not in {44, 45}:
+            raise Round0113Error("registered prompt training seed changed")
+        return observed
     registered = {
         ROUND_ID: SEED,
         "0115": SEED,
@@ -131,7 +151,11 @@ def _graph_execution_round_id(
     active: Mapping[str, Any], job: Mapping[str, Any]
 ) -> str:
     execution_round_id = _execution_round_id(active)
-    registered = "0115" if execution_round_id == "0117" else execution_round_id
+    registered = (
+        "0115"
+        if execution_round_id in {"0117", "0160"}
+        else execution_round_id
+    )
     observed = str(job.get("graph_execution_round_id", registered))
     if observed != registered:
         raise Round0113Error("registered prompt graph provenance changed")
