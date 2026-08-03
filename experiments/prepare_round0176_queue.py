@@ -72,6 +72,9 @@ def _configure() -> None:
         "query or FineWeb-control overlap blocks before scoring, while corpus "
         "overlap is reported diagnostically without filtering"
     )
+    base.PROBE_FAMILY_POLICY = (
+        "require prompted corpus/query exact-family disjointness"
+    )
     # The inherited per-node p90s sum to 2.233 GPU-h.  R0172's 2.0 h cap was
     # therefore internally inconsistent even though its expected execution was
     # much shorter.  Keep those conservative node bounds and make the cap

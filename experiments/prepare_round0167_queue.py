@@ -83,6 +83,7 @@ Q2_CAPABILITY: str | None = "jina-document-english-8m-prompted-map-seed42-v1"
 Q2_MAP_ROLE = "accepted positive Q2 map capability"
 TRAINING_AUDIT_PATHS: dict[str, tuple[str, int]] = {}
 TRAINING_AUDIT_POLICY = "not requested"
+PROBE_FAMILY_POLICY = "require corpus/query exact-family disjointness"
 HANDLER_MODULE = "experiments.round0167_nodes"
 QUEUE_SCHEMA = "round0167-prompted-universality-queue-v1"
 QUEUE_LABEL = "R0167 prompted universality queue"
@@ -532,6 +533,7 @@ def prepare_round0167(
             "raw_comparison": "accepted R0142/R0146, descriptive because map scales differ",
             "q2_map_evidence_role": Q2_MAP_ROLE,
             "training_overlap_audit": TRAINING_AUDIT_POLICY,
+            "probe_family_policy": PROBE_FAMILY_POLICY,
             "diagnostic_only": True,
             "no_causal_prompt_claim": True,
             "no_universal_map_claim": True,

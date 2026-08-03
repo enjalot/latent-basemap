@@ -40,6 +40,8 @@ def _configure() -> None:
     }
     for name, value in node_bindings.items():
         setattr(base, name, value)
+    base.ALLOW_CROSS_SPLIT_FAMILIES = False
+    base.DUPLICATE_SENSITIVITY = False
 
 
 def run_training_disjoint_audit(

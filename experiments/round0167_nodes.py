@@ -25,6 +25,10 @@ from basemap.output_safety import (
 from basemap.round0142_jina_universality import PROBE_ORDER
 from basemap.round0146_projection_predictors import geometry_predictors
 from basemap.round0116_prompted_corpus import validate_environment_freeze
+from basemap.round0108_evaluation import (
+    exact_reference_copy_mask,
+    exact_split_duplicate_diagnostics,
+)
 from basemap.round0167_prompted_universality import (
     CAPABILITY,
     CONTROL_QUERY_ID_OFFSET,
@@ -57,6 +61,8 @@ CANARY_SCHEMA = "round0167-prompt-model-canary-v1"
 PROBE_SCHEMA = "round0167-prompted-probe-embeddings-v1"
 CONTROL_SCHEMA = "round0167-prompted-fineweb-control-v1"
 MAP_PANEL_SCHEMA = "round0167-prompted-universality-map-panel-v1"
+ALLOW_CROSS_SPLIT_FAMILIES = False
+DUPLICATE_SENSITIVITY = False
 
 
 def _signature(expected: Mapping[str, Any], *, label: str) -> dict[str, Any]:
@@ -173,7 +179,8 @@ def _exact_family_audit(corpus: np.ndarray, queries: np.ndarray) -> dict[str, An
     corpus_unique, corpus_counts = np.unique(corpus_keys, return_counts=True)
     query_unique, query_counts = np.unique(query_keys, return_counts=True)
     overlap = np.intersect1d(corpus_unique, query_unique, assume_unique=True)
-    if overlap.size:
+    diagnostic = exact_split_duplicate_diagnostics(corpus, queries)
+    if overlap.size and not ALLOW_CROSS_SPLIT_FAMILIES:
         raise Round0167Error("prompted corpus/query exact families overlap")
     return {
         "identity": "complete stored prompted-fp16 row bytes",
@@ -185,7 +192,63 @@ def _exact_family_audit(corpus: np.ndarray, queries: np.ndarray) -> dict[str, An
         "query_duplicate_rows": int(len(queries) - len(query_unique)),
         "maximum_corpus_family": int(corpus_counts.max()),
         "maximum_query_family": int(query_counts.max()),
-        "cross_split_family_overlap": 0,
+        "cross_split_family_overlap": int(len(overlap)),
+        "query_rows_with_exact_corpus_copy": int(
+            diagnostic["query_rows_with_exact_corpus_copy"]
+        ),
+        "corpus_query_exact_family_disjoint": bool(
+            diagnostic["corpus_query_exact_family_disjoint"]
+        ),
+        "policy": (
+            "diagnostic-primary-plus-query-leakage-controlled-sensitivity"
+            if ALLOW_CROSS_SPLIT_FAMILIES
+            else "require-corpus-query-exact-family-disjoint"
+        ),
+        "passed": (
+            None if ALLOW_CROSS_SPLIT_FAMILIES
+            else bool(diagnostic["corpus_query_exact_family_disjoint"])
+        ),
+    }
+
+
+def _duplicate_sensitivity_mask(
+    *,
+    probe_corpus: np.ndarray,
+    probe_queries: np.ndarray,
+    control_corpus: np.ndarray,
+    control_queries: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Exclude matched query positions leaked in either paired universe."""
+    probe_copies, probe_audit = exact_reference_copy_mask(
+        probe_corpus, probe_queries
+    )
+    control_copies, control_audit = exact_reference_copy_mask(
+        control_corpus, control_queries
+    )
+    if probe_copies.shape != control_copies.shape:
+        raise Round0167Error("duplicate-sensitivity query shapes disagree")
+    excluded = np.asarray(probe_copies | control_copies, dtype=bool)
+    keep = ~excluded
+    if not np.any(keep):
+        raise Round0167Error("duplicate-sensitivity removed every query")
+    return keep, {
+        "policy": (
+            "exclude the union of paired query positions having an exact "
+            "stored-fp16 corpus copy; retain both frozen corpora"
+        ),
+        "probe_copy_audit": probe_audit,
+        "control_copy_audit": control_audit,
+        "original_query_rows": int(len(keep)),
+        "retained_query_rows": int(keep.sum()),
+        "probe_copy_query_positions": np.flatnonzero(
+            probe_copies
+        ).astype(np.int64).tolist(),
+        "control_copy_query_positions": np.flatnonzero(
+            control_copies
+        ).astype(np.int64).tolist(),
+        "excluded_query_positions": np.flatnonzero(excluded).astype(
+            np.int64
+        ).tolist(),
     }
 
 
@@ -478,6 +541,7 @@ def _load_probe(output: str, name: str) -> tuple[np.ndarray, np.ndarray, np.ndar
         "query_embeddings": query_signature,
         "corpus_source_rows": corpus_rows_signature,
         "query_source_rows": query_rows_signature,
+        "duplicate_audit": receipt.get("duplicate_audit"),
         "prompt_applied": True,
         "prompt_prefix": PROMPT_PREFIX,
     }
@@ -512,6 +576,13 @@ def run_score_map(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         )
         if len(control_corpus_rows) != len(corpus) or len(control_query_rows) != len(queries):
             raise Round0167Error(f"{name} prompted control shape mismatch")
+        primary_duplicate_policy = (
+            "diagnostic-only"
+            if DUPLICATE_SENSITIVITY
+            else "require-corpus-query-exact-family-disjoint"
+        )
+        control_corpus = np.asarray(control[control_corpus_rows])
+        control_queries = np.asarray(control[control_query_rows])
         probe_report = _probe_score(
             name=name,
             corpus=np.asarray(corpus),
@@ -522,12 +593,12 @@ def run_score_map(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             output=output,
             inputs=inputs,
             save_coordinates=True,
-            duplicate_policy="require-corpus-query-exact-family-disjoint",
+            duplicate_policy=primary_duplicate_policy,
         )
         control_report = _probe_score(
             name=f"{name}__fineweb-control",
-            corpus=np.asarray(control[control_corpus_rows]),
-            queries=np.asarray(control[control_query_rows]),
+            corpus=control_corpus,
+            queries=control_queries,
             corpus_ids=control_corpus_rows,
             query_ids=CONTROL_QUERY_ID_OFFSET + control_query_rows,
             model=model,
@@ -541,7 +612,7 @@ def run_score_map(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 "r0142_coordinates": control_coordinates,
             },
             save_coordinates=True,
-            duplicate_policy="require-corpus-query-exact-family-disjoint",
+            duplicate_policy=primary_duplicate_policy,
         )
         probe_ffr = float(probe_report["probe"]["ffr"])
         control_ffr = float(control_report["probe"]["ffr"])
@@ -564,6 +635,117 @@ def run_score_map(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 "verdict": retention_verdict(retention),
             },
         }
+        if DUPLICATE_SENSITIVITY:
+            keep, sensitivity_audit = _duplicate_sensitivity_mask(
+                probe_corpus=np.asarray(corpus),
+                probe_queries=np.asarray(queries),
+                control_corpus=control_corpus,
+                control_queries=control_queries,
+            )
+            excluded = ~keep
+            sensitivity_audit["excluded_probe_source_rows"] = (
+                np.asarray(query_rows, dtype=np.int64)[excluded].tolist()
+            )
+            sensitivity_audit["excluded_control_source_rows"] = (
+                np.asarray(
+                    control_query_rows, dtype=np.int64
+                )[excluded].tolist()
+            )
+            if bool(np.all(keep)):
+                sensitivity_metrics = dict(reports[name]["metrics"])
+                sensitivity = {
+                    "audit": sensitivity_audit,
+                    "identical_to_primary": True,
+                    "probe": None,
+                    "control": None,
+                    "metrics": sensitivity_metrics,
+                }
+            else:
+                sensitivity_probe = _probe_score(
+                    name=f"{name}__duplicate-controlled",
+                    corpus=np.asarray(corpus),
+                    queries=np.asarray(queries)[keep],
+                    corpus_ids=np.asarray(corpus_rows, dtype=np.int64),
+                    query_ids=(
+                        QUERY_ID_OFFSET
+                        + np.asarray(query_rows, dtype=np.int64)[keep]
+                    ),
+                    model=model,
+                    output=output,
+                    inputs={
+                        **inputs,
+                        "duplicate_sensitivity": sensitivity_audit,
+                    },
+                    save_coordinates=True,
+                    duplicate_policy=(
+                        "require-corpus-query-exact-family-disjoint"
+                    ),
+                )
+                sensitivity_control = _probe_score(
+                    name=f"{name}__fineweb-control__duplicate-controlled",
+                    corpus=control_corpus,
+                    queries=control_queries[keep],
+                    corpus_ids=control_corpus_rows,
+                    query_ids=(
+                        CONTROL_QUERY_ID_OFFSET + control_query_rows[keep]
+                    ),
+                    model=model,
+                    output=output,
+                    inputs={
+                        "embedding_receipt": expected_input_signature(
+                            control_receipt_path
+                        ),
+                        "embeddings": control_signature,
+                        "prompt_applied": True,
+                        "prompt_prefix": PROMPT_PREFIX,
+                        "training_membership": "dedicated heldout artifact",
+                        "r0142_coordinates": control_coordinates,
+                        "duplicate_sensitivity": sensitivity_audit,
+                    },
+                    save_coordinates=True,
+                    duplicate_policy=(
+                        "require-corpus-query-exact-family-disjoint"
+                    ),
+                )
+                sensitivity_probe_ffr = float(
+                    sensitivity_probe["probe"]["ffr"]
+                )
+                sensitivity_control_ffr = float(
+                    sensitivity_control["probe"]["ffr"]
+                )
+                sensitivity_control_recall = float(
+                    sensitivity_control["probe"]["recall_at_10"]
+                )
+                if sensitivity_control_ffr <= 0:
+                    raise Round0167Error(
+                        f"{name} sensitivity control FFR is nonpositive"
+                    )
+                sensitivity_retention = (
+                    sensitivity_probe_ffr / sensitivity_control_ffr
+                )
+                sensitivity = {
+                    "audit": sensitivity_audit,
+                    "identical_to_primary": False,
+                    "probe": sensitivity_probe,
+                    "control": sensitivity_control,
+                    "metrics": {
+                        "probe_ffr": sensitivity_probe_ffr,
+                        "control_ffr": sensitivity_control_ffr,
+                        "ffr_retention": sensitivity_retention,
+                        "recall10_retention": (
+                            float(
+                                sensitivity_probe["probe"]["recall_at_10"]
+                            )
+                            / sensitivity_control_recall
+                            if sensitivity_control_recall > 0
+                            else None
+                        ),
+                        "verdict": retention_verdict(
+                            sensitivity_retention
+                        ),
+                    },
+                }
+            reports[name]["duplicate_controlled_sensitivity"] = sensitivity
         print(
             f"R0167 {map_key} {index + 1}/{len(PROBE_ORDER)} {name}: retention={retention:.4f}",
             flush=True,
@@ -579,6 +761,11 @@ def run_score_map(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "probe_order": list(PROBE_ORDER),
         "probes": reports,
         "thresholds": {"pass_at_least": 0.70, "failure_below": 0.50},
+        "duplicate_policy": (
+            "full frozen panel primary plus paired query-leakage sensitivity"
+            if DUPLICATE_SENSITIVITY
+            else "require corpus/query exact-family disjointness"
+        ),
         "role": "diagnostic-only; no atlas-quality or production gate",
         "training_performed": False,
         "wall_seconds": time.monotonic() - started,
@@ -643,6 +830,7 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 
     geometries: dict[str, Any] = {}
     cells: list[dict[str, Any]] = []
+    duplicate_sensitivity_cells: list[dict[str, Any]] = []
     for name in PROBE_ORDER:
         corpus, _queries, corpus_rows, _query_rows, inputs = _load_probe(
             str(job["probe_outputs"][name]), name
@@ -664,7 +852,87 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 ),
                 "twonn_intrinsic_dimension": float(geometry["twonn"]["intrinsic_dimension"]),
             })
+            if DUPLICATE_SENSITIVITY:
+                sensitivity = panels[map_key]["probes"][name][
+                    "duplicate_controlled_sensitivity"
+                ]
+                sensitivity_metric = sensitivity["metrics"]
+                primary_ffr = float(metric["ffr_retention"])
+                sensitivity_ffr = float(
+                    sensitivity_metric["ffr_retention"]
+                )
+                primary_recall = (
+                    float(metric["recall10_retention"])
+                    if metric.get("recall10_retention") is not None
+                    else None
+                )
+                sensitivity_recall = (
+                    float(sensitivity_metric["recall10_retention"])
+                    if sensitivity_metric.get("recall10_retention")
+                    is not None
+                    else None
+                )
+                duplicate_sensitivity_cells.append({
+                    "map": map_key,
+                    "probe": name,
+                    "ffr_retention": sensitivity_ffr,
+                    "recall10_retention": sensitivity_recall,
+                    "primary_ffr_retention": primary_ffr,
+                    "delta_ffr_retention": (
+                        sensitivity_ffr - primary_ffr
+                    ),
+                    "primary_recall10_retention": primary_recall,
+                    "delta_recall10_retention": (
+                        sensitivity_recall - primary_recall
+                        if sensitivity_recall is not None
+                        and primary_recall is not None
+                        else None
+                    ),
+                    "primary_verdict": metric["verdict"],
+                    "sensitivity_verdict": (
+                        sensitivity_metric["verdict"]
+                    ),
+                    "twonn_intrinsic_dimension": float(
+                        geometry["twonn"]["intrinsic_dimension"]
+                    ),
+                    "excluded_query_positions": list(
+                        sensitivity["audit"][
+                            "excluded_query_positions"
+                        ]
+                    ),
+                })
     correlations = twonn_correlations(cells)
+    duplicate_sensitivity_correlations = (
+        twonn_correlations(duplicate_sensitivity_cells)
+        if DUPLICATE_SENSITIVITY
+        else None
+    )
+    duplicate_sensitivity_summary = None
+    if DUPLICATE_SENSITIVITY:
+        sensitivity_recall_deltas = [
+            abs(float(item["delta_recall10_retention"]))
+            for item in duplicate_sensitivity_cells
+            if item["delta_recall10_retention"] is not None
+        ]
+        duplicate_sensitivity_summary = {
+            "cells": len(duplicate_sensitivity_cells),
+            "cells_with_query_exclusions": sum(
+                bool(item["excluded_query_positions"])
+                for item in duplicate_sensitivity_cells
+            ),
+            "maximum_absolute_ffr_retention_delta": max(
+                abs(float(item["delta_ffr_retention"]))
+                for item in duplicate_sensitivity_cells
+            ),
+            "maximum_absolute_recall10_retention_delta": max(
+                sensitivity_recall_deltas
+            ) if sensitivity_recall_deltas else None,
+            "verdict_changes": sum(
+                item["primary_verdict"]
+                != item["sensitivity_verdict"]
+                for item in duplicate_sensitivity_cells
+            ),
+        }
     prompted_rho = next(
         float(item["spearman_rho"])
         for item in correlations
@@ -679,6 +947,31 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "amber": sum(item["verdict"] == "amber" for item in values),
             "named_failure": sum(item["verdict"] == "named-failure" for item in values),
         }
+        if DUPLICATE_SENSITIVITY:
+            sensitivity_values = [
+                panels[map_key]["probes"][name][
+                    "duplicate_controlled_sensitivity"
+                ]["metrics"]
+                for name in PROBE_ORDER
+            ]
+            summaries[map_key]["duplicate_controlled_sensitivity"] = {
+                "ffr_retention_median": float(np.median([
+                    float(item["ffr_retention"])
+                    for item in sensitivity_values
+                ])),
+                "pass": sum(
+                    item["verdict"] == "pass"
+                    for item in sensitivity_values
+                ),
+                "amber": sum(
+                    item["verdict"] == "amber"
+                    for item in sensitivity_values
+                ),
+                "named_failure": sum(
+                    item["verdict"] == "named-failure"
+                    for item in sensitivity_values
+                ),
+            }
     scale_comparisons: dict[str, Any] = {}
     for name in PROBE_ORDER:
         baseline = np.mean([
@@ -691,6 +984,29 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "prompted_8m_seed42": eight,
             "delta_8m_minus_mean_2m": eight - float(baseline),
         }
+        if DUPLICATE_SENSITIVITY:
+            sensitivity_baseline = np.mean([
+                float(
+                    panels[map_key]["probes"][name][
+                        "duplicate_controlled_sensitivity"
+                    ]["metrics"]["ffr_retention"]
+                )
+                for map_key in PROMPTED_MAP_ORDER[:2]
+            ])
+            sensitivity_eight = float(
+                panels[PROMPTED_MAP_ORDER[2]]["probes"][name][
+                    "duplicate_controlled_sensitivity"
+                ]["metrics"]["ffr_retention"]
+            )
+            scale_comparisons[name][
+                "duplicate_controlled_sensitivity"
+            ] = {
+                "mean_2m_seed42_43": float(sensitivity_baseline),
+                "prompted_8m_seed42": sensitivity_eight,
+                "delta_8m_minus_mean_2m": (
+                    sensitivity_eight - float(sensitivity_baseline)
+                ),
+            }
     report = seal({
         "schema": CAPABILITY,
         "round_id": ROUND_ID,
@@ -705,10 +1021,21 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             for key in PROMPTED_MAP_ORDER
         },
         "cells": cells,
+        "duplicate_controlled_sensitivity_cells": (
+            duplicate_sensitivity_cells
+            if DUPLICATE_SENSITIVITY
+            else None
+        ),
         "summaries": summaries,
         "scale_comparisons": scale_comparisons,
         "prompted_geometry": geometries,
         "twonn_correlations": correlations,
+        "duplicate_controlled_sensitivity_correlations": (
+            duplicate_sensitivity_correlations
+        ),
+        "duplicate_controlled_sensitivity_summary": (
+            duplicate_sensitivity_summary
+        ),
         "raw_comparison": {
             "r0142_retention_table": raw_table_signature,
             "r0142_rows": raw_table.get("rows"),
@@ -724,6 +1051,13 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "interpretation": (
             "within-probe FFR divided by an exactly shape-matched prompted FineWeb control; "
             "same accepted R0142 source-row selections"
+        ),
+        "duplicate_policy": (
+            "full frozen panel is primary; paired sensitivity excludes the "
+            "union of query positions with an exact corpus copy in either "
+            "probe or matched control"
+            if DUPLICATE_SENSITIVITY
+            else "require corpus/query exact-family disjointness"
         ),
         "diagnostic_only": True,
         "no_causal_prompt_claim": True,
