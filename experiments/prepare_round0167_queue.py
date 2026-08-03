@@ -78,6 +78,11 @@ REVIEW_CAPABILITIES = {
 GPU_HOURS_MINIMUM = 0.20
 GPU_HOURS_EXPECTED = 0.40
 GPU_HOURS_MAXIMUM = 2.00
+Q2_ROUND_ID = "0166"
+Q2_CAPABILITY = "jina-document-english-8m-prompted-map-seed42-v1"
+HANDLER_MODULE = "experiments.round0167_nodes"
+QUEUE_SCHEMA = "round0167-prompted-universality-queue-v1"
+QUEUE_LABEL = "R0167 prompted universality queue"
 
 
 def _one_document(prefix: str, round_id: str, *, status: str) -> dict[str, Any]:
@@ -233,7 +238,7 @@ def _release_cpu_smoke(release_sha: str, maps: Mapping[str, Mapping[str, Any]]) 
             "coordinate_maximum": float(coordinates.max()),
         }
     return seal({
-        "schema": "round0167-release-cpu-smoke-v1",
+        "schema": f"round{ROUND_ID}-release-cpu-smoke-v1",
         "round_id": ROUND_ID,
         "release_sha": release_sha,
         "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
@@ -252,7 +257,7 @@ def prepare_round0167(
     reviews: list[dict[str, Any]] = []
     for round_id, capability in REVIEW_CAPABILITIES.items():
         reviews.extend(_accepted_review(round_id, capability))
-    reviews.extend(_accepted_any_review("0166"))
+    reviews.extend(_accepted_any_review(Q2_ROUND_ID))
 
     maps = {key: expected_input_signature(path) for key, path in MAPS.items()}
     if tuple(maps) != PROMPTED_MAP_ORDER:
@@ -289,7 +294,7 @@ def prepare_round0167(
         ],
     ])
 
-    queue_root = create_fresh_directory(queue_root, label="R0167 prompted universality queue")
+    queue_root = create_fresh_directory(queue_root, label=QUEUE_LABEL)
     preflight = ensure_data_directory(os.path.join(queue_root, "preflight"))
     smoke_path = os.path.join(preflight, "release-cpu-smoke.json")
     atomic_write_new_json(smoke_path, _release_cpu_smoke(release_sha, maps), immutable=True)
@@ -300,7 +305,7 @@ def prepare_round0167(
     jobs: list[dict[str, Any]] = [{
         "id": "prompt_model_canary",
         "action": "prompt_canary",
-        "handler_module": "experiments.round0167_nodes",
+        "handler_module": HANDLER_MODULE,
         "handler_callable": "run_job",
         "deps": [],
         "outputs": [canary_output],
@@ -334,7 +339,7 @@ def prepare_round0167(
         jobs.append({
             "id": job_id,
             "action": "embed_probe",
-            "handler_module": "experiments.round0167_nodes",
+            "handler_module": HANDLER_MODULE,
             "handler_callable": "run_job",
             "deps": ["prompt_model_canary"],
             "outputs": [output],
@@ -357,7 +362,7 @@ def prepare_round0167(
     jobs.append({
         "id": control_job_id,
         "action": "embed_control",
-        "handler_module": "experiments.round0167_nodes",
+        "handler_module": HANDLER_MODULE,
         "handler_callable": "run_job",
         "deps": ["prompt_model_canary"],
         "outputs": [control_output],
@@ -383,7 +388,7 @@ def prepare_round0167(
         jobs.append({
             "id": job_id,
             "action": "score_map",
-            "handler_module": "experiments.round0167_nodes",
+            "handler_module": HANDLER_MODULE,
             "handler_callable": "run_job",
             "deps": [*embed_ids, control_job_id],
             "outputs": [output],
@@ -402,7 +407,7 @@ def prepare_round0167(
     jobs.append({
         "id": "assemble_prompted_universality",
         "action": "assemble",
-        "handler_module": "experiments.round0167_nodes",
+        "handler_module": HANDLER_MODULE,
         "handler_callable": "run_job",
         "deps": score_ids,
         "outputs": [final_output],
@@ -430,12 +435,15 @@ def prepare_round0167(
         gpu=True,
     )
     queue.update({
-        "schema": "round0167-prompted-universality-queue-v1",
+        "schema": QUEUE_SCHEMA,
         "repo_root": RELEASE_ROOT,
         "queue_class": "gpu-evaluation",
-        "required_reviews": [*REVIEW_CAPABILITIES, "0166"],
-        "ordering_dependencies": ["0166"],
-        "capability_dependencies": list(REVIEW_CAPABILITIES.values()),
+        "required_reviews": [*REVIEW_CAPABILITIES, Q2_ROUND_ID],
+        "ordering_dependencies": [Q2_ROUND_ID],
+        "capability_dependencies": [
+            *REVIEW_CAPABILITIES.values(),
+            Q2_CAPABILITY,
+        ],
         "capabilities_produced": [CAPABILITY],
         "training_performed": False,
         "jobs": jobs,
