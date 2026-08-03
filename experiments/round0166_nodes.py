@@ -173,6 +173,7 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         np.ascontiguousarray(X[quality_ids]), X, k=GRAPH_K, candidate_block_rows=50_000
     )
     truth = _without_self(truth_raw, quality_ids, GRAPH_K - 1)
+    torch.cuda.empty_cache()
 
     train_rows = np.sort(
         np.random.RandomState(GRAPH_TRAIN_SEED)
@@ -187,7 +188,7 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     cpu_index.cp.niter = 25
     cpu_index.cp.spherical = True
     resource = faiss.StandardGpuResources()
-    resource.setTempMemory(1 << 30)
+    resource.setTempMemory(256 << 20)
     index = faiss.index_cpu_to_gpu(
         resource, 0, cpu_index, prompt_nodes._faiss_gpu_options(faiss)
     )
@@ -195,8 +196,8 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     index.train(np.ascontiguousarray(X[train_rows]))
     train_seconds = time.monotonic() - train_started
     add_started = time.monotonic()
-    for start in range(0, rows, 100_000):
-        index.add(np.ascontiguousarray(X[start:min(start + 100_000, rows)]))
+    for start in range(0, rows, 25_000):
+        index.add(np.ascontiguousarray(X[start:min(start + 25_000, rows)]))
     add_seconds = time.monotonic() - add_started
     if int(index.ntotal) != rows:
         raise Round0166Error("R0166 IVF row count changed")
