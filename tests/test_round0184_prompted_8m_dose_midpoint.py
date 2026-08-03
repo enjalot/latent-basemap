@@ -13,7 +13,7 @@ from basemap.round0184_prompted_8m_dose_midpoint import (
     diagnostic_scale_decision,
     scale_train_config,
 )
-from experiments import round0166_nodes, round0184_nodes
+from experiments import prepare_round0184_queue, round0166_nodes, round0184_nodes
 from tests.test_round0166_cpu_smoke import _run_train_seal_reload_panel_cpu_smoke
 
 
@@ -74,6 +74,28 @@ def test_metric_miss_is_valid_diagnostic_but_execution_miss_is_not() -> None:
     )
     assert invalid["passed"] is False
     assert invalid["outcome"] == "prompted-english-8m-execution-invalid"
+
+
+def test_midpoint_accepts_valid_negative_t1_but_not_execution_failure() -> None:
+    evaluation = {
+        "schema": "round0180-prompted-8m-dose-matched-evaluation-v1",
+        "round_id": "0180",
+        "release_sha": "a" * 40,
+        "training_performed_in_round": True,
+        "capabilities": [],
+        "decision": {
+            "metric_gates_passed": False,
+            "execution_gates": {"accounting": True, "finite": True},
+            "passed": False,
+        },
+    }
+    assert prepare_round0184_queue._valid_r0180_terminal_evaluation(
+        evaluation, reviewed_release="a" * 40
+    )
+    evaluation["decision"]["execution_gates"]["accounting"] = False
+    assert not prepare_round0184_queue._valid_r0180_terminal_evaluation(
+        evaluation, reviewed_release="a" * 40
+    )
 
 
 def test_historical_scale_decisions_remain_metric_gated() -> None:

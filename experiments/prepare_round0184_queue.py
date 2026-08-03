@@ -39,10 +39,7 @@ from basemap.round0184_prompted_8m_dose_midpoint import (
     scale_train_config,
 )
 from experiments.prepare_round0020_0022_queues import LAB_ROOT, _base_manifest, _dedupe
-from experiments.prepare_round0138_queue import (
-    _accepted_review,
-    _frontmatter,
-)
+from experiments.prepare_round0138_queue import _frontmatter
 from experiments.prepare_round0166_queue import FAMILY_PATH, GATES_PATH, POPULATION_PATH
 from experiments.prepare_round0180_queue import (
     R0171_GRAPH,
@@ -56,6 +53,10 @@ ROUND_ROOT = "/data/latent-basemap/runs/round-0184"
 QUEUE_ROOT = os.path.join(ROUND_ROOT, "queue")
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE = os.path.join(LAB_ROOT, "round-0184-2026-08-03.md")
+R0180_EVALUATION = (
+    "/data/latent-basemap/runs/round-0180/queue/artifacts/"
+    f"{R0180_CAPABILITY}/scale-evaluation.json"
+)
 HANDLER_MODULE = "experiments.round0184_nodes"
 QUEUE_SCHEMA = "round0184-prompted-8m-dose-midpoint-queue-v1"
 GPU_HOURS_CAP = 4.0
@@ -104,6 +105,48 @@ def _accepted_terminal_review(round_id: str) -> list[dict[str, Any]]:
             f"R0184 requires one accepted terminal Review {round_id}; found {len(matches)}"
         )
     return matches[0]
+
+
+def _valid_r0180_terminal_evaluation(
+    evaluation: dict[str, Any], *, reviewed_release: str
+) -> bool:
+    """Accept a valid T1 readout whether its frozen quality selector passed or not."""
+    decision = evaluation.get("decision") or {}
+    execution_gates = decision.get("execution_gates") or {}
+    metric_passed = decision.get("metric_gates_passed")
+    expected_capabilities = [R0180_CAPABILITY] if metric_passed is True else []
+    return bool(
+        evaluation.get("schema")
+        == "round0180-prompted-8m-dose-matched-evaluation-v1"
+        and evaluation.get("round_id") == "0180"
+        and evaluation.get("release_sha") == reviewed_release
+        and evaluation.get("training_performed_in_round") is True
+        and isinstance(execution_gates, dict)
+        and execution_gates
+        and all(value is True for value in execution_gates.values())
+        and type(metric_passed) is bool
+        and decision.get("passed") is metric_passed
+        and evaluation.get("capabilities") == expected_capabilities
+    )
+
+
+def _accepted_valid_r0180() -> list[dict[str, Any]]:
+    """Bind accepted, execution-valid T1 evidence without requiring a metric pass."""
+    evidence = _accepted_terminal_review("0180")
+    result_signature = evidence[1]
+    result = _frontmatter(result_signature["canonical_path"])
+    reviewed_release = str(result.get("release_commit") or "")
+    evaluation_signature = expected_input_signature(R0180_EVALUATION)
+    evaluation = prompt_contract.read_sealed(
+        R0180_EVALUATION, label="accepted R0180 terminal evaluation"
+    )
+    if not re.fullmatch(r"[0-9a-f]{40}", reviewed_release) or not (
+        _valid_r0180_terminal_evaluation(
+            evaluation, reviewed_release=reviewed_release
+        )
+    ):
+        raise RuntimeError("R0184 requires an execution-valid terminal R0180 readout")
+    return [*evidence, evaluation_signature]
 
 
 def _release_cpu_smoke(release_sha: str) -> dict[str, Any]:
@@ -204,7 +247,7 @@ def prepare_round0184(
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0184 release SHA must be one full commit")
     round_signature = _issued_round(release_sha)
-    r0180_evidence = _accepted_review("0180", R0180_CAPABILITY)
+    r0180_evidence = _accepted_valid_r0180()
     r0181_evidence = _accepted_terminal_review("0181")
     lineage = _r0171_lineage()
     population_signature = expected_input_signature(POPULATION_PATH)
@@ -295,7 +338,6 @@ def prepare_round0184(
             GATE_CAPABILITY,
             POPULATION_CAPABILITY,
             POPULATION_HOST_CAPABILITY,
-            R0180_CAPABILITY,
         ],
         "capabilities_produced": [CAPABILITY],
         "training_performed": True,
