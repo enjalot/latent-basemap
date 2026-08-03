@@ -45,16 +45,26 @@ def _write_subset(
     source_rows: int,
     positions: np.ndarray,
 ) -> None:
-    source = np.memmap(
-        source_path, mode="r", dtype="<f2", shape=(source_rows, DIMENSION)
-    )
+    row_bytes = DIMENSION * np.dtype("<f2").itemsize
+    if os.path.getsize(source_path) != source_rows * row_bytes:
+        raise Round0165Error("R0165 compact source byte count changed")
     written = 0
-    with open(path, "wb") as handle:
-        for start in range(0, len(positions), 25_000):
-            selected = positions[start:min(start + 25_000, len(positions))]
-            block = np.asarray(source[selected], dtype=np.float16, order="C")
-            block.tofile(handle)
-            written += len(block)
+    with open(source_path, "rb") as source, open(path, "wb") as handle:
+        for start in range(0, source_rows, 25_000):
+            stop = min(start + 25_000, source_rows)
+            payload = source.read((stop - start) * row_bytes)
+            if len(payload) != (stop - start) * row_bytes:
+                raise Round0165Error("R0165 compact source read was short")
+            left = int(np.searchsorted(positions, start, side="left"))
+            right = int(np.searchsorted(positions, stop, side="left"))
+            if right > left:
+                selected = positions[left:right] - start
+                block = np.frombuffer(payload, dtype="<f2").reshape(
+                    stop - start, DIMENSION
+                )
+                retained = np.ascontiguousarray(block[selected])
+                retained.tofile(handle)
+                written += len(retained)
         handle.flush()
         os.fsync(handle.fileno())
     if written != len(positions):
@@ -201,6 +211,11 @@ def run_population(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     if compact_signature["bytes"] != len(mapping) * DIMENSION * 2:
         raise Round0165Error("R0165 compact byte count changed")
 
+    peak_rss_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
+    if peak_rss_gib > 8.0:
+        raise Round0165Error(
+            f"R0165 peak RSS {peak_rss_gib:.2f} GiB exceeds registered 8 GiB abort"
+        )
     receipt = seal({
         "schema": SCHEMA,
         "round_id": ROUND_ID,
@@ -244,8 +259,7 @@ def run_population(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "performance": {
             "compact_subset_write_seconds": write_seconds,
             "wall_seconds": time.monotonic() - started,
-            "peak_rss_gib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            / (1024 ** 2),
+            "peak_rss_gib": peak_rss_gib,
         },
     })
     atomic_write_new_json(
