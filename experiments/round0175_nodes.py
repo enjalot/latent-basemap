@@ -160,7 +160,12 @@ def _exact_cosine_neighbors(
     )
     stage = time.monotonic()
     for start in range(0, len(corpus), 100_000):
-        block = np.asarray(corpus[start : min(start + 100_000, len(corpus))], dtype=np.float32)
+        block = np.array(
+            corpus[start : min(start + 100_000, len(corpus))],
+            dtype=np.float32,
+            order="C",
+            copy=True,
+        )
         norms = np.linalg.norm(block, axis=1, keepdims=True)
         if not np.isfinite(block).all() or np.any(norms <= 0):
             raise Round0175Error("teacher corpus embeddings are invalid")
