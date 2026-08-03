@@ -221,6 +221,11 @@ def run_population(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         mapping=mapping,
         excluded=excluded,
     )
+    peak_rss_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
+    if peak_rss_gib > 48.0:
+        raise Round0164Error(
+            f"prompted population peak RSS {peak_rss_gib:.2f} GiB exceeds 48 GiB"
+        )
     receipt = seal({
         "schema": SCHEMA,
         "round_id": ROUND_ID,
@@ -273,8 +278,7 @@ def run_population(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "performance": {
             "compact_write_seconds": compact_wall,
             "wall_seconds": time.monotonic() - started,
-            "peak_rss_gib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            / (1024 ** 2),
+            "peak_rss_gib": peak_rss_gib,
         },
     })
     atomic_write_new_json(
