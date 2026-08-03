@@ -14,6 +14,8 @@ from basemap.round0162_prompted_english_staging import (
     layout_identity,
     ordered_chunks,
 )
+from experiments.round0162_nodes import _immutable_copy
+from basemap.artifact_identity import expected_input_signature
 
 
 def _chunk(dataset: str, rows: int, byte: str, *, pile: bool = False) -> dict:
@@ -73,3 +75,17 @@ def test_layout_identity_binds_source_manifest_signatures() -> None:
     baseline = layout_identity(r0116_signature=first, r0120_signature=second, chunks=chunks)
     changed = dict(second, sha256="3" * 64)
     assert baseline != layout_identity(r0116_signature=first, r0120_signature=changed, chunks=chunks)
+
+
+def test_immutable_copy_has_independent_inode_and_identical_payload(tmp_path) -> None:
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"prompted-english" * 1024)
+    source.chmod(0o444)
+    signature = expected_input_signature(str(source))
+    destination = tmp_path / "copy.bin"
+    copied, method = _immutable_copy(signature, str(destination))
+    assert method in {"reflink", "byte-copy"}
+    assert copied["sha256"] == signature["sha256"]
+    assert copied["bytes"] == signature["bytes"]
+    assert source.stat().st_ino != destination.stat().st_ino
+    assert destination.stat().st_nlink == 1

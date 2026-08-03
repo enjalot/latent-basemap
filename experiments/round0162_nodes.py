@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import hashlib
+import fcntl
 import json
 import os
+import shutil
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -43,21 +45,53 @@ def _read_and_validate_manifest(expected: Mapping[str, Any], *, label: str) -> d
     return value
 
 
-def _hardlink(source: Mapping[str, Any], destination: str) -> dict[str, Any]:
+FICLONE = 0x40049409
+
+
+def _immutable_copy(
+    source: Mapping[str, Any], destination: str
+) -> tuple[dict[str, Any], str]:
     observed = expected_input_signature(str(source["canonical_path"]))
     if observed != dict(source):
         raise Round0162Error("source prompted chunk bytes changed")
     if os.path.lexists(destination):
-        existing = expected_input_signature(destination)
-        if existing["bytes"] != observed["bytes"] or existing["sha256"] != observed["sha256"]:
-            raise Round0162Error("content-addressed chunk collision")
-    else:
-        os.link(observed["canonical_path"], destination)
-        os.chmod(destination, 0o444)
+        raise Round0162Error("content-addressed destination already exists")
+    method = "reflink"
+    source_handle = open(observed["canonical_path"], "rb")
+    destination_fd = os.open(
+        destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+    )
+    try:
+        with source_handle, os.fdopen(destination_fd, "wb") as destination_handle:
+            try:
+                fcntl.ioctl(
+                    destination_handle.fileno(),
+                    FICLONE,
+                    source_handle.fileno(),
+                )
+            except OSError:
+                method = "byte-copy"
+                destination_handle.seek(0)
+                destination_handle.truncate(0)
+                source_handle.seek(0)
+                shutil.copyfileobj(
+                    source_handle, destination_handle, length=16 * 1024 * 1024
+                )
+            destination_handle.flush()
+            os.fsync(destination_handle.fileno())
+    except Exception:
+        try:
+            os.unlink(destination)
+        except FileNotFoundError:
+            pass
+        raise
+    if os.stat(destination).st_nlink != 1:
+        raise Round0162Error("immutable content-addressed copy is multiply linked")
+    os.chmod(destination, 0o444)
     linked = expected_input_signature(destination)
     if linked["bytes"] != observed["bytes"] or linked["sha256"] != observed["sha256"]:
         raise Round0162Error("staged hardlink payload changed")
-    return linked
+    return linked, method
 
 
 def run_staging(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
@@ -81,9 +115,12 @@ def run_staging(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     manifest_root = ensure_data_directory(os.path.join(output, "source-manifests"))
 
     preserved_manifests = {}
+    copy_methods = {"reflink": 0, "byte-copy": 0}
     for round_id, expected in (("0116", job["r0116_manifest"]), ("0120", job["r0120_manifest"])):
         destination = os.path.join(manifest_root, f"sha256-{expected['sha256']}.json")
-        preserved_manifests[round_id] = _hardlink(expected, destination)
+        copied, method = _immutable_copy(expected, destination)
+        preserved_manifests[round_id] = copied
+        copy_methods[method] += 1
 
     staged_chunks: list[dict[str, Any]] = []
     content_paths: dict[str, dict[str, Any]] = {}
@@ -92,8 +129,9 @@ def run_staging(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         destination = os.path.join(chunk_root, f"sha256-{sha}.f16.npy")
         linked = content_paths.get(sha)
         if linked is None:
-            linked = _hardlink(chunk["source_output"], destination)
+            linked, method = _immutable_copy(chunk["source_output"], destination)
             content_paths[sha] = linked
+            copy_methods[method] += 1
         staged_chunks.append({
             **{key: value for key, value in chunk.items() if key != "source_output"},
             "source_output": dict(chunk["source_output"]),
@@ -163,7 +201,9 @@ def run_staging(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "source_manifests": preserved_manifests,
         "chunks": staged_chunks,
         "unique_content_files": len(content_paths),
-        "hardlinked_immutable_copy": True,
+        "content_addressed_immutable_copy": True,
+        "copy_methods": copy_methods,
+        "hardlinks": False,
         "symlinks": False,
         "first8m_view": expected_input_signature(view_path),
         "ordered_selection_sha256": view_receipt["ordered_selection_sha256"],
