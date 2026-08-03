@@ -10,7 +10,7 @@ import pytest
 
 from basemap.panel_v2 import PanelV2Config, score_panel
 from basemap import round0104_training as training
-from basemap.round0108_evaluation import validate_seal
+from basemap.round0108_evaluation import seal, validate_seal
 from basemap.round0140_subsystem_bisection import RESTORATION_FLOORS
 from basemap.round0174_k15_forensic import (
     CELL,
@@ -26,6 +26,7 @@ from experiments import round0174_nodes as nodes
 def _cell(values: dict[str, float]) -> dict[str, Any]:
     return {
         "panel": {
+            "density": values.get("density", 0.5725),
             "ffr": values["ffr"],
             "purity": {
                 "k256": values["purity_fidelity_k256"],
@@ -113,6 +114,57 @@ def test_registered_selector_has_both_preregistered_branches() -> None:
     )
     assert failing["outcome"] == "k15-breaks-restoration-on-historical-rows"
     assert failing["registered_gates"]["ffr"]["passed"] is False
+
+
+def test_decision_node_seals_external_k50_control(tmp_path) -> None:
+    control = {
+        "ffr": 0.5708,
+        "purity_fidelity_k256": 0.9082652134423251,
+        "purity_fidelity_k1024": 0.9722,
+        "projection_ffr": 0.5365,
+        "ood_recall_at_10": 0.00985,
+    }
+    panel_root = tmp_path / "panel"
+    panel_root.mkdir()
+    panel_path = panel_root / "functional-bisection.json"
+    panel_path.write_text(
+        json.dumps(seal({
+            "schema": "round0174-fixed-row-functional-panel-v1",
+            "round_id": ROUND_ID,
+            "cells": {CELL: _cell(control)},
+        })),
+        encoding="utf-8",
+    )
+    control_path = tmp_path / "round0140-functional-bisection.json"
+    control_path.write_text(
+        json.dumps(seal({
+            "schema": "round0140-fixed-row-functional-panel-v1",
+            "round_id": "0140",
+            "cells": {"current_graph_current_host": _cell(control)},
+        })),
+        encoding="utf-8",
+    )
+    output = tmp_path / "decision"
+    nodes.run_decision(
+        {"manifest": {"release_sha": "f" * 40}},
+        {
+            "outputs": [str(output)],
+            "panel_output": str(panel_root),
+            "r0140_panel": str(control_path),
+        },
+    )
+    with (output / "decision.json").open(encoding="utf-8") as handle:
+        decision = json.load(handle)
+    validate_seal(decision, label="R0174 CPU smoke decision")
+    assert decision["outcome"] == "k15-maintains-restoration-on-historical-rows"
+    assert decision["graph_degree_treatment"] == {
+        "control_k": 50,
+        "treatment_k": GRAPH_K,
+        "same_rows_trainer_seed_and_update_horizon": True,
+    }
+    assert decision["capabilities"] == [
+        "jina-historical-rows-current-trainer-k15-forensic-v1"
+    ]
 
 
 def test_train_seal_reload_panel_cpu_smoke(
