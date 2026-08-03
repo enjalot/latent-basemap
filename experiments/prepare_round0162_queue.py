@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 from typing import Any
 
@@ -61,7 +62,13 @@ def _read_sealed(path: str, *, expected_schema: str) -> tuple[dict[str, Any], di
 
 def _issued_round(release_sha: str) -> dict[str, Any]:
     frontmatter = _frontmatter(ROUND_FILE)
-    if frontmatter.get("status") != "issued" or frontmatter.get("base_commit") != release_sha:
+    base_commit = str(frontmatter.get("base_commit") or "")
+    descendant = subprocess.run(
+        ["git", "-C", RELEASE_ROOT, "merge-base", "--is-ancestor", base_commit, release_sha],
+        check=False,
+        timeout=10,
+    ).returncode == 0
+    if frontmatter.get("status") != "issued" or not descendant:
         raise RuntimeError("R0162 round is not issued for this release")
     return expected_input_signature(ROUND_FILE)
 
