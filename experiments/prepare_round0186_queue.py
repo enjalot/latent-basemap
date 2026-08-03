@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -43,7 +44,7 @@ from experiments.prepare_round0185_queue import _accepted_r0168_review
 ROUND_ROOT = "/data/latent-basemap/runs/round-0186"
 QUEUE_ROOT = os.path.join(ROUND_ROOT, "queue")
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
-ROUND_FILE = os.path.join(LAB_ROOT, "round-0186-2026-08-03.md")
+ROUND_FILE_GLOB = os.path.join(LAB_ROOT, "round-0186-*.md")
 STAGING_MANIFEST = (
     "/data/latent-basemap/runs/round-0168/queue/artifacts/"
     "prompted-diverse-u12/prompted-u12-manifest.json"
@@ -57,14 +58,20 @@ GRAPH_P90_WALL_S = 5_400.0
 
 
 def _issued_round(release_sha: str) -> dict[str, Any]:
-    frontmatter = _frontmatter(ROUND_FILE)
-    if (
-        frontmatter.get("round_id") != ROUND_ID
-        or frontmatter.get("status") != "issued"
-        or frontmatter.get("base_commit") != release_sha
-    ):
-        raise RuntimeError("R0186 issued round binding changed")
-    return expected_input_signature(ROUND_FILE)
+    matches = []
+    for path in sorted(glob.glob(ROUND_FILE_GLOB)):
+        frontmatter = _frontmatter(path)
+        if (
+            frontmatter.get("round_id") == ROUND_ID
+            and frontmatter.get("status") == "issued"
+            and frontmatter.get("base_commit") == release_sha
+        ):
+            matches.append(path)
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"R0186 requires one issued round for its exact release; found {len(matches)}"
+        )
+    return expected_input_signature(matches[0])
 
 
 def _release_cpu_smoke(release_sha: str) -> dict[str, Any]:
@@ -247,7 +254,7 @@ def prepare_round0186(
     queue = _base_manifest(
         round_id=ROUND_ID,
         release_sha=release_sha,
-        round_file=ROUND_FILE,
+        round_file=round_signature["canonical_path"],
         queue_root=queue_root,
         gpu_hours_cap=GPU_HOURS_CAP,
         execution_authority="autonomous-gpu",
