@@ -43,7 +43,7 @@ SOURCE_ROOT = (
     "jina-v5-nano/train"
 )
 TOOLCHAIN_PYTHON = (
-    "/data/latent-basemap/toolchains/aumap-v0.2.0-py312/bin/python"
+    "/data/latent-basemap/toolchains/aumap-v0.2.0-py312-r0175/bin/python"
 )
 OFFICIAL_PROBE = os.path.join(
     os.path.dirname(__file__), "round0175_official_probe.py"

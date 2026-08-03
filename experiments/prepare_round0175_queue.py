@@ -22,7 +22,7 @@ from experiments.round0175_nodes import SOURCE_ROOT, TESTBED_ROOTS, TOOLCHAIN_PY
 ROUND_ROOT = "/data/latent-basemap/runs/round-0175"
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE = os.path.join(LAB_ROOT, "round-0175-2026-08-03.md")
-TOOLCHAIN_ROOT = "/data/latent-basemap/toolchains/aumap-v0.2.0-py312"
+TOOLCHAIN_ROOT = "/data/latent-basemap/toolchains/aumap-v0.2.0-py312-r0175"
 PACKAGE_FILES = (
     os.path.join(
         TOOLCHAIN_ROOT,
