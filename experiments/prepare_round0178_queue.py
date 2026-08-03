@@ -43,7 +43,6 @@ CONTROL_TEXT = (
     "/data/chunks/fineweb-edu-sample-10BT-chunked-500/heldout/"
     "data-00090-of-00099.parquet"
 )
-R0177_ROOT = "/data/latent-basemap/runs/round-0177/queue/artifacts"
 TRAINING_TEXT_HASHES = {
     "r0115-r0117-prompted-2m": (
         "/data/latent-basemap/runs/round-0113/queue/artifacts/"
@@ -81,9 +80,9 @@ MAPS = {
         "seed42-train/model.pt"
     ),
 }
-GPU_HOURS_MINIMUM = 0.05
-GPU_HOURS_EXPECTED = 0.20
-GPU_HOURS_MAXIMUM = 1.50
+GPU_HOURS_MINIMUM = 0.20
+GPU_HOURS_EXPECTED = 0.45
+GPU_HOURS_MAXIMUM = 2.00
 HANDLER_MODULE = "experiments.round0178_nodes"
 
 
@@ -123,49 +122,6 @@ def _issued_round(release_sha: str) -> dict[str, Any]:
     if frontmatter.get("status") != "issued" or not descendant:
         raise RuntimeError("R0178 round is not issued for this release")
     return expected_input_signature(ROUND_FILE)
-
-
-def _reused_probe_inputs() -> tuple[
-    dict[str, str], list[dict[str, Any]]
-]:
-    outputs: dict[str, str] = {}
-    signatures: list[dict[str, Any]] = []
-    for name in PROBE_ORDER:
-        output = os.path.join(R0177_ROOT, f"prompted-{name}")
-        receipt_path = os.path.join(output, "receipt.json")
-        with open(receipt_path, encoding="utf-8") as handle:
-            receipt = json.load(handle)
-        if (
-            receipt.get("round_id") != "0177"
-            or receipt.get("probe") != name
-            or receipt.get("prompt_applied") is not True
-        ):
-            raise RuntimeError(f"R0177 {name} probe receipt changed")
-        receipt_signature = expected_input_signature(receipt_path)
-        payloads = [
-            expected_input_signature(receipt[key]["canonical_path"])
-            for key in (
-                "corpus_embeddings",
-                "query_embeddings",
-                "corpus_source_rows",
-                "query_source_rows",
-            )
-        ]
-        for key, signature in zip(
-            (
-                "corpus_embeddings",
-                "query_embeddings",
-                "corpus_source_rows",
-                "query_source_rows",
-            ),
-            payloads,
-            strict=True,
-        ):
-            if signature != receipt[key]:
-                raise RuntimeError(f"R0177 {name} {key} changed")
-        outputs[name] = output
-        signatures.extend((receipt_signature, *payloads))
-    return outputs, _dedupe(signatures)
 
 
 def prepare_round0178(
@@ -210,7 +166,6 @@ def prepare_round0178(
         name: prior._coordinate_signature(name, control=True)
         for name in PROBE_ORDER
     }
-    probe_outputs, reused_probe_signatures = _reused_probe_inputs()
     probe_sources = {
         name: {
             "probe": name,
@@ -226,7 +181,6 @@ def prepare_round0178(
         *maps.values(),
         *training_text_hashes.values(),
         *[source["signature"] for source in training_sources.values()],
-        *reused_probe_signatures,
         *model_members,
         canary["text"],
         canary["document"],
@@ -262,6 +216,13 @@ def prepare_round0178(
     control_output = os.path.join(artifacts, "prompted-fineweb-control")
     masks_output = os.path.join(artifacts, "source-text-sensitivity-masks")
     audit_output = os.path.join(artifacts, "prompted-training-disjoint-audit")
+    probe_outputs = {
+        name: os.path.join(artifacts, f"prompted-{name}")
+        for name in PROBE_ORDER
+    }
+    embed_ids = [
+        f"embed_prompted_{name.replace('-', '_')}" for name in PROBE_ORDER
+    ]
     jobs: list[dict[str, Any]] = [
         {
             "id": "prompt_model_canary",
@@ -352,7 +313,7 @@ def prepare_round0178(
             "action": "seal_sensitivity_masks",
             "handler_module": HANDLER_MODULE,
             "handler_callable": "run_job",
-            "deps": ["embed_disjoint_fineweb_control"],
+            "deps": [*embed_ids, "embed_disjoint_fineweb_control"],
             "outputs": [masks_output],
             "done_marker": os.path.join(
                 artifacts, "source-text-sensitivity-masks.done.json"
@@ -393,6 +354,52 @@ def prepare_round0178(
             },
         },
     ]
+
+    embed_jobs: list[dict[str, Any]] = []
+    for name, job_id in zip(PROBE_ORDER, embed_ids, strict=True):
+        corpus_rows, query_rows = prior._selection_rows(
+            probe_coordinates[name],
+            label=name,
+            separate_sources=sources[name]["source_kind"] == "beir-arrow",
+        )
+        source = sources[name]
+        source_signatures = [
+            value for value in source.values() if isinstance(value, Mapping)
+        ]
+        embed_jobs.append({
+            "id": job_id,
+            "action": "embed_probe",
+            "handler_module": HANDLER_MODULE,
+            "handler_callable": "run_job",
+            "deps": ["prompt_model_canary"],
+            "outputs": [probe_outputs[name]],
+            "done_marker": os.path.join(artifacts, f"{job_id}.done.json"),
+            "expected_inputs": _dedupe([
+                round_signature,
+                *reviews,
+                *model_members,
+                probe_coordinates[name],
+                *source_signatures,
+                smoke_signature,
+            ]),
+            "p90_wall_s": max(
+                120.0,
+                (corpus_rows + query_rows)
+                / prior.EMBED_MINIMUM_ROWS_PER_S
+                + 90.0,
+            ),
+            "probe": name,
+            "r0142_coordinates": probe_coordinates[name],
+            **source,
+            "canary_output": canary_output,
+            "model_members": model_members,
+            "environment_freeze": environment,
+            "node_policy": {
+                "gpu_required": True,
+                "training_performed": False,
+            },
+        })
+    jobs[2:2] = embed_jobs
 
     map_outputs: dict[str, str] = {}
     score_ids: list[str] = []
@@ -501,8 +508,8 @@ def prepare_round0178(
             "probes": list(PROBE_ORDER),
             "probe_selection": "exact accepted R0142 corpus/query rows",
             "probe_embeddings": (
-                "reviewed successful R0177 probe nodes, exact receipt and "
-                "payload hashes; no failed control or audit reuse"
+                "fresh R0178 re-embedding of every exact R0142 selection; "
+                "no R0177 partial artifact reuse"
             ),
             "control": (
                 "first 60000 source-text-unique heldout-shard rows after "

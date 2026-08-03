@@ -402,8 +402,8 @@ def run_seal_sensitivity_masks(
         receipt = base._read_sealed(
             receipt_path, label=f"R0178 reused R0177 {name} receipt"
         )
-        if receipt.get("round_id") != "0177":
-            raise Round0178Error(f"{name} is not a reviewed R0177 embedding")
+        if receipt.get("round_id") != ROUND_ID:
+            raise Round0178Error(f"{name} is not a fresh R0178 embedding")
         source_job = dict(job["probe_sources"][name])
         corpus_texts, query_texts, _sources = base._selected_probe_texts(
             source_job,
