@@ -110,6 +110,12 @@ def _accepted_any_review(round_id: str) -> list[dict[str, Any]]:
         or issued["sha256"] != frontmatter.get("round_sha256")
     ):
         raise RuntimeError(f"Review {round_id} bindings changed")
+    releases = frontmatter.get("releases") or []
+    expected_release = f"capability:{Q2_CAPABILITY}"
+    if not isinstance(releases, list) or expected_release not in releases:
+        raise RuntimeError(
+            f"Review {round_id} did not release required {expected_release}"
+        )
     return [issued, result, review]
 
 

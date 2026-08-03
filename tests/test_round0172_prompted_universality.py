@@ -1,6 +1,8 @@
 """Contract tests for the R0171-backed prompted universality correction."""
 from __future__ import annotations
 
+import pytest
+
 from basemap import round0167_prompted_universality as contract_base
 from basemap.round0142_jina_universality import PROBE_ORDER
 from basemap.round0172_prompted_universality import (
@@ -8,7 +10,11 @@ from basemap.round0172_prompted_universality import (
     ROUND_ID,
     twonn_correlations,
 )
-from experiments import round0167_nodes, round0172_nodes
+from experiments import (
+    prepare_round0167_queue,
+    round0167_nodes,
+    round0172_nodes,
+)
 
 
 def test_r0172_correlation_matrix_names_reviewed_r0171_map() -> None:
@@ -62,3 +68,48 @@ def test_r0172_dispatch_rebinds_schemas_and_map_order(monkeypatch) -> None:
             setattr(contract_base, name, value)
         for name, value in node_before.items():
             setattr(round0167_nodes, name, value)
+
+
+def test_q2_review_must_release_the_positive_map_capability(monkeypatch) -> None:
+    review = {"canonical_path": "/review-0171.md", "sha256": "review"}
+    frontmatter = {
+        "round": "round-0171.md",
+        "result": "result-0171.md",
+        "round_sha256": "round",
+        "result_sha256": "result",
+        "releases": [],
+    }
+
+    monkeypatch.setattr(
+        prepare_round0167_queue,
+        "_one_document",
+        lambda *args, **kwargs: review,
+    )
+    monkeypatch.setattr(
+        prepare_round0167_queue,
+        "_frontmatter",
+        lambda path: frontmatter,
+    )
+    monkeypatch.setattr(prepare_round0167_queue, "LAB_ROOT", "/labs")
+
+    def signature(path: str):
+        digest = "result" if path.endswith("result-0171.md") else "round"
+        return {"canonical_path": path, "sha256": digest}
+
+    monkeypatch.setattr(
+        prepare_round0167_queue, "expected_input_signature", signature
+    )
+    capability = (
+        "jina-document-english-8m-prompted-map-seed42-sharded-fp32-ivf-v1"
+    )
+    monkeypatch.setattr(prepare_round0167_queue, "Q2_CAPABILITY", capability)
+
+    with pytest.raises(RuntimeError, match="did not release required capability"):
+        prepare_round0167_queue._accepted_any_review("0171")
+
+    frontmatter["releases"] = [f"capability:{capability}"]
+    assert prepare_round0167_queue._accepted_any_review("0171") == [
+        {"canonical_path": "/labs/round-0171.md", "sha256": "round"},
+        {"canonical_path": "/labs/result-0171.md", "sha256": "result"},
+        review,
+    ]
