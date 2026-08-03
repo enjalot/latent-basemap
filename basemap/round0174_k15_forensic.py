@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -67,6 +68,25 @@ def host_train_config(
         "control_k": 50,
         "treatment_k": GRAPH_K,
         "dose_rule_changed": False,
+    }
+    positive_rows_per_batch = max(
+        1,
+        int(
+            int(config["optimizer"]["batch_size"])
+            * float(config["optimizer"]["positive_ratio"])
+        ),
+    )
+    loader_batches_per_epoch = math.ceil(graph_edges / positive_rows_per_batch)
+    loader_supply_epochs = math.ceil(
+        SUCCESSFUL_UPDATES / loader_batches_per_epoch
+    )
+    config["execution"]["loader_supply"] = {
+        "role": "loop-capacity-only; training stops at the frozen LR horizon",
+        "positive_rows_per_batch": positive_rows_per_batch,
+        "loader_batches_per_epoch": loader_batches_per_epoch,
+        "loader_supply_epochs": loader_supply_epochs,
+        "planned_loop_iters": loader_batches_per_epoch * loader_supply_epochs,
+        "successful_update_horizon": SUCCESSFUL_UPDATES,
     }
     return config, sha256_bytes(canonical_json(config))
 

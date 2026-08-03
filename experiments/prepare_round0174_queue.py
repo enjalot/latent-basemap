@@ -35,6 +35,21 @@ ROUND_ROOT = "/data/latent-basemap/runs/round-0174"
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE = os.path.join(LAB_ROOT, "round-0174-2026-08-03.md")
 SMOKE_PATH = os.path.join(ROUND_ROOT, "preflight", "release-cpu-smoke.json")
+CORRECTION_SMOKE_PATH = os.path.join(
+    ROUND_ROOT, "preflight", "release-cpu-smoke-correction-1.json"
+)
+FIRST_QUEUE_ROOT = os.path.join(ROUND_ROOT, "queue")
+FIRST_QUEUE_MANIFEST = os.path.join(FIRST_QUEUE_ROOT, "queue.json")
+FIRST_TERMINAL = os.path.join(FIRST_QUEUE_ROOT, "runner-terminal.json")
+FIRST_GRAPH_DONE = os.path.join(
+    FIRST_QUEUE_ROOT, "artifacts", "build-current-k15-graph.done.json"
+)
+FIRST_TRAIN_FAILED = os.path.join(
+    FIRST_QUEUE_ROOT, "artifacts", "train-k15-current-host.failed.json"
+)
+FIRST_GRAPH_OUTPUT = os.path.join(
+    FIRST_QUEUE_ROOT, "artifacts", "current-k15-graph-fixed-rows"
+)
 R0037_SHARED = (
     "/data/latent-basemap/runs/round-0037/queue/artifacts/"
     "shared-reference/receipt.json"
@@ -122,9 +137,9 @@ def _release_cpu_smoke(release_sha: str) -> dict[str, Any]:
     return receipt
 
 
-def write_release_smoke(release_sha: str) -> str:
-    preflight = ensure_data_directory(os.path.dirname(SMOKE_PATH))
-    path = os.path.join(preflight, os.path.basename(SMOKE_PATH))
+def write_release_smoke(release_sha: str, *, path: str = SMOKE_PATH) -> str:
+    preflight = ensure_data_directory(os.path.dirname(path))
+    path = os.path.join(preflight, os.path.basename(path))
     atomic_write_new_json(path, _release_cpu_smoke(release_sha), immutable=True)
     return path
 
@@ -190,9 +205,11 @@ def _review_inputs() -> list[dict[str, Any]]:
     return output
 
 
-def _validated_smoke(release_sha: str) -> dict[str, Any]:
-    signature = expected_input_signature(SMOKE_PATH)
-    smoke = _read_json(SMOKE_PATH)
+def _validated_smoke(
+    release_sha: str, *, path: str = SMOKE_PATH
+) -> dict[str, Any]:
+    signature = expected_input_signature(path)
+    smoke = _read_json(path)
     validate_seal(smoke, label="R0174 release CPU smoke")
     if (
         smoke.get("schema") != "round0174-release-cpu-smoke-v1"
@@ -206,12 +223,65 @@ def _validated_smoke(release_sha: str) -> dict[str, Any]:
     return signature
 
 
+def _correction_inputs() -> tuple[list[dict[str, Any]], float]:
+    signatures = [
+        expected_input_signature(FIRST_QUEUE_MANIFEST),
+        expected_input_signature(FIRST_TERMINAL),
+        expected_input_signature(FIRST_GRAPH_DONE),
+        expected_input_signature(FIRST_TRAIN_FAILED),
+        expected_input_signature(
+            os.path.join(FIRST_GRAPH_OUTPUT, "edges-k15-fuzzy.npz")
+        ),
+        expected_input_signature(
+            os.path.join(FIRST_GRAPH_OUTPUT, "graph-manifest.json")
+        ),
+    ]
+    terminal = _read_json(FIRST_TERMINAL)
+    failed = _read_json(FIRST_TRAIN_FAILED)
+    graph_manifest = _read_json(
+        os.path.join(FIRST_GRAPH_OUTPUT, "graph-manifest.json")
+    )
+    if (
+        terminal.get("round_id") != ROUND_ID
+        or terminal.get("verdict") != "failed"
+        or terminal.get("release_checkout", {}).get("head")
+        != "a80259582bdfb762c7561f2bd7c44b180840dfe9"
+        or terminal.get("completed_jobs") != ["build_current_k15_graph_fixed_rows"]
+        or failed.get("node")
+        != "train_historical_rows_current_graph_k15_current_host"
+        or "actual loader plan cannot supply" not in str(failed.get("log_tail"))
+        or graph_manifest.get("k") != GRAPH_K
+        or graph_manifest.get("n_nodes") != 2_000_000
+        or graph_manifest.get("n_edges") != 43_848_884
+        or graph_manifest.get("graph_sha256") != signatures[4]["sha256"]
+    ):
+        raise RuntimeError("R0174 first-attempt correction evidence changed")
+    prior_gpu_wall_s = float(terminal.get("gpu_wall_s", -1.0))
+    if prior_gpu_wall_s <= 0 or prior_gpu_wall_s >= GPU_HOURS_MAXIMUM * 3_600:
+        raise RuntimeError("R0174 first-attempt GPU accounting is invalid")
+    return signatures, prior_gpu_wall_s
+
+
 def prepare_round0174(
-    *, release_sha: str, queue_root: str = os.path.join(ROUND_ROOT, "queue")
+    *,
+    release_sha: str,
+    queue_root: str | None = None,
+    correction: bool = False,
 ) -> str:
+    if queue_root is None:
+        queue_root = os.path.join(
+            ROUND_ROOT, "queue-attempt-2" if correction else "queue"
+        )
     round_signature = _issued_round(release_sha)
     review_inputs = _review_inputs()
-    smoke_signature = _validated_smoke(release_sha)
+    smoke_signature = _validated_smoke(
+        release_sha,
+        path=CORRECTION_SMOKE_PATH if correction else SMOKE_PATH,
+    )
+    correction_inputs: list[dict[str, Any]] = []
+    prior_gpu_wall_s = 0.0
+    if correction:
+        correction_inputs, prior_gpu_wall_s = _correction_inputs()
 
     r0134_signature = expected_input_signature(R0134_PANEL)
     r0134 = _read_json(R0134_PANEL)
@@ -243,6 +313,7 @@ def prepare_round0174(
         round_signature,
         *review_inputs,
         smoke_signature,
+        *correction_inputs,
         r0134_signature,
         r0140_signature,
         shared_signature,
@@ -252,7 +323,11 @@ def prepare_round0174(
         *_embedded_signatures(r0134),
     ])
 
-    graph_output = os.path.join(artifacts, "current-k15-graph-fixed-rows")
+    graph_output = (
+        FIRST_GRAPH_OUTPUT
+        if correction
+        else os.path.join(artifacts, "current-k15-graph-fixed-rows")
+    )
     train_output = os.path.join(artifacts, CELL, "train")
     panel_output = os.path.join(artifacts, "functional-panel")
     decision_output = os.path.join(artifacts, CAPABILITY)
@@ -287,7 +362,9 @@ def prepare_round0174(
         "graph_output": graph_output,
         "handler_module": "experiments.round0174_nodes",
         "handler_callable": "run_job",
-        "deps": ["build_current_k15_graph_fixed_rows"],
+        "deps": (
+            [] if correction else ["build_current_k15_graph_fixed_rows"]
+        ),
         "outputs": [train_output],
         "done_marker": os.path.join(artifacts, "train-k15-current-host.done.json"),
         "expected_inputs": expected_inputs,
@@ -321,17 +398,24 @@ def prepare_round0174(
         "p90_wall_s": 60.0,
         "node_policy": {"gpu_required": False, "training_performed": False},
     }]
+    if correction:
+        jobs = jobs[1:]
+    remaining_gpu_hours = GPU_HOURS_MAXIMUM - prior_gpu_wall_s / 3_600
     queue = _base_manifest(
         round_id=ROUND_ID,
         release_sha=release_sha,
         round_file=ROUND_FILE,
         queue_root=queue_root,
-        gpu_hours_cap=GPU_HOURS_MAXIMUM,
+        gpu_hours_cap=remaining_gpu_hours,
         execution_authority="autonomous-gpu",
         gpu=True,
     )
     queue.update({
-        "schema": "round0174-historical-row-k15-forensic-queue-v1",
+        "schema": (
+            "round0174-historical-row-k15-forensic-correction-queue-v1"
+            if correction
+            else "round0174-historical-row-k15-forensic-queue-v1"
+        ),
         "repo_root": RELEASE_ROOT,
         "queue_class": "gpu-research",
         "required_reviews": ["0037", "0134", "0140", "0171"],
@@ -346,7 +430,10 @@ def prepare_round0174(
         "p90_gpu_seconds": {
             job["id"]: float(job["p90_wall_s"])
             for job in jobs if job["node_policy"]["gpu_required"]
-        } | {"total": 6_300.0},
+        } | {"total": sum(
+            float(job["p90_wall_s"])
+            for job in jobs if job["node_policy"]["gpu_required"]
+        )},
         "scientific_contract": {
             "question": "does fuzzy graph k15 alone break the R0140 historical-row restoration?",
             "cell": CELL,
@@ -364,6 +451,21 @@ def prepare_round0174(
             "fixed_dose_estimand": True,
             "release_cpu_smoke": smoke_signature,
             "negative_q2_activation": expected_input_signature(R0171_EVALUATION),
+            "correction": (
+                {
+                    "class": "setup-only-loader-loop-capacity",
+                    "first_attempt_terminal": expected_input_signature(
+                        FIRST_TERMINAL
+                    ),
+                    "reused_graph_output": FIRST_GRAPH_OUTPUT,
+                    "prior_gpu_wall_s": prior_gpu_wall_s,
+                    "cumulative_gpu_hard_cap": GPU_HOURS_MAXIMUM,
+                    "remaining_gpu_hours_cap": remaining_gpu_hours,
+                    "science_changed": False,
+                }
+                if correction
+                else None
+            ),
         },
     })
     path = os.path.join(queue_root, "queue.json")
@@ -374,13 +476,21 @@ def prepare_round0174(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-sha", required=True)
-    parser.add_argument("--queue-root", default=os.path.join(ROUND_ROOT, "queue"))
+    parser.add_argument("--queue-root")
     parser.add_argument("--smoke-only", action="store_true")
+    parser.add_argument("--correction", action="store_true")
     args = parser.parse_args(argv)
     path = (
-        write_release_smoke(args.release_sha)
+        write_release_smoke(
+            args.release_sha,
+            path=CORRECTION_SMOKE_PATH if args.correction else SMOKE_PATH,
+        )
         if args.smoke_only
-        else prepare_round0174(release_sha=args.release_sha, queue_root=args.queue_root)
+        else prepare_round0174(
+            release_sha=args.release_sha,
+            queue_root=args.queue_root,
+            correction=args.correction,
+        )
     )
     print(json.dumps({"path": path}, indent=2, sort_keys=True))
     return 0

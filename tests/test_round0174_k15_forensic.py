@@ -66,6 +66,14 @@ def test_k15_config_changes_only_registered_graph_stamps(tmp_path) -> None:
     expected = config["execution"]["expected_pipeline_stamp"]
     assert expected["positive_destination_policy"] == "queue-local-fp16-fuzzy-k15"
     assert expected["graph_degree"] == "variable-fuzzy-k15-edge-universe"
+    assert config["execution"]["loader_supply"] == {
+        "role": "loop-capacity-only; training stops at the frozen LR horizon",
+        "positive_rows_per_batch": 409,
+        "loader_batches_per_epoch": 25,
+        "loader_supply_epochs": 20_000,
+        "planned_loop_iters": 500_000,
+        "successful_update_horizon": 500_000,
+    }
 
 
 def test_sampler_stamp_reports_actual_graph_degree() -> None:
@@ -95,6 +103,34 @@ def test_sampler_stamp_reports_actual_graph_degree() -> None:
     stamp = sampler.execution_stamp()
     assert stamp["positive_destination_policy"] == "queue-local-fp16-fuzzy-k15"
     assert stamp["graph_degree"] == "variable-fuzzy-k15-edge-universe"
+
+
+def test_loader_supply_covers_observed_k15_graph_without_changing_dose(
+    tmp_path,
+) -> None:
+    graph = {
+        "canonical_path": str(tmp_path / "graph.npz"),
+        "kind": "file",
+        "bytes": 10,
+        "sha256": "a" * 64,
+    }
+    manifest = {
+        "canonical_path": str(tmp_path / "manifest.json"),
+        "kind": "file",
+        "bytes": 10,
+        "sha256": "b" * 64,
+    }
+    config, _ = host_train_config(
+        cell=CELL,
+        graph_signature=graph,
+        graph_manifest_signature=manifest,
+        graph_edges=43_848_884,
+    )
+    supply = config["execution"]["loader_supply"]
+    assert supply["loader_batches_per_epoch"] == 107_210
+    assert supply["loader_supply_epochs"] == 5
+    assert supply["planned_loop_iters"] == 536_050
+    assert supply["successful_update_horizon"] == 500_000
 
 
 def test_registered_selector_has_both_preregistered_branches() -> None:
@@ -234,6 +270,12 @@ def test_train_seal_reload_panel_cpu_smoke(
         "stop_reason": "lr_horizon",
         "budget_satisfied": True,
         "n_pos_edges": 16,
+        "loader_batches_per_epoch": config["execution"]["loader_supply"][
+            "loader_batches_per_epoch"
+        ],
+        "planned_loop_iters": config["execution"]["loader_supply"][
+            "planned_loop_iters"
+        ],
     }
     for key in training._DYNAMIC_PIPELINE_COUNTERS:
         accounting[f"pipeline_{key}"] = runtime[key]

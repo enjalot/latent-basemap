@@ -468,6 +468,19 @@ def run_host_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     torch.cuda.manual_seed_all(SEED)
     torch.cuda.reset_peak_memory_stats("cuda")
     model = r0104._new_model(config)
+    loader_supply = config["execution"].get("loader_supply")
+    if loader_supply is not None:
+        if (
+            not isinstance(loader_supply, Mapping)
+            or int(loader_supply.get("loader_supply_epochs", 0)) <= 0
+            or int(loader_supply.get("loader_batches_per_epoch", 0)) <= 0
+            or int(loader_supply.get("planned_loop_iters", 0))
+            < SUCCESSFUL_UPDATES
+            or int(loader_supply.get("successful_update_horizon", -1))
+            != SUCCESSFUL_UPDATES
+        ):
+            raise Round0140Error("registered loader-supply plan is invalid")
+        model.n_epochs = int(loader_supply["loader_supply_epochs"])
     model._max_train_steps = SUCCESSFUL_UPDATES
     model._bench_warmup = PERFORMANCE_WARMUP_UPDATES
     model._perf_profile = True
@@ -517,6 +530,18 @@ def run_host_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         for key, value in exact.items()
         if accounting.get(key) != value
     })
+    if loader_supply is not None:
+        expected_loader_accounting = {
+            "loader_batches_per_epoch": int(
+                loader_supply["loader_batches_per_epoch"]
+            ),
+            "planned_loop_iters": int(loader_supply["planned_loop_iters"]),
+        }
+        mismatches.update({
+            key: {"expected": value, "observed": accounting.get(key)}
+            for key, value in expected_loader_accounting.items()
+            if accounting.get(key) != value
+        })
     expected_rows = SUCCESSFUL_UPDATES * config["optimizer"]["batch_size"]
     producer_delta = int(runtime["host_prefetch_producer_batches"]) - int(
         runtime["host_prefetch_consumer_batches"]
