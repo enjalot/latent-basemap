@@ -18,7 +18,12 @@ from basemap.output_safety import (
     create_fresh_directory,
     ensure_data_directory,
 )
-from basemap.round0179_numap_baseline import CAPABILITY, ROUND_ID, ROWS
+from basemap.round0179_numap_baseline import (
+    CAPABILITY,
+    N_QUERIES,
+    ROUND_ID,
+    ROWS,
+)
 from experiments.prepare_round0020_0022_queues import LAB_ROOT, _base_manifest, _dedupe
 from experiments.prepare_round0138_queue import _accepted_review, _frontmatter
 from experiments.prepare_round0175_queue import _source_signatures
