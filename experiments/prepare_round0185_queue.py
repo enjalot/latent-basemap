@@ -28,7 +28,11 @@ from basemap.round0185_prompted_ood_disjoint_pack import (
     TRAINING_ROWS,
 )
 from experiments.prepare_round0020_0022_queues import LAB_ROOT, _base_manifest, _dedupe
-from experiments.prepare_round0138_queue import _accepted_review, _frontmatter
+from experiments.prepare_round0138_queue import (
+    _accepted_review,
+    _frontmatter,
+    _frontmatter_list,
+)
 from experiments.prepare_round0184_queue import _accepted_terminal_review
 
 
@@ -44,6 +48,7 @@ R0173_AUDIT = (
     "/data/latent-basemap/runs/round-0173/queue/artifacts/"
     "jina-prompted-u12-ood-probe-pack-v1/audit.json"
 )
+R0168_REVIEW = os.path.join(LAB_ROOT, "review-0168-2026-08-03-01.md")
 
 
 def _issued_round(release_sha: str) -> dict[str, Any]:
@@ -55,6 +60,28 @@ def _issued_round(release_sha: str) -> dict[str, Any]:
     ):
         raise RuntimeError("R0185 issued round binding changed")
     return expected_input_signature(ROUND_FILE)
+
+
+def _accepted_r0168_review() -> list[dict[str, Any]]:
+    """Bind the append-only correction that supersedes the first R0168 review."""
+    review = _frontmatter(R0168_REVIEW)
+    if (
+        review.get("round_id") != "0168"
+        or review.get("status") != "accepted"
+        or f"capability:{STAGING_CAPABILITY}"
+        not in _frontmatter_list(review, "releases")
+    ):
+        raise RuntimeError("corrected R0168 review is not accepted")
+    round_path = os.path.join(LAB_ROOT, review.get("round") or "")
+    result_path = os.path.join(LAB_ROOT, review.get("result") or "")
+    issued = expected_input_signature(round_path)
+    result = expected_input_signature(result_path)
+    if (
+        issued["sha256"] != review.get("round_sha256")
+        or result["sha256"] != review.get("result_sha256")
+    ):
+        raise RuntimeError("corrected R0168 review binding changed")
+    return [issued, result, expected_input_signature(R0168_REVIEW)]
 
 
 def _release_cpu_smoke(release_sha: str) -> dict[str, Any]:
@@ -175,7 +202,7 @@ def prepare_round0185(
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0185 release SHA must be one full commit")
     round_signature = _issued_round(release_sha)
-    r0168_evidence = _accepted_review("0168", STAGING_CAPABILITY)
+    r0168_evidence = _accepted_r0168_review()
     r0173_evidence = _accepted_terminal_review("0173")
     r0180_evidence = _accepted_review("0180", R0180_CAPABILITY)
     manifest_signature, audit_signature, artifact_inputs = _artifact_inputs()
