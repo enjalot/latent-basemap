@@ -79,7 +79,8 @@ GPU_HOURS_MINIMUM = 0.20
 GPU_HOURS_EXPECTED = 0.40
 GPU_HOURS_MAXIMUM = 2.00
 Q2_ROUND_ID = "0166"
-Q2_CAPABILITY = "jina-document-english-8m-prompted-map-seed42-v1"
+Q2_CAPABILITY: str | None = "jina-document-english-8m-prompted-map-seed42-v1"
+Q2_MAP_ROLE = "accepted positive Q2 map capability"
 HANDLER_MODULE = "experiments.round0167_nodes"
 QUEUE_SCHEMA = "round0167-prompted-universality-queue-v1"
 QUEUE_LABEL = "R0167 prompted universality queue"
@@ -110,12 +111,13 @@ def _accepted_any_review(round_id: str) -> list[dict[str, Any]]:
         or issued["sha256"] != frontmatter.get("round_sha256")
     ):
         raise RuntimeError(f"Review {round_id} bindings changed")
-    releases = frontmatter.get("releases") or []
-    expected_release = f"capability:{Q2_CAPABILITY}"
-    if not isinstance(releases, list) or expected_release not in releases:
-        raise RuntimeError(
-            f"Review {round_id} did not release required {expected_release}"
-        )
+    if Q2_CAPABILITY is not None:
+        releases = frontmatter.get("releases") or []
+        expected_release = f"capability:{Q2_CAPABILITY}"
+        if not isinstance(releases, list) or expected_release not in releases:
+            raise RuntimeError(
+                f"Review {round_id} did not release required {expected_release}"
+            )
     return [issued, result, review]
 
 
@@ -448,7 +450,7 @@ def prepare_round0167(
         "ordering_dependencies": [Q2_ROUND_ID],
         "capability_dependencies": [
             *REVIEW_CAPABILITIES.values(),
-            Q2_CAPABILITY,
+            *([Q2_CAPABILITY] if Q2_CAPABILITY is not None else []),
         ],
         "capabilities_produced": [CAPABILITY],
         "training_performed": False,
@@ -475,6 +477,7 @@ def prepare_round0167(
             "metrics": ["probe FFR", "control FFR", "FFR retention", "recall10 retention"],
             "twonn": "R0146 exact 2048-row estimator recomputed in prompted geometry",
             "raw_comparison": "accepted R0142/R0146, descriptive because map scales differ",
+            "q2_map_evidence_role": Q2_MAP_ROLE,
             "diagnostic_only": True,
             "no_causal_prompt_claim": True,
             "no_universal_map_claim": True,
