@@ -35,7 +35,8 @@ GRAPH_QUALITY_ROWS = 4_096
 GRAPH_QUALITY_SEED = 114
 GRAPH_MEAN_RECALL_FLOOR = 0.90
 GRAPH_P10_RECALL_FLOOR = 0.80
-GRAPH_VECTOR_STORAGE = "gpu-ivfflat-fp16"
+GRAPH_VECTOR_STORAGE = "gpu-ivfflat-fp32-four-shard-exact-merge"
+GRAPH_EXECUTION = "four-row-disjoint-shards-shared-quantizer-global-topk"
 RETENTION_RATIO = 0.97
 LANGUAGE_TO_POOLED_ENGLISH_RATIO = 0.40
 POLISH_TO_IN_MIX_MEDIAN_RATIO = 0.50
@@ -84,8 +85,8 @@ def diverse_train_config(
         "dimension": DIMENSION,
         "seed": SEED,
         "successful_positive_lr_updates": SUCCESSFUL_UPDATES,
-        "dose_rule": "same fixed 500,000 successful-update dose as R0115/R0166",
-        "graph_policy": "same fuzzy-k50 law and seeds as R0115/R0166",
+        "dose_rule": "same fixed 500,000 successful-update dose as R0115/R0171",
+        "graph_policy": "same fuzzy-k50 law and seeds as R0115/R0171",
         "graph_vector_storage": GRAPH_VECTOR_STORAGE,
         "sampler": r0113.SAMPLER_CLASS,
     }
@@ -104,6 +105,7 @@ def diverse_train_config(
         "recipe, k50 graph law, seed, and fixed dose remain unchanged"
     )
     config["execution"]["graph_vector_storage"] = GRAPH_VECTOR_STORAGE
+    config["execution"]["graph_execution"] = GRAPH_EXECUTION
     return config, sha256_bytes(canonical_json(config))
 
 

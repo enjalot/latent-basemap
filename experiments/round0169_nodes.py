@@ -30,11 +30,13 @@ from basemap.round0168_prompted_diverse_staging import (
     CAPABILITY as STAGING_CAPABILITY,
     MANIFEST_SCHEMA as STAGING_SCHEMA,
 )
+from basemap.round0171_prompted_8m import CAPABILITY as Q2_CAPABILITY
 from basemap.round0169_prompted_diverse import (
     CAPABILITY,
     DIMENSION,
     DiversePromptTrainingInput,
     GRAPH_K,
+    GRAPH_EXECUTION,
     GRAPH_MEAN_RECALL_FLOOR,
     GRAPH_NLIST,
     GRAPH_NPROBE,
@@ -74,6 +76,17 @@ TRAIN_SCHEMA = "round0169-prompted-diverse-u12-train-receipt-v1"
 PRODUCTION_CONFIG_SCHEMA = "round0169-prompted-diverse-u12-production-config-v1"
 PROMPT_PREFIX = "Document: "
 LANGUAGES = (*IN_MIX_LANGUAGES, POLISH)
+GRAPH_SHARD_ROWS = 4_000_000
+GRAPH_INDEX_DESCRIPTION = (
+    "four row-disjoint GPU IndexIVFFlat/IP shards with fp32 vector storage, "
+    "one shared coarse quantizer, and exact global top-k merge"
+)
+EXPECTED_GRAPH_SHARDS = (
+    (0, 4_000_000),
+    (4_000_000, 8_000_000),
+    (8_000_000, 12_000_000),
+    (12_000_000, ROWS),
+)
 
 
 class PromptedDiverseScaleArray(L2NormalizedArray):
@@ -180,12 +193,39 @@ def _data_identity(population: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _fp16_gpu_options(faiss: Any) -> Any:
+def _fp32_gpu_options(faiss: Any) -> Any:
     options = faiss.GpuClonerOptions()
     options.indicesOptions = faiss.INDICES_64_BIT
-    options.useFloat16 = True
+    options.useFloat16 = False
     options.usePrecomputed = True
     return options
+
+
+def _graph_execution_ok(graph: Mapping[str, Any]) -> bool:
+    search = graph.get("search_qualification") or {}
+    execution = search.get("execution") or {}
+    shards = execution.get("shards") or []
+    observed = tuple(
+        (
+            int(item.get("start", -1)),
+            int(item.get("stop", -1)),
+            int(item.get("rows", -1)),
+            int(item.get("ntotal", -1)),
+        )
+        for item in shards
+        if isinstance(item, Mapping)
+    )
+    expected = tuple(
+        (start, stop, stop - start, stop - start)
+        for start, stop in EXPECTED_GRAPH_SHARDS
+    )
+    return bool(
+        search.get("index") == GRAPH_INDEX_DESCRIPTION
+        and int(execution.get("shard_rows", -1)) == GRAPH_SHARD_ROWS
+        and execution.get("coarse_quantizer")
+        == "one shared trained IVF8192 template"
+        and observed == expected
+    )
 
 
 def _seal(body: Mapping[str, Any]) -> dict[str, Any]:
@@ -828,19 +868,18 @@ def run_evaluate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     started = time.monotonic()
     torch.cuda.reset_peak_memory_stats("cuda")
     q2_evaluation_signature = _signature(
-        job["q2_evaluation"], label="accepted positive R0166 evaluation"
+        job["q2_evaluation"], label="accepted positive R0171 evaluation"
     )
     q2_evaluation = prompt_contract.read_sealed(
         q2_evaluation_signature["canonical_path"],
-        label="accepted positive R0166 evaluation",
+        label="accepted positive R0171 evaluation",
     )
     if (
-        q2_evaluation.get("round_id") != "0166"
+        q2_evaluation.get("round_id") != "0171"
         or (q2_evaluation.get("decision") or {}).get("passed") is not True
         or (q2_evaluation.get("decision") or {}).get("outcome")
         != "prompted-english-8m-scale-rung-qualified"
-        or q2_evaluation.get("capabilities")
-        != ["jina-document-english-8m-prompted-map-seed42-v1"]
+        or q2_evaluation.get("capabilities") != [Q2_CAPABILITY]
     ):
         raise Round0169Error("R0169 requires a positive accepted Q2 evaluation")
     audit_path = os.path.join(str(job["ood_audit_output"]), "audit.json")
@@ -855,11 +894,8 @@ def run_evaluate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     ):
         raise Round0169Error("R0169 OOD training-disjoint audit changed")
 
-    if (
-        (graph.get("search_qualification") or {}).get("index")
-        != "GPU IndexIVFFlat/IP fp16 vector storage"
-    ):
-        raise Round0169Error("R0169 graph vector-storage contract changed")
+    if not _graph_execution_ok(graph):
+        raise Round0169Error("R0169 graph execution contract changed")
 
     source_raw = _open_source(population)
     source = PromptedDiverseScaleArray(
@@ -1015,10 +1051,7 @@ def run_evaluate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             .get("passed")
             is True
         ),
-        "graph_uses_registered_fp16_vector_storage": (
-            (graph.get("search_qualification") or {}).get("index")
-            == "GPU IndexIVFFlat/IP fp16 vector storage"
-        ),
+        "graph_uses_registered_sharded_fp32_execution": _graph_execution_ok(graph),
         "ood_population_exactly_training_disjoint": audit.get("passed") is True,
         "native_panel_finite_noncollapsed": q2._panel_execution_ok(native_panel),
         "matched_panel_finite_noncollapsed": q2._panel_execution_ok(matched["panel"]),
@@ -1113,7 +1146,8 @@ def _configure_q2_kernel() -> None:
         "GRAPH_SCHEMA": GRAPH_SCHEMA,
         "TRAIN_SCHEMA": TRAIN_SCHEMA,
         "PRODUCTION_CONFIG_SCHEMA": PRODUCTION_CONFIG_SCHEMA,
-        "GRAPH_INDEX_DESCRIPTION": "GPU IndexIVFFlat/IP fp16 vector storage",
+        "GRAPH_INDEX_DESCRIPTION": GRAPH_INDEX_DESCRIPTION,
+        "GRAPH_SHARD_ROWS": GRAPH_SHARD_ROWS,
         "GRAPH_REFERENCE_ROW_ORDER": "exact accepted R0132 U12 compact order",
         "GRAPH_REFERENCE_ANCHOR_NAMESPACE": "R0132 U12 compact IDs",
         "Round0166Error": Round0169Error,
@@ -1122,7 +1156,7 @@ def _configure_q2_kernel() -> None:
         "_read_population": _read_population,
         "_open_source": _open_source,
         "_data_identity": _data_identity,
-        "_faiss_gpu_options": _fp16_gpu_options,
+        "_faiss_gpu_options": _fp32_gpu_options,
     }
     for name, value in bindings.items():
         setattr(q2, name, value)

@@ -29,7 +29,7 @@ from basemap.round0112_prompt_substrate import model_member_signatures
 from basemap.round0116_prompted_corpus import environment_freeze_receipt
 from basemap.round0160_prompted_seed_family import CAPABILITY as FAMILY_CAPABILITY
 from basemap.round0161_prompted_gate_registration import CAPABILITY as GATE_CAPABILITY
-from basemap.round0166_prompted_8m import CAPABILITY as Q2_CAPABILITY
+from basemap.round0171_prompted_8m import CAPABILITY as Q2_CAPABILITY
 from basemap.round0168_prompted_diverse_staging import (
     CAPABILITY as STAGING_CAPABILITY,
     MANIFEST_SCHEMA as STAGING_SCHEMA,
@@ -38,6 +38,7 @@ from basemap.round0169_prompted_diverse import (
     CAPABILITY,
     DIMENSION,
     GRAPH_K,
+    GRAPH_EXECUTION,
     GRAPH_MEAN_RECALL_FLOOR,
     GRAPH_NLIST,
     GRAPH_NPROBE,
@@ -62,7 +63,7 @@ STAGING_MANIFEST = (
     "prompted-diverse-u12/prompted-u12-manifest.json"
 )
 Q2_EVALUATION = (
-    "/data/latent-basemap/runs/round-0166/queue/artifacts/"
+    "/data/latent-basemap/runs/round-0171/queue/artifacts/"
     f"{Q2_CAPABILITY}/scale-evaluation.json"
 )
 FAMILY_PATH = (
@@ -253,6 +254,7 @@ def _config_smoke() -> dict[str, Any]:
     if (
         config["paired_invariant"]["rows"] != ROWS
         or config["paired_invariant"]["graph_vector_storage"] != GRAPH_VECTOR_STORAGE
+        or config["execution"]["graph_execution"] != GRAPH_EXECUTION
         or config["optimizer"]["successful_positive_lr_updates"] != SUCCESSFUL_UPDATES
         or config["graph"]["k"] != GRAPH_K
         or stamp["compact_retained_rows"] != ROWS
@@ -266,6 +268,7 @@ def _config_smoke() -> dict[str, Any]:
         "successful_updates": SUCCESSFUL_UPDATES,
         "graph_k": GRAPH_K,
         "graph_vector_storage": GRAPH_VECTOR_STORAGE,
+        "graph_execution": GRAPH_EXECUTION,
         "expected_pipeline_stamp": stamp,
     })
 
@@ -277,7 +280,7 @@ def prepare_round0169(
         raise ValueError("R0169 release SHA must be one full commit")
     round_signature = _issued_round(release_sha)
     dependency_inputs: list[dict[str, Any]] = []
-    for dependency in ("0108", "0114", "0132", "0160", "0161", "0166"):
+    for dependency in ("0108", "0114", "0132", "0160", "0161", "0171"):
         dependency_inputs.extend(_accepted_bundle(dependency))
     dependency_inputs.extend(_accepted_bundle(
         "0168",
@@ -303,9 +306,9 @@ def prepare_round0169(
     ]
 
     q2_signature = expected_input_signature(Q2_EVALUATION)
-    q2 = _read_sealed(q2_signature, label="accepted positive R0166 evaluation")
+    q2 = _read_sealed(q2_signature, label="accepted positive R0171 evaluation")
     if (
-        q2.get("round_id") != "0166"
+        q2.get("round_id") != "0171"
         or (q2.get("decision") or {}).get("passed") is not True
         or (q2.get("decision") or {}).get("outcome")
         != "prompted-english-8m-scale-rung-qualified"
@@ -550,8 +553,8 @@ def prepare_round0169(
         "schema": "round0169-prompted-diverse-u12-queue-v1",
         "repo_root": RELEASE_ROOT,
         "queue_class": "gpu-research",
-        "required_reviews": ["0108", "0114", "0132", "0160", "0161", "0166", "0168"],
-        "ordering_dependencies": ["0166"],
+        "required_reviews": ["0108", "0114", "0132", "0160", "0161", "0168", "0171"],
+        "ordering_dependencies": ["0171"],
         "capability_dependencies": [
             Q2_CAPABILITY,
             STAGING_CAPABILITY,

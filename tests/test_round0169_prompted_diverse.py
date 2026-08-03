@@ -10,6 +10,7 @@ from basemap.panel_v2 import _require_score_panel_scale_admission
 from basemap.round0113_prompt_contrast import seal
 from basemap.round0166_prompted_8m import METRICS
 from basemap.round0169_prompted_diverse import (
+    GRAPH_EXECUTION,
     GRAPH_VECTOR_STORAGE,
     MULTIPLICITY_POLICY,
     RETENTION_RATIO,
@@ -18,7 +19,7 @@ from basemap.round0169_prompted_diverse import (
     diverse_train_config,
     prompted_diverse_decision,
 )
-from experiments import round0169_nodes
+from experiments import round0166_nodes, round0169_nodes
 
 
 def _inputs():
@@ -102,6 +103,7 @@ def test_q3_config_changes_only_bound_population_and_registered_storage() -> Non
     assert config["input"]["rows"] == ROWS
     assert config["input"]["multiplicity_policy"] == MULTIPLICITY_POLICY
     assert config["execution"]["graph_vector_storage"] == GRAPH_VECTOR_STORAGE
+    assert config["execution"]["graph_execution"] == GRAPH_EXECUTION
     stamp = config["execution"]["expected_pipeline_stamp"]
     assert stamp["compact_retained_rows"] == ROWS
     assert stamp["multiplicity_policy"] == MULTIPLICITY_POLICY
@@ -199,3 +201,84 @@ def test_q3_evaluation_action_is_reachable(monkeypatch) -> None:
     job = {"action": "evaluate_prompted_diverse_u12"}
     round0169_nodes.run_job(active, job)
     assert observed == [(active, job)]
+
+
+def test_q3_graph_execution_requires_complete_disjoint_shards() -> None:
+    shards = [
+        {
+            "start": start,
+            "stop": stop,
+            "rows": stop - start,
+            "ntotal": stop - start,
+        }
+        for start, stop in round0169_nodes.EXPECTED_GRAPH_SHARDS
+    ]
+    graph = {
+        "search_qualification": {
+            "index": round0169_nodes.GRAPH_INDEX_DESCRIPTION,
+            "execution": {
+                "shard_rows": round0169_nodes.GRAPH_SHARD_ROWS,
+                "coarse_quantizer": "one shared trained IVF8192 template",
+                "shards": shards,
+            },
+        }
+    }
+    assert round0169_nodes._graph_execution_ok(graph) is True
+    graph["search_qualification"]["execution"]["shards"] = shards[:-1]
+    assert round0169_nodes._graph_execution_ok(graph) is False
+
+
+def test_q3_dispatch_binds_sharded_fp32_kernel(monkeypatch) -> None:
+    names = (
+        "ROUND_ID",
+        "CAPABILITY",
+        "DIMENSION",
+        "SEED",
+        "SUCCESSFUL_UPDATES",
+        "GRAPH_K",
+        "GRAPH_NLIST",
+        "GRAPH_NPROBE",
+        "GRAPH_NPROBE_GRID",
+        "GRAPH_TRAIN_ROWS",
+        "GRAPH_TRAIN_SEED",
+        "GRAPH_QUALITY_ROWS",
+        "GRAPH_QUALITY_SEED",
+        "GRAPH_MEAN_RECALL_FLOOR",
+        "GRAPH_P10_RECALL_FLOOR",
+        "HOST_RSS_LIMIT_GIB",
+        "GRAPH_SCHEMA",
+        "TRAIN_SCHEMA",
+        "PRODUCTION_CONFIG_SCHEMA",
+        "GRAPH_INDEX_DESCRIPTION",
+        "GRAPH_SHARD_ROWS",
+        "GRAPH_REFERENCE_ROW_ORDER",
+        "GRAPH_REFERENCE_ANCHOR_NAMESPACE",
+        "Round0166Error",
+        "ScalePromptTrainingInput",
+        "scale_train_config",
+        "_read_population",
+        "_open_source",
+        "_data_identity",
+        "_faiss_gpu_options",
+    )
+    before = {name: getattr(round0166_nodes, name) for name in names}
+    observed = {}
+    monkeypatch.setattr(
+        round0166_nodes,
+        "run_build_graph",
+        lambda active, job: observed.update({
+            "index": round0166_nodes.GRAPH_INDEX_DESCRIPTION,
+            "shards": round0166_nodes.GRAPH_SHARD_ROWS,
+            "config": round0166_nodes.scale_train_config,
+        }),
+    )
+    try:
+        round0169_nodes.run_build_graph(
+            {"manifest": {"round_id": "0169"}}, {"action": "build_graph_and_reference"}
+        )
+        assert observed["index"] == round0169_nodes.GRAPH_INDEX_DESCRIPTION
+        assert observed["shards"] == 4_000_000
+        assert observed["config"] is diverse_train_config
+    finally:
+        for name, value in before.items():
+            setattr(round0166_nodes, name, value)
