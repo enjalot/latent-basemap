@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 
 import pytest
 
 from basemap.round0183_baseline_table import Round0183Error, build_table, render_markdown
+from experiments import prepare_round0183_queue
 
 
 def _aumap() -> dict:
@@ -77,3 +79,47 @@ def test_500k_substitution_fails_closed() -> None:
     broken["scales"]["500k"]["historical_parametric_context"] = {}
     with pytest.raises(Round0183Error, match="unexpectedly acquired"):
         build_table(aumap=broken, numap=None, numap_terminal_status="terminal-retry-failed")
+
+
+def test_terminal_pair_discovers_cross_midnight_files_and_checks_hashes(
+    tmp_path, monkeypatch
+) -> None:
+    round_path = tmp_path / "round-0181-2026-08-03.md"
+    result_path = tmp_path / "result-0181-2026-08-04.md"
+    review_path = tmp_path / "review-0181-2026-08-04.md"
+    release = "a" * 40
+    round_path.write_text(
+        '---\nround_id: "0181"\nstatus: issued\n---\n', encoding="utf-8"
+    )
+    result_path.write_text(
+        '---\nround_id: "0181"\nstatus: complete\n'
+        f'release_commit: "{release}"\ncapabilities_produced: []\n---\n',
+        encoding="utf-8",
+    )
+    round_sha = hashlib.sha256(round_path.read_bytes()).hexdigest()
+    result_sha = hashlib.sha256(result_path.read_bytes()).hexdigest()
+    review_path.write_text(
+        '---\nround_id: "0181"\nstatus: accepted\n'
+        f'round: {round_path.name}\nround_sha256: "{round_sha}"\n'
+        f'result: {result_path.name}\nresult_sha256: "{result_sha}"\n'
+        f'verified_release_commit: "{release}"\nreleases: []\n---\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(prepare_round0183_queue, "LAB_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        prepare_round0183_queue,
+        "R0181_RESULT_GLOB",
+        str(tmp_path / "result-0181-*.md"),
+    )
+    monkeypatch.setattr(
+        prepare_round0183_queue,
+        "R0181_REVIEW_GLOB",
+        str(tmp_path / "review-0181-*.md"),
+    )
+    result, review = prepare_round0183_queue._r0181_terminal_pair()
+    assert result["canonical_path"] == str(result_path)
+    assert review["canonical_path"] == str(review_path)
+
+    review_path.write_text(review_path.read_text().replace(result_sha, "0" * 64))
+    with pytest.raises(RuntimeError, match="binding changed"):
+        prepare_round0183_queue._r0181_terminal_pair()

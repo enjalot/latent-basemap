@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -30,8 +31,8 @@ AUMAP_SYNTHESIS = (
     "/data/latent-basemap/runs/round-0175/queue/artifacts/"
     "jina-aumap-oos-baseline-v1/synthesis.json"
 )
-R0181_RESULT = os.path.join(LAB_ROOT, "result-0181-2026-08-03.md")
-R0181_REVIEW = os.path.join(LAB_ROOT, "review-0181-2026-08-03.md")
+R0181_RESULT_GLOB = os.path.join(LAB_ROOT, "result-0181-*.md")
+R0181_REVIEW_GLOB = os.path.join(LAB_ROOT, "review-0181-*.md")
 NUMAP_SYNTHESIS = (
     "/data/latent-basemap/runs/round-0181/queue/artifacts/"
     f"{NUMAP_CAPABILITY}/synthesis.json"
@@ -40,39 +41,91 @@ NUMAP_SYNTHESIS = (
 
 def _issued_round(release_sha: str) -> dict[str, Any]:
     frontmatter = _frontmatter(ROUND_FILE)
+    with open(ROUND_FILE, encoding="utf-8") as handle:
+        body = handle.read()
+    release_authorized = (
+        frontmatter.get("base_commit") == release_sha
+        or f"Execution release `{release_sha}`" in body
+    )
     if (
         frontmatter.get("round_id") != ROUND_ID
         or frontmatter.get("status") != "issued"
-        or frontmatter.get("base_commit") != release_sha
+        or not release_authorized
     ):
         raise RuntimeError("R0183 issued round binding changed")
     return expected_input_signature(ROUND_FILE)
 
 
-def _r0181_branch() -> tuple[str, dict[str, Any] | None, list[dict[str, Any]]]:
-    if not os.path.isfile(R0181_RESULT) or not os.path.isfile(R0181_REVIEW):
-        raise RuntimeError("R0183 waits for terminal R0181 result and review")
-    result = _frontmatter(R0181_RESULT)
-    review = _frontmatter(R0181_REVIEW)
-    if (
-        result.get("round_id") != "0181"
-        or result.get("status") not in {"complete", "failed", "blocked"}
-        or review.get("round_id") != "0181"
-        or review.get("status") != "accepted"
-    ):
-        raise RuntimeError("R0181 is not an accepted terminal result")
+def _r0181_terminal_pair() -> tuple[dict[str, Any], dict[str, Any]]:
+    """Discover one accepted terminal pair and verify the review's byte bindings."""
+    results = {
+        os.path.realpath(path): path for path in sorted(glob.glob(R0181_RESULT_GLOB))
+    }
+    matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for review_path in sorted(glob.glob(R0181_REVIEW_GLOB)):
+        review = _frontmatter(review_path)
+        if review.get("round_id") != "0181" or review.get("status") != "accepted":
+            continue
+        result_path = os.path.realpath(
+            os.path.join(LAB_ROOT, str(review.get("result") or ""))
+        )
+        round_path = os.path.realpath(
+            os.path.join(LAB_ROOT, str(review.get("round") or ""))
+        )
+        if result_path not in results or not os.path.isfile(round_path):
+            raise RuntimeError("R0181 review points outside its terminal evidence")
+        result = _frontmatter(result_path)
+        result_signature = expected_input_signature(result_path)
+        review_signature = expected_input_signature(review_path)
+        round_signature = expected_input_signature(round_path)
+        if (
+            result.get("round_id") != "0181"
+            or result.get("status") not in {"complete", "failed", "blocked"}
+            or result_signature["sha256"] != review.get("result_sha256")
+            or round_signature["sha256"] != review.get("round_sha256")
+            or result.get("release_commit")
+            != review.get("verified_release_commit")
+        ):
+            raise RuntimeError("R0181 terminal review binding changed")
+        matches.append((result_signature, review_signature))
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"R0183 requires one accepted terminal R0181 pair; found {len(matches)}"
+        )
+    return matches[0]
+
+
+def _r0181_branch() -> tuple[
+    str,
+    dict[str, Any] | None,
+    dict[str, Any],
+    dict[str, Any],
+    list[dict[str, Any]],
+]:
+    result_signature, review_signature = _r0181_terminal_pair()
+    result = _frontmatter(result_signature["canonical_path"])
+    review = _frontmatter(review_signature["canonical_path"])
     releases = _frontmatter_list(review, "releases")
     capability_marker = f"capability:{NUMAP_CAPABILITY}"
-    evidence = [
-        expected_input_signature(R0181_RESULT),
-        expected_input_signature(R0181_REVIEW),
-    ]
+    evidence = [result_signature, review_signature]
     if capability_marker in releases:
         synthesis = expected_input_signature(NUMAP_SYNTHESIS)
-        return "measured", synthesis, [*evidence, synthesis]
+        return (
+            "measured",
+            synthesis,
+            result_signature,
+            review_signature,
+            [*evidence, synthesis],
+        )
     if NUMAP_CAPABILITY in _frontmatter_list(result, "capabilities_produced"):
         raise RuntimeError("R0181 result claims an unreviewed NUMAP capability")
-    return "terminal-retry-failed", None, evidence
+    return (
+        "terminal-retry-failed",
+        None,
+        result_signature,
+        review_signature,
+        evidence,
+    )
 
 
 def prepare_round0183(
@@ -82,7 +135,7 @@ def prepare_round0183(
         raise ValueError("R0183 release SHA must be one full commit")
     round_signature = _issued_round(release_sha)
     r0175_review = _accepted_review("0175", "jina-aumap-oos-baseline-v1")
-    branch, numap, r0181_evidence = _r0181_branch()
+    branch, numap, r0181_result, r0181_review, r0181_evidence = _r0181_branch()
     aumap = expected_input_signature(AUMAP_SYNTHESIS)
     queue_root = create_fresh_directory(queue_root, label="R0183 CPU queue")
     artifacts = ensure_data_directory(os.path.join(queue_root, "artifacts"))
@@ -102,8 +155,8 @@ def prepare_round0183(
         "aumap_synthesis": aumap,
         "numap_synthesis": numap,
         "numap_terminal_status": branch,
-        "r0181_result": expected_input_signature(R0181_RESULT),
-        "r0181_review": expected_input_signature(R0181_REVIEW),
+        "r0181_result": r0181_result,
+        "r0181_review": r0181_review,
         "outputs": [output],
         "done_marker": os.path.join(artifacts, "assemble-heldout-projection-table.done.json"),
         "expected_inputs": expected_inputs,
