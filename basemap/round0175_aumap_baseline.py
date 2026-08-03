@@ -124,7 +124,20 @@ def build_synthesis(
             raise Round0175Error(f"R0175 {scale} cell contract changed")
         weighted = cell.get("aumap_inverse_distance")
         unweighted = cell.get("unweighted_knn15")
-        if not isinstance(weighted, Mapping) or not isinstance(unweighted, Mapping):
+        high_performance = cell.get("high_search_performance")
+        coordinate_performance = cell.get("coordinate_projection_performance")
+        rank1_diagnostics = (
+            high_performance.get("rank1_cosine_distance_diagnostics")
+            if isinstance(high_performance, Mapping)
+            else None
+        )
+        if (
+            not isinstance(weighted, Mapping)
+            or not isinstance(unweighted, Mapping)
+            or not isinstance(high_performance, Mapping)
+            or not isinstance(coordinate_performance, Mapping)
+            or not isinstance(rank1_diagnostics, Mapping)
+        ):
             raise Round0175Error(f"R0175 {scale} metrics are absent")
         summaries[scale] = {
             "aumap_inverse_distance": dict(weighted),
@@ -132,6 +145,15 @@ def build_synthesis(
             "delta_weighted_minus_unweighted": {
                 metric: float(weighted[metric]) - float(unweighted[metric])
                 for metric in ("ffr", "recall_at_10")
+            },
+            "execution_performance": {
+                "high_search": dict(high_performance),
+                "coordinate_projection": dict(coordinate_performance),
+                "low_search_seconds_both_methods": float(
+                    cell["low_search_seconds_both_methods"]
+                ),
+                "total_wall_seconds": float(cell["total_wall_seconds"]),
+                "peak_rss_gib": float(cell["peak_rss_gib"]),
             },
             "historical_parametric_context": historical_context.get(scale),
         }

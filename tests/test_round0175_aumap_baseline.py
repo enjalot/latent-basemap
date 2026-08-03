@@ -62,6 +62,20 @@ def test_synthesis_accepts_only_complete_execution_valid_cells() -> None:
             "guards_passed": True,
             "aumap_inverse_distance": {"ffr": 0.5, "recall_at_10": 0.02},
             "unweighted_knn15": {"ffr": 0.4, "recall_at_10": 0.01},
+            "high_search_performance": {
+                "query_seconds": 1.0,
+                "rank1_cosine_distance_diagnostics": {
+                    "exact_zero_rows": 0,
+                    "near_zero_rows_le_1e-7": 0,
+                },
+            },
+            "coordinate_projection_performance": {
+                "aumap_inverse_distance_seconds": 0.1,
+                "unweighted_knn15_seconds": 0.1,
+            },
+            "low_search_seconds_both_methods": 2.0,
+            "total_wall_seconds": 4.0,
+            "peak_rss_gib": 1.0,
         }
         for scale in SCALES
     }
