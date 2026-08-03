@@ -159,7 +159,6 @@ def prepare_round0164(
         "required_reviews": ["0113", "0162", "0163"],
         "capability_dependencies": [
             "jina-document-english-first8m-view-v1",
-            "claim:R0163-prompted-English-population-confound",
         ],
         "capabilities_produced": [CAPABILITY, HOST_CAPABILITY],
         "training_performed": False,
@@ -202,4 +201,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
