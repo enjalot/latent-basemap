@@ -53,6 +53,12 @@ from experiments.round0116_nodes import (
 )
 
 
+CANARY_SCHEMA = "round0167-prompt-model-canary-v1"
+PROBE_SCHEMA = "round0167-prompted-probe-embeddings-v1"
+CONTROL_SCHEMA = "round0167-prompted-fineweb-control-v1"
+MAP_PANEL_SCHEMA = "round0167-prompted-universality-map-panel-v1"
+
+
 def _signature(expected: Mapping[str, Any], *, label: str) -> dict[str, Any]:
     value = expected_input_signature(str(expected.get("canonical_path") or ""))
     if value != dict(expected):
@@ -272,7 +278,7 @@ def run_prompt_canary(active: Mapping[str, Any], job: Mapping[str, Any]) -> None
     if float(cosine.mean()) < 0.995 or float(cosine.min()) < 0.99:
         raise Round0167Error("prompted Jina execution does not reproduce R0114")
     receipt = seal({
-        "schema": "round0167-prompt-model-canary-v1",
+        "schema": CANARY_SCHEMA,
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
         "prompt_applied": True,
@@ -378,7 +384,7 @@ def run_embed_probe(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     atomic_save_new_npy(corpus_rows_path, corpus_rows, immutable=True)
     atomic_save_new_npy(query_rows_path, query_rows, immutable=True)
     receipt = seal({
-        "schema": "round0167-prompted-probe-embeddings-v1",
+        "schema": PROBE_SCHEMA,
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
         "probe": name,
@@ -431,7 +437,7 @@ def run_embed_control(active: Mapping[str, Any], job: Mapping[str, Any]) -> None
     path = os.path.join(output, "embeddings.f16.npy")
     atomic_save_new_npy(path, embeddings, immutable=True)
     receipt = seal({
-        "schema": "round0167-prompted-fineweb-control-v1",
+        "schema": CONTROL_SCHEMA,
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
         "prompt_applied": True,
@@ -565,7 +571,7 @@ def run_score_map(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         del corpus, queries
         gc.collect()
     panel = seal({
-        "schema": "round0167-prompted-universality-map-panel-v1",
+        "schema": MAP_PANEL_SCHEMA,
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
         "map_key": map_key,
