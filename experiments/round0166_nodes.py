@@ -74,10 +74,47 @@ PRODUCTION_CONFIG_SCHEMA = "round0166-prompted-8m-production-config-v1"
 GRAPH_INDEX_DESCRIPTION = "GPU IndexIVFFlat/IP fp32 vector storage"
 GRAPH_REFERENCE_ROW_ORDER = "R0165 frozen-prefix prompted compact order"
 GRAPH_REFERENCE_ANCHOR_NAMESPACE = "R0165 compact IDs"
+GRAPH_SHARD_ROWS = 4_000_000
 
 
 def _faiss_gpu_options(faiss: Any) -> Any:
     return prompt_nodes._faiss_gpu_options(faiss)
+
+
+def _merge_ann_topk(
+    left_sims: np.ndarray,
+    left_ids: np.ndarray,
+    right_sims: np.ndarray,
+    right_ids: np.ndarray,
+    *,
+    k: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Merge two per-row ANN result tables with deterministic global-ID ties."""
+    if (
+        left_sims.shape != left_ids.shape
+        or right_sims.shape != right_ids.shape
+        or left_sims.shape[0] != right_sims.shape[0]
+        or left_sims.shape[1] < k
+        or right_sims.shape[1] < k
+    ):
+        raise Round0166Error("sharded ANN merge geometry changed")
+    sims = np.concatenate((left_sims, right_sims), axis=1).astype(
+        np.float32, copy=False
+    )
+    ids = np.concatenate((left_ids, right_ids), axis=1).astype(
+        np.int64, copy=False
+    )
+    if not np.isfinite(sims).all() or np.any(ids < 0):
+        raise Round0166Error("sharded ANN merge received invalid candidates")
+    # The merged table is only 2k wide (100 columns for the registered graph),
+    # so sort the complete candidate set.  Besides being cheap at this width,
+    # this avoids argpartition choosing an arbitrary member of a score tie at
+    # the kth boundary.
+    order = np.lexsort((ids, -sims), axis=1)[:, :k]
+    return (
+        np.take_along_axis(sims, order, axis=1),
+        np.take_along_axis(ids, order, axis=1),
+    )
 
 
 def _signature(path: str, *, label: str) -> dict[str, Any]:
@@ -195,34 +232,122 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     cpu_index.cp.seed = GRAPH_TRAIN_SEED
     cpu_index.cp.niter = 25
     cpu_index.cp.spherical = True
-    resource = faiss.StandardGpuResources()
-    resource.setTempMemory(256 << 20)
+    gpu_resource = faiss.StandardGpuResources()
+    gpu_resource.setTempMemory(256 << 20)
     index = faiss.index_cpu_to_gpu(
-        resource, 0, cpu_index, _faiss_gpu_options(faiss)
+        gpu_resource, 0, cpu_index, _faiss_gpu_options(faiss)
     )
     train_started = time.monotonic()
     index.train(np.ascontiguousarray(X[train_rows]))
     train_seconds = time.monotonic() - train_started
-    add_started = time.monotonic()
-    for start in range(0, rows, 25_000):
-        index.add(np.ascontiguousarray(X[start:min(start + 25_000, rows)]))
-    add_seconds = time.monotonic() - add_started
-    if int(index.ntotal) != rows:
-        raise Round0166Error("R0166 IVF row count changed")
+    trained_cpu = faiss.index_gpu_to_cpu(index)
+    if trained_cpu.is_trained is not True or int(trained_cpu.ntotal) != 0:
+        raise Round0166Error("R0171 trained empty IVF template changed")
+    del index, cpu_index, quantizer, gpu_resource
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    neighbors = np.full((rows, GRAPH_K), -1, dtype=np.int32)
+    distances = np.full((rows, GRAPH_K), -np.inf, dtype=np.float32)
+    quality_best: dict[int, tuple[np.ndarray, np.ndarray] | None] = {
+        nprobe: None for nprobe in GRAPH_NPROBE_GRID
+    }
+    quality_wall = {nprobe: 0.0 for nprobe in GRAPH_NPROBE_GRID}
+    add_seconds = 0.0
+    search_seconds = 0.0
+    shard_receipts: list[dict[str, Any]] = []
+    quality_queries = np.ascontiguousarray(X[quality_ids])
+    for shard_start in range(0, rows, GRAPH_SHARD_ROWS):
+        shard_stop = min(shard_start + GRAPH_SHARD_ROWS, rows)
+        gpu_resource = faiss.StandardGpuResources()
+        gpu_resource.setTempMemory(256 << 20)
+        index = faiss.index_cpu_to_gpu(
+            gpu_resource, 0, trained_cpu, _faiss_gpu_options(faiss)
+        )
+        add_started = time.monotonic()
+        for start in range(shard_start, shard_stop, 25_000):
+            stop = min(start + 25_000, shard_stop)
+            index.add_with_ids(
+                np.ascontiguousarray(X[start:stop]),
+                np.arange(start, stop, dtype=np.int64),
+            )
+        shard_add_s = time.monotonic() - add_started
+        add_seconds += shard_add_s
+        if int(index.ntotal) != shard_stop - shard_start:
+            raise Round0166Error("R0171 sharded IVF row count changed")
+
+        for nprobe in GRAPH_NPROBE_GRID:
+            index.nprobe = nprobe
+            cell_started = time.monotonic()
+            shard_sims, shard_ids = index.search(quality_queries, GRAPH_K)
+            quality_wall[nprobe] += time.monotonic() - cell_started
+            current = quality_best[nprobe]
+            quality_best[nprobe] = (
+                (
+                    shard_sims.astype(np.float32, copy=False),
+                    shard_ids.astype(np.int64, copy=False),
+                )
+                if current is None
+                else _merge_ann_topk(
+                    current[0],
+                    current[1],
+                    shard_sims,
+                    shard_ids,
+                    k=GRAPH_K,
+                )
+            )
+
+        index.nprobe = GRAPH_NPROBE
+        shard_search_started = time.monotonic()
+        for start in range(0, rows, 16_384):
+            stop = min(start + 16_384, rows)
+            shard_sims, shard_ids = index.search(
+                np.ascontiguousarray(X[start:stop]), GRAPH_K
+            )
+            if shard_start == 0:
+                distances[start:stop] = shard_sims.astype(np.float32, copy=False)
+                neighbors[start:stop] = shard_ids.astype(np.int32, copy=False)
+            else:
+                merged_sims, merged_ids = _merge_ann_topk(
+                    distances[start:stop],
+                    neighbors[start:stop],
+                    shard_sims,
+                    shard_ids,
+                    k=GRAPH_K,
+                )
+                distances[start:stop] = merged_sims
+                neighbors[start:stop] = merged_ids.astype(np.int32, copy=False)
+        shard_search_s = time.monotonic() - shard_search_started
+        search_seconds += shard_search_s
+        shard_receipts.append({
+            "start": shard_start,
+            "stop": shard_stop,
+            "rows": shard_stop - shard_start,
+            "add_s": shard_add_s,
+            "full_search_s": shard_search_s,
+            "ntotal": int(index.ntotal),
+        })
+        del index, gpu_resource
+        torch.cuda.empty_cache()
+        gc.collect()
+
+    if np.any(neighbors < 0) or np.any(neighbors >= rows) or not np.isfinite(distances).all():
+        raise Round0166Error("R0171 sharded full graph search returned invalid rows")
+    np.maximum(0.0, 1.0 - distances, out=distances)
 
     cells: dict[str, Any] = {}
     selected_observed: np.ndarray | None = None
     for nprobe in GRAPH_NPROBE_GRID:
-        index.nprobe = nprobe
-        cell_started = time.monotonic()
-        _sims, raw = index.search(np.ascontiguousarray(X[quality_ids]), GRAPH_K)
-        cell_wall = time.monotonic() - cell_started
-        observed = _without_self(raw, quality_ids, GRAPH_K - 1)
+        merged = quality_best[nprobe]
+        if merged is None:
+            raise Round0166Error("R0171 sharded quality search is incomplete")
+        observed = _without_self(merged[1], quality_ids, GRAPH_K - 1)
         recalls = _recall_rows(observed, truth)
         passed = bool(
             recalls.mean() >= GRAPH_MEAN_RECALL_FLOOR
             and np.percentile(recalls, 10) >= GRAPH_P10_RECALL_FLOOR
         )
+        cell_wall = quality_wall[nprobe]
         cells[str(nprobe)] = {
             "mean_recall_at_49": float(recalls.mean()),
             "p10_recall_at_49": float(np.percentile(recalls, 10)),
@@ -234,21 +359,9 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             selected_observed = observed.copy()
     fixed = cells[str(GRAPH_NPROBE)]
     if fixed["passed"] is not True or selected_observed is None:
-        raise Round0166Error("R0166 fixed-nprobe graph search did not qualify")
+        raise Round0166Error("R0171 fixed-nprobe sharded graph search did not qualify")
 
-    index.nprobe = GRAPH_NPROBE
-    neighbors = np.empty((rows, GRAPH_K), dtype=np.int32)
-    distances = np.empty((rows, GRAPH_K), dtype=np.float32)
-    search_started = time.monotonic()
-    for start in range(0, rows, 16_384):
-        stop = min(start + 16_384, rows)
-        sims, ids = index.search(np.ascontiguousarray(X[start:stop]), GRAPH_K)
-        if np.any(ids < 0) or np.any(ids >= rows):
-            raise Round0166Error("R0166 full graph search returned invalid IDs")
-        neighbors[start:stop] = ids.astype(np.int32, copy=False)
-        distances[start:stop] = np.maximum(0.0, 1.0 - sims).astype(np.float32, copy=False)
-    search_seconds = time.monotonic() - search_started
-    del index, cpu_index, quantizer, resource
+    del trained_cpu, quality_queries, quality_best
     torch.cuda.empty_cache()
     gc.collect()
 
@@ -355,6 +468,15 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "search_qualification": {
             "index": GRAPH_INDEX_DESCRIPTION,
             "selected_nprobe": GRAPH_NPROBE,
+            "execution": {
+                "shard_rows": GRAPH_SHARD_ROWS,
+                "shards": shard_receipts,
+                "coarse_quantizer": "one shared trained IVF8192 template",
+                "merge": (
+                    "exact global top-k over every row-disjoint fp32-IVF "
+                    "shard, ordered by similarity descending then global ID ascending"
+                ),
+            },
             "cells": cells,
             "training_rows_sha256": ordered_array_sha256(train_rows),
             "quality_rows_sha256": ordered_array_sha256(quality_ids),
@@ -380,6 +502,10 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "same_as_r0115": True,
             "search_neighbors_including_self": GRAPH_K,
             "nonself_degree": GRAPH_K - 1,
+            "sharded_search_equivalence": (
+                "same shared coarse quantizer and nprobe on every disjoint row "
+                "shard; exact global top-k merge by similarity then global ID"
+            ),
             "fuzzy_symmetrization": "UMAP fuzzy_simplicial_set",
             "positive_weight_semantics": "fuzzy membership strength",
         },

@@ -59,6 +59,11 @@ HANDLER_MODULE = "experiments.round0166_nodes"
 QUEUE_SCHEMA = "round0166-prompted-english-8m-scale-queue-v1"
 QUEUE_LABEL = "R0166 GPU queue"
 GRAPH_VECTOR_STORAGE = "gpu-ivfflat-fp32"
+GPU_HOURS_CAP = 5.5
+SELECT_P90_WALL_S = 900.0
+GRAPH_P90_WALL_S = 7_200.0
+TRAIN_P90_WALL_S = 6_000.0
+EVALUATION_P90_WALL_S = 3_600.0
 
 
 def _one_document(prefix: str, round_id: str, *, status: str) -> dict[str, Any]:
@@ -298,7 +303,7 @@ def prepare_round0166(
                 r0120_signature,
                 *query_payloads,
             ]),
-            "p90_wall_s": 900.0,
+            "p90_wall_s": SELECT_P90_WALL_S,
             "population_receipt": population_signature,
             "canonical_layout": layout_signature,
             "r0116_manifest": r0116_signature,
@@ -319,7 +324,7 @@ def prepare_round0166(
             "outputs": [graph_output],
             "done_marker": os.path.join(artifacts, "graph-reference.done.json"),
             "expected_inputs": common,
-            "p90_wall_s": 7_200.0,
+            "p90_wall_s": GRAPH_P90_WALL_S,
             "population_receipt": population_signature,
             "node_policy": {
                 "gpu_required": True,
@@ -336,7 +341,7 @@ def prepare_round0166(
             "outputs": [train_output],
             "done_marker": os.path.join(artifacts, "train.done.json"),
             "expected_inputs": common,
-            "p90_wall_s": 6_000.0,
+            "p90_wall_s": TRAIN_P90_WALL_S,
             "population_receipt": population_signature,
             "graph_manifest": graph_manifest,
             "node_policy": {
@@ -354,7 +359,7 @@ def prepare_round0166(
             "outputs": [evaluation_output],
             "done_marker": os.path.join(artifacts, "evaluation.done.json"),
             "expected_inputs": common,
-            "p90_wall_s": 3_600.0,
+            "p90_wall_s": EVALUATION_P90_WALL_S,
             "population_receipt": population_signature,
             "query_output": query_output,
             "graph_manifest": graph_manifest,
@@ -373,7 +378,7 @@ def prepare_round0166(
         release_sha=release_sha,
         round_file=ROUND_FILE,
         queue_root=queue_root,
-        gpu_hours_cap=5.5,
+        gpu_hours_cap=GPU_HOURS_CAP,
         execution_authority="autonomous-gpu",
         gpu=True,
     )
