@@ -1,6 +1,9 @@
 """Contract tests for the R0179 NUMAP 200k OOS baseline."""
 from __future__ import annotations
 
+import types
+
+import numpy as np
 import pytest
 
 from basemap.round0179_numap_baseline import (
@@ -131,3 +134,42 @@ def test_synthesis_rejects_wrong_held_universe() -> None:
     cell["held_hash"] = "wrong"
     with pytest.raises(Round0179Error):
         build_synthesis(cell=cell, aumap_context=_aumap())
+
+
+def test_numap_adapter_keeps_import_caches_out_of_reference_output(
+    tmp_path, monkeypatch
+) -> None:
+    from experiments import round0179_nodes as nodes
+
+    held = np.arange(nodes.N_QUERIES, dtype=np.int64)
+    queries = np.zeros((nodes.N_QUERIES, 4), dtype=np.float32)
+    observed: dict[str, object] = {}
+
+    monkeypatch.setattr(nodes, "_signature", lambda expected, *, label: dict(expected))
+    monkeypatch.setattr(nodes, "_heldout_queries", lambda scale: (None, held, queries))
+    monkeypatch.setattr(nodes, "_ids_hash", lambda ids: nodes.HELD_HASH)
+
+    def fake_run(*args, **kwargs):
+        observed.update(kwargs)
+        kwargs["stderr"].write("stopped before package execution\n")
+        return types.SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(nodes.subprocess, "run", fake_run)
+
+    output = tmp_path / "numap-200k"
+    job = {
+        "outputs": [str(output)],
+        "testbed_embeddings": {"canonical_path": "/tmp/frozen-matrix.npy"},
+        "sample_indices": {},
+        "source_manifest": {},
+        "source_shards": [],
+        "reference_script": {},
+        "toolchain_python": {"resolved_interpreter": {}, "pyvenv_config": {}},
+        "package_files": [],
+    }
+
+    with pytest.raises(nodes.Round0179Error):
+        nodes.run_numap_cell({"manifest": {"release_sha": "test"}}, job)
+
+    assert observed["cwd"] == str(output / "reference")
+    assert observed["env"]["MPLCONFIGDIR"] == str(output / "numap-mplconfig")
