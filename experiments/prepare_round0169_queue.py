@@ -30,6 +30,10 @@ from basemap.round0116_prompted_corpus import environment_freeze_receipt
 from basemap.round0160_prompted_seed_family import CAPABILITY as FAMILY_CAPABILITY
 from basemap.round0161_prompted_gate_registration import CAPABILITY as GATE_CAPABILITY
 from basemap.round0171_prompted_8m import CAPABILITY as Q2_CAPABILITY
+from basemap.round0173_prompted_ood_pack import (
+    CAPABILITY as OOD_PACK_CAPABILITY,
+    OOD_AUDIT_SCHEMA as OOD_PACK_SCHEMA,
+)
 from basemap.round0168_prompted_diverse_staging import (
     CAPABILITY as STAGING_CAPABILITY,
     MANIFEST_SCHEMA as STAGING_SCHEMA,
@@ -65,6 +69,10 @@ STAGING_MANIFEST = (
 Q2_EVALUATION = (
     "/data/latent-basemap/runs/round-0171/queue/artifacts/"
     f"{Q2_CAPABILITY}/scale-evaluation.json"
+)
+OOD_PACK_PATH = (
+    "/data/latent-basemap/runs/round-0173/queue/artifacts/"
+    f"{OOD_PACK_CAPABILITY}/audit.json"
 )
 FAMILY_PATH = (
     "/data/latent-basemap/runs/round-0160/queue/artifacts/"
@@ -280,7 +288,7 @@ def prepare_round0169(
         raise ValueError("R0169 release SHA must be one full commit")
     round_signature = _issued_round(release_sha)
     dependency_inputs: list[dict[str, Any]] = []
-    for dependency in ("0108", "0114", "0132", "0160", "0161", "0171"):
+    for dependency in ("0108", "0114", "0132", "0160", "0161", "0171", "0173"):
         dependency_inputs.extend(_accepted_bundle(dependency))
     dependency_inputs.extend(_accepted_bundle(
         "0168",
@@ -304,6 +312,47 @@ def prepare_round0169(
         dict(staging["population"]["mapping"]),
         dict(staging["duplicate_control"]["arrays"]),
     ]
+
+    ood_pack_signature = expected_input_signature(OOD_PACK_PATH)
+    ood_pack = _read_sealed(
+        ood_pack_signature, label="accepted R0173 prompted OOD pack"
+    )
+    if (
+        ood_pack.get("schema") != OOD_PACK_SCHEMA
+        or ood_pack.get("round_id") != "0173"
+        or ood_pack.get("passed") is not True
+        or ood_pack.get("capabilities") != [OOD_PACK_CAPABILITY]
+        or ood_pack.get("population") != staging_signature
+        or int(ood_pack.get("probe_rows", -1)) != len(LANGUAGES) * 50_000
+        or int(ood_pack.get("exact_training_family_overlap_count", -1)) != 0
+    ):
+        raise RuntimeError("R0169 accepted R0173 OOD pack changed")
+    packed_languages = ood_pack.get("language_outputs") or {}
+    if set(packed_languages) != set(LANGUAGES):
+        raise RuntimeError("R0169 accepted OOD pack language set changed")
+    language_outputs: dict[str, str] = {}
+    ood_pack_inputs: list[dict[str, Any]] = [
+        ood_pack_signature,
+        dict(ood_pack["prompt_canary"]),
+    ]
+    for language in LANGUAGES:
+        signatures = packed_languages[language]
+        if set(signatures) != {
+            "receipt",
+            "corpus_embeddings",
+            "query_embeddings",
+            "corpus_source_rows",
+            "query_source_rows",
+        }:
+            raise RuntimeError(f"R0169 {language} OOD pack signature set changed")
+        for signature in signatures.values():
+            observed = expected_input_signature(signature["canonical_path"])
+            if observed != signature:
+                raise RuntimeError(f"R0169 {language} OOD pack bytes changed")
+            ood_pack_inputs.append(dict(signature))
+        language_outputs[language] = os.path.dirname(
+            str(signatures["receipt"]["canonical_path"])
+        )
 
     q2_signature = expected_input_signature(Q2_EVALUATION)
     q2 = _read_sealed(q2_signature, label="accepted positive R0171 evaluation")
@@ -351,8 +400,6 @@ def prepare_round0169(
         dict(accepted_selection["positions"]),
     ]
 
-    selection_signature = expected_input_signature(SELECTION_PATH)
-    language_sources = _language_sources(selection_signature)
     group_signature = expected_input_signature(GROUP_IDS_PATH)
     group_ids = np.load(GROUP_IDS_PATH, mmap_mode="r", allow_pickle=False)
     if (
@@ -375,9 +422,6 @@ def prepare_round0169(
     ):
         raise RuntimeError("R0169 accepted R0132 OOD summary changed")
 
-    model_members = model_member_signatures()
-    environment = environment_freeze_receipt()
-    canary = _canary_inputs()
     queue_root = create_fresh_directory(queue_root, label="R0169 GPU queue")
     preflight = ensure_data_directory(os.path.join(queue_root, "preflight"))
     smoke_path = os.path.join(preflight, "release-cpu-smoke.json")
@@ -394,83 +438,12 @@ def prepare_round0169(
         round_signature,
         *dependency_inputs,
         q2_signature,
+        *ood_pack_inputs,
         *smoke_inputs,
     ])
     artifacts = ensure_data_directory(os.path.join(queue_root, "artifacts"))
-    canary_output = os.path.join(artifacts, "prompt-model-canary")
-    jobs: list[dict[str, Any]] = [{
-        "id": "prompt_model_canary",
-        "action": "prompt_canary",
-        "handler_module": "experiments.round0169_nodes",
-        "handler_callable": "run_job",
-        "deps": [],
-        "outputs": [canary_output],
-        "done_marker": os.path.join(artifacts, "prompt-model-canary.done.json"),
-        "expected_inputs": _dedupe([
-            *protocol_inputs,
-            *model_members,
-            canary["text"],
-            canary["document"],
-        ]),
-        "p90_wall_s": 180.0,
-        "canary_text": canary["text"],
-        "canary_document": canary["document"],
-        "canary_positions": canary["positions"],
-        "model_members": model_members,
-        "environment_freeze": environment,
-        "node_policy": {"gpu_required": True, "training_performed": False},
-    }]
-
-    language_outputs: dict[str, str] = {}
-    embed_ids: list[str] = []
-    for language in LANGUAGES:
-        node_id = f"embed_prompted_{language}"
-        output = os.path.join(artifacts, f"prompted-{language}")
-        embed_ids.append(node_id)
-        language_outputs[language] = output
-        jobs.append({
-            "id": node_id,
-            "action": "embed_language_probe",
-            "handler_module": "experiments.round0169_nodes",
-            "handler_callable": "run_job",
-            "deps": ["prompt_model_canary"],
-            "outputs": [output],
-            "done_marker": os.path.join(artifacts, f"{node_id}.done.json"),
-            "expected_inputs": _dedupe([
-                *protocol_inputs,
-                *model_members,
-                selection_signature,
-                language_sources[language],
-            ]),
-            "p90_wall_s": 300.0,
-            "language": language,
-            "selection": selection_signature,
-            "text_source": language_sources[language],
-            "canary_output": canary_output,
-            "model_members": model_members,
-            "environment_freeze": environment,
-            "node_policy": {"gpu_required": True, "training_performed": False},
-        })
-
-    audit_output = os.path.join(artifacts, "prompted-ood-training-disjoint")
-    jobs.append({
-        "id": "audit_prompted_ood_training_disjoint",
-        "action": "audit_probe_training_disjoint",
-        "handler_module": "experiments.round0169_nodes",
-        "handler_callable": "run_job",
-        "deps": embed_ids,
-        "outputs": [audit_output],
-        "done_marker": os.path.join(artifacts, "ood-training-audit.done.json"),
-        "expected_inputs": _dedupe([*protocol_inputs, *staging_inputs]),
-        "p90_wall_s": 1_800.0,
-        "staging_manifest": staging_signature,
-        "language_outputs": language_outputs,
-        "node_policy": {
-            "gpu_required": False,
-            "training_performed": False,
-            "cpu_heavy": True,
-        },
-    })
+    jobs: list[dict[str, Any]] = []
+    audit_output = os.path.dirname(OOD_PACK_PATH)
 
     graph_output = os.path.join(artifacts, "fuzzy-k50-graph-and-reference")
     graph_manifest = os.path.join(graph_output, "graph-manifest.json")
@@ -479,7 +452,7 @@ def prepare_round0169(
         "action": "build_graph_and_reference",
         "handler_module": "experiments.round0169_nodes",
         "handler_callable": "run_job",
-        "deps": ["audit_prompted_ood_training_disjoint"],
+        "deps": [],
         "outputs": [graph_output],
         "done_marker": os.path.join(artifacts, "graph-reference.done.json"),
         "expected_inputs": _dedupe([*protocol_inputs, *staging_inputs]),
@@ -514,17 +487,16 @@ def prepare_round0169(
         "action": "evaluate_prompted_diverse_u12",
         "handler_module": "experiments.round0169_nodes",
         "handler_callable": "run_job",
-        "deps": ["train_prompted_diverse_u12", *embed_ids],
+        "deps": ["train_prompted_diverse_u12"],
         "outputs": [evaluation_output],
         "done_marker": os.path.join(artifacts, "evaluation.done.json"),
         "expected_inputs": _dedupe([
             *protocol_inputs,
             *staging_inputs,
             *matched_inputs,
-            selection_signature,
             group_signature,
             raw_ood_signature,
-            *language_sources.values(),
+            *ood_pack_inputs,
         ]),
         "p90_wall_s": 6_600.0,
         "staging_manifest": staging_signature,
@@ -553,13 +525,14 @@ def prepare_round0169(
         "schema": "round0169-prompted-diverse-u12-queue-v1",
         "repo_root": RELEASE_ROOT,
         "queue_class": "gpu-research",
-        "required_reviews": ["0108", "0114", "0132", "0160", "0161", "0168", "0171"],
-        "ordering_dependencies": ["0171"],
+        "required_reviews": ["0108", "0114", "0132", "0160", "0161", "0168", "0171", "0173"],
+        "ordering_dependencies": ["0171", "0173"],
         "capability_dependencies": [
             Q2_CAPABILITY,
             STAGING_CAPABILITY,
             FAMILY_CAPABILITY,
             GATE_CAPABILITY,
+            OOD_PACK_CAPABILITY,
         ],
         "capabilities_produced": [CAPABILITY],
         "training_performed": True,
@@ -590,7 +563,10 @@ def prepare_round0169(
                 "mean_recall_floor": GRAPH_MEAN_RECALL_FLOOR,
                 "p10_recall_floor": GRAPH_P10_RECALL_FLOOR,
                 "vector_storage": GRAPH_VECTOR_STORAGE,
-                "vector_storage_change_role": "registered capacity representation; fp32 vectors exceed the single 32GiB device",
+                "execution_role": (
+                    "same shared-quantizer sharded-fp32 exact-merge law as Q2; "
+                    "four row shards follow only from the larger N"
+                ),
             },
             "training": {
                 "seed": 42,
@@ -600,6 +576,7 @@ def prepare_round0169(
             "ood": {
                 "selectors": "exact accepted R0108 selectors",
                 "prompted_rows": len(LANGUAGES) * 50_000,
+                "reviewed_probe_pack": OOD_PACK_CAPABILITY,
                 "all_rows_must_be_exact_prompted_family_disjoint_from_training_before_graph": True,
                 "post_embedding_replacements": False,
                 "polish_role": "held-out headline OOD",

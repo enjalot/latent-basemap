@@ -31,6 +31,12 @@ from basemap.round0168_prompted_diverse_staging import (
     MANIFEST_SCHEMA as STAGING_SCHEMA,
 )
 from basemap.round0171_prompted_8m import CAPABILITY as Q2_CAPABILITY
+from basemap.round0173_prompted_ood_pack import (
+    CAPABILITY as OOD_PACK_CAPABILITY_REGISTERED,
+    LANGUAGE_PROBE_SCHEMA as OOD_PACK_PROBE_SCHEMA,
+    OOD_AUDIT_SCHEMA as OOD_PACK_AUDIT_SCHEMA,
+    ROUND_ID as OOD_PACK_ROUND_ID,
+)
 from basemap.round0169_prompted_diverse import (
     CAPABILITY,
     DIMENSION,
@@ -87,6 +93,11 @@ EXPECTED_GRAPH_SHARDS = (
     (8_000_000, 12_000_000),
     (12_000_000, ROWS),
 )
+CANARY_SCHEMA = "round0169-prompt-model-canary-v1"
+LANGUAGE_PROBE_SCHEMA = OOD_PACK_PROBE_SCHEMA
+LANGUAGE_RECEIPT_ROUND_ID = OOD_PACK_ROUND_ID
+OOD_AUDIT_SCHEMA = OOD_PACK_AUDIT_SCHEMA
+OOD_PACK_CAPABILITY: str | None = OOD_PACK_CAPABILITY_REGISTERED
 
 
 class PromptedDiverseScaleArray(L2NormalizedArray):
@@ -272,7 +283,7 @@ def run_prompt_canary(active: Mapping[str, Any], job: Mapping[str, Any]) -> None
     if float(cosine.mean()) < 0.995 or float(cosine.min()) < 0.99:
         raise Round0169Error("R0169 prompt execution does not reproduce R0114")
     receipt = _seal({
-        "schema": "round0169-prompt-model-canary-v1",
+        "schema": CANARY_SCHEMA,
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
         "prompt_applied": True,
@@ -298,8 +309,8 @@ def _read_canary(output: str) -> dict[str, Any]:
     path = os.path.join(output, "canary.json")
     receipt = prompt_contract.read_sealed(path, label="R0169 prompt canary")
     if (
-        receipt.get("schema") != "round0169-prompt-model-canary-v1"
-        or receipt.get("round_id") != ROUND_ID
+        receipt.get("schema") != CANARY_SCHEMA
+        or receipt.get("round_id") != LANGUAGE_RECEIPT_ROUND_ID
         or receipt.get("passed") is not True
         or receipt.get("prompt_applied") is not True
         or receipt.get("prompt_prefix") != PROMPT_PREFIX
@@ -371,7 +382,7 @@ def run_embed_language(active: Mapping[str, Any], job: Mapping[str, Any]) -> Non
     atomic_save_new_npy(query_rows_path, query_rows, immutable=True)
     embed_wall = corpus_wall + query_wall
     receipt = _seal({
-        "schema": "round0169-prompted-language-probe-v1",
+        "schema": LANGUAGE_PROBE_SCHEMA,
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
         "language": language,
@@ -419,7 +430,7 @@ def _load_language_probe(
         receipt_path, label=f"R0169 {language} prompted probe"
     )
     if (
-        receipt.get("schema") != "round0169-prompted-language-probe-v1"
+        receipt.get("schema") != LANGUAGE_PROBE_SCHEMA
         or receipt.get("round_id") != ROUND_ID
         or receipt.get("language") != language
         or receipt.get("prompt_applied") is not True
@@ -498,6 +509,7 @@ def run_audit_probe_training_disjoint(
     total_probe_rows = len(LANGUAGES) * (HELDOUT_CORPUS_ROWS + HELDOUT_QUERY_ROWS)
     probe_pairs = np.empty(total_probe_rows, dtype=pair_dtype)
     entries: list[dict[str, Any]] = []
+    language_artifacts: dict[str, dict[str, Any]] = {}
     cursor = 0
     zero_rows = 0
     nonfinite_rows = 0
@@ -505,6 +517,7 @@ def run_audit_probe_training_disjoint(
         corpus, queries, corpus_rows, query_rows, signatures = _load_language_probe(
             str(job["language_outputs"][language]), language
         )
+        language_artifacts[language] = signatures
         for split, values, source_rows in (
             ("corpus", corpus, corpus_rows),
             ("queries", queries, query_rows),
@@ -575,7 +588,7 @@ def run_audit_probe_training_disjoint(
                                 "training_compact_row": int(training_row),
                             })
     receipt = _seal({
-        "schema": "round0169-prompted-ood-training-disjoint-v1",
+        "schema": OOD_AUDIT_SCHEMA,
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
         "population": population_signature,
@@ -594,6 +607,13 @@ def run_audit_probe_training_disjoint(
         ),
         "identity": "complete stored prompted-fp16 row bytes",
         "passed": not exact_overlaps,
+        "capabilities": [OOD_PACK_CAPABILITY]
+        if not exact_overlaps and OOD_PACK_CAPABILITY
+        else [],
+        "language_outputs": language_artifacts,
+        "prompt_canary": expected_input_signature(
+            os.path.join(str(job["canary_output"]), "canary.json")
+        ),
         "training_performed": False,
         "wall_seconds": time.monotonic() - started,
     })
@@ -886,13 +906,26 @@ def run_evaluate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     audit_signature = expected_input_signature(audit_path)
     audit = prompt_contract.read_sealed(audit_path, label="R0169 OOD training audit")
     if (
-        audit.get("schema") != "round0169-prompted-ood-training-disjoint-v1"
-        or audit.get("round_id") != ROUND_ID
+        audit.get("schema") != OOD_AUDIT_SCHEMA
+        or audit.get("round_id") != OOD_PACK_ROUND_ID
         or audit.get("passed") is not True
+        or audit.get("capabilities") != [OOD_PACK_CAPABILITY_REGISTERED]
+        or audit.get("population") != population_signature
         or int(audit.get("probe_rows", -1)) != len(LANGUAGES) * 50_000
         or int(audit.get("exact_training_family_overlap_count", -1)) != 0
     ):
         raise Round0169Error("R0169 OOD training-disjoint audit changed")
+    audit_languages = audit.get("language_outputs") or {}
+    if set(audit_languages) != set(LANGUAGES):
+        raise Round0169Error("R0169 OOD probe-pack language set changed")
+    for language in LANGUAGES:
+        receipt = expected_input_signature(
+            os.path.join(str(job["language_outputs"][language]), "receipt.json")
+        )
+        if (audit_languages[language] or {}).get("receipt") != receipt:
+            raise Round0169Error(
+                f"R0169 {language} probe path differs from reviewed OOD pack"
+            )
 
     if not _graph_execution_ok(graph):
         raise Round0169Error("R0169 graph execution contract changed")
