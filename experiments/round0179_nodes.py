@@ -132,7 +132,10 @@ def run_numap_cell(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             env={
                 **os.environ,
                 "PYTHONHASHSEED": "42",
-                "MPLCONFIGDIR": os.path.join(reference_output, ".mplconfig"),
+                # Importing numap imports matplotlib before the adapter can
+                # assert that reference_output is empty.  Keep that benign
+                # cache in the enclosing declared node output instead.
+                "MPLCONFIGDIR": os.path.join(output, "numap-mplconfig"),
             },
         )
     reference_seconds = time.monotonic() - reference_started
