@@ -302,6 +302,7 @@ def test_score_panel_reports_registered_density_groups():
         Z,
         config=cfg,
         density_group_labels=labels,
+        ffr_group_labels=labels,
         provenance={"t": "density-groups"},
     )
     assert set(result["density_by_group"]) == {
@@ -313,6 +314,13 @@ def test_score_panel_reports_registered_density_groups():
         group["anchors"]
         for group in result["density_by_group"].values()
     ) == 90
+    assert set(result["ffr_by_group"]) == {
+        "fineweb",
+        "redpajama",
+        "pile",
+    }
+    assert sum(group["anchors"] for group in result["ffr_by_group"].values()) == 90
+    assert all(0.0 <= group["ffr"] <= 1.0 for group in result["ffr_by_group"].values())
 
     with pytest.raises(ValueError, match="one label per sampled anchor"):
         pv.score_panel(
@@ -321,6 +329,14 @@ def test_score_panel_reports_registered_density_groups():
             config=cfg,
             density_group_labels=labels[:-1],
             provenance={"t": "bad-density-groups"},
+        )
+    with pytest.raises(ValueError, match="one label per sampled anchor"):
+        pv.score_panel(
+            X,
+            Z,
+            config=cfg,
+            ffr_group_labels=labels[:-1],
+            provenance={"t": "bad-ffr-groups"},
         )
 
 

@@ -1,13 +1,22 @@
 """Frozen scientific contracts for the conditional prompted-diverse Q3 rung."""
 from __future__ import annotations
 
+import copy
 import math
 from collections.abc import Mapping
 from typing import Any
 
+import numpy as np
+
+from basemap.artifact_identity import canonical_json, sha256_bytes
 from basemap.round0105_search import GROUPS
 from basemap.round0108_evaluation import IN_MIX_LANGUAGES
-from basemap.round0166_prompted_8m import METRICS, NATIVE_ABSOLUTE_METRICS
+from basemap import round0113_prompt_contrast as r0113
+from basemap.round0166_prompted_8m import (
+    METRICS,
+    NATIVE_ABSOLUTE_METRICS,
+    ScalePromptTrainingInput,
+)
 
 
 ROUND_ID = "0169"
@@ -31,10 +40,71 @@ RETENTION_RATIO = 0.97
 LANGUAGE_TO_POOLED_ENGLISH_RATIO = 0.40
 POLISH_TO_IN_MIX_MEDIAN_RATIO = 0.50
 HOST_RSS_LIMIT_GIB = 90.0
+MULTIPLICITY_POLICY = (
+    "exact-r0132-u12-population-unchanged; exact duplicate families are metadata-only"
+)
 
 
 class Round0169Error(RuntimeError):
     """The conditional prompted-diverse scale contract changed."""
+
+
+class DiversePromptTrainingInput(ScalePromptTrainingInput):
+    """Q2's sampler adapter with Q3's exact, non-deduplicated U12 policy."""
+
+    @staticmethod
+    def _patch_runtime(runtime: Mapping[str, Any]) -> dict[str, Any]:
+        value = dict(runtime)
+        value["multiplicity_policy"] = MULTIPLICITY_POLICY
+        return value
+
+
+def diverse_train_config(
+    *,
+    graph_signature: Mapping[str, Any],
+    graph_manifest_signature: Mapping[str, Any],
+    graph_edges: int,
+    retained_rows: int,
+) -> tuple[dict[str, Any], str]:
+    """Clone the accepted prompted recipe with only Q3 population bindings."""
+    if retained_rows != ROWS or graph_edges <= 0:
+        raise Round0169Error("R0169 train config population is invalid")
+    config, _ = r0113.train_config(
+        "document",
+        graph_signature=graph_signature,
+        graph_manifest_signature=graph_manifest_signature,
+        graph_edges=graph_edges,
+        retained_rows=r0113.RETAINED_ROWS,
+        seed=SEED,
+    )
+    config = copy.deepcopy(config)
+    config["schema"] = "round0169-prompted-diverse-u12-train-config-v1"
+    config["paired_invariant"] = {
+        "rows": retained_rows,
+        "dimension": DIMENSION,
+        "seed": SEED,
+        "successful_positive_lr_updates": SUCCESSFUL_UPDATES,
+        "dose_rule": "same fixed 500,000 successful-update dose as R0115/R0166",
+        "graph_policy": "same fuzzy-k50 law and seeds as R0115/R0166",
+        "graph_vector_storage": GRAPH_VECTOR_STORAGE,
+        "sampler": r0113.SAMPLER_CLASS,
+    }
+    config["input"].update({
+        "rows": retained_rows,
+        "representation": "prompted-document-host-fp16-npy",
+        "multiplicity_policy": MULTIPLICITY_POLICY,
+    })
+    expected = config["execution"]["expected_pipeline_stamp"]
+    expected["negative_sampling"] = f"uniform-{retained_rows}-compact-representatives-nonself"
+    expected["compact_retained_rows"] = retained_rows
+    expected["multiplicity_policy"] = MULTIPLICITY_POLICY
+    config["optimizer"]["successful_positive_lr_updates"] = SUCCESSFUL_UPDATES
+    config["execution"]["scale_change"] = (
+        "Q2-to-Q3 changes the exact population to reviewed diverse R0132 U12; "
+        "recipe, k50 graph law, seed, and fixed dose remain unchanged"
+    )
+    config["execution"]["graph_vector_storage"] = GRAPH_VECTOR_STORAGE
+    return config, sha256_bytes(canonical_json(config))
 
 
 def _at_least(observed: float, threshold: float) -> bool:

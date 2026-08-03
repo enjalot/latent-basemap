@@ -70,6 +70,19 @@ GRAPH_SCHEMA = "round0166-prompted-8m-fuzzy-graph-v1"
 QUERY_SCHEMA = "round0166-prompted-8m-heldout-query-v1"
 TRAIN_SCHEMA = "round0166-prompted-8m-train-receipt-v1"
 EVALUATION_SCHEMA = "round0166-prompted-8m-scale-evaluation-v1"
+PRODUCTION_CONFIG_SCHEMA = "round0166-prompted-8m-production-config-v1"
+GRAPH_INDEX_DESCRIPTION = "GPU IndexIVFFlat/IP fp32 vector storage"
+GRAPH_REFERENCE_ROW_ORDER = "R0165 frozen-prefix prompted compact order"
+GRAPH_REFERENCE_ANCHOR_NAMESPACE = "R0165 compact IDs"
+
+
+def _faiss_gpu_options(faiss: Any) -> Any:
+    """Return the registered Q2 fp32 GPU-index storage options.
+
+    Kept behind a narrow hook so later rungs can reuse the graph implementation
+    while explicitly registering a different capacity representation.
+    """
+    return prompt_nodes._faiss_gpu_options(faiss)
 
 
 def _signature(path: str, *, label: str) -> dict[str, Any]:
@@ -189,7 +202,7 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     resource = faiss.StandardGpuResources()
     resource.setTempMemory(1 << 30)
     index = faiss.index_cpu_to_gpu(
-        resource, 0, cpu_index, prompt_nodes._faiss_gpu_options(faiss)
+        resource, 0, cpu_index, _faiss_gpu_options(faiss)
     )
     train_started = time.monotonic()
     index.train(np.ascontiguousarray(X[train_rows]))
@@ -307,10 +320,10 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     reference_identity = {
         "data_identity": _data_identity(population),
         "convention": {
-            "row_order": "R0165 frozen-prefix prompted compact order",
+            "row_order": GRAPH_REFERENCE_ROW_ORDER,
             "distance": "cosine via fp32-L2-normalized squared L2",
             "self_exclusion": True,
-            "anchor_namespace": "R0165 compact IDs",
+            "anchor_namespace": GRAPH_REFERENCE_ANCHOR_NAMESPACE,
             "embedding_prompt": "document",
         },
     }
@@ -344,7 +357,7 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "compact_mapping": population["mapping"],
         "source": population["document_compact"],
         "search_qualification": {
-            "index": "GPU IndexIVFFlat/IP",
+            "index": GRAPH_INDEX_DESCRIPTION,
             "selected_nprobe": GRAPH_NPROBE,
             "cells": cells,
             "training_rows_sha256": ordered_array_sha256(train_rows),
@@ -660,7 +673,7 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     atomic_write_new_json(
         config_path,
         {
-            "schema": "round0166-prompted-8m-production-config-v1",
+            "schema": PRODUCTION_CONFIG_SCHEMA,
             "round_id": ROUND_ID,
             "config": config,
             "config_sha256": config_sha,

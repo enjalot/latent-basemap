@@ -1673,6 +1673,57 @@ def _require_score_panel_scale_admission(X, scale_admission):
                 "representative-row scale view carries its own exact identity"
             )
         return identity
+    # R0169 scores the exact reviewed 12.5M U12 population, including its
+    # diagnostic-only duplicate families.  It is neither a legacy reopened
+    # source directory nor a representative-only view, so bind the precise
+    # staged matrix and compact-to-global mapping instead of mislabelling it as
+    # either one merely to cross the generic >=8M admission boundary.
+    if getattr(X, "round0169_prompted_diverse_view", False):
+        identity = X.scale_admission_identity()
+        body = {
+            key: value for key, value in identity.items()
+            if key != "identity_sha256"
+        }
+        source = identity.get("source") or {}
+        mapping = identity.get("mapping") or {}
+        staging = identity.get("staging") or {}
+        filename = getattr(getattr(X, "source", None), "filename", None)
+        expected_source_bytes = rows * int(identity.get("dimensions", -1)) * 2 + 128
+        expected_mapping_bytes = rows * 8 + 128
+        if (
+            identity.get("schema")
+            != "round0169-prompted-diverse-scale-input-v1"
+            or identity.get("round_id") != "0169"
+            or identity.get("identity_sha256")
+            != sha256_bytes(canonical_json(body))
+            or identity.get("row_count") != rows
+            or identity.get("dimensions") != 768
+            or source.get("kind") != "file"
+            or source.get("bytes") != expected_source_bytes
+            or not _valid_sha256(source.get("sha256"))
+            or not isinstance(filename, (str, os.PathLike))
+            or os.path.realpath(filename)
+            != os.path.realpath(str(source.get("canonical_path") or ""))
+            or mapping.get("kind") != "file"
+            or mapping.get("bytes") != expected_mapping_bytes
+            or not _valid_sha256(mapping.get("sha256"))
+            or staging.get("kind") != "file"
+            or not _valid_sha256(staging.get("sha256"))
+            or not _valid_sha256(identity.get("staging_identity_sha256"))
+            or identity.get("population_law")
+            != "exact accepted R0132 U12 compact order"
+            or identity.get("duplicate_policy")
+            != (
+                "exact duplicate families are diagnostic metadata only; "
+                "the accepted U12 population is unchanged"
+            )
+        ):
+            raise RuntimeError("Round 0169 prompted-diverse scale identity is invalid")
+        if scale_admission is not None:
+            raise RuntimeError(
+                "Round 0169 prompted-diverse view carries its own exact identity"
+            )
+        return identity
     required = {"performance_gate", "release_sha", "row_derivation", "scale_policy"}
     if not isinstance(scale_admission, dict) or set(scale_admission) != required:
         raise RuntimeError(
@@ -1694,7 +1745,8 @@ def _require_score_panel_scale_admission(X, scale_admission):
 def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
                 centroids_by_k=None, anchor_masks=None, projection=None,
                 hiD_reference=None, reference_identity=None,
-                scale_admission=None, density_group_labels=None, provenance):
+                scale_admission=None, density_group_labels=None,
+                ffr_group_labels=None, provenance):
     """The single evaluator both the runner and CLI call. Aligns X to Z exactly,
     runs ONE high-D and ONE low-D neighbour pass shared across ffr/recall/purity,
     an exact-radius pass for density, optional projection fidelity, and emits a
@@ -1756,6 +1808,28 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
     res["ffr"] = round(ffr_from_neighbors(hi_hit[sel_ffr], lo_kf[sel_ffr], cfg.k_hit), 4)
     res["recall@k"] = round(recall_at_k_from_neighbors(hi_hit[sel_ffr], lo_kf[sel_ffr], cfg.k_hit), 5)
     res["n_ffr_anchors"] = int(len(sel_ffr))
+    if ffr_group_labels is not None:
+        labels = np.asarray(ffr_group_labels)
+        if labels.shape != (m,):
+            raise ValueError(
+                "ffr_group_labels must contain one label per sampled anchor"
+            )
+        selected_labels = labels[sel_ffr]
+        groups = {}
+        for raw_label in sorted(np.unique(selected_labels), key=str):
+            mask = selected_labels == raw_label
+            groups[str(raw_label)] = {
+                "anchors": int(mask.sum()),
+                "ffr": round(
+                    ffr_from_neighbors(
+                        hi_hit[sel_ffr][mask],
+                        lo_kf[sel_ffr][mask],
+                        cfg.k_hit,
+                    ),
+                    4,
+                ),
+            }
+        res["ffr_by_group"] = groups
 
     # purity per centroid granularity — uses the APPROXIMATE high-D k_frac membership
     if centroids_by_k:
