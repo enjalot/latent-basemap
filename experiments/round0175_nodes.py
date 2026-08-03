@@ -195,6 +195,26 @@ def _exact_cosine_neighbors(
     distances = np.maximum(0.0, 1.0 - scores[:, :NEIGHBORS]).astype(
         np.float32, copy=False
     )
+    rank1_distances = distances[:, 0]
+    rank1_quantiles = np.quantile(
+        rank1_distances, [0.0, 0.01, 0.10, 0.50, 0.90, 1.0]
+    )
+    rank1_diagnostics = {
+        "minimum": float(rank1_quantiles[0]),
+        "p01": float(rank1_quantiles[1]),
+        "p10": float(rank1_quantiles[2]),
+        "median": float(rank1_quantiles[3]),
+        "p90": float(rank1_quantiles[4]),
+        "maximum": float(rank1_quantiles[5]),
+        "exact_zero_rows": int(np.count_nonzero(rank1_distances == 0.0)),
+        "near_zero_rows_le_1e-7": int(
+            np.count_nonzero(rank1_distances <= 1.0e-7)
+        ),
+        "role": (
+            "duplicate/near-duplicate pressure diagnostic; no rows are "
+            "filtered from the registered full-universe metrics"
+        ),
+    }
     performance = {
         "index_add_seconds": add_seconds,
         "query_seconds": search_seconds,
@@ -203,6 +223,7 @@ def _exact_cosine_neighbors(
         "search_k_for_boundary_guard": search_k,
         "minimum_rank15_to_rank16_similarity_gap": float(boundary_gap.min()),
         "zero_rank15_to_rank16_gap_rows": int(np.count_nonzero(boundary_gap == 0)),
+        "rank1_cosine_distance_diagnostics": rank1_diagnostics,
         "index": "GPU IndexFlatIP exact fp32",
         "tie_order_within_returned_candidates": "similarity descending then global ID ascending",
     }
