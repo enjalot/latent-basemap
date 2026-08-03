@@ -60,6 +60,10 @@ LAYER_PASSTHROUGH = ("sampled_of", "accent")
 # Full-map grid resolution ladder. write_grid returns the levels it actually
 # emitted (it may drop 1024 for a subset layer whose bin would exceed 2 MB).
 LEVELS = [64, 128, 256, 512, 1024]
+# Addendum v3 deep-zoom levels — base "all" layer ONLY (subsets stay <=1024).
+# Any base-layer level whose whole sparse file would exceed 2.5 MB is written
+# as 4x4 spatial tiles (map_tiles.write_grid_auto) and declared "tiled_levels".
+FINE_LEVELS = [2048, 4096]
 SAMPLE_LEVEL = 256
 SUPER_TILE = 16
 
@@ -305,13 +309,31 @@ def _linked_projections(registry: dict, entry: dict) -> list[dict]:
 # --------------------------------------------------------- grid / metrics ---
 
 def _emit_grids(mt, source, data: Path, layer_key: str, extent, row_filter,
-                skipped=None):
-    """Write grid-<layer>-<L>.bin for every level, dropping any that would
-    exceed the static-fetch size cap. Returns the emitted level list."""
-    grids = mt.bin_all_levels(source, LEVELS, extent, row_filter=row_filter)
-    emitted, rows = [], 0
-    for lvl in LEVELS:
+                skipped=None, base=False):
+    """Write the grid files for one layer.
+
+    Subset layers (base=False): plain grid-<layer>-<L>.bin for LEVELS, dropping
+    any level that would exceed the static-fetch size cap (unchanged v1 rule).
+
+    Base "all" layer (base=True): LEVELS + FINE_LEVELS, each written plain or
+    as 4x4 spatial tiles by map_tiles.write_grid_auto's 2.5 MB rule (nothing is
+    dropped). Returns (plain_levels, tiled_levels, rows) where tiled_levels is
+    the manifest fragment [{"level": L, "split": 4}, ...].
+    """
+    levels = LEVELS + FINE_LEVELS if base else LEVELS
+    grids = mt.bin_all_levels(source, levels, extent, row_filter=row_filter)
+    # Every level sums to the same row total; use the coarsest.
+    rows = int(grids[levels[0]][1].sum())
+    emitted, tiled = [], []
+    for lvl in levels:
         idx, cnt = grids[lvl]
+        if base:
+            result = mt.write_grid_auto(str(data), layer_key, lvl, idx, cnt)
+            if result["tiled"]:
+                tiled.append({"level": lvl, "split": result["split"]})
+            else:
+                emitted.append(lvl)
+            continue
         if 16 + 8 * len(idx) > MAX_GRID_BYTES:
             msg = (f"{layer_key}: L{lvl} grid omitted "
                    f"({16 + 8 * len(idx)}B > {MAX_GRID_BYTES}B static-fetch cap)")
@@ -321,8 +343,7 @@ def _emit_grids(mt, source, data: Path, layer_key: str, extent, row_filter,
             continue
         mt.write_grid(str(data / f"grid-{layer_key}-{lvl}.bin"), lvl, idx, cnt)
         emitted.append(lvl)
-        rows = int(cnt.sum())
-    return emitted, rows
+    return emitted, tiled, rows
 
 
 def _metric_artifacts(map_kind: str, coords_dir: Path) -> dict:
@@ -393,18 +414,22 @@ def _round_descriptor(entry: dict, manifest: dict, viewer_rel: str,
     kind = "atlas" if map_kind == "jina-25m" else "round-map"
     panel = (manifest.get("provenance") or {}).get("panel") or {}
     thumb_rel = f"{viewer_rel}/thumb.png"
+    probes = _probe_summaries(manifest)
     return {
         "map_id": entry["map_id"],
         "round_id": entry.get("round_id"),
         "kind": kind,
         "title": manifest.get("title") or _title(entry),
+        "date": entry.get("date"),
         "rows_total": manifest.get("rows_total"),
         "rows_note": manifest.get("rows_note"),
         "evidence_status": entry.get("evidence_status"),
         "data": f"{viewer_rel}/data/",
         "thumbnail": thumb_rel if thumb_exists else None,
         "metrics": {"ffr": panel.get("ffr"), "density_v2": panel.get("density")},
-        "probes": _probe_summaries(manifest),
+        "probes": probes,
+        # Filter tags: the keys of this map's OOD probes (addendum v3).
+        "tags": sorted({p["key"] for p in probes if p.get("key")}),
         # Retained for the registry card grid (legacy viewer link + thumb).
         "viewer_rel": f"{viewer_rel}/index.html",
         "thumb_rel": thumb_rel,
@@ -423,6 +448,7 @@ def _projection_descriptor(entry: dict, manifest: dict, viewer_rel: str,
         "round_id": entry.get("round_id"),
         "kind": "projection-map",
         "title": manifest.get("title"),
+        "date": entry.get("date"),
         "rows_total": manifest.get("rows_total"),
         "rows_note": manifest.get("rows_note"),
         "evidence_status": entry.get("evidence_status"),
@@ -430,6 +456,8 @@ def _projection_descriptor(entry: dict, manifest: dict, viewer_rel: str,
         "thumbnail": thumb_rel if thumb_exists else None,
         "metrics": {"ffr": proj.get("ffr"), "control_ffr": proj.get("control_ffr")},
         "probes": probes,
+        # Filter tag: this projection's probe key (addendum v3).
+        "tags": [proj["probe"]] if proj.get("probe") else [],
         "viewer_rel": f"{viewer_rel}/index.html",
         "thumb_rel": thumb_rel,
     }
@@ -449,6 +477,7 @@ def write_maps_index(site_dir: Path, round_built: list[dict],
             "title": d.get("title"),
             "kind": d.get("kind"),
             "round_id": d.get("round_id"),
+            "date": d.get("date"),
             "rows_total": d.get("rows_total"),
             "rows_note": d.get("rows_note"),
             "data": d.get("data"),
@@ -456,6 +485,7 @@ def write_maps_index(site_dir: Path, round_built: list[dict],
             "evidence_status": d.get("evidence_status"),
             "metrics": d.get("metrics") or {},
             "probes": d.get("probes") or [],
+            "tags": d.get("tags") or [],
         })
     index = {
         "schema": MAPS_INDEX_SCHEMA,
@@ -509,17 +539,19 @@ def _build_one(entry: dict, registry: dict, site_dir: Path,
 
     manifest_layers: list[dict] = []
     for layer in _plan_layers(entry, map_kind, mt):
+        is_base = layer["key"] == "all"
         try:
-            emitted, rows = _emit_grids(mt, source, data, layer["key"], extent,
-                                        layer["row_filter"], skipped=skipped)
+            emitted, tiled, rows = _emit_grids(
+                mt, source, data, layer["key"], extent, layer["row_filter"],
+                skipped=skipped, base=is_base)
         except Exception as exc:
             print(f"  {map_id}: grids({layer['key']}) failed: {exc}")
-            if layer["key"] == "all":
+            if is_base:
                 return None  # base layer is mandatory
             skipped.append(f"subset layer '{layer['key']}' omitted: grid build failed ({exc})")
             continue
-        if not emitted:
-            if layer["key"] == "all":
+        if not emitted and not tiled:
+            if is_base:
                 return None
             skipped.append(f"subset layer '{layer['key']}' omitted: no grid level within size cap")
             continue
@@ -527,6 +559,8 @@ def _build_one(entry: dict, registry: dict, site_dir: Path,
             "key": layer["key"], "label": layer["label"], "kind": "grid",
             "rows": rows, "levels": emitted,
         }
+        if tiled:
+            lyr["tiled_levels"] = tiled
         if layer["group"]:
             lyr["group"] = layer["group"]
         _apply_passthrough(lyr, layer)

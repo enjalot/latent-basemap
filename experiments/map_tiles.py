@@ -40,6 +40,11 @@ GRID_MAGIC = 0x42494E31   # "BIN1"
 PTS_MAGIC = 0x50545331    # "PTS1"
 ANCHOR_MAGIC = 0x414E4331  # "ANC1"  (written by component C, reader provided here)
 
+# Addendum v3: a level whose whole sparse BIN1 file would exceed this is
+# written as split x split spatial tiles instead of one plain file.
+TILE_THRESHOLD_BYTES = 2_500_000
+TILE_SPLIT = 4
+
 # ---------------------------------------------------------------------------
 # Fixed data-source locations (read-only, under /data).
 # ---------------------------------------------------------------------------
@@ -613,6 +618,60 @@ def read_grid(path):
         idx = np.frombuffer(f.read(4 * ncells), dtype="<u4").copy()
         cnt = np.frombuffer(f.read(4 * ncells), dtype="<u4").copy()
     return int(level), idx, cnt
+
+
+def grid_file_bytes(ncells):
+    """Whole-file size of a plain sparse BIN1 grid with `ncells` nonempty cells."""
+    return 16 + 8 * int(ncells)
+
+
+def write_grid_tiled(out_dir, layer, level, idx, cnt, split=TILE_SPLIT):
+    """Split one level's sparse bins into split x split spatial tile files.
+
+    Files: grid-<layer>-<L>-<tx>_<ty>.bin — the SAME BIN1 format as write_grid,
+    with GLOBAL row-major cell indices for the full LxL grid (the tiling is a
+    fetch-granularity split, not a re-indexing). A cell (cx, cy) belongs to
+    tile tx = cx // (L/split), ty = cy // (L/split). ALL split*split tiles are
+    written (empty tiles are 16-byte headers) so the viewer never 404s on a
+    viewport fetch. Returns the list of written paths in (ty, tx) order.
+    """
+    if level % split != 0:
+        raise ValueError(f"level {level} not divisible by split {split}")
+    idx = np.ascontiguousarray(np.asarray(idx, dtype="<u4"))
+    cnt = np.ascontiguousarray(np.asarray(cnt, dtype="<u4"))
+    if idx.shape != cnt.shape:
+        raise ValueError("idx/cnt length mismatch")
+    span = level // split  # cells per tile edge
+    cx = idx % np.uint32(level)
+    cy = idx // np.uint32(level)
+    tx = cx // np.uint32(span)
+    ty = cy // np.uint32(span)
+    tile_key = ty * np.uint32(split) + tx
+    paths = []
+    for t_y in range(split):
+        for t_x in range(split):
+            sel = tile_key == np.uint32(t_y * split + t_x)
+            path = os.path.join(out_dir, f"grid-{layer}-{level}-{t_x}_{t_y}.bin")
+            write_grid(path, level, idx[sel], cnt[sel])
+            paths.append(path)
+    return paths
+
+
+def write_grid_auto(out_dir, layer, level, idx, cnt, *,
+                    threshold=TILE_THRESHOLD_BYTES, split=TILE_SPLIT):
+    """Write one level plain or tiled by the addendum-v3 size rule.
+
+    Plain grid-<layer>-<L>.bin when the whole sparse file fits within
+    `threshold` bytes; otherwise split x split tile files via write_grid_tiled.
+    Returns {"level", "tiled", "split" (only when tiled), "paths"}.
+    """
+    if grid_file_bytes(len(idx)) > threshold:
+        paths = write_grid_tiled(out_dir, layer, level, idx, cnt, split=split)
+        return {"level": int(level), "tiled": True, "split": int(split),
+                "paths": paths}
+    path = write_grid(os.path.join(out_dir, f"grid-{layer}-{level}.bin"),
+                      level, idx, cnt)
+    return {"level": int(level), "tiled": False, "paths": [path]}
 
 
 def write_points(path, xy):

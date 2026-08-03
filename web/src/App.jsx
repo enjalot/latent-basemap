@@ -7,5 +7,5 @@ export default function App() {
   const route = useHashRoute();
   const theme = useTheme();
   if (route.name === "map") return <Viewer mapId={route.mapId} theme={theme} />;
-  return <Gallery theme={theme} />;
+  return <Gallery theme={theme} query={route.query || {}} />;
 }

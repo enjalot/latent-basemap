@@ -227,3 +227,81 @@ def test_clean_text_strips_cls():
     assert mt._clean_text("[CLS]tight") == "tight"
     long = "[CLS] " + "x" * 500
     assert len(mt._clean_text(long)) == mt.TEXT_MAX_CHARS
+
+
+# --------------------------------------------------- tiled grids (addendum v3)
+
+def test_write_grid_tiled_roundtrip(tmp_path):
+    """Union of the split x split tiles == the plain level bins; membership
+    of every cell in its tile file is correct; empty tiles still exist."""
+    L, split = 64, 4
+    rng = np.random.RandomState(7)
+    ncells = 500
+    idx = np.sort(rng.choice(L * L, ncells, replace=False)).astype(np.uint32)
+    cnt = rng.randint(1, 1000, ncells).astype(np.uint32)
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    mt.write_grid(str(plain / f"grid-all-{L}.bin"), L, idx, cnt)
+
+    paths = mt.write_grid_tiled(str(tmp_path), "all", L, idx, cnt, split=split)
+    assert len(paths) == split * split  # every tile written, even empty ones
+
+    span = L // split
+    union = {}
+    for p in paths:
+        name = os.path.basename(p)
+        # grid-all-<L>-<tx>_<ty>.bin
+        stem = name[len(f"grid-all-{L}-"):-len(".bin")]
+        tx, ty = (int(v) for v in stem.split("_"))
+        lvl, tidx, tcnt = mt.read_grid(p)
+        assert lvl == L  # same BIN1 format, full-grid level
+        for c, v in zip(tidx.tolist(), tcnt.tolist()):
+            cx, cy = c % L, c // L
+            # GLOBAL row-major indices with correct tile membership.
+            assert cx // span == tx and cy // span == ty
+            assert c not in union
+            union[c] = v
+
+    lvl, pidx, pcnt = mt.read_grid(plain / f"grid-all-{L}.bin")
+    assert union == dict(zip(pidx.tolist(), pcnt.tolist()))
+    assert sum(union.values()) == int(cnt.sum())
+
+
+def test_write_grid_tiled_rejects_bad_split():
+    with pytest.raises(ValueError):
+        mt.write_grid_tiled("/tmp", "all", 100, np.array([], np.uint32),
+                            np.array([], np.uint32), split=3)
+
+
+def test_write_grid_auto_plain_under_threshold(tmp_path):
+    idx = np.arange(10, dtype=np.uint32)
+    cnt = np.ones(10, dtype=np.uint32)
+    res = mt.write_grid_auto(str(tmp_path), "all", 256, idx, cnt)
+    assert res["tiled"] is False
+    assert res["paths"] == [os.path.join(str(tmp_path), "grid-all-256.bin")]
+    assert (tmp_path / "grid-all-256.bin").is_file()
+    assert not list(tmp_path.glob("grid-all-256-*"))
+
+
+def test_write_grid_auto_tiles_over_threshold(tmp_path):
+    # 400k cells -> 16 + 8*400000 = 3.2 MB > 2.5 MB threshold -> 4x4 tiles.
+    L = 2048
+    ncells = 400_000
+    idx = np.arange(ncells, dtype=np.uint32)
+    cnt = np.ones(ncells, dtype=np.uint32)
+    assert mt.grid_file_bytes(ncells) > mt.TILE_THRESHOLD_BYTES
+
+    res = mt.write_grid_auto(str(tmp_path), "all", L, idx, cnt)
+    assert res["tiled"] is True and res["split"] == 4
+    assert len(res["paths"]) == 16
+    assert not (tmp_path / f"grid-all-{L}.bin").exists()  # no plain file
+
+    # Union across tiles preserves every cell and count.
+    total_cells, total = 0, 0
+    for p in res["paths"]:
+        _, tidx, tcnt = mt.read_grid(p)
+        total_cells += len(tidx)
+        total += int(tcnt.sum())
+    assert total_cells == ncells
+    assert total == ncells

@@ -32,9 +32,15 @@ def _write_grid_bin(path: Path, level: int, cells: dict[int, int]) -> None:
     path.write_bytes(body)
 
 
-def _fake_map_tiles():
-    """Fakes matching the REAL component-A signatures the orchestrator calls."""
+def _fake_map_tiles(fine_cells: int = 0):
+    """Fakes matching the REAL component-A signatures the orchestrator calls.
+
+    ``fine_cells``: when > 0, levels >= 2048 emit that many nonempty cells so
+    the orchestrator's plain-vs-tiled decision (2.5 MB rule, delegated to the
+    REAL map_tiles.write_grid_auto) can be exercised.
+    """
     import numpy as np
+    import map_tiles as real_mt
     mod = types.ModuleType("map_tiles")
 
     class MapSource:
@@ -58,6 +64,11 @@ def _fake_map_tiles():
     def bin_all_levels(source, levels, extent, row_filter=None):
         out = {}
         for L in levels:
+            if fine_cells and L >= 2048:
+                idx = np.arange(fine_cells, dtype=np.uint32)
+                cnt = np.ones(fine_cells, dtype=np.uint32)
+                out[L] = (idx, cnt)
+                continue
             # A few populated cells; enough for a real thumbnail render.
             cells = {0: 3, L + 1: 12, 2 * L + 2: 40, L * L - 1: 7}
             idx = np.array(sorted(cells), dtype=np.uint32)
@@ -92,6 +103,12 @@ def _fake_map_tiles():
     mod.jina_subset_ranges = jina_subset_ranges
     mod.bin_all_levels = bin_all_levels
     mod.write_grid = write_grid
+    # The plain/tiled decision + tile writer are the REAL implementations so
+    # the on-disk tile format in these tests matches production byte-for-byte.
+    mod.write_grid_auto = real_mt.write_grid_auto
+    mod.write_grid_tiled = real_mt.write_grid_tiled
+    mod.grid_file_bytes = real_mt.grid_file_bytes
+    mod.read_grid = real_mt.read_grid
     mod.sample_bins = sample_bins
     mod.write_samples = write_samples
     mod.write_points = write_points
@@ -364,6 +381,65 @@ def test_maps_index_schema(patched, registry, tmp_path):
     assert m["metrics"]["density_v2"] == 0.72
     # Probe list carried from the metrics fragment.
     assert m["probes"] and m["probes"][0]["key"] == "pol_Latn"
+    # Addendum v3: date (registry map date) + tags (OOD probe keys).
+    assert m["date"] == "2026-07-20T00:00:00+00:00"
+    assert m["tags"] == ["pol_Latn"]
+
+
+def test_base_layer_fine_levels_plain_when_small(patched, registry, tmp_path):
+    """Small maps: 2048/4096 built for the base layer only, written plain."""
+    import map_viewer
+    site = tmp_path / "site"
+    map_viewer.build_map_viewers(registry, site)
+    vdir = site / "viewer" / "round-0108-r0107-diverse-jina-25m-seed42"
+    manifest = json.loads((vdir / "data" / "manifest.json").read_text())
+    layers = {l["key"]: l for l in manifest["layers"]}
+
+    assert layers["all"]["levels"] == [64, 128, 256, 512, 1024, 2048, 4096]
+    assert "tiled_levels" not in layers["all"]
+    assert (vdir / "data" / "grid-all-4096.bin").is_file()
+    # Subset overlays stay <= 1024 (addendum v3).
+    for key in ("eng", "lang-pol"):
+        assert max(layers[key]["levels"]) <= 1024
+        assert "tiled_levels" not in layers[key]
+
+
+def test_base_layer_tiled_levels_over_threshold(monkeypatch, registry, tmp_path):
+    """Fine levels whose whole file would exceed 2.5 MB are written as 4x4
+    tiles with GLOBAL cell indices and declared in the manifest tiled_levels."""
+    import map_tiles as real_mt
+    # 400k cells at L>=2048 -> 3.2 MB whole-file -> tiled by the 2.5 MB rule.
+    monkeypatch.setitem(sys.modules, "map_tiles", _fake_map_tiles(fine_cells=400_000))
+    monkeypatch.setitem(sys.modules, "map_metrics_extract", _fake_metrics())
+    import map_viewer
+    site = tmp_path / "site"
+    map_viewer.build_map_viewers(registry, site)
+    vdir = site / "viewer" / "round-0108-r0107-diverse-jina-25m-seed42"
+    manifest = json.loads((vdir / "data" / "manifest.json").read_text())
+    all_layer = next(l for l in manifest["layers"] if l["key"] == "all")
+
+    assert all_layer["levels"] == [64, 128, 256, 512, 1024]
+    assert all_layer["tiled_levels"] == [{"level": 2048, "split": 4},
+                                         {"level": 4096, "split": 4}]
+    # rows honesty preserved: coarse-level sum, not the fine synthetic cells.
+    assert all_layer["rows"] == 62
+
+    for L in (2048, 4096):
+        assert not (vdir / "data" / f"grid-all-{L}.bin").exists()
+        tiles = sorted((vdir / "data").glob(f"grid-all-{L}-*_*.bin"))
+        assert len(tiles) == 16
+        span = L // 4
+        total = 0
+        for t in tiles:
+            tx, ty = (int(v) for v in t.stem.split("-")[-1].split("_"))
+            lvl, tidx, tcnt = real_mt.read_grid(t)
+            assert lvl == L
+            if len(tidx):
+                cx = tidx % L
+                cy = tidx // L
+                assert ((cx // span == tx) & (cy // span == ty)).all()
+            total += len(tidx)
+        assert total == 400_000  # union of tiles == the level's sparse bins
 
 
 # ------------------------------------------------ projection-map viewers ----
@@ -402,6 +478,7 @@ def projection_registry(tmp_path):
         "map_id": "round-0108-r0107-diverse-jina-25m-seed42-pol-latn-projection",
         "round_id": "0108",
         "kind": "projection-map",
+        "date": "2026-07-21T00:00:00+00:00",
         "evidence_status": "review:accepted",
         "base_map": "25M diverse-Jina atlas — seed 42",
         "base_coordinates": {"dir": f"gsv:{base}"},
@@ -470,6 +547,9 @@ def test_projection_manifest_build(projection_registry, tmp_path):
     assert len(proj_entries) == 1
     assert proj_entries[0]["map_id"] == map_id
     assert proj_entries[0]["data"] == f"viewer/{map_id}/data/"
+    # Addendum v3: projection entries carry their date + probe-key tag.
+    assert proj_entries[0]["date"] == "2026-07-21T00:00:00+00:00"
+    assert proj_entries[0]["tags"] == ["pol_Latn"]
 
 
 def test_projection_manifest_no_truth_skips_queries(projection_registry, tmp_path):

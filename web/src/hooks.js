@@ -1,13 +1,21 @@
 import { useEffect, useState } from "react";
 
 // Hash router: "#/" -> gallery; "#/map/<id>" -> viewer. Static-server safe
-// (no history rewrites). Returns { name, mapId }.
+// (no history rewrites). The gallery carries shareable sort/filter state in the
+// hash query (#/?sort=&kind=&tag=&q=). Returns { name, mapId, query }.
 export function useHashRoute() {
   const parse = () => {
     const h = (window.location.hash || "#/").replace(/^#/, "");
-    const m = h.match(/^\/map\/(.+)$/);
-    if (m) return { name: "map", mapId: decodeURIComponent(m[1]) };
-    return { name: "gallery", mapId: null };
+    const qi = h.indexOf("?");
+    const path = qi >= 0 ? h.slice(0, qi) : h;
+    const query = {};
+    if (qi >= 0) {
+      const sp = new URLSearchParams(h.slice(qi + 1));
+      for (const [k, v] of sp) query[k] = v;
+    }
+    const m = path.match(/^\/map\/(.+)$/);
+    if (m) return { name: "map", mapId: decodeURIComponent(m[1]), query };
+    return { name: "gallery", mapId: null, query };
   };
   const [route, setRoute] = useState(parse);
   useEffect(() => {
@@ -16,6 +24,18 @@ export function useHashRoute() {
     return () => window.removeEventListener("hashchange", on);
   }, []);
   return route;
+}
+
+// Serialize a gallery query object into a shareable hash ("#/" or "#/?..."),
+// omitting default values so clean states stay clean.
+export function galleryHash(query, defaults) {
+  const sp = new URLSearchParams();
+  for (const k of ["sort", "kind", "tag", "q"]) {
+    const v = query[k];
+    if (v != null && v !== "" && (!defaults || v !== defaults[k])) sp.set(k, v);
+  }
+  const s = sp.toString();
+  return s ? `#/?${s}` : "#/";
 }
 
 // Theme: null=system, "light", "dark". Persists to localStorage and stamps

@@ -7,6 +7,9 @@
 import { parseGrid, parsePoints, parseAnchors } from "./parsers.js";
 import { densityRamp, accentRamp, anchorRamp, rampSample } from "./ramps.js";
 import { fmt } from "./format.js";
+import { cellAt, containingSampleCell, cellDataBounds } from "./hover.js";
+import { tiledLevelMap, tilesForViewport, pickLevelFrom, tileCacheKey } from "./tiles.js";
+import { wheelFactor, BUTTON_IN, BUTTON_OUT, DBLCLICK_IN } from "./zoom.js";
 
 const MIN_CELL_PX = 7; // finest level whose cells still reach this many px
 const TWO_PI = 6.2832;
@@ -29,6 +32,14 @@ export class ViewerEngine {
     if (this.baseLayer && (!this.baseLayer.levels || !this.baseLayer.levels.length))
       this.baseLayer.levels =
         manifest.levels && manifest.levels.length ? manifest.levels : [256];
+    // Deep-zoom tiled fine levels (v3). Map(level -> split); empty when the base
+    // layer declares no tiled_levels (older manifests / all projection maps) —
+    // in which case no fine level is ever picked and no tile is ever fetched.
+    this.tiledLevels = tiledLevelMap(this.baseLayer && this.baseLayer.tiled_levels);
+    // Candidate LOD levels for the base layer = plain levels ∪ tiled levels.
+    this.baseLevels = this.baseLayer
+      ? Array.from(new Set([...(this.baseLayer.levels || []), ...this.tiledLevels.keys()])).sort((a, b) => a - b)
+      : [];
 
     this.view = null; // [x0,x1,y0,y1] data space (screen y flips)
     this.cssW = 0; this.cssH = 0; this.dpr = 1;
@@ -40,9 +51,15 @@ export class ViewerEngine {
     this.anchors = null; this.queriesDoc = null;
 
     this.gridCache = new Map(); this.gridInflight = new Set();
+    this.tileCache = new Map(); this.tileInflight = new Map(); // deep-zoom tiles
     this.pointsCache = new Map();
     this.sampleCache = new Map(); this.sampleInflight = new Map();
     this.count256 = null;
+    // Currently-rendered base representation, for hover alignment: the grids
+    // actually drawn (plain: one grid; tiled: the loaded viewport tiles) and the
+    // level they are at. hoverCell = { cx, cy, level, idx } at that rendered level.
+    this.renderedGrids = [];
+    this.renderLevel = 0;
     this.hoverCell = null;
     this.raf = 0;
     this._lastLegend = "";
@@ -75,6 +92,8 @@ export class ViewerEngine {
   destroy() {
     for (const [t, ev, fn, opt] of this._bound) t.removeEventListener(ev, fn, opt);
     this._bound = [];
+    for (const [, ctrl] of this.tileInflight) ctrl.abort();
+    this.tileInflight.clear();
     if (this.raf) cancelAnimationFrame(this.raf);
   }
   on(target, ev, fn, opt) { target.addEventListener(ev, fn, opt); this._bound.push([target, ev, fn, opt]); }
@@ -131,6 +150,53 @@ export class ViewerEngine {
     if (!best) for (const L of asc) { const g = this.gridCache.get(`${key}-${L}`); if (g) { best = g; break; } }
     return best;
   }
+  // ---- deep-zoom tiles ---------------------------------------------------
+  // Cached count map (cellIdx -> count) per parsed grid, built once. Shared by
+  // hover lookup and by tiled combined-max computation.
+  gridCountMap(g) {
+    if (!g._cmap) {
+      const m = new Map();
+      for (let i = 0; i < g.cells.length; i++) m.set(g.cells[i], g.counts[i]);
+      g._cmap = m;
+    }
+    return g._cmap;
+  }
+  async getTile(key, level, tx, ty) {
+    const ck = tileCacheKey(key, level, tx, ty);
+    if (this.tileCache.has(ck)) return this.tileCache.get(ck);
+    if (this.tileInflight.has(ck)) return null;
+    const ctrl = new AbortController();
+    this.tileInflight.set(ck, ctrl);
+    try {
+      const g = parseGrid(await this.fetchBuf(`grid-${key}-${level}-${tx}_${ty}.bin`, ctrl.signal));
+      this.tileCache.set(ck, g);
+      return g;
+    } catch (e) {
+      if (e.name !== "AbortError") { this.tileCache.set(ck, null); console.warn(`tile ${ck} unavailable:`, e.message); }
+      return null;
+    } finally {
+      this.tileInflight.delete(ck);
+      this.requestDraw();
+    }
+  }
+  // Ensure the viewport tiles for a tiled level are loading; abort any in-flight
+  // tile that is no longer needed (stale after pan/zoom). Returns the currently
+  // loaded grids for the needed tiles.
+  ensureTiles(key, level, split) {
+    const need = tilesForViewport([this.view[0], this.view[1], this.view[2], this.view[3]], this.extent, level, split);
+    const needKeys = new Set(need.map(({ tx, ty }) => tileCacheKey(key, level, tx, ty)));
+    for (const [ck, ctrl] of this.tileInflight) {
+      if (!needKeys.has(ck)) { ctrl.abort(); this.tileInflight.delete(ck); }
+    }
+    const loaded = [];
+    for (const { tx, ty } of need) {
+      const ck = tileCacheKey(key, level, tx, ty);
+      const g = this.tileCache.get(ck);
+      if (g) loaded.push(g);
+      else if (!this.tileInflight.has(ck)) this.getTile(key, level, tx, ty);
+    }
+    return loaded;
+  }
   async loadPoints(key) {
     if (this.pointsCache.has(key)) return this.pointsCache.get(key);
     try {
@@ -185,14 +251,7 @@ export class ViewerEngine {
     this.requestDraw();
   }
   pickLevel(levels) {
-    const asc = levels.slice().sort((a, b) => a - b);
-    const viewW = this.view[1] - this.view[0];
-    let chosen = asc[0];
-    for (const L of asc) {
-      const cellPx = this.cssW * (this.extent.w / L) / viewW;
-      if (cellPx >= MIN_CELL_PX) chosen = L;
-    }
-    return chosen;
+    return pickLevelFrom(levels, this.extent.w, this.view[1] - this.view[0], this.cssW, MIN_CELL_PX);
   }
   fitProbe(p) {
     const qs = p.queries || []; if (!qs.length) return;
@@ -242,12 +301,12 @@ export class ViewerEngine {
     this._lastLegend = key;
     this.onLegend(info);
   }
-  drawGridLayer(g, muted, stops) {
+  drawGridLayer(g, muted, stops, maxOverride) {
     if (!g) return;
     const ctx = this.ctx, L = g.level, e = this.extent;
     const cw = (e.w / L) * this.cssW / (this.view[1] - this.view[0]);
     const ch = (e.h / L) * this.cssH / (this.view[3] - this.view[2]);
-    const denom = Math.log((g.max || 1) + 1);
+    const denom = Math.log((maxOverride || g.max || 1) + 1);
     ctx.globalAlpha = muted ? 0.32 : 1;
     const w = Math.max(1, Math.ceil(cw)), h = Math.max(1, Math.ceil(ch));
     for (let i = 0; i < g.cells.length; i++) {
@@ -275,13 +334,34 @@ export class ViewerEngine {
   }
   drawMap() {
     const base = this.baseLayer;
-    let g = null, legendMax = 1, legendOverlay = null;
+    let legendMax = 1, legendOverlay = null;
+    this.renderedGrids = []; this.renderLevel = 0;
     if (base) {
-      const level = this.pickLevel(base.levels);
-      this.getGrid(base.key, level);
-      g = this.bestGrid(base.key, level, base.levels);
-      this.drawGridLayer(g, !!this.gridOverlay, this.ramp());
-      legendMax = g ? g.max : 1;
+      const level = this.pickLevel(this.baseLevels);
+      const split = this.tiledLevels.get(level); // defined only for tiled fine levels
+      if (split) {
+        // Deep zoom: fetch only viewport-intersecting tiles. Draw a coarse
+        // fallback underneath so the view is never blank while tiles stream in.
+        const tiles = this.ensureTiles(base.key, level, split);
+        // Coarse fallback so the view is never blank while tiles stream in.
+        const plainMax = (base.levels || []).slice().sort((a, b) => a - b).pop() || 256;
+        this.getGrid(base.key, plainMax);
+        const fallback = this.bestGrid(base.key, plainMax, base.levels);
+        if (fallback && !tiles.length) this.drawGridLayer(fallback, !!this.gridOverlay, this.ramp());
+        if (tiles.length) {
+          let tmax = 1;
+          for (const t of tiles) if (t.max > tmax) tmax = t.max;
+          for (const t of tiles) this.drawGridLayer(t, !!this.gridOverlay, this.ramp(), tmax);
+          this.renderedGrids = tiles; this.renderLevel = level; legendMax = tmax;
+        } else if (fallback) {
+          this.renderedGrids = [fallback]; this.renderLevel = fallback.level; legendMax = fallback.max;
+        }
+      } else {
+        this.getGrid(base.key, level);
+        const g = this.bestGrid(base.key, level, base.levels);
+        this.drawGridLayer(g, !!this.gridOverlay, this.ramp());
+        if (g) { this.renderedGrids = [g]; this.renderLevel = g.level; legendMax = g.max; }
+      }
       if (this.gridOverlay) {
         const o = this.layerByKey(this.gridOverlay);
         if (o) {
@@ -302,8 +382,25 @@ export class ViewerEngine {
       const color = o.context ? this.css("--ink-muted") : this.accentColor(o.accent);
       this.drawPointsLayer(xy, color, o.size || 2.6, o.context);
     }
+    if (base) this.drawHoverHighlight();
     if (base) this.emitLegend({ kind: "density", maxCount: legendMax, overlay: legendOverlay });
     else this.emitLegend({ kind: "points" });
+  }
+  // Outline the EXACT rendered-level cell under the cursor so the highlight, the
+  // drawn bins, and the tooltip count all agree at any zoom depth.
+  drawHoverHighlight() {
+    const hc = this.hoverCell;
+    if (!hc || hc.level !== this.renderLevel) return;
+    const [x0, x1, y0, y1] = cellDataBounds(hc.cx, hc.cy, this.extent, hc.level);
+    const px0 = this.sx(x0), px1 = this.sx(x1), py0 = this.sy(y0), py1 = this.sy(y1);
+    const left = Math.min(px0, px1), top = Math.min(py0, py1);
+    const w = Math.abs(px1 - px0), h = Math.abs(py1 - py0);
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = this.css("--accent");
+    ctx.strokeRect(left + 0.5, top + 0.5, Math.max(1, w - 1), Math.max(1, h - 1));
+    ctx.restore();
   }
   drawAnchors() {
     const a = this.anchors; if (!a) { this.loadAnchors(); this.emitLegend({ kind: "anchor" }); return; }
@@ -386,13 +483,16 @@ export class ViewerEngine {
     if (y + r.height > innerHeight - 6) y = clientY - r.height - pad;
     t.style.left = Math.max(6, x) + "px"; t.style.top = Math.max(6, y) + "px";
   }
-  async hoverMap(clientX, clientY, localX, localY) {
-    const L = this.manifest.sample_level, e = this.extent;
-    const dx = this.dataX(localX), dy = this.dataY(localY);
-    const cx = Math.floor((dx - e.x0) / (e.w / L)), cy = Math.floor((dy - e.y0) / (e.h / L));
-    if (cx < 0 || cy < 0 || cx >= L || cy >= L) { this.hideTip(); return; }
-    const cellIdx = cy * L + cx;
-    const count = this.count256 ? (this.count256.get(cellIdx) || 0) : 0;
+  // Count in a rendered-level cell (searches the loaded grids/tiles). Cell
+  // indices are GLOBAL row-major so a single idx lookup works across tiles.
+  renderedCount(idx) {
+    for (const g of this.renderedGrids) { const m = this.gridCountMap(g); if (m.has(idx)) return m.get(idx); }
+    return 0;
+  }
+  async hoverMap(clientX, clientY, hc) {
+    // hc is the rendered-level cell { cx, cy, level, idx } resolved by mousemove.
+    const dx = this.dataX(hc._lx), dy = this.dataY(hc._ly);
+    const count = this.renderedCount(hc.idx);
     if (!count) { this.hideTip(); return; }
     const t = this.tooltip; t.innerHTML = "";
     const head = document.createElement("div");
@@ -402,11 +502,18 @@ export class ViewerEngine {
     co.textContent = `x ${dx.toFixed(3)}, y ${dy.toFixed(3)}`;
     head.appendChild(c); head.appendChild(co); t.appendChild(head);
     t.hidden = false; this.positionTip(clientX, clientY);
-    const doc = await this.getSamples(cx, cy);
-    if (doc && this.hoverCell === cellIdx) {
-      const samples = (doc.cells && doc.cells[String(cellIdx)]) || [];
+    // Text samples come from the CONTAINING sample_level (256) cell — labeled so
+    // the reader never conflates the (finer) rendered-bin count with the samples.
+    const sampleLevel = this.manifest.sample_level;
+    const sc = containingSampleCell(hc.cx, hc.cy, hc.level, sampleLevel);
+    if (!sc) return;
+    const doc = await this.getSamples(sc.cx, sc.cy);
+    if (doc && this.hoverCell && this.hoverCell.idx === hc.idx) {
+      const samples = (doc.cells && doc.cells[String(sc.idx)]) || [];
+      const cap = document.createElement("div"); cap.className = "tt-caption"; cap.textContent = "sample texts from this area";
+      t.appendChild(cap);
       if (!samples.length) {
-        const em = document.createElement("div"); em.className = "tt-empty"; em.textContent = "no text sample for this bin"; t.appendChild(em);
+        const em = document.createElement("div"); em.className = "tt-empty"; em.textContent = "no text sample nearby"; t.appendChild(em);
       } else {
         for (const s of samples.slice(0, 3)) {
           const box = document.createElement("div"); box.className = "tt-sample";
@@ -461,8 +568,16 @@ export class ViewerEngine {
       e.preventDefault();
       const r = c.getBoundingClientRect();
       const fx = (e.clientX - r.left) / r.width, fy = 1 - (e.clientY - r.top) / r.height;
-      this.zoomAt(fx, fy, e.deltaY > 0 ? 1.18 : 0.84);
+      // Gentle exponential zoom (~1.12x per notch), smooth for trackpad deltas,
+      // anchored at the cursor. See lib/zoom.js.
+      this.zoomAt(fx, fy, wheelFactor(e.deltaY, e.deltaMode, r.height));
     }, { passive: false });
+    this.on(c, "dblclick", (e) => {
+      e.preventDefault();
+      const r = c.getBoundingClientRect();
+      const fx = (e.clientX - r.left) / r.width, fy = 1 - (e.clientY - r.top) / r.height;
+      this.zoomAt(fx, fy, DBLCLICK_IN); // zoom in centered on the cursor
+    });
     this.on(c, "mousedown", (e) => { drag = [e.clientX, e.clientY, this.view.slice()]; c.classList.add("dragging"); });
     this.on(window, "mouseup", () => { drag = null; c.classList.remove("dragging"); });
     this.on(window, "mousemove", (e) => {
@@ -483,20 +598,26 @@ export class ViewerEngine {
           if (this.hoverPoints(o, e.clientX, e.clientY, lx, ly)) { this.hoverCell = null; return; }
         }
         if (!this.baseLayer) { this.hideTip(); return; } // no bins to hover on point-only maps
-        const L = this.manifest.sample_level, e2 = this.extent;
-        const cx = Math.floor((this.dataX(lx) - e2.x0) / (e2.w / L)), cy = Math.floor((this.dataY(ly) - e2.y0) / (e2.h / L));
-        this.hoverCell = (cx >= 0 && cy >= 0 && cx < L && cy < L) ? cy * L + cx : null;
-        this.hoverMap(e.clientX, e.clientY, lx, ly);
+        // Resolve the cell at the CURRENTLY RENDERED level (v3 hover alignment).
+        // renderLevel is set by the last draw; fall back to sample_level pre-paint.
+        const L = this.renderLevel || this.manifest.sample_level;
+        const prev = this.hoverCell;
+        const hc = cellAt(this.dataX(lx), this.dataY(ly), this.extent, L);
+        this.hoverCell = hc;
+        if (!hc) { this.hideTip(); if (prev) this.requestDraw(); return; }
+        hc._lx = lx; hc._ly = ly;
+        if (!prev || prev.idx !== hc.idx || prev.level !== hc.level) this.requestDraw();
+        this.hoverMap(e.clientX, e.clientY, hc);
       } else if (this.mode === "metrics" && this.metricMode === "anchors") {
         this.hoverAnchors(e.clientX, e.clientY, lx, ly);
       } else { this.hideTip(); }
     });
-    this.on(c, "mouseleave", () => this.hideTip());
+    this.on(c, "mouseleave", () => { this.hideTip(); if (this.hoverCell) { this.hoverCell = null; this.requestDraw(); } });
     this.on(window, "keydown", (e) => {
       const tag = e.target && e.target.tagName;
       if (tag === "SELECT" || tag === "INPUT" || tag === "TEXTAREA") return;
-      if (e.key === "+" || e.key === "=") this.zoomAt(0.5, 0.5, 0.8);
-      else if (e.key === "-" || e.key === "_") this.zoomAt(0.5, 0.5, 1.25);
+      if (e.key === "+" || e.key === "=") this.zoomAt(0.5, 0.5, BUTTON_IN);
+      else if (e.key === "-" || e.key === "_") this.zoomAt(0.5, 0.5, BUTTON_OUT);
       else if (e.key === "0") this.resetView();
     });
     this.on(window, "resize", () => this.requestDraw());

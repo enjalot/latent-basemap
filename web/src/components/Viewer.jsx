@@ -4,6 +4,7 @@ import {
   findBaseLayer, emptyOverlayState, defaultOverlayState, toggleLayer,
   accentFor, markerSize,
 } from "../lib/layers.js";
+import { BUTTON_IN, BUTTON_OUT } from "../lib/zoom.js";
 import HeaderBar from "./HeaderBar.jsx";
 import LegendPanel from "./LegendPanel.jsx";
 import MetricsPanel from "./MetricsPanel.jsx";
@@ -45,7 +46,10 @@ export default function Viewer({ mapId, theme }) {
           setMode("map");
           setProbeKey(null);
           setQuery(null);
-          setLoad({ status: "ok", manifest: m, error: null });
+          // Tag the manifest with its mapId so the engine effect never boots
+          // with a stale manifest against a new dataDir (grid map -> point map
+          // transition would otherwise fetch grid-*.bin from the wrong dir = 404).
+          setLoad({ status: "ok", manifest: m, mapId, error: null });
         }
       } catch (e) {
         if (alive) setLoad({ status: "error", manifest: null, error: e.message });
@@ -54,9 +58,11 @@ export default function Viewer({ mapId, theme }) {
     return () => { alive = false; };
   }, [mapId]);
 
-  // Create engine once the manifest + canvas are ready.
+  // Create engine once the manifest + canvas are ready. Guard on load.mapId ===
+  // mapId so a stale manifest (mid hash-navigation) never boots against the new
+  // dataDir. Without this, a grid->point transition 404s on grid-*.bin.
   useEffect(() => {
-    if (load.status !== "ok" || !canvasRef.current) return;
+    if (load.status !== "ok" || load.mapId !== mapId || !canvasRef.current) return;
     const eng = new ViewerEngine({
       canvas: canvasRef.current,
       tooltip: tooltipRef.current,
@@ -134,8 +140,8 @@ export default function Viewer({ mapId, theme }) {
         <canvas id="plot" ref={canvasRef} />
         <div className="tooltip" ref={tooltipRef} hidden />
         <div className="zoomctl">
-          <button onClick={() => engineRef.current && engineRef.current.zoomAt(0.5, 0.5, 0.8)} aria-label="Zoom in">+</button>
-          <button onClick={() => engineRef.current && engineRef.current.zoomAt(0.5, 0.5, 1.25)} aria-label="Zoom out">−</button>
+          <button onClick={() => engineRef.current && engineRef.current.zoomAt(0.5, 0.5, BUTTON_IN)} aria-label="Zoom in">+</button>
+          <button onClick={() => engineRef.current && engineRef.current.zoomAt(0.5, 0.5, BUTTON_OUT)} aria-label="Zoom out">−</button>
           <button onClick={() => engineRef.current && engineRef.current.resetView()} aria-label="Reset view">⤾</button>
         </div>
       </div>
