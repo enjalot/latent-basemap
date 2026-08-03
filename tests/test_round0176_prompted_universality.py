@@ -1,6 +1,7 @@
 """Contract tests for the negative-Q2-aware prompted universality round."""
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from basemap import round0167_prompted_universality as contract_base
@@ -8,6 +9,7 @@ from basemap.round0142_jina_universality import PROBE_ORDER
 from basemap.round0176_prompted_universality import (
     PROMPTED_MAP_ORDER,
     ROUND_ID,
+    exact_training_overlap_report,
     twonn_correlations,
 )
 from experiments import (
@@ -119,6 +121,8 @@ def test_r0176_binds_accepted_negative_review_without_claiming_capability(
         "Q2_ROUND_ID",
         "Q2_CAPABILITY",
         "Q2_MAP_ROLE",
+        "TRAINING_AUDIT_PATHS",
+        "TRAINING_AUDIT_POLICY",
         "GPU_HOURS_MINIMUM",
         "GPU_HOURS_EXPECTED",
         "GPU_HOURS_MAXIMUM",
@@ -151,6 +155,10 @@ def test_r0176_binds_accepted_negative_review_without_claiming_capability(
             in prepare_round0167_queue.Q2_MAP_ROLE
         )
         assert prepare_round0167_queue.GPU_HOURS_MAXIMUM == 2.5
+        assert set(prepare_round0167_queue.TRAINING_AUDIT_PATHS) == {
+            "r0115-r0117-prompted-2m",
+            "r0171-prompted-8m",
+        }
     finally:
         for name, value in previous_base.items():
             setattr(prepare_round0167_queue, name, value)
@@ -185,3 +193,54 @@ def test_positive_q2_rounds_still_require_the_named_capability(monkeypatch) -> N
     monkeypatch.setattr(prepare_round0167_queue, "Q2_CAPABILITY", "positive-map")
     with pytest.raises(RuntimeError, match="did not release required"):
         prepare_round0167_queue._accepted_any_review("0171")
+
+
+def test_training_overlap_policy_blocks_queries_but_reports_corpus() -> None:
+    corpus = np.asarray([[1.0, 0.0], [0.5, 0.5]], dtype=np.float16)
+    queries = np.asarray([[0.0, 1.0]], dtype=np.float16)
+    control = np.asarray([[0.25, 0.75]], dtype=np.float16)
+    entries = [
+        {
+            "label": "probe",
+            "split": "corpus",
+            "values": corpus,
+            "source_rows": np.asarray([10, 11], dtype=np.int64),
+        },
+        {
+            "label": "probe",
+            "split": "queries",
+            "values": queries,
+            "source_rows": np.asarray([20], dtype=np.int64),
+        },
+        {
+            "label": "fineweb-control",
+            "split": "control",
+            "values": control,
+            "source_rows": np.asarray([30], dtype=np.int64),
+        },
+    ]
+    diagnostic = exact_training_overlap_report(
+        entries=entries,
+        training_sources={
+            "2m": np.asarray([[1.0, 0.0], [0.1, 0.9]], dtype=np.float16)
+        },
+        block_rows=1,
+    )
+    assert diagnostic["passed"] is True
+    assert diagnostic["all_rows_training_disjoint"] is False
+    assert diagnostic["diagnostic_corpus_overlap_count"] == 1
+    assert diagnostic["blocking_query_or_control_overlap_count"] == 0
+
+    blocked = exact_training_overlap_report(
+        entries=entries,
+        training_sources={
+            "8m": np.asarray([[0.0, 1.0], [0.25, 0.75]], dtype=np.float16)
+        },
+        block_rows=1,
+    )
+    assert blocked["passed"] is False
+    assert blocked["blocking_query_or_control_overlap_count"] == 2
+    assert {item["split"] for item in blocked["exact_training_family_overlaps"]} == {
+        "queries",
+        "control",
+    }

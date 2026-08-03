@@ -81,6 +81,8 @@ GPU_HOURS_MAXIMUM = 2.00
 Q2_ROUND_ID = "0166"
 Q2_CAPABILITY: str | None = "jina-document-english-8m-prompted-map-seed42-v1"
 Q2_MAP_ROLE = "accepted positive Q2 map capability"
+TRAINING_AUDIT_PATHS: dict[str, tuple[str, int]] = {}
+TRAINING_AUDIT_POLICY = "not requested"
 HANDLER_MODULE = "experiments.round0167_nodes"
 QUEUE_SCHEMA = "round0167-prompted-universality-queue-v1"
 QUEUE_LABEL = "R0167 prompted universality queue"
@@ -270,6 +272,19 @@ def prepare_round0167(
     maps = {key: expected_input_signature(path) for key, path in MAPS.items()}
     if tuple(maps) != PROMPTED_MAP_ORDER:
         raise RuntimeError("R0167 prompted map order changed")
+    training_audit_sources = {
+        label: {
+            "signature": expected_input_signature(path),
+            "rows": int(rows),
+        }
+        for label, (path, rows) in TRAINING_AUDIT_PATHS.items()
+    }
+    for label, source in training_audit_sources.items():
+        expected_bytes = int(source["rows"]) * 768 * 2
+        if source["signature"]["bytes"] != expected_bytes:
+            raise RuntimeError(
+                f"R0167 {label} training-audit source size changed"
+            )
     sources = _source_specs()
     model_members = model_member_signatures()
     environment = environment_freeze_receipt()
@@ -286,6 +301,7 @@ def prepare_round0167(
         round_signature,
         *reviews,
         *maps.values(),
+        *[source["signature"] for source in training_audit_sources.values()],
         *model_members,
         canary["text"],
         canary["document"],
@@ -386,6 +402,34 @@ def prepare_round0167(
         "node_policy": {"gpu_required": True, "training_performed": False},
     })
 
+    audit_output: str | None = None
+    audit_job_id: str | None = None
+    if training_audit_sources:
+        audit_job_id = "audit_prompted_rows_against_map_training"
+        audit_output = os.path.join(artifacts, "prompted-training-disjoint-audit")
+        jobs.append({
+            "id": audit_job_id,
+            "action": "audit_training_disjoint",
+            "handler_module": HANDLER_MODULE,
+            "handler_callable": "run_job",
+            "deps": [*embed_ids, control_job_id],
+            "outputs": [audit_output],
+            "done_marker": os.path.join(
+                artifacts, "prompted-training-disjoint-audit.done.json"
+            ),
+            "expected_inputs": external_inputs,
+            "p90_wall_s": 1_800.0,
+            "training_sources": training_audit_sources,
+            "probe_outputs": probe_outputs,
+            "control_output": control_output,
+            "control_coordinates": control_coordinates,
+            "node_policy": {
+                "gpu_required": False,
+                "training_performed": False,
+                "cpu_heavy": True,
+            },
+        })
+
     map_outputs: dict[str, str] = {}
     score_ids: list[str] = []
     for map_key in PROMPTED_MAP_ORDER:
@@ -398,7 +442,11 @@ def prepare_round0167(
             "action": "score_map",
             "handler_module": HANDLER_MODULE,
             "handler_callable": "run_job",
-            "deps": [*embed_ids, control_job_id],
+            "deps": [
+                *embed_ids,
+                control_job_id,
+                *([audit_job_id] if audit_job_id is not None else []),
+            ],
             "outputs": [output],
             "done_marker": os.path.join(artifacts, f"{job_id}.done.json"),
             "expected_inputs": external_inputs,
@@ -426,6 +474,11 @@ def prepare_round0167(
         "probe_outputs": probe_outputs,
         "raw_retention_table": raw_table,
         "raw_predictors": raw_predictors,
+        **(
+            {"training_disjoint_audit": audit_output}
+            if audit_output is not None
+            else {}
+        ),
         "node_policy": {
             "gpu_required": False,
             "training_performed": False,
@@ -478,6 +531,7 @@ def prepare_round0167(
             "twonn": "R0146 exact 2048-row estimator recomputed in prompted geometry",
             "raw_comparison": "accepted R0142/R0146, descriptive because map scales differ",
             "q2_map_evidence_role": Q2_MAP_ROLE,
+            "training_overlap_audit": TRAINING_AUDIT_POLICY,
             "diagnostic_only": True,
             "no_causal_prompt_claim": True,
             "no_universal_map_claim": True,

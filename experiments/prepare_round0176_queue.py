@@ -55,6 +55,23 @@ def _configure() -> None:
         "accepted R0171 negative-result artifact; mechanically valid model, "
         "not a released map capability and not evidence of Q2 quality"
     )
+    base.TRAINING_AUDIT_PATHS = {
+        "r0115-r0117-prompted-2m": (
+            "/data/latent-basemap/runs/round-0113/queue/artifacts/"
+            "compact-arrays/document-compact.f16",
+            1_993_761,
+        ),
+        "r0171-prompted-8m": (
+            "/data/latent-basemap/runs/round-0165/queue-correction-1/artifacts/"
+            "prompted-english-8m-frozen-prefix/document-compact.f16",
+            7_952_419,
+        ),
+    }
+    base.TRAINING_AUDIT_POLICY = (
+        "exact fp16 row-family audit against both map-training matrices; "
+        "query or FineWeb-control overlap blocks before scoring, while corpus "
+        "overlap is reported diagnostically without filtering"
+    )
     # The inherited per-node p90s sum to 2.233 GPU-h.  R0172's 2.0 h cap was
     # therefore internally inconsistent even though its expected execution was
     # much shorter.  Keep those conservative node bounds and make the cap

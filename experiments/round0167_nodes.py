@@ -617,6 +617,29 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     raw_rho = _accepted_raw_rho(raw_predictors)
     raw_table_signature = _signature(job["raw_retention_table"], label="R0142 retention table")
     raw_table = _read_json(raw_table_signature["canonical_path"])
+    training_audit = None
+    if job.get("training_disjoint_audit"):
+        audit_path = os.path.join(
+            str(job["training_disjoint_audit"]), "audit.json"
+        )
+        audit = _read_sealed(
+            audit_path, label=f"R{ROUND_ID} prompted training-overlap audit"
+        )
+        if audit.get("round_id") != ROUND_ID or audit.get("passed") is not True:
+            raise Round0167Error("prompted training-overlap audit did not pass")
+        training_audit = {
+            "receipt": expected_input_signature(audit_path),
+            "all_rows_training_disjoint": bool(
+                audit.get("all_rows_training_disjoint")
+            ),
+            "blocking_query_or_control_overlap_count": int(
+                audit.get("blocking_query_or_control_overlap_count", -1)
+            ),
+            "diagnostic_corpus_overlap_count": int(
+                audit.get("diagnostic_corpus_overlap_count", -1)
+            ),
+            "policy": audit.get("policy"),
+        }
 
     geometries: dict[str, Any] = {}
     cells: list[dict[str, Any]] = []
@@ -697,6 +720,7 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 "descriptive only: raw R0142 maps are 12.5M/25M while prompted maps are 2M/8M"
             ),
         },
+        "training_overlap_audit": training_audit,
         "interpretation": (
             "within-probe FFR divided by an exactly shape-matched prompted FineWeb control; "
             "same accepted R0142 source-row selections"
