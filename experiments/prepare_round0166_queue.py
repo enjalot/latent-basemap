@@ -55,6 +55,10 @@ GATES_PATH = (
     "/data/latent-basemap/runs/round-0161/queue/artifacts/"
     "jina-prompted-universe-quality-gates-v1/prompted-quality-gates.json"
 )
+HANDLER_MODULE = "experiments.round0166_nodes"
+QUEUE_SCHEMA = "round0166-prompted-english-8m-scale-queue-v1"
+QUEUE_LABEL = "R0166 GPU queue"
+GRAPH_VECTOR_STORAGE = "gpu-ivfflat-fp32"
 
 
 def _one_document(prefix: str, round_id: str, *, status: str) -> dict[str, Any]:
@@ -259,7 +263,7 @@ def prepare_round0166(
         *accepted_inputs,
     ])
 
-    queue_root = create_fresh_directory(queue_root, label="R0166 GPU queue")
+    queue_root = create_fresh_directory(queue_root, label=QUEUE_LABEL)
     preflight = ensure_data_directory(os.path.join(queue_root, "preflight"))
     release_smoke_path = os.path.join(preflight, "release-cpu-smoke.json")
     atomic_write_new_json(
@@ -282,7 +286,7 @@ def prepare_round0166(
         {
             "id": "select_heldout_queries",
             "action": "select_heldout_queries",
-            "handler_module": "experiments.round0166_nodes",
+            "handler_module": HANDLER_MODULE,
             "handler_callable": "run_job",
             "deps": [],
             "outputs": [query_output],
@@ -309,7 +313,7 @@ def prepare_round0166(
         {
             "id": "build_graph_and_reference",
             "action": "build_graph_and_reference",
-            "handler_module": "experiments.round0166_nodes",
+            "handler_module": HANDLER_MODULE,
             "handler_callable": "run_job",
             "deps": ["select_heldout_queries"],
             "outputs": [graph_output],
@@ -326,7 +330,7 @@ def prepare_round0166(
         {
             "id": "train_prompted_8m",
             "action": "train_prompted_8m",
-            "handler_module": "experiments.round0166_nodes",
+            "handler_module": HANDLER_MODULE,
             "handler_callable": "run_job",
             "deps": ["build_graph_and_reference"],
             "outputs": [train_output],
@@ -344,7 +348,7 @@ def prepare_round0166(
         {
             "id": "evaluate_prompted_8m",
             "action": "evaluate_prompted_8m",
-            "handler_module": "experiments.round0166_nodes",
+            "handler_module": HANDLER_MODULE,
             "handler_callable": "run_job",
             "deps": ["select_heldout_queries", "build_graph_and_reference", "train_prompted_8m"],
             "outputs": [evaluation_output],
@@ -374,7 +378,7 @@ def prepare_round0166(
         gpu=True,
     )
     queue.update({
-        "schema": "round0166-prompted-english-8m-scale-queue-v1",
+        "schema": QUEUE_SCHEMA,
         "repo_root": RELEASE_ROOT,
         "queue_class": "gpu-research",
         "required_reviews": ["0160", "0161", "0165"],
@@ -402,6 +406,7 @@ def prepare_round0166(
                 "nlist": 8_192,
                 "nprobe": 64,
                 "same_builder_parameters_and_seeds_as_r0115": True,
+                "vector_storage": GRAPH_VECTOR_STORAGE,
             },
             "training": {
                 "seed": 42,

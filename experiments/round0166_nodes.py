@@ -70,6 +70,14 @@ GRAPH_SCHEMA = "round0166-prompted-8m-fuzzy-graph-v1"
 QUERY_SCHEMA = "round0166-prompted-8m-heldout-query-v1"
 TRAIN_SCHEMA = "round0166-prompted-8m-train-receipt-v1"
 EVALUATION_SCHEMA = "round0166-prompted-8m-scale-evaluation-v1"
+PRODUCTION_CONFIG_SCHEMA = "round0166-prompted-8m-production-config-v1"
+GRAPH_INDEX_DESCRIPTION = "GPU IndexIVFFlat/IP fp32 vector storage"
+GRAPH_REFERENCE_ROW_ORDER = "R0165 frozen-prefix prompted compact order"
+GRAPH_REFERENCE_ANCHOR_NAMESPACE = "R0165 compact IDs"
+
+
+def _faiss_gpu_options(faiss: Any) -> Any:
+    return prompt_nodes._faiss_gpu_options(faiss)
 
 
 def _signature(path: str, *, label: str) -> dict[str, Any]:
@@ -190,7 +198,7 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     resource = faiss.StandardGpuResources()
     resource.setTempMemory(256 << 20)
     index = faiss.index_cpu_to_gpu(
-        resource, 0, cpu_index, prompt_nodes._faiss_gpu_options(faiss)
+        resource, 0, cpu_index, _faiss_gpu_options(faiss)
     )
     train_started = time.monotonic()
     index.train(np.ascontiguousarray(X[train_rows]))
@@ -308,10 +316,10 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     reference_identity = {
         "data_identity": _data_identity(population),
         "convention": {
-            "row_order": "R0165 frozen-prefix prompted compact order",
+            "row_order": GRAPH_REFERENCE_ROW_ORDER,
             "distance": "cosine via fp32-L2-normalized squared L2",
             "self_exclusion": True,
-            "anchor_namespace": "R0165 compact IDs",
+            "anchor_namespace": GRAPH_REFERENCE_ANCHOR_NAMESPACE,
             "embedding_prompt": "document",
         },
     }
@@ -345,7 +353,7 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "compact_mapping": population["mapping"],
         "source": population["document_compact"],
         "search_qualification": {
-            "index": "GPU IndexIVFFlat/IP",
+            "index": GRAPH_INDEX_DESCRIPTION,
             "selected_nprobe": GRAPH_NPROBE,
             "cells": cells,
             "training_rows_sha256": ordered_array_sha256(train_rows),
@@ -661,7 +669,7 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     atomic_write_new_json(
         config_path,
         {
-            "schema": "round0166-prompted-8m-production-config-v1",
+            "schema": PRODUCTION_CONFIG_SCHEMA,
             "round_id": ROUND_ID,
             "config": config,
             "config_sha256": config_sha,
@@ -827,6 +835,8 @@ def _authenticate_model(
         or int(graph.get("directed_edge_count", -1)) <= 0
         or fixed.get("passed") is not True
         or set(graph.get("centroids") or {}) != {"256", "1024"}
+        or (graph.get("search_qualification") or {}).get("index")
+        != GRAPH_INDEX_DESCRIPTION
     ):
         raise Round0166Error("R0166 graph/evaluation binding changed")
     for key in ("graph", "high_d_reference"):
@@ -1242,6 +1252,10 @@ def run_evaluate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             .get(str(GRAPH_NPROBE), {})
             .get("passed")
             is True
+        ),
+        "graph_vector_storage_registered": (
+            (graph.get("search_qualification") or {}).get("index")
+            == GRAPH_INDEX_DESCRIPTION
         ),
         "heldout_queries_selected_before_training_and_disjoint": (
             query.get("selected_before_training") is True
