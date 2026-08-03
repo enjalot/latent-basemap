@@ -46,6 +46,7 @@ REFERENCE_SCRIPT = os.path.join(
     os.path.dirname(__file__), "round0179_numap_reference.py"
 )
 TESTBED_ROOT = TESTBED_ROOTS["200k"]
+CELL_SCHEMA = "round0179-numap-cell-v1"
 
 
 def _signature(expected: Mapping[str, Any], *, label: str) -> dict[str, Any]:
@@ -206,8 +207,18 @@ def run_numap_cell(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "high_neighbor_distances": high_distances_path,
         "low_neighbor_ids": low_ids_path,
     }
+    for key in (
+        "normalization_mean",
+        "normalization_std",
+        "normalization_nonzero_mask",
+    ):
+        relative = (execution.get("paths") or {}).get(key)
+        if relative is not None:
+            if os.path.basename(str(relative)) != str(relative):
+                raise Round0179Error(f"invalid reference artifact path for {key}")
+            artifact_paths[key] = os.path.join(reference_output, str(relative))
     receipt = seal({
-        "schema": "round0179-numap-cell-v1",
+        "schema": CELL_SCHEMA,
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
         "rows": ROWS,
