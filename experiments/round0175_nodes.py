@@ -265,12 +265,16 @@ def run_scale(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     neighbor_ids, distances, high_performance = _exact_cosine_neighbors(
         corpus, queries
     )
+    stage = time.monotonic()
     weighted = project_coordinates(
         teacher, neighbor_ids, distances, weighted=True
     )
+    weighted_projection_seconds = time.monotonic() - stage
+    stage = time.monotonic()
     unweighted = project_coordinates(
         teacher, neighbor_ids, distances, weighted=False
     )
+    unweighted_projection_seconds = time.monotonic() - stage
     k_fraction = max(K_HIT, int(np.ceil(FRAC * ROWS[scale])))
     stage = time.monotonic()
     weighted_low = _exact_low_neighbors(teacher, weighted, k_fraction)
@@ -333,6 +337,17 @@ def run_scale(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "recall_formula": "canonical panel_v2 recall_at_k_from_neighbors",
         },
         "high_search_performance": high_performance,
+        "coordinate_projection_performance": {
+            "aumap_inverse_distance_seconds": weighted_projection_seconds,
+            "aumap_inverse_distance_queries_per_second": (
+                N_QUERIES / weighted_projection_seconds
+            ),
+            "unweighted_knn15_seconds": unweighted_projection_seconds,
+            "unweighted_knn15_queries_per_second": (
+                N_QUERIES / unweighted_projection_seconds
+            ),
+            "scope": "coordinate interpolation only; excludes neighbor search",
+        },
         "low_search_seconds_both_methods": low_search_seconds,
         "total_wall_seconds": time.monotonic() - started,
         "peak_rss_gib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024**2,
