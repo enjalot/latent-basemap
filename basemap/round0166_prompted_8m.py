@@ -29,6 +29,7 @@ GRAPH_QUALITY_SEED = 114
 GRAPH_MEAN_RECALL_FLOOR = 0.90
 GRAPH_P10_RECALL_FLOOR = 0.80
 RETENTION_RATIO = 0.97
+HOST_RSS_LIMIT_GIB = 90.0
 METRICS = (
     "density_v2",
     "ffr",
@@ -186,4 +187,3 @@ def scale_decision(
         "native_projection_metrics_role": "diagnostic; held-out corpus and N changed",
         "registered_retention_ratio": RETENTION_RATIO,
     }
-

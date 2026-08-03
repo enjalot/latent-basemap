@@ -426,6 +426,7 @@ def prepare_round0166(
                 "heldout_recall_at_10",
             ],
             "matched_2m_minimum_ratio_to_seed42": 0.97,
+            "host_rss_hard_abort_gib": 90.0,
             "negative_outcome_releases_no_map_capability": True,
             "release_cpu_smoke": expected_input_signature(release_smoke_path),
             "config_cpu_smoke": expected_input_signature(config_smoke_path),

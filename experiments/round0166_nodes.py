@@ -6,6 +6,7 @@ import hashlib
 import math
 import os
 import random
+import resource
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -40,6 +41,7 @@ from basemap.round0166_prompted_8m import (
     GRAPH_QUALITY_SEED,
     GRAPH_TRAIN_ROWS,
     GRAPH_TRAIN_SEED,
+    HOST_RSS_LIMIT_GIB,
     QUERY_CANDIDATES,
     QUERY_ROWS,
     ROUND_ID,
@@ -323,6 +325,12 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     reference_path = os.path.join(output, "high-d-reference.npz")
     save_hiD_reference(reference, reference_path)
     reference_seconds = time.monotonic() - reference_started
+    peak_rss_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
+    if peak_rss_gib > HOST_RSS_LIMIT_GIB:
+        raise Round0166Error(
+            f"R0166 graph peak RSS {peak_rss_gib:.2f} GiB exceeds "
+            f"{HOST_RSS_LIMIT_GIB:.0f} GiB"
+        )
     manifest = prompt_contract.seal({
         "schema": GRAPH_SCHEMA,
         "round_id": ROUND_ID,
@@ -374,6 +382,7 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "fuzzy_s": fuzzy_seconds,
             "centroids_s": centroid_seconds,
             "high_d_reference_s": reference_seconds,
+            "peak_rss_gib": peak_rss_gib,
             "total_wall_s": time.monotonic() - started,
         },
         "training_performed": False,
@@ -751,6 +760,12 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     model_path = os.path.join(output, "model.pt")
     atomic_build_new_file(model_path, model.save, immutable=True)
     free_bytes, total_bytes = torch.cuda.mem_get_info("cuda")
+    peak_rss_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
+    if peak_rss_gib > HOST_RSS_LIMIT_GIB:
+        raise Round0166Error(
+            f"R0166 train peak RSS {peak_rss_gib:.2f} GiB exceeds "
+            f"{HOST_RSS_LIMIT_GIB:.0f} GiB"
+        )
     receipt = prompt_contract.seal({
         "schema": TRAIN_SCHEMA,
         "round_id": ROUND_ID,
@@ -779,6 +794,7 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "post_train_free_bytes": int(free_bytes),
             "peak_allocated_bytes": int(torch.cuda.max_memory_allocated("cuda")),
             "peak_reserved_bytes": int(torch.cuda.max_memory_reserved("cuda")),
+            "peak_host_rss_gib": peak_rss_gib,
         },
         "training_performed": True,
         "optimizer_updates": SUCCESSFUL_UPDATES,
@@ -1248,6 +1264,12 @@ def run_evaluate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             else "prompted-english-8m-scale-rung-not-qualified"
         ),
     }
+    peak_rss_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
+    if peak_rss_gib > HOST_RSS_LIMIT_GIB:
+        raise Round0166Error(
+            f"R0166 evaluation peak RSS {peak_rss_gib:.2f} GiB exceeds "
+            f"{HOST_RSS_LIMIT_GIB:.0f} GiB"
+        )
     receipt = prompt_contract.seal({
         "schema": EVALUATION_SCHEMA,
         "round_id": ROUND_ID,
@@ -1299,6 +1321,7 @@ def run_evaluate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "evaluation_wall_s": time.monotonic() - started,
             "peak_allocated_bytes": int(torch.cuda.max_memory_allocated("cuda")),
             "peak_reserved_bytes": int(torch.cuda.max_memory_reserved("cuda")),
+            "peak_host_rss_gib": peak_rss_gib,
         },
     })
     atomic_write_new_json(
