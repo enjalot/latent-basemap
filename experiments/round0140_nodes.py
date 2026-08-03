@@ -148,7 +148,7 @@ class HistoricalHostFp16Array(HostFp16MaterializedArray):
 def _source_proof() -> dict[str, Any]:
     source = HistoricalFp16Array()
     return {
-        "schema": "round0140-r0037-exact-source-proof-v1",
+        "schema": f"round{ROUND_ID}-r0037-exact-source-proof-v1",
         "rows": ROWS,
         "dimension": DIMENSION,
         "dtype": "<f2",
@@ -229,8 +229,8 @@ def run_build_current_graph(
         passed = mean >= GRAPH_MEAN_RECALL_FLOOR and p10 >= GRAPH_P10_RECALL_FLOOR
         cells[str(nprobe)] = {
             "nprobe": nprobe,
-            "mean_recall_at_49": mean,
-            "p10_recall_at_49": p10,
+            f"mean_recall_at_{GRAPH_K - 1}": mean,
+            f"p10_recall_at_{GRAPH_K - 1}": p10,
             "queries": GRAPH_QUALITY_ROWS,
             "wall_seconds": wall,
             "passed": passed,
@@ -278,7 +278,7 @@ def run_build_current_graph(
         or np.any(weights <= 0)
     ):
         raise Round0140Error("current fuzzy graph arrays are invalid")
-    graph_path = os.path.join(output, "edges-k50-fuzzy.npz")
+    graph_path = os.path.join(output, f"edges-k{GRAPH_K}-fuzzy.npz")
     atomic_save_new_npz(
         graph_path,
         immutable=True,
@@ -315,7 +315,7 @@ def run_build_current_graph(
         "k": GRAPH_K,
         "metric": "cosine",
         "metric_input": "exact R0037 fp16 source normalized in fp32",
-        "weight_semantics": "fuzzy_simplicial_set(k50)",
+        "weight_semantics": f"fuzzy_simplicial_set(k{GRAPH_K})",
         "graph_path": os.path.basename(graph_path),
         "graph_sha256": graph_signature["sha256"],
         "graph_bytes": graph_signature["bytes"],
@@ -333,16 +333,20 @@ def run_build_current_graph(
                 "p10_recall_floor": GRAPH_P10_RECALL_FLOOR,
                 "self_inclusive_k": GRAPH_K,
             },
-            "semantics": "R0104 current builder on R0037 exact rows",
+            "semantics": (
+                f"current IVF/fuzzy-k{GRAPH_K} builder on R0037 exact rows"
+            ),
         },
         "endpoint_cosine": endpoint,
         "post_hoc_identity_verified": True,
-        "verified_by": "round0140-current-graph-fixed-row-builder-v1",
+        "verified_by": (
+            f"round{ROUND_ID}-current-graph-fixed-row-builder-v1"
+        ),
     }
     manifest_path = os.path.join(output, "graph-manifest.json")
     atomic_write_new_json(manifest_path, manifest, immutable=True)
     receipt = seal({
-        "schema": "round0140-current-graph-fixed-row-receipt-v1",
+        "schema": f"{ARTIFACT_SCHEMA_PREFIX}-current-graph-fixed-row-receipt-v1",
         "round_id": ROUND_ID,
         "release_sha": active["manifest"]["release_sha"],
         "source_proof": proof,
@@ -399,6 +403,7 @@ def _graph_bundle(job: Mapping[str, Any]) -> dict[str, Any]:
         or manifest.get("graph_sha256") != graph_signature["sha256"]
         or manifest.get("n_nodes") != ROWS
         or manifest.get("n_edges") != edges
+        or manifest.get("k") != GRAPH_K
     ):
         raise Round0140Error("graph manifest content changed")
     sources, targets, weights, n_nodes = load_edge_arrays(
@@ -415,6 +420,7 @@ def _graph_bundle(job: Mapping[str, Any]) -> dict[str, Any]:
         "n_nodes": int(n_nodes),
         "edges": edges,
         "kind": kind,
+        "k": int(manifest.get("k", -1)),
     }
 
 
@@ -640,7 +646,9 @@ def _render(
     titles = {
         "historical_r0037_seed42": "accepted historical R0037",
         "current_r0104_fp16_seed42": "accepted current R0104 (other rows)",
-        CURRENT_GRAPH_CURRENT_HOST: "fixed rows: current graph + host",
+        CURRENT_GRAPH_CURRENT_HOST: (
+            f"fixed rows: current fuzzy-k{GRAPH_K} graph + host"
+        ),
         HISTORICAL_GRAPH_CURRENT_HOST: "fixed rows: historical graph + host",
         HISTORICAL_GRAPH_DEVICE_REPRO: "fixed rows: historical graph + device",
     }

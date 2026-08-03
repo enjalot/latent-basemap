@@ -769,6 +769,7 @@ class PairedHostWeightedJinaSampler:
         graph_signature: Mapping[str, Any],
         graph_manifest_signature: Mapping[str, Any],
         arm: str,
+        graph_k: int = GRAPH_K,
     ) -> None:
         import torch
 
@@ -784,6 +785,7 @@ class PairedHostWeightedJinaSampler:
         self.rng = np.random.default_rng(int(random_state))
         self.graph_signature = dict(graph_signature)
         self.graph_manifest_signature = dict(graph_manifest_signature)
+        self.graph_k = int(graph_k)
         self.arm = arm
         self.device = dataset.device
         self.batch_no = 0
@@ -799,6 +801,7 @@ class PairedHostWeightedJinaSampler:
             or self.targets.shape != self.sources.shape
             or self.weights.shape != self.sources.shape
             or self.n_pos <= 0
+            or self.graph_k <= 1
             or self.num_neg <= 0
             or self.sources.min(initial=0) < 0
             or self.targets.min(initial=0) < 0
@@ -889,14 +892,18 @@ class PairedHostWeightedJinaSampler:
             representation = "int8-treatment"
         if representation not in {"fp16-control", "int8-treatment"}:
             raise Round0104Error("paired dataset representation stamp changed")
+        positive_destination_policy = (
+            f"queue-local-fp16-fuzzy-k{self.graph_k}"
+        )
+        graph_degree = f"variable-fuzzy-k{self.graph_k}-edge-universe"
         return {
             "schema": PIPELINE_SCHEMA,
             "pipeline": PIPELINE,
             "sampler_class": SAMPLER_CLASS,
             "positive_sampling": "weighted_with_replacement",
-            "positive_destination_policy": "queue-local-fp16-fuzzy-k50",
+            "positive_destination_policy": positive_destination_policy,
             "negative_sampling": negative_sampling_stamp(self.n_nodes),
-            "graph_degree": "variable-fuzzy-k50-edge-universe",
+            "graph_degree": graph_degree,
             "host_prefetch": "single-producer-two-pinned-slot",
             "host_prefetch_producer_batches": self._producer_batches,
             "host_prefetch_consumer_batches": self._consumer_batches,
@@ -980,6 +987,7 @@ class Round0104TrainingInput:
             random_state=random_state,
             graph_signature=self.graph["signature"],
             graph_manifest_signature=self.graph["manifest_signature"],
+            graph_k=int(self.graph.get("k", GRAPH_K)),
             arm=self.arm,
         )
         self._last_sampler = sampler
