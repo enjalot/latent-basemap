@@ -1131,6 +1131,40 @@ def _panel_execution_ok(panel: Mapping[str, Any]) -> bool:
     )
 
 
+def _finalize_scale_decision(
+    metric_decision: Mapping[str, Any], execution_gates: Mapping[str, bool]
+) -> dict[str, Any]:
+    """Combine metric evidence with either gated or diagnostic release policy."""
+    metric_gates_passed = bool(metric_decision["passed"])
+    metric_gates_required = metric_decision.get(
+        "metric_gates_required_for_capability", True
+    )
+    if type(metric_gates_required) is not bool:
+        raise Round0166Error("metric gate release policy is invalid")
+    execution_gates_passed = all(execution_gates.values())
+    passed = bool(
+        execution_gates_passed
+        and (metric_gates_passed or not metric_gates_required)
+    )
+    if passed and metric_gates_required:
+        outcome = "prompted-english-8m-scale-rung-qualified"
+    elif passed:
+        outcome = "prompted-english-8m-dose-readout-valid"
+    elif not execution_gates_passed:
+        outcome = "prompted-english-8m-execution-invalid"
+    else:
+        outcome = "prompted-english-8m-scale-rung-not-qualified"
+    return {
+        **metric_decision,
+        "metric_gates_passed": metric_gates_passed,
+        "metric_gates_required_for_capability": metric_gates_required,
+        "execution_gates": dict(execution_gates),
+        "execution_gates_passed": execution_gates_passed,
+        "passed": passed,
+        "outcome": outcome,
+    }
+
+
 def run_evaluate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     import torch
     from basemap.panel_v2 import (
@@ -1424,18 +1458,8 @@ def run_evaluate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "native_panel_finite_noncollapsed": _panel_execution_ok(native_panel),
         "matched_panel_finite_noncollapsed": _panel_execution_ok(matched_panel),
     }
-    passed = bool(metric_decision["passed"] and all(execution_gates.values()))
-    decision = {
-        **metric_decision,
-        "metric_gates_passed": bool(metric_decision["passed"]),
-        "execution_gates": execution_gates,
-        "passed": passed,
-        "outcome": (
-            "prompted-english-8m-scale-rung-qualified"
-            if passed
-            else "prompted-english-8m-scale-rung-not-qualified"
-        ),
-    }
+    decision = _finalize_scale_decision(metric_decision, execution_gates)
+    passed = bool(decision["passed"])
     peak_rss_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
     if peak_rss_gib > HOST_RSS_LIMIT_GIB:
         raise Round0166Error(
