@@ -9,7 +9,7 @@ import random
 import resource
 import time
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -79,6 +79,34 @@ GRAPH_SHARD_ROWS = 4_000_000
 # that they rebuilt it.  The defaults preserve every historical R0166 call.
 GRAPH_SOURCE_ROUND_ID = ROUND_ID
 GRAPH_BUILT_IN_ROUND = True
+# Later scale rounds may bind a freshly derived population whose receipt cannot
+# exist when the queue itself is sealed.  Keep the historical R0166 reader as
+# the default, while allowing a round-local runtime reader to authenticate a
+# dependency-produced receipt.
+POPULATION_READER: Callable[[Mapping[str, Any]], tuple[dict[str, Any], dict[str, Any]]] | None = None
+# R0166 deliberately rejected the 2M family.  Composition-controlled ladders
+# include a 1.988M mixed rung, so descendants may lower this bound explicitly.
+MIN_SCALE_ROWS_EXCLUSIVE = 2_000_000
+# Optional graph-time references let descendants reuse the already-materialized
+# normalized matrix instead of paying another multi-gigabyte materialization.
+GRAPH_EXTRA_REFERENCE_BUILDER: Callable[..., dict[str, Any]] | None = None
+
+REQUIRED_TRAIN_CHECKS = {
+    "exact_update_closure",
+    "zero_numerical_skips",
+    "no_pipeline_stamp_drift",
+    "endpoint_rows_match_updates",
+    "weighted_rejection_accounting_closes",
+}
+
+
+def _train_checks_close(value: Any) -> bool:
+    """Require the exact nonempty execution-check set; never pass vacuously."""
+    return (
+        isinstance(value, Mapping)
+        and set(value) == REQUIRED_TRAIN_CHECKS
+        and all(value[key] is True for key in REQUIRED_TRAIN_CHECKS)
+    )
 
 
 def _faiss_gpu_options(faiss: Any) -> Any:
@@ -130,6 +158,8 @@ def _signature(path: str, *, label: str) -> dict[str, Any]:
 
 
 def _read_population(job: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    if POPULATION_READER is not None:
+        return POPULATION_READER(job)
     signature = dict(job["population_receipt"])
     population = _read_sealed(signature, label="accepted R0165 population")
     capabilities = population.get("capabilities")
@@ -452,6 +482,17 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     reference_path = os.path.join(output, "high-d-reference.npz")
     save_hiD_reference(reference, reference_path)
     reference_seconds = time.monotonic() - reference_started
+    extra_references = (
+        GRAPH_EXTRA_REFERENCE_BUILDER(
+            output=output,
+            X=X,
+            population=population,
+            population_signature=population_signature,
+            config=cfg,
+        )
+        if GRAPH_EXTRA_REFERENCE_BUILDER is not None
+        else {}
+    )
     peak_rss_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
     if peak_rss_gib > HOST_RSS_LIMIT_GIB:
         raise Round0166Error(
@@ -503,6 +544,7 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "centroid_iterations": 25,
             "centroid_ks": [256, 1024],
         },
+        "comparison_references": extra_references,
         "graph_law": {
             "same_as_r0115": True,
             "search_neighbors_including_self": GRAPH_K,
@@ -735,7 +777,7 @@ def _load_graph(path: str) -> dict[str, Any]:
     if (
         manifest.get("schema") != GRAPH_SCHEMA
         or manifest.get("round_id") != GRAPH_SOURCE_ROUND_ID
-        or rows <= 2_000_000
+        or rows <= MIN_SCALE_ROWS_EXCLUSIVE
         or int(manifest.get("dimension", -1)) != DIMENSION
         or int(manifest.get("k", -1)) != GRAPH_K
         or int(manifest.get("directed_edge_count", -1)) <= 0
@@ -950,6 +992,22 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "graph": graph["signature"],
         "train_accounting": accounting,
         "exact_execution_receipt": runtime,
+        "requested_positive_draws_per_edge": float(
+            config["execution"].get(
+                "target_positive_draws_per_edge",
+                SUCCESSFUL_UPDATES
+                * prompt_contract.POSITIVE_ROWS_PER_UPDATE
+                / len(graph["sources"]),
+            )
+        ),
+        "consumed_positive_draws": int(
+            SUCCESSFUL_UPDATES * prompt_contract.POSITIVE_ROWS_PER_UPDATE
+        ),
+        "consumed_positive_draws_per_edge": float(
+            SUCCESSFUL_UPDATES
+            * prompt_contract.POSITIVE_ROWS_PER_UPDATE
+            / len(graph["sources"])
+        ),
         "performance_profile": profiler,
         "steady_updates_per_s": rate,
         "train_wall_s": wall,
@@ -1022,7 +1080,7 @@ def _authenticate_model(
         or train.get("graph_manifest") != graph_signature
         or train.get("production_config_sha256") != config_sha
         or int(train.get("optimizer_updates", -1)) != SUCCESSFUL_UPDATES
-        or not all(bool(value) for value in (train.get("train_checks") or {}).values())
+        or not _train_checks_close(train.get("train_checks"))
     ):
         raise Round0166Error("R0166 accepted train receipt changed")
     model_path = prompt_contract.verify_signature(train["model"], label="R0166 model")
@@ -1440,9 +1498,7 @@ def run_evaluate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         prompted_floors=floors,
     )
     execution_gates = {
-        "train_receipt_closes": all(
-            bool(value) for value in (train.get("train_checks") or {}).values()
-        ),
+        "train_receipt_closes": _train_checks_close(train.get("train_checks")),
         "graph_fixed_nprobe_qualified": (
             ((graph.get("search_qualification") or {}).get("cells") or {})
             .get(str(GRAPH_NPROBE), {})
