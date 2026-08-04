@@ -18,6 +18,7 @@ from basemap.round0187_composition_nested_ladder import (
     train_config,
 )
 from experiments import round0166_nodes as q2
+from basemap.panel_v2 import _matrix_identity, _validate_matrix_identity
 
 
 def _metrics(value: float) -> dict[str, float]:
@@ -58,6 +59,13 @@ def test_tiny_composition_selection_is_nested_and_canonical() -> None:
             assert np.count_nonzero(
                 (selected[rung] >= start) & (selected[rung] < stop)
             ) == per_corpus[corpus]
+
+
+def test_common_corpus_reference_uses_panel_v2_ordered_array_identity() -> None:
+    values = np.arange(48, dtype=np.float32).reshape(12, 4)
+    identity = _matrix_identity(values)
+    assert identity["kind"] == "ordered_array"
+    assert _validate_matrix_identity(identity) == (12, 4)
 
 
 def test_dose_horizon_uses_exact_r0180_rational() -> None:

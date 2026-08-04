@@ -309,7 +309,12 @@ def _build_corpus_references(
     population_signature: Mapping[str, Any],
     config: Any,
 ) -> dict[str, Any]:
-    from basemap.panel_v2 import build_hiD_reference, sample_anchors, save_hiD_reference
+    from basemap.panel_v2 import (
+        _matrix_identity,
+        build_hiD_reference,
+        sample_anchors,
+        save_hiD_reference,
+    )
     from experiments.score_complete_panel import frozen_centroids
 
     if population.get("rung") != "quarter":
@@ -340,20 +345,20 @@ def _build_corpus_references(
             for k in (256, 1024)
         }
         identity = {
-            "data_identity": {
-                "kind": "ordered_population_slice",
-                "population": dict(population_signature),
-                "compact_range": [int(start), int(stop)],
-                "corpus": corpus,
-                "shape": [int(stop) - int(start), DIMENSION],
-                "dtype": "<f2",
-            },
+            # panel-v2 accepts only its exact ordered_array/ordered_shards
+            # identity schemas.  Bind the actual normalized slice bytes here;
+            # the population receipt and range remain explicit convention
+            # fields and are checked again by the evaluation node.
+            "data_identity": _matrix_identity(values),
             "convention": {
                 "row_order": "R0187 quarter canonical order within corpus",
                 "distance": "cosine via fp32-L2-normalized squared L2",
                 "self_exclusion": True,
                 "anchor_namespace": f"R0187 quarter {corpus} local compact IDs",
                 "embedding_prompt": "document",
+                "population_receipt_sha256": str(population_signature["sha256"]),
+                "compact_range": [int(start), int(stop)],
+                "corpus": corpus,
             },
         }
         reference = build_hiD_reference(

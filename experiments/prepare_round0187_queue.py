@@ -75,6 +75,70 @@ P90 = {
 }
 
 
+def _prior_failed_attempt(prior_queue_root: str) -> dict[str, Any]:
+    root = os.path.abspath(prior_queue_root)
+    queue_path = os.path.join(root, "queue.json")
+    terminal_path = os.path.join(root, "runner-terminal.json")
+    failed_path = os.path.join(root, "artifacts", "quarter-graph.failed.json")
+    stage_done_path = os.path.join(root, "artifacts", "nested-populations.done.json")
+    summary_path = os.path.join(root, "artifacts", "nested-population-summary.json")
+    queue_signature = expected_input_signature(queue_path)
+    terminal_signature = expected_input_signature(terminal_path)
+    failed_signature = expected_input_signature(failed_path)
+    stage_done_signature = expected_input_signature(stage_done_path)
+    summary_signature = expected_input_signature(summary_path)
+    queue = _read_json(queue_path, label="R0187 prior queue")
+    terminal = _read_json(terminal_path, label="R0187 prior terminal")
+    failed = _read_json(failed_path, label="R0187 prior graph failure")
+    jobs = queue.get("jobs") or []
+    if not jobs or jobs[0].get("id") != "stage_nested_populations":
+        raise RuntimeError("R0187 prior population job changed")
+    roots = dict(jobs[0].get("population_roots") or {})
+    receipts = {
+        rung: os.path.join(str(roots[rung]), "population.json")
+        for rung in ("quarter", "half")
+    }
+    receipt_signatures = [
+        expected_input_signature(receipts[rung]) for rung in ("quarter", "half")
+    ]
+    gpu_wall_s = float(terminal.get("gpu_wall_s") or -1.0)
+    if (
+        queue.get("round_id") != ROUND_ID
+        or terminal.get("round_id") != ROUND_ID
+        or terminal.get("verdict") != "failed"
+        or terminal.get("completed_jobs") != ["stage_nested_populations"]
+        or terminal.get("queue_manifest_sha256") != queue_signature["sha256"]
+        or terminal.get("queue_manifest_sha256_at_finish")
+        != queue_signature["sha256"]
+        or terminal.get("queue_manifest_unchanged") is not True
+        or terminal.get("release_checkout_unchanged") is not True
+        or terminal.get("gpu_wall_accounting_complete") is not True
+        or terminal.get("boundary_problems") != []
+        or failed.get("node") != "build_quarter_graph"
+        or int(failed.get("returncode", 0)) == 0
+        or failed.get("queue_manifest_sha256") != queue_signature["sha256"]
+        or not (0.0 < gpu_wall_s < GPU_HOURS_CAP * 3600.0)
+        or set(roots) != {"quarter", "half"}
+    ):
+        raise RuntimeError("R0187 prior setup-failure evidence changed")
+    return {
+        "root": root,
+        "release_sha": str(queue["release_sha"]),
+        "gpu_wall_s": gpu_wall_s,
+        "population_roots": roots,
+        "population_receipts": receipts,
+        "population_summary": summary_path,
+        "inputs": [
+            queue_signature,
+            terminal_signature,
+            failed_signature,
+            stage_done_signature,
+            summary_signature,
+            *receipt_signatures,
+        ],
+    }
+
+
 def _document(prefix: str, round_id: str, *, status: str) -> dict[str, Any]:
     candidates = []
     for name in sorted(os.listdir(LAB_ROOT)):
@@ -96,9 +160,23 @@ def _document(prefix: str, round_id: str, *, status: str) -> dict[str, Any]:
 
 def _issued_round(release_sha: str) -> dict[str, Any]:
     frontmatter = _frontmatter(ROUND_FILE)
+    base_commit = str(frontmatter.get("base_commit") or "")
+    descendant = subprocess.run(
+        [
+            "git",
+            "-C",
+            RELEASE_ROOT,
+            "merge-base",
+            "--is-ancestor",
+            base_commit,
+            release_sha,
+        ],
+        check=False,
+        timeout=10,
+    ).returncode == 0
     if (
         frontmatter.get("status") != "issued"
-        or frontmatter.get("base_commit") != release_sha
+        or not descendant
     ):
         raise RuntimeError("R0187 round is not issued for the exact release")
     return expected_input_signature(ROUND_FILE)
@@ -296,11 +374,19 @@ def _job(
 
 
 def prepare_round0187(
-    *, release_sha: str, queue_root: str = QUEUE_ROOT
+    *,
+    release_sha: str,
+    queue_root: str = QUEUE_ROOT,
+    prior_queue_root: str | None = None,
 ) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0187 release SHA must be one full commit")
     round_signature = _issued_round(release_sha)
+    prior = (
+        _prior_failed_attempt(prior_queue_root)
+        if prior_queue_root is not None
+        else None
+    )
     lineage = _accepted_lineage()
     source_population_signature = expected_input_signature(SOURCE_POPULATION)
     pile_query_signature = expected_input_signature(PILE_QUERY_RECEIPT)
@@ -324,20 +410,29 @@ def prepare_round0187(
         full_train_signature,
         expected_input_signature(release_smoke_path),
         expected_input_signature(config_smoke_path),
+        *(prior["inputs"] if prior is not None else []),
     ])
 
     artifacts = ensure_data_directory(os.path.join(queue_root, "artifacts"))
-    population_parent = ensure_data_directory(
-        os.path.join(artifacts, "nested-populations")
-    )
-    population_roots = {
-        rung: os.path.join(population_parent, rung) for rung in ("quarter", "half")
-    }
-    population_receipts = {
-        rung: os.path.join(root, "population.json")
-        for rung, root in population_roots.items()
-    }
-    population_summary = os.path.join(artifacts, "nested-population-summary.json")
+    if prior is None:
+        population_parent = ensure_data_directory(
+            os.path.join(artifacts, "nested-populations")
+        )
+        population_roots = {
+            rung: os.path.join(population_parent, rung)
+            for rung in ("quarter", "half")
+        }
+        population_receipts = {
+            rung: os.path.join(root, "population.json")
+            for rung, root in population_roots.items()
+        }
+        population_summary = os.path.join(
+            artifacts, "nested-population-summary.json"
+        )
+    else:
+        population_roots = dict(prior["population_roots"])
+        population_receipts = dict(prior["population_receipts"])
+        population_summary = str(prior["population_summary"])
     graph_outputs = {
         rung: os.path.join(artifacts, f"{rung}-graph")
         for rung in ("quarter", "half")
@@ -483,12 +578,20 @@ def prepare_round0187(
             evaluation_outputs=evaluation_outputs,
         ),
     ]
+    if prior is not None:
+        jobs = jobs[1:]
+        jobs[0]["deps"] = []
+    remaining_gpu_hours = GPU_HOURS_CAP - (
+        float(prior["gpu_wall_s"]) / 3600.0 if prior is not None else 0.0
+    )
+    if remaining_gpu_hours <= 0:
+        raise RuntimeError("R0187 prior attempt exhausted the registered GPU cap")
     queue = _base_manifest(
         round_id=ROUND_ID,
         release_sha=release_sha,
         round_file=ROUND_FILE,
         queue_root=queue_root,
-        gpu_hours_cap=GPU_HOURS_CAP,
+        gpu_hours_cap=remaining_gpu_hours,
         execution_authority="autonomous-gpu",
         gpu=True,
     )
@@ -566,6 +669,23 @@ def prepare_round0187(
                 "literal_consumed_positive_draws_per_edge": True,
                 "exact_nonempty_train_check_set": True,
             },
+            "setup_retry": (
+                None
+                if prior is None
+                else {
+                    "prior_queue_root": prior["root"],
+                    "prior_release_sha": prior["release_sha"],
+                    "prior_gpu_wall_s": prior["gpu_wall_s"],
+                    "completed_population_derivation_reused_without_reexecution": True,
+                    "failed_partial_graph_reused": False,
+                    "correction": (
+                        "encode per-corpus high-D reference data with panel-v2's "
+                        "required ordered_array identity schema"
+                    ),
+                    "science_contract_changed": False,
+                    "remaining_gpu_hours_cap": remaining_gpu_hours,
+                }
+            ),
             "release_cpu_smoke": expected_input_signature(release_smoke_path),
             "config_cpu_smoke": expected_input_signature(config_smoke_path),
         },
@@ -579,10 +699,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-sha", required=True)
     parser.add_argument("--queue-root", default=QUEUE_ROOT)
+    parser.add_argument("--prior-queue-root")
     args = parser.parse_args(argv)
     print(json.dumps({
         "queue_manifest": prepare_round0187(
-            release_sha=args.release_sha, queue_root=args.queue_root
+            release_sha=args.release_sha,
+            queue_root=args.queue_root,
+            prior_queue_root=args.prior_queue_root,
         )
     }, indent=2, sort_keys=True))
     return 0
