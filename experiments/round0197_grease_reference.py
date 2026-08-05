@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one R0197 scale with the accepted R0196 fixed-chunk inference patch."""
+"""Run one R0197 scale with the R0200-qualified fixed-chunk patch."""
 from __future__ import annotations
 
 import argparse
@@ -75,7 +75,8 @@ def run(
         "cuda_available": bool(base_execution["cuda_available"]),
         "cuda_device": base_execution.get("cuda_device"),
         "inference_patch": {
-            "source_round": "0196",
+            "qualification_round": "0200",
+            "implementation_origin_round": "0196",
             "source_capability": "jina-grease-batch-stable-inference-patch-v1",
             "selected_patch": selected_patch,
             "chunk_rows": 256,

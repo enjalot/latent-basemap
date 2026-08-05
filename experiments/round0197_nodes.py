@@ -246,7 +246,7 @@ def run_synthesis(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "release_sha": active["manifest"]["release_sha"],
         "cell_receipts": signatures,
         "prior_method_table": dict(job["prior_method_table"]),
-        "accepted_r0196_review": dict(job["accepted_r0196_review"]),
+        "accepted_r0200_review": dict(job["accepted_r0200_review"]),
     })
     atomic_write_new_json(os.path.join(output, "synthesis.json"), receipt, immutable=True)
 

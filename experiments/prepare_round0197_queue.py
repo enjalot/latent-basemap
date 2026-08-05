@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare, but never launch, conditional R0197 after positive Review 0196."""
+"""Prepare, but never launch, conditional R0197 after positive Review 0200."""
 from __future__ import annotations
 
 import argparse
@@ -43,10 +43,10 @@ ROUND_ROOT = "/data/latent-basemap/runs/round-0197"
 QUEUE_ROOT = os.path.join(ROUND_ROOT, "queue")
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE = os.path.join(LAB_ROOT, "round-0197-2026-08-05.md")
-R0196_RESULT = os.path.join(LAB_ROOT, "result-0196-2026-08-05.md")
-R0196_REVIEW = os.path.join(LAB_ROOT, "review-0196-2026-08-05.md")
-R0196_DIAGNOSIS = (
-    "/data/latent-basemap/runs/round-0196/queue/artifacts/"
+R0200_RESULT = os.path.join(LAB_ROOT, "result-0200-2026-08-05.md")
+R0200_REVIEW = os.path.join(LAB_ROOT, "review-0200-2026-08-05.md")
+R0200_DIAGNOSIS = (
+    "/data/latent-basemap/runs/round-0200/queue/artifacts/"
     "jina-grease-batch-stability-diagnosis-v1/diagnosis.json"
 )
 R0183_TABLE = (
@@ -66,44 +66,54 @@ def _issued_round(release_sha: str) -> dict[str, Any]:
         frontmatter.get("round_id") != ROUND_ID
         or frontmatter.get("status") != "issued"
         or frontmatter.get("base_commit") != release_sha
+        or frontmatter.get("execution_authority") != "autonomous-gpu"
+        or _frontmatter_list(frontmatter, "required_reviews")
+        != ["0175", "0183", "0200"]
+        or _frontmatter_list(frontmatter, "capability_dependencies")
+        != [PATCH_CAPABILITY]
     ):
         raise RuntimeError("R0197 is not issued for this exact release")
     return expected_input_signature(ROUND_FILE)
 
 
-def _positive_r0196() -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
-    result = _frontmatter(R0196_RESULT)
-    review = _frontmatter(R0196_REVIEW)
-    result_signature = expected_input_signature(R0196_RESULT)
+def _positive_r0200() -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+    result = _frontmatter(R0200_RESULT)
+    review = _frontmatter(R0200_REVIEW)
+    result_signature = expected_input_signature(R0200_RESULT)
+    release_commit = result.get("release_commit")
     if (
-        result.get("round_id") != "0196"
+        result.get("round_id") != "0200"
         or result.get("status") != "complete"
-        or review.get("round_id") != "0196"
+        or not re.fullmatch(r"[0-9a-f]{40}", release_commit or "")
+        or review.get("round_id") != "0200"
         or review.get("status") != "accepted"
         or review.get("result_sha256") != result_signature["sha256"]
+        or review.get("verified_release_commit") != release_commit
         or f"capability:{PATCH_CAPABILITY}"
         not in _frontmatter_list(review, "releases")
     ):
-        raise RuntimeError("R0197 requires positive accepted Review 0196")
-    diagnosis_signature = expected_input_signature(R0196_DIAGNOSIS)
-    with open(R0196_DIAGNOSIS, encoding="utf-8") as handle:
+        raise RuntimeError("R0197 requires positive accepted Review 0200")
+    diagnosis_signature = expected_input_signature(R0200_DIAGNOSIS)
+    with open(R0200_DIAGNOSIS, encoding="utf-8") as handle:
         diagnosis = json.load(handle)
-    validate_seal(diagnosis, label="R0196 diagnosis")
+    validate_seal(diagnosis, label="R0200 diagnosis")
     decision = diagnosis.get("decision") or {}
     selected_patch = str(decision.get("selected_patch") or "")
     if (
         diagnosis.get("schema")
-        != "round0196-grease-batch-stability-diagnosis-v1"
+        != "round0200-grease-batch-stability-diagnosis-v1"
+        or diagnosis.get("round_id") != "0200"
+        or diagnosis.get("release_sha") != release_commit
         or decision.get("passed") is not True
         or decision.get("f2_gpu_baseline_activated") is not True
         or selected_patch not in SELECTED_PATCHES
         or PATCH_CAPABILITY not in (diagnosis.get("branch_capabilities_releasable") or [])
     ):
-        raise RuntimeError("R0196 diagnosis did not activate F2")
+        raise RuntimeError("R0200 diagnosis did not activate F2")
     return (
         [
             result_signature,
-            expected_input_signature(R0196_REVIEW),
+            expected_input_signature(R0200_REVIEW),
             diagnosis_signature,
         ],
         selected_patch,
@@ -192,7 +202,7 @@ def prepare_round0197(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0197 release SHA must be one full commit")
     round_signature = _issued_round(release_sha)
-    r0196_lineage, selected_patch, _diagnosis = _positive_r0196()
+    r0200_lineage, selected_patch, _diagnosis = _positive_r0200()
     r0175_lineage = _accepted_review("0175", "jina-aumap-oos-baseline-v1")
     r0183_lineage = _accepted_review(
         "0183", "jina-heldout-projection-method-table-v1"
@@ -234,7 +244,7 @@ def prepare_round0197(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
         round_signature,
         *r0175_lineage,
         *r0183_lineage,
-        *r0196_lineage,
+        *r0200_lineage,
         prior_table,
         source_manifest,
         *source_shards,
@@ -286,7 +296,7 @@ def prepare_round0197(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
         "selected_patch": selected_patch,
         "scale_outputs": scale_outputs,
         "prior_method_table": prior_table,
-        "accepted_r0196_review": r0196_lineage[1],
+        "accepted_r0200_review": r0200_lineage[1],
         "outputs": [os.path.join(artifacts, CAPABILITY)],
         "done_marker": os.path.join(artifacts, "synthesize-grease.done.json"),
         "expected_inputs": expected_inputs,
@@ -306,7 +316,7 @@ def prepare_round0197(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
         "schema": "round0197-grease-batch-stable-oos-queue-v1",
         "repo_root": RELEASE_ROOT,
         "queue_class": "gpu-training",
-        "required_reviews": ["0196"],
+        "required_reviews": ["0200"],
         "capability_dependencies": [PATCH_CAPABILITY],
         "capabilities_produced": [CAPABILITY],
         "training_performed": True,
@@ -317,7 +327,7 @@ def prepare_round0197(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
             "scales": list(SCALES),
             "rows": ROWS,
             "selected_patch": selected_patch,
-            "only_treatment_relative_to_r0181": "accepted R0196 fixed-chunk inference patch plus registered scale",
+            "only_treatment_relative_to_r0181": "accepted R0200-qualified fixed-chunk inference patch plus registered scale",
             "gpu_hours_maximum": GPU_HOURS_MAXIMUM,
             "one_attempt": True,
             "extends_reviewed_r0183_table": True,

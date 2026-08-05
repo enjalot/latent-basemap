@@ -33,6 +33,8 @@ def _execution(scale: str, patch: str = PATCH) -> dict:
         "dimension": 768,
         "cuda_available": True,
         "inference_patch": {
+            "qualification_round": "0200",
+            "implementation_origin_round": "0196",
             "source_capability": "jina-grease-batch-stable-inference-patch-v1",
             "selected_patch": patch,
             "chunk_rows": 256,

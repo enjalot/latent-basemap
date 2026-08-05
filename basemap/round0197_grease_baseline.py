@@ -53,6 +53,8 @@ def validate_execution(
         or execution.get("cuda_available") is not True
         or not isinstance(base, Mapping)
         or not isinstance(patch, Mapping)
+        or patch.get("qualification_round") != "0200"
+        or patch.get("implementation_origin_round") != "0196"
         or patch.get("source_capability") != PATCH_CAPABILITY
         or patch.get("selected_patch") != selected_patch
         or patch.get("chunk_rows") != 256
