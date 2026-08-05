@@ -21,7 +21,7 @@ from basemap.output_safety import (
 from basemap.round0192_quarter_seed_family import CAPABILITY as FAMILY_CAPABILITY
 from basemap.round0193_mixed_gate_registration import CAPABILITY, FORMULA, ROUND_ID
 from experiments.prepare_round0020_0022_queues import LAB_ROOT, _base_manifest, _dedupe
-from experiments.prepare_round0138_queue import _frontmatter
+from experiments.prepare_round0138_queue import _frontmatter, _frontmatter_list
 
 
 ROUND_ROOT = "/data/latent-basemap/runs/round-0193"
@@ -68,6 +68,10 @@ def _accepted_r0192() -> tuple[dict[str, Any], list[dict[str, Any]]]:
     if (
         review.get("result_sha256") != result_signature["sha256"]
         or review.get("round_sha256") != round_signature["sha256"]
+        or f"capability:{FAMILY_CAPABILITY}"
+        not in _frontmatter_list(review, "releases")
+        or _frontmatter(results[0]).get("release_commit")
+        != review.get("verified_release_commit")
     ):
         raise RuntimeError("R0192 review binding changed")
     queue_signature = expected_input_signature(R0192_QUEUE)

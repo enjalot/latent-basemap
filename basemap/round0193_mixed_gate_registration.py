@@ -30,13 +30,38 @@ def register_mixed_gates(family: Mapping[str, Any]) -> dict[str, Any]:
     cells = family.get("gate_metric_cells") or {}
     if set(cells) != {str(seed) for seed in SEEDS}:
         raise Round0193Error("mixed-quarter gate family is incomplete")
+    summaries = family.get("descriptive_summaries") or {}
+    if set(summaries) != set(GATE_METRICS):
+        raise Round0193Error("mixed-quarter descriptive summaries are incomplete")
     gates: dict[str, Any] = {}
     for metric in GATE_METRICS:
         values = [float(cells[str(seed)][metric]) for seed in SEEDS]
-        if any(not math.isfinite(value) or value <= 0 for value in values):
+        if any(
+            not math.isfinite(value) or value <= 0 or value > 1 for value in values
+        ):
             raise Round0193Error(f"mixed gate metric {metric} is invalid")
         mean = statistics.fmean(values)
         sample_sd = statistics.stdev(values)
+        summary = summaries[metric]
+        try:
+            summary_values = [
+                float(value)
+                for value in summary["values_seed42_seed43_seed44"]
+            ]
+            summary_mean = float(summary["mean"])
+            summary_sd = float(summary["sample_sd_ddof1"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise Round0193Error(
+                f"mixed gate summary {metric} is malformed"
+            ) from error
+        if (
+            summary_values != values
+            or not math.isclose(summary_mean, mean, rel_tol=0, abs_tol=1e-15)
+            or not math.isclose(summary_sd, sample_sd, rel_tol=0, abs_tol=1e-15)
+        ):
+            raise Round0193Error(
+                f"mixed gate summary {metric} disagrees with seed cells"
+            )
         floor = mean - 2.0 * sample_sd
         if not math.isfinite(floor):
             raise Round0193Error(f"mixed gate floor {metric} is invalid")
