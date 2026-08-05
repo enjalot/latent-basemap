@@ -18,13 +18,14 @@ def _run_train_seal_reload_panel_cpu_smoke(
     tmp_path,
     *,
     config_graph_edges: int = 8,
+    config_retained_rows: int = 7_952_419,
     expected_seed: int = 42,
 ) -> None:
     import torch
 
     successful_updates = round0166_nodes.SUCCESSFUL_UPDATES
     round_id = round0166_nodes.ROUND_ID
-    rows = 7_952_419
+    rows = config_retained_rows
     producer_batches = successful_updates + 1
     expected_rows = successful_updates * prompt_contract.BATCH_SIZE
     emitted = producer_batches * prompt_contract.POSITIVE_ROWS_PER_UPDATE
