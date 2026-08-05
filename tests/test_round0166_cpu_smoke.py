@@ -18,6 +18,7 @@ def _run_train_seal_reload_panel_cpu_smoke(
     tmp_path,
     *,
     config_graph_edges: int = 8,
+    expected_seed: int = 42,
 ) -> None:
     import torch
 
@@ -150,7 +151,7 @@ def _run_train_seal_reload_panel_cpu_smoke(
             self._setup_seconds = 0.001
 
         def fit(self, wrapper, **kwargs) -> None:
-            assert kwargs["random_state"] == 42
+            assert kwargs["random_state"] == expected_seed
             features = torch.from_numpy(wrapper.dataset.features)
             target = features[:, :2] - 0.25 * features[:, 2:4]
             optimizer = torch.optim.SGD(self.layer.parameters(), lr=0.05)
