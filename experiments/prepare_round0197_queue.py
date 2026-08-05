@@ -28,7 +28,11 @@ from basemap.round0197_grease_baseline import (
     SELECTED_PATCHES,
 )
 from experiments.prepare_round0020_0022_queues import LAB_ROOT, _base_manifest, _dedupe
-from experiments.prepare_round0138_queue import _frontmatter
+from experiments.prepare_round0138_queue import (
+    _accepted_review,
+    _frontmatter,
+    _frontmatter_list,
+)
 from experiments.prepare_round0175_queue import _source_signatures
 from experiments.prepare_round0181_queue import _package_files
 from experiments.round0175_nodes import TESTBED_ROOTS
@@ -77,7 +81,8 @@ def _positive_r0196() -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
         or review.get("round_id") != "0196"
         or review.get("status") != "accepted"
         or review.get("result_sha256") != result_signature["sha256"]
-        or f"capability:{PATCH_CAPABILITY}" not in (review.get("releases") or [])
+        or f"capability:{PATCH_CAPABILITY}"
+        not in _frontmatter_list(review, "releases")
     ):
         raise RuntimeError("R0197 requires positive accepted Review 0196")
     diagnosis_signature = expected_input_signature(R0196_DIAGNOSIS)
@@ -188,6 +193,10 @@ def prepare_round0197(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
         raise ValueError("R0197 release SHA must be one full commit")
     round_signature = _issued_round(release_sha)
     r0196_lineage, selected_patch, _diagnosis = _positive_r0196()
+    r0175_lineage = _accepted_review("0175", "jina-aumap-oos-baseline-v1")
+    r0183_lineage = _accepted_review(
+        "0183", "jina-heldout-projection-method-table-v1"
+    )
     source_manifest, source_shards = _source_signatures()
     prior_table = expected_input_signature(R0183_TABLE)
     reference_script = expected_input_signature(REFERENCE_SCRIPT)
@@ -223,6 +232,8 @@ def prepare_round0197(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
     )
     expected_inputs = _dedupe([
         round_signature,
+        *r0175_lineage,
+        *r0183_lineage,
         *r0196_lineage,
         prior_table,
         source_manifest,

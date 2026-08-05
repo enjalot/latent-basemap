@@ -12,7 +12,11 @@ from basemap.round0197_grease_baseline import (
     build_synthesis,
     validate_execution,
 )
-from experiments.prepare_round0197_queue import GPU_HOURS_MAXIMUM, P90_SECONDS
+from experiments.prepare_round0197_queue import (
+    GPU_HOURS_MAXIMUM,
+    P90_SECONDS,
+    _accepted_review,
+)
 
 
 PATCH = "fixed-256-row-grease-network"
@@ -152,3 +156,10 @@ def test_missing_scale_or_bad_metric_fails_closed() -> None:
 def test_registered_gpu_p90_fits_campaign_cap() -> None:
     assert GPU_HOURS_MAXIMUM == 0.5
     assert sum(P90_SECONDS.values()) <= GPU_HOURS_MAXIMUM * 3600
+
+
+def test_upstream_review_helper_resolves_exact_accepted_capabilities() -> None:
+    assert len(_accepted_review("0175", "jina-aumap-oos-baseline-v1")) == 3
+    assert len(
+        _accepted_review("0183", "jina-heldout-projection-method-table-v1")
+    ) == 3
