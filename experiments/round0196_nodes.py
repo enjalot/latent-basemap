@@ -108,7 +108,16 @@ def run_job(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "f2_authorized_only_on_positive_review": True,
             "f3_is_terminal_on_negative_review": True,
             "f4_authorized": False,
-            "numap_toy_fit_inspected_but_not_fixed": False,
+            "numap_toy_fit": {
+                "inspected": True,
+                "fixed": False,
+                "source_round": "0175",
+                "root_cause": (
+                    "spectral-plus-input feature/encoder dimension mismatch"
+                ),
+                "shares_r0196_batch_geometry_cause": False,
+                "numap_stays_killed": True,
+            },
         },
     })
     atomic_write_new_json(

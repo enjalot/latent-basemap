@@ -14,6 +14,7 @@ PATCH_CAPABILITY = "jina-grease-batch-stable-inference-patch-v1"
 NEGATIVE_CAPABILITY = "jina-grease-batch-stability-negative-v1"
 RELOAD_TOLERANCE = 1.0e-4
 INFERENCE_CHUNK_ROWS = 256
+SOURCE_DIMENSION = 768
 
 
 class Round0196Error(RuntimeError):
@@ -39,11 +40,20 @@ def fixed_chunks(
 
 
 def diagnose_execution(value: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        probe_rows = int(value.get("probe_rows", -1))
+        query_rows = int(value.get("query_rows", -1))
+        dimension = int(value.get("dimension", -1))
+        reload_tolerance = float(value.get("reload_tolerance", math.nan))
+    except (TypeError, ValueError) as error:
+        raise Round0196Error("R0196 CPU execution contract changed") from error
     if (
         value.get("schema") != "round0196-grease-batch-stable-cpu-execution-v1"
         or value.get("device") != "cpu"
-        or int(value.get("probe_rows", -1)) != INFERENCE_CHUNK_ROWS
-        or int(value.get("query_rows", -1)) < 2 * INFERENCE_CHUNK_ROWS
+        or probe_rows != INFERENCE_CHUNK_ROWS
+        or query_rows < 2 * INFERENCE_CHUNK_ROWS
+        or dimension != SOURCE_DIMENSION
+        or reload_tolerance != RELOAD_TOLERANCE
         or value.get("source_checkpoint_round") != "0181"
     ):
         raise Round0196Error("R0196 CPU execution contract changed")
@@ -55,14 +65,17 @@ def diagnose_execution(value: Mapping[str, Any]) -> dict[str, Any]:
             number = float(cell[key])
             if not math.isfinite(number) or number < 0:
                 raise Round0196Error(f"R0196 {name}/{key} is invalid")
-    grease_pass = (
-        float(candidates["fixed_grease"]["numap_batch_max_abs_error"])
-        <= RELOAD_TOLERANCE
-    )
-    both_pass = (
-        float(candidates["fixed_grease_and_pumap"]["numap_batch_max_abs_error"])
-        <= RELOAD_TOLERANCE
-    )
+    def candidate_passes(name: str) -> bool:
+        return all(
+            float(candidates[name][key]) <= RELOAD_TOLERANCE
+            for key in (
+                "grease_batch_max_abs_error",
+                "numap_batch_max_abs_error",
+            )
+        )
+
+    grease_pass = candidate_passes("fixed_grease")
+    both_pass = candidate_passes("fixed_grease_and_pumap")
     selected = value.get("selected_patch")
     expected = (
         "fixed-256-row-grease-network"
@@ -105,6 +118,7 @@ __all__ = [
     "RELOAD_TOLERANCE",
     "ROUND_ID",
     "Round0196Error",
+    "SOURCE_DIMENSION",
     "diagnose_execution",
     "fixed_chunks",
 ]

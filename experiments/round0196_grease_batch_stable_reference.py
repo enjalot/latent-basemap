@@ -173,9 +173,15 @@ def run(*, checkpoint: str, queries: str, output: str) -> dict[str, Any]:
         numap_probe=fixed_both_numap_probe,
         probe_rows=probe_rows,
     )
-    if fixed_grease["numap_batch_max_abs_error"] <= RELOAD_TOLERANCE:
+    if all(
+        fixed_grease[key] <= RELOAD_TOLERANCE
+        for key in ("grease_batch_max_abs_error", "numap_batch_max_abs_error")
+    ):
         selected = "fixed-256-row-grease-network"
-    elif fixed_both["numap_batch_max_abs_error"] <= RELOAD_TOLERANCE:
+    elif all(
+        fixed_both[key] <= RELOAD_TOLERANCE
+        for key in ("grease_batch_max_abs_error", "numap_batch_max_abs_error")
+    ):
         selected = "fixed-256-row-grease-and-pumap-networks"
     else:
         selected = None
