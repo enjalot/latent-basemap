@@ -709,6 +709,150 @@ def scan_round0108_atlas(
     }]
 
 
+def scan_v0_release_map(
+    round_dir: Path,
+    ledger: dict,
+    *,
+    queue_dir: Path | None = None,
+) -> list[dict]:
+    """Discover the explicitly promoted FineWeb-English Jina v0 artifact."""
+    from basemap.round0205_v0_registry import (
+        CANDIDATE_ID,
+        EXPECTED_COORDINATES_SHA256,
+        EXPECTED_TRAIN_RECEIPT_SHA256,
+        MAP_DEFINITION_SCHEMA,
+        ROUND_ID,
+        ROWS,
+    )
+
+    queue_dir = queue_dir or round_dir / "queue"
+    output = (
+        queue_dir / "artifacts"
+        / "basemap-jina-v5-nano-en-2m-v0-local-registry-v1"
+    )
+    definition_path = output / "map-definition.json"
+    definition = _load_json(definition_path)
+    if (
+        not isinstance(definition, dict)
+        or definition.get("schema") != MAP_DEFINITION_SCHEMA
+        or definition.get("round_id") != ROUND_ID
+        or definition.get("map_id") != CANDIDATE_ID
+        or definition.get("candidate_id") != CANDIDATE_ID
+        or definition.get("training_round") != "0115"
+        or definition.get("evaluation_round") != "0115"
+        or (definition.get("population") or {}).get("rows") != ROWS
+        or (definition.get("population") or {}).get("input_dimension") != 768
+        or (definition.get("population") or {}).get("output_dimension") != 2
+        or (definition.get("population") or {}).get("embedding_convention")
+        != "Document: "
+        or (definition.get("source_coordinates") or {}).get("sha256")
+        != EXPECTED_COORDINATES_SHA256
+        or (definition.get("train_receipt") or {}).get("sha256")
+        != EXPECTED_TRAIN_RECEIPT_SHA256
+        or (definition.get("release_scope") or {}).get("local_registry_ready")
+        is not True
+        or (definition.get("release_scope") or {}).get(
+            "local_v0_release_registered"
+        )
+        is not True
+        or (definition.get("release_scope") or {}).get(
+            "production_readiness_claimed"
+        )
+        is not False
+        or (definition.get("release_scope") or {}).get(
+            "huggingface_upload_performed"
+        )
+        is not False
+        or (definition.get("limitations") or {}).get(
+            "universal_ood_quality_claim"
+        )
+        is not False
+        or (definition.get("limitations") or {}).get(
+            "canonical_seed42_named_ood_failure_count"
+        )
+        != 7
+    ):
+        return []
+    coordinates = definition.get("coordinates") or {}
+    coordinate_path = Path(str(coordinates.get("canonical_path") or ""))
+    if (
+        not coordinate_path.is_file()
+        or coordinate_path.name != "coordinates.npy"
+        or coordinate_path.parent.name != "chunk-00000"
+        or coordinate_path.parent.parent != output / "coordinates"
+        or coordinates.get("sha256") != EXPECTED_COORDINATES_SHA256
+        or _file_signature(coordinate_path) != coordinates
+    ):
+        return []
+    metrics = definition.get("metrics") or {}
+    architecture = definition.get("architecture") or {}
+    model = definition.get("model") or {}
+    pipeline = definition.get("actual_pipeline") or {}
+    if (
+        metrics.get("all_six_seed42_gates_pass") is not True
+        or metrics.get("all_four_seeds_pass_all_six_gates") is not True
+        or pipeline.get("pipeline") != "host_weighted_jina_prompt_contrast"
+        or pipeline.get("sampler_class") != "PromptWeightedJinaSampler"
+        or model.get("sha256") is None
+    ):
+        return []
+    return [{
+        "map_id": CANDIDATE_ID,
+        "round_id": ROUND_ID,
+        "kind": "round-map",
+        "map_label": "Jina v5 nano FineWeb English 2M v0",
+        "date": datetime.fromtimestamp(
+            definition_path.stat().st_mtime, tz=timezone.utc
+        ).isoformat(),
+        "evidence_status": evidence_status(ROUND_ID, ledger),
+        "n_rows": ROWS,
+        "scientific_rows": ROWS,
+        "dims": [768, 2],
+        "architecture": architecture.get("name"),
+        "hidden_dim": architecture.get("hidden_dimension"),
+        "kernel": architecture.get("low_dim_kernel"),
+        "pipeline": pipeline.get("pipeline"),
+        "precision": "bf16-train/fp32-coordinates",
+        "embedding_prompt": "Document: ",
+        "prompt_applied": True,
+        "local_v0_release_registered": True,
+        "production_ready": False,
+        "intended_use": "exploratory FineWeb-English under Document: convention",
+        "universal_ood_ready": False,
+        "scientific_status": "four-seed-six-gate-pass-with-named-ood-limitations",
+        "capability_candidate": True,
+        "density_semantics": "jina-prompted-four-seed-calibrated",
+        "model": model,
+        "coordinates": {
+            "dir": _relpath(output / "coordinates"),
+            "chunks": 1,
+            "file": _relpath(coordinate_path),
+            "receipt_sha256": EXPECTED_COORDINATES_SHA256,
+        },
+        "panel": {
+            "path": _relpath(Path(str((definition.get("score") or {}).get(
+                "canonical_path", "")))),
+            "ffr": metrics.get("ffr"),
+            "density": metrics.get("density"),
+            "purity_k256": metrics.get("purity_k256"),
+            "purity_k1024": metrics.get("purity_k1024"),
+            "proj_ffr": metrics.get("projection_ffr"),
+            "heldout_recall_at_10": metrics.get("heldout_recall_at_10"),
+            "decision_checks_all_pass": True,
+            "formula_version": metrics.get("formula_version"),
+        },
+        "renders": [],
+        "release_bundle": definition.get("release_bundle"),
+        "model_card": definition.get("model_card"),
+        "named_ood_failures": (definition.get("limitations") or {}).get(
+            "canonical_seed42_named_ood_failures"
+        ),
+        "release_sha": definition.get("release_sha"),
+        "run_dir": _relpath(round_dir),
+        "training_round": "0115",
+    }]
+
+
 def _sha_of(obj) -> str | None:
     if isinstance(obj, dict):
         return obj.get("sha256") or obj.get("identity_sha256")
@@ -794,6 +938,9 @@ def scan() -> dict:
                     round_dir, ledger, queue_dir=queue_dir
                 )
                 maps += scan_round0108_atlas(
+                    round_dir, ledger, queue_dir=queue_dir
+                )
+                maps += scan_v0_release_map(
                     round_dir, ledger, queue_dir=queue_dir
                 )
                 maps += scan_projection_maps(
