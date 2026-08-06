@@ -67,11 +67,22 @@ def _rerank_candidates_float64(
     delta32 = points[ids] - queries[:, None, :]
     squared32 = np.sum(delta32 * delta32, axis=2, dtype=np.float32)
     order32 = np.argsort(squared32, axis=1, kind="stable")
+    ordered_ids32 = np.take_along_axis(ids, order32, axis=1)
     ordered_squared32 = np.take_along_axis(squared32, order32, axis=1)
     gap32 = ordered_squared32[:, k] - ordered_squared32[:, k - 1]
     if np.any(gap32 < 0) or not np.isfinite(gap32).all():
         raise Round0201Error("R0201 fp32 diagnostic boundary is invalid")
-    return np.ascontiguousarray(ordered_ids[:, :k]), {
+    selected64 = np.ascontiguousarray(ordered_ids[:, :k])
+    selected32 = np.ascontiguousarray(ordered_ids32[:, :k])
+    membership_changed = np.any(
+        np.sort(selected64, axis=1) != np.sort(selected32, axis=1), axis=1
+    )
+    changed_rows = int(np.count_nonzero(membership_changed))
+    if changed_rows:
+        raise Round0201Error(
+            f"R0201 float64 rerank changes {changed_rows} fp32 membership sets"
+        )
+    return selected64, {
         "distance_rerank_dtype": "float64-from-exact-float32-coordinates",
         "boundary_secondary_order": "canonical-row-id",
         "minimum_boundary_gap_squared_l2_float64": float(gap64.min()),
@@ -82,6 +93,7 @@ def _rerank_candidates_float64(
         "zero_boundary_gaps_float32_diagnostic": int(
             np.count_nonzero(gap32 == 0)
         ),
+        "membership_sets_changed_vs_fp32": changed_rows,
     }
 
 

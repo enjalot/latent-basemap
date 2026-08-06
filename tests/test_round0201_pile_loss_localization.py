@@ -46,13 +46,28 @@ def test_float64_rerank_resolves_fp32_only_boundary_tie() -> None:
     neighbors, receipt = round0201_nodes._rerank_candidates_float64(
         values,
         values[[0]],
-        np.asarray([[2, 1, 3]], dtype=np.int64),
+        np.asarray([[1, 2, 3]], dtype=np.int64),
         k=1,
     )
     assert neighbors.tolist() == [[1]]
     assert receipt["zero_boundary_gaps_float32_diagnostic"] == 1
     assert receipt["zero_boundary_gaps_float64"] == 0
     assert receipt["minimum_boundary_gap_squared_l2_float64"] > 0
+    assert receipt["membership_sets_changed_vs_fp32"] == 0
+
+
+def test_float64_membership_change_fails_closed() -> None:
+    values = np.asarray(
+        [[0.0, 0.0], [1.0, 0.0], [1.0, 1e-4], [2.0, 0.0]],
+        dtype=np.float32,
+    )
+    with pytest.raises(Round0201Error, match="changes 1 fp32 membership"):
+        round0201_nodes._rerank_candidates_float64(
+            values,
+            values[[0]],
+            np.asarray([[2, 1, 3]], dtype=np.int64),
+            k=1,
+        )
 
 
 def test_true_float64_boundary_tie_fails_closed() -> None:
