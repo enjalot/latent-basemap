@@ -27,7 +27,7 @@ from experiments.prepare_round0138_queue import _frontmatter, _frontmatter_list
 ROUND_ROOT = "/data/latent-basemap/runs/round-0193"
 QUEUE_ROOT = os.path.join(ROUND_ROOT, "queue")
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-cpu-run"
-ROUND_FILE = os.path.join(LAB_ROOT, "round-0193-2026-08-05.md")
+ROUND_FILE = os.path.join(LAB_ROOT, "round-0193-2026-08-06.md")
 R0192_QUEUE = "/data/latent-basemap/runs/round-0192/queue/queue.json"
 R0192_TERMINAL = "/data/latent-basemap/runs/round-0192/queue/runner-terminal.json"
 R0192_FAMILY = (

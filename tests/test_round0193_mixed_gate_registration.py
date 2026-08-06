@@ -11,6 +11,7 @@ from basemap.round0193_mixed_gate_registration import (
     Round0193Error,
     register_mixed_gates,
 )
+from experiments.prepare_round0193_queue import ROUND_FILE
 
 
 def _family() -> dict:
@@ -45,6 +46,10 @@ def _family() -> dict:
         for metric in GATE_METRICS
     }
     return family
+
+
+def test_queue_preparer_targets_actual_issue_date() -> None:
+    assert ROUND_FILE.endswith("/round-0193-2026-08-06.md")
 
 
 def test_formula_is_exact_mean_minus_two_sample_sd() -> None:
