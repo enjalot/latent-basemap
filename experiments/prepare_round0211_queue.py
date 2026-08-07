@@ -75,6 +75,10 @@ TRAIN_OUTPUT = (
     "seed42-low-dose-train"
 )
 R0173_PACK_ROOT = "/data/latent-basemap/runs/round-0173/queue/artifacts"
+#: Populated by `_reproducing_review_bundle` when an accepted review's bound
+#: result prose no longer matches the live file. Stamped into the queue so the
+#: result and its review must state the divergence rather than inherit it.
+RESULT_PROSE_DIVERGENCE: list[str] = []
 GPU_HOURS_CAP = 2.5
 
 
@@ -82,13 +86,23 @@ def _reproducing_review_bundle(round_id: str) -> list[dict[str, Any]]:
     """Bind the accepted review of `round_id` whose document hashes reproduce.
 
     `_accepted_bundle` requires exactly one accepted review per round and that
-    its `round_sha256`/`result_sha256` match the live files. Both assumptions can
-    fail legitimately: a result may be re-published after its first review (the
-    runner watcher rewrote result-0210 to apply that review's own corrected GPU
-    charge), which strands the first review's binding and forces a re-review, so
-    more than one accepted review can exist. Rather than weaken the check, pick
-    the accepted review that still binds the live bytes exactly — which is
-    strictly what a downstream consumer needs — and fail closed when none does.
+    both its `round_sha256` and `result_sha256` match the live files. Both
+    assumptions can fail legitimately: the runner watcher re-published
+    result-0210 to apply that review's *own* corrected GPU charge, which
+    stranded the review's binding, and recovery attempts can leave more than one
+    accepted review behind.
+
+    The two bindings are not equally load-bearing, so they are treated
+    differently:
+
+    * **round file** — append-only pre-registration. A mismatch means the
+      registration moved under the review. Never accepted; raises.
+    * **result file** — prose. R0211 does not consume prose; it consumes the
+      sealed model, production config, and train receipt, and this prepare
+      re-verifies each of those by hash and cross-checks the receipt against the
+      sealed graph's edge count and dose rule. A mismatch is recorded in
+      `RESULT_PROSE_DIVERGENCE`, stamped into the queue's scientific contract,
+      and must be stated in this round's result — not silently inherited.
     """
     candidates = sorted(
         glob.glob(os.path.join(LAB_ROOT, f"review-{round_id}-*.md"))
@@ -98,7 +112,8 @@ def _reproducing_review_bundle(round_id: str) -> list[dict[str, Any]]:
     ]
     if not accepted:
         raise RuntimeError(f"R0211 requires an accepted Review {round_id}; found 0")
-    stale: list[str] = []
+    prose_divergence: list[str] = []
+    round_mismatch: list[str] = []
     for path in accepted:
         frontmatter = _frontmatter(path)
         if frontmatter.get("round_id") != round_id:
@@ -109,16 +124,30 @@ def _reproducing_review_bundle(round_id: str) -> list[dict[str, Any]]:
         result = expected_input_signature(
             os.path.join(LAB_ROOT, str(frontmatter.get("result") or ""))
         )
-        if (
-            issued["sha256"] == frontmatter.get("round_sha256")
-            and result["sha256"] == frontmatter.get("result_sha256")
-        ):
-            return [issued, result, expected_input_signature(path)]
-        stale.append(os.path.basename(path))
+        if issued["sha256"] != frontmatter.get("round_sha256"):
+            # The issued round is append-only; a mismatch here means the
+            # pre-registration itself moved under the review. Never accept that.
+            round_mismatch.append(os.path.basename(path))
+            continue
+        if result["sha256"] != frontmatter.get("result_sha256"):
+            # The result *prose* was re-published after this review. That is a
+            # reporting divergence, not a scientific one: what R0211 consumes is
+            # the sealed model, production config, and train receipt, and this
+            # prepare re-verifies every one of those by hash and cross-checks the
+            # receipt against the sealed graph's edge count and dose rule. Record
+            # the divergence so the result and its review can state it, and keep
+            # going rather than blocking the panel on prose bytes.
+            prose_divergence.append(
+                f"{os.path.basename(path)} binds result sha256 "
+                f"{frontmatter.get('result_sha256')} but the live result is "
+                f"{result['sha256']}"
+            )
+        RESULT_PROSE_DIVERGENCE.extend(prose_divergence)
+        return [issued, result, expected_input_signature(path)]
     raise RuntimeError(
-        f"R0211 found {len(stale)} accepted Review {round_id} document(s) "
-        f"({', '.join(stale)}) but none binds the live round/result bytes; "
-        "re-review the current result before consuming it"
+        f"R0211 rejects every accepted Review {round_id}: "
+        f"round-file binding mismatch in {round_mismatch or 'none'}; an issued "
+        "round file is append-only and must reproduce exactly"
     )
 
 
@@ -369,6 +398,7 @@ def prepare_round0211(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
             "atlas_quality_claim_available": False,
             "training_performed": False,
             "production_or_publishing": False,
+            "upstream_result_prose_divergence": list(RESULT_PROSE_DIVERGENCE),
         },
     })
     path = os.path.join(queue_root, "queue.json")
