@@ -133,3 +133,68 @@ def test_node_rejects_another_action_or_queue() -> None:
 def test_capability_and_round_identity() -> None:
     assert ROUND_ID == "0210"
     assert CAPABILITY == "jina-prompted-diverse-u12-map-seed42-low-dose-v1"
+
+
+def test_configure_binds_the_cross_round_graph_contract() -> None:
+    """R0210 consumes a graph sealed by R0209, not one built in its own queue."""
+    from experiments import round0166_nodes as q2
+    from experiments import round0169_nodes as diverse
+    from basemap.round0209_prompted_diverse_graph import GRAPH_SCHEMA
+
+    saved_q2 = (q2.ROUND_ID, q2.GRAPH_SCHEMA, q2.GRAPH_SOURCE_ROUND_ID,
+                q2.GRAPH_BUILT_IN_ROUND, q2.SUCCESSFUL_UPDATES, q2.TRAIN_SCHEMA)
+    saved_diverse = (diverse.ROUND_ID, diverse.GRAPH_SCHEMA,
+                     diverse.SUCCESSFUL_UPDATES, diverse.TRAIN_SCHEMA)
+    try:
+        nodes._configure(1_588_163)
+        # The kernel must look for R0209's sealed receipt, not R0169's own.
+        assert q2.GRAPH_SCHEMA == GRAPH_SCHEMA
+        assert q2.GRAPH_SOURCE_ROUND_ID == "0209"
+        assert q2.GRAPH_BUILT_IN_ROUND is False
+        # ...while the round identity and horizon are R0210's.
+        assert q2.ROUND_ID == ROUND_ID == "0210"
+        assert q2.SUCCESSFUL_UPDATES == 1_588_163
+        assert q2.TRAIN_SCHEMA == "round0210-prompted-diverse-u12-low-dose-train-receipt-v1"
+        assert q2.scale_train_config is low_dose_train_config
+        # A second kernel pass must not reset the cross-round bindings.
+        diverse._configure_q2_kernel()
+        assert q2.GRAPH_SCHEMA == GRAPH_SCHEMA
+        assert q2.GRAPH_SOURCE_ROUND_ID == "0209"
+    finally:
+        (q2.ROUND_ID, q2.GRAPH_SCHEMA, q2.GRAPH_SOURCE_ROUND_ID,
+         q2.GRAPH_BUILT_IN_ROUND, q2.SUCCESSFUL_UPDATES, q2.TRAIN_SCHEMA) = saved_q2
+        (diverse.ROUND_ID, diverse.GRAPH_SCHEMA,
+         diverse.SUCCESSFUL_UPDATES, diverse.TRAIN_SCHEMA) = saved_diverse
+
+
+def test_sealed_r0209_graph_passes_the_kernel_contract_check() -> None:
+    """Load the live sealed graph manifest through the kernel's own check."""
+    import os
+    import pytest as _pytest
+    from experiments import round0166_nodes as q2
+    from experiments import round0169_nodes as diverse
+    from experiments.prepare_round0210_queue import GRAPH_MANIFEST
+
+    if not os.path.exists(GRAPH_MANIFEST):
+        _pytest.skip("sealed R0209 graph is not present on this machine")
+    saved = (q2.ROUND_ID, q2.GRAPH_SCHEMA, q2.GRAPH_SOURCE_ROUND_ID,
+             q2.GRAPH_BUILT_IN_ROUND, q2.SUCCESSFUL_UPDATES, q2.TRAIN_SCHEMA)
+    saved_diverse = (diverse.ROUND_ID, diverse.GRAPH_SCHEMA,
+                     diverse.SUCCESSFUL_UPDATES, diverse.TRAIN_SCHEMA)
+    try:
+        nodes._configure(1_588_163)
+        manifest = q2.prompt_contract.read_sealed(GRAPH_MANIFEST, label="graph")
+        search = manifest["search_qualification"]
+        fixed = search["cells"][str(q2.GRAPH_NPROBE)]
+        assert manifest["schema"] == q2.GRAPH_SCHEMA
+        assert manifest["round_id"] == q2.GRAPH_SOURCE_ROUND_ID
+        assert int(manifest["dimension"]) == q2.DIMENSION
+        assert int(manifest["k"]) == q2.GRAPH_K
+        assert int(search["selected_nprobe"]) == q2.GRAPH_NPROBE
+        assert fixed["passed"] is True
+        assert int(manifest["directed_edge_count"]) == 957_799_410
+    finally:
+        (q2.ROUND_ID, q2.GRAPH_SCHEMA, q2.GRAPH_SOURCE_ROUND_ID,
+         q2.GRAPH_BUILT_IN_ROUND, q2.SUCCESSFUL_UPDATES, q2.TRAIN_SCHEMA) = saved
+        (diverse.ROUND_ID, diverse.GRAPH_SCHEMA,
+         diverse.SUCCESSFUL_UPDATES, diverse.TRAIN_SCHEMA) = saved_diverse

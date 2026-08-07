@@ -30,6 +30,7 @@ from basemap.round0210_prompted_diverse_low_dose import (
     successful_updates_for_edges,
 )
 from basemap import round0113_prompt_contrast as prompt_contract
+from experiments import round0166_nodes as q2
 from experiments import round0169_nodes as diverse
 
 
@@ -67,6 +68,13 @@ def _sealed_graph_edges(job: Mapping[str, Any]) -> int:
 
 
 def _configure(updates: int) -> None:
+    """Bind the R0169 kernel to R0210's identity and to R0209's sealed graph.
+
+    R0169 built its graph inside its own queue, so the kernel's graph-contract
+    check defaults to `GRAPH_SOURCE_ROUND_ID = ROUND_ID` and to R0169's receipt
+    schema. R0210 consumes a graph sealed by a *different* round, so both must
+    name R0209 — the same rebinding R0171 used for its own cross-round graph.
+    """
     bindings = {
         "ROUND_ID": ROUND_ID,
         "CAPABILITY": CAPABILITY,
@@ -76,8 +84,17 @@ def _configure(updates: int) -> None:
         "diverse_train_config": low_dose_train_config,
         "Round0169Error": Round0210Error,
     }
+    bindings["GRAPH_SCHEMA"] = GRAPH_SCHEMA
     for name, value in bindings.items():
         setattr(diverse, name, value)
+    # Configure the kernel here rather than letting `diverse.run_train` do it,
+    # so the cross-round graph bindings below cannot be reset by a second pass.
+    diverse._configure_q2_kernel()
+    for name, value in {
+        "GRAPH_SOURCE_ROUND_ID": "0209",
+        "GRAPH_BUILT_IN_ROUND": False,
+    }.items():
+        setattr(q2, name, value)
 
 
 def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
@@ -91,7 +108,7 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "R0210 derived update horizon exceeds the registered round bound"
         )
     _configure(updates)
-    diverse.run_train(active, job)
+    q2.run_train(active, job)
 
 
 def run_job(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
