@@ -66,6 +66,7 @@ def diverse_train_config(
     graph_manifest_signature: Mapping[str, Any],
     graph_edges: int,
     retained_rows: int,
+    seed: int = SEED,
 ) -> tuple[dict[str, Any], str]:
     """Clone the accepted prompted recipe with only Q3 population bindings."""
     if retained_rows != ROWS or graph_edges <= 0:
@@ -76,14 +77,14 @@ def diverse_train_config(
         graph_manifest_signature=graph_manifest_signature,
         graph_edges=graph_edges,
         retained_rows=r0113.RETAINED_ROWS,
-        seed=SEED,
+        seed=seed,
     )
     config = copy.deepcopy(config)
     config["schema"] = "round0169-prompted-diverse-u12-train-config-v1"
     config["paired_invariant"] = {
         "rows": retained_rows,
         "dimension": DIMENSION,
-        "seed": SEED,
+        "seed": seed,
         "successful_positive_lr_updates": SUCCESSFUL_UPDATES,
         "dose_rule": "same fixed 500,000 successful-update dose as R0115/R0171",
         "graph_policy": "same fuzzy-k50 law and seeds as R0115/R0171",
