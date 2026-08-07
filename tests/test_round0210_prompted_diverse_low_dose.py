@@ -135,16 +135,34 @@ def test_capability_and_round_identity() -> None:
     assert CAPABILITY == "jina-prompted-diverse-u12-map-seed42-low-dose-v1"
 
 
-def test_configure_binds_the_cross_round_graph_contract() -> None:
-    """R0210 consumes a graph sealed by R0209, not one built in its own queue."""
+def _kernel_snapshot():
+    """Snapshot both rebound modules whole.
+
+    `_configure_q2_kernel` rebinds far more than this round's own names — most
+    importantly `Round0166Error`, which is *not* a base of `Round0169Error`, so
+    a partial restore silently breaks every other test that asserts on the
+    kernel's own exception type.
+    """
     from experiments import round0166_nodes as q2
     from experiments import round0169_nodes as diverse
+
+    return (q2, diverse, dict(q2.__dict__), dict(diverse.__dict__))
+
+
+def _kernel_restore(snapshot) -> None:
+    q2, diverse, q2_state, diverse_state = snapshot
+    q2.__dict__.clear()
+    q2.__dict__.update(q2_state)
+    diverse.__dict__.clear()
+    diverse.__dict__.update(diverse_state)
+
+
+def test_configure_binds_the_cross_round_graph_contract() -> None:
+    """R0210 consumes a graph sealed by R0209, not one built in its own queue."""
     from basemap.round0209_prompted_diverse_graph import GRAPH_SCHEMA
 
-    saved_q2 = (q2.ROUND_ID, q2.GRAPH_SCHEMA, q2.GRAPH_SOURCE_ROUND_ID,
-                q2.GRAPH_BUILT_IN_ROUND, q2.SUCCESSFUL_UPDATES, q2.TRAIN_SCHEMA)
-    saved_diverse = (diverse.ROUND_ID, diverse.GRAPH_SCHEMA,
-                     diverse.SUCCESSFUL_UPDATES, diverse.TRAIN_SCHEMA)
+    snapshot = _kernel_snapshot()
+    q2, diverse = snapshot[0], snapshot[1]
     try:
         nodes._configure(1_588_163)
         # The kernel must look for R0209's sealed receipt, not R0169's own.
@@ -154,33 +172,28 @@ def test_configure_binds_the_cross_round_graph_contract() -> None:
         # ...while the round identity and horizon are R0210's.
         assert q2.ROUND_ID == ROUND_ID == "0210"
         assert q2.SUCCESSFUL_UPDATES == 1_588_163
-        assert q2.TRAIN_SCHEMA == "round0210-prompted-diverse-u12-low-dose-train-receipt-v1"
+        assert q2.TRAIN_SCHEMA == (
+            "round0210-prompted-diverse-u12-low-dose-train-receipt-v1"
+        )
         assert q2.scale_train_config is low_dose_train_config
         # A second kernel pass must not reset the cross-round bindings.
         diverse._configure_q2_kernel()
         assert q2.GRAPH_SCHEMA == GRAPH_SCHEMA
         assert q2.GRAPH_SOURCE_ROUND_ID == "0209"
     finally:
-        (q2.ROUND_ID, q2.GRAPH_SCHEMA, q2.GRAPH_SOURCE_ROUND_ID,
-         q2.GRAPH_BUILT_IN_ROUND, q2.SUCCESSFUL_UPDATES, q2.TRAIN_SCHEMA) = saved_q2
-        (diverse.ROUND_ID, diverse.GRAPH_SCHEMA,
-         diverse.SUCCESSFUL_UPDATES, diverse.TRAIN_SCHEMA) = saved_diverse
+        _kernel_restore(snapshot)
 
 
 def test_sealed_r0209_graph_passes_the_kernel_contract_check() -> None:
     """Load the live sealed graph manifest through the kernel's own check."""
     import os
-    import pytest as _pytest
-    from experiments import round0166_nodes as q2
-    from experiments import round0169_nodes as diverse
+
     from experiments.prepare_round0210_queue import GRAPH_MANIFEST
 
     if not os.path.exists(GRAPH_MANIFEST):
-        _pytest.skip("sealed R0209 graph is not present on this machine")
-    saved = (q2.ROUND_ID, q2.GRAPH_SCHEMA, q2.GRAPH_SOURCE_ROUND_ID,
-             q2.GRAPH_BUILT_IN_ROUND, q2.SUCCESSFUL_UPDATES, q2.TRAIN_SCHEMA)
-    saved_diverse = (diverse.ROUND_ID, diverse.GRAPH_SCHEMA,
-                     diverse.SUCCESSFUL_UPDATES, diverse.TRAIN_SCHEMA)
+        pytest.skip("sealed R0209 graph is not present on this machine")
+    snapshot = _kernel_snapshot()
+    q2 = snapshot[0]
     try:
         nodes._configure(1_588_163)
         manifest = q2.prompt_contract.read_sealed(GRAPH_MANIFEST, label="graph")
@@ -194,7 +207,17 @@ def test_sealed_r0209_graph_passes_the_kernel_contract_check() -> None:
         assert fixed["passed"] is True
         assert int(manifest["directed_edge_count"]) == 957_799_410
     finally:
-        (q2.ROUND_ID, q2.GRAPH_SCHEMA, q2.GRAPH_SOURCE_ROUND_ID,
-         q2.GRAPH_BUILT_IN_ROUND, q2.SUCCESSFUL_UPDATES, q2.TRAIN_SCHEMA) = saved
-        (diverse.ROUND_ID, diverse.GRAPH_SCHEMA,
-         diverse.SUCCESSFUL_UPDATES, diverse.TRAIN_SCHEMA) = saved_diverse
+        _kernel_restore(snapshot)
+
+
+def test_kernel_error_type_is_restored_for_other_suites() -> None:
+    """Regression guard for the pollution this file previously caused."""
+    from experiments.round0166_nodes import Round0166Error
+
+    snapshot = _kernel_snapshot()
+    q2 = snapshot[0]
+    try:
+        nodes._configure(1_588_163)
+    finally:
+        _kernel_restore(snapshot)
+    assert q2.Round0166Error is Round0166Error
