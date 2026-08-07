@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -75,6 +76,50 @@ TRAIN_OUTPUT = (
 )
 R0173_PACK_ROOT = "/data/latent-basemap/runs/round-0173/queue/artifacts"
 GPU_HOURS_CAP = 2.5
+
+
+def _reproducing_review_bundle(round_id: str) -> list[dict[str, Any]]:
+    """Bind the accepted review of `round_id` whose document hashes reproduce.
+
+    `_accepted_bundle` requires exactly one accepted review per round and that
+    its `round_sha256`/`result_sha256` match the live files. Both assumptions can
+    fail legitimately: a result may be re-published after its first review (the
+    runner watcher rewrote result-0210 to apply that review's own corrected GPU
+    charge), which strands the first review's binding and forces a re-review, so
+    more than one accepted review can exist. Rather than weaken the check, pick
+    the accepted review that still binds the live bytes exactly — which is
+    strictly what a downstream consumer needs — and fail closed when none does.
+    """
+    candidates = sorted(
+        glob.glob(os.path.join(LAB_ROOT, f"review-{round_id}-*.md"))
+    )
+    accepted = [
+        path for path in candidates if _frontmatter(path).get("status") == "accepted"
+    ]
+    if not accepted:
+        raise RuntimeError(f"R0211 requires an accepted Review {round_id}; found 0")
+    stale: list[str] = []
+    for path in accepted:
+        frontmatter = _frontmatter(path)
+        if frontmatter.get("round_id") != round_id:
+            continue
+        issued = expected_input_signature(
+            os.path.join(LAB_ROOT, str(frontmatter.get("round") or ""))
+        )
+        result = expected_input_signature(
+            os.path.join(LAB_ROOT, str(frontmatter.get("result") or ""))
+        )
+        if (
+            issued["sha256"] == frontmatter.get("round_sha256")
+            and result["sha256"] == frontmatter.get("result_sha256")
+        ):
+            return [issued, result, expected_input_signature(path)]
+        stale.append(os.path.basename(path))
+    raise RuntimeError(
+        f"R0211 found {len(stale)} accepted Review {round_id} document(s) "
+        f"({', '.join(stale)}) but none binds the live round/result bytes; "
+        "re-review the current result before consuming it"
+    )
 
 
 def _issued_round(release_sha: str) -> dict[str, Any]:
@@ -195,9 +240,9 @@ def prepare_round0211(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
         *_accepted_bundle("0160"),
         *_accepted_bundle("0161"),
         *_accepted_bundle("0168", review_path=R0168_REVIEW),
-        *_accepted_bundle("0208"),
-        *_accepted_bundle("0209"),
-        *_accepted_bundle("0210"),
+        *_reproducing_review_bundle("0208"),
+        *_reproducing_review_bundle("0209"),
+        *_reproducing_review_bundle("0210"),
     ]
     staging_signature = expected_input_signature(STAGING_MANIFEST)
     staging = _read_sealed(staging_signature, label="accepted R0168 staging")
