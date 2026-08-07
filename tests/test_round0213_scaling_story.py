@@ -39,7 +39,10 @@ def test_dose_axis_reproduces_the_sealed_seed_sensitivity() -> None:
         seed_noise_sd=r0190["width_null_noise_scale"]["value"],
     )
     assert axis["high_dose"]["seeds"] == 3
-    assert axis["high_dose"]["seeds_clearing_floor"] == 2
+    # 2 of 3 seeds reproduced the regression, so exactly 1 clears the floor
+    assert axis["high_dose"]["seeds_reproducing_regression"] == 2
+    assert axis["high_dose"]["seeds_below_floor"] == 2
+    assert axis["high_dose"]["seeds_clearing_floor"] == 1
     assert axis["high_dose"]["clears_floor_on_mean"] is False
     assert axis["high_dose"]["floor_inside_one_sd"] is True
     assert axis["low_dose"]["clears_floor"] is True
@@ -129,6 +132,39 @@ def test_fewer_than_three_seeds_is_not_a_boundary_claim() -> None:
         dose_axis(
             high_dose_retention=[0.95, 0.98],
             high_dose_positive_by_seed={"seed42": True, "seed43": False},
+            low_dose_full_over_half=1.05,
+            seed_noise_sd=0.0116,
+        )
+
+
+def test_seed_counts_are_derived_from_the_values_not_from_a_label() -> None:
+    """R0190's `positive` seed = one that REPRODUCED the regression, i.e. failed."""
+    r0190, r0207 = _live()
+    axis = dose_axis(
+        high_dose_retention=r0190["retention_summary"]["values"],
+        high_dose_positive_by_seed=r0190["positive_by_seed"],
+        low_dose_full_over_half=r0207["retentions"]["h2048"]["pile_ffr"]["full_over_half"],
+        seed_noise_sd=r0190["width_null_noise_scale"]["value"],
+    )
+    high = axis["high_dose"]
+    values = high["retention_values"]
+    assert high["seeds_below_floor"] == sum(1 for v in values if v < RETENTION_FLOOR)
+    assert high["seeds_clearing_floor"] == sum(
+        1 for v in values if v >= RETENTION_FLOOR
+    )
+    assert high["seeds_below_floor"] + high["seeds_clearing_floor"] == high["seeds"]
+    # the sealed R0190 case specifically: 2 reproduce, exactly 1 clears
+    assert high["seeds_reproducing_regression"] == 2
+    assert high["seeds_below_floor"] == 2
+    assert high["seeds_clearing_floor"] == 1
+
+
+def test_inconsistent_seed_flags_fail_closed() -> None:
+    """If R0190's flags disagree with its own values, refuse to synthesise."""
+    with pytest.raises(Round0213Error):
+        dose_axis(
+            high_dose_retention=[0.98, 0.99, 0.995],   # none below the floor
+            high_dose_positive_by_seed={"a": True, "b": True, "c": False},
             low_dose_full_over_half=1.05,
             seed_noise_sd=0.0116,
         )

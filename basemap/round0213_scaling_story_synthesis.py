@@ -80,7 +80,19 @@ def dose_axis(
     mean = sum(values) / len(values)
     variance = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
     sd = math.sqrt(variance)
-    positive = sum(1 for v in high_dose_positive_by_seed.values() if v)
+    # R0190's `positive_by_seed` marks a seed that **reproduced the regression**,
+    # i.e. one whose retention fell BELOW the floor. Derive both counts from the
+    # retention values so the labels cannot invert, and cross-check R0190's own
+    # flags against them.
+    below = sum(1 for v in values if v < RETENTION_FLOOR)
+    clearing = len(values) - below
+    reproduced = sum(1 for v in high_dose_positive_by_seed.values() if v)
+    if reproduced != below:
+        raise Round0213Error(
+            f"R0190 marks {reproduced} seeds as reproducing the regression but "
+            f"{below} of {len(values)} retention values fall below the "
+            f"{RETENTION_FLOOR} floor"
+        )
     low = _finite(low_dose_full_over_half, label="low-dose full/half")
     return {
         "width": 2048,
@@ -93,7 +105,9 @@ def dose_axis(
             "retention_mean": mean,
             "retention_sample_sd_ddof1": sd,
             "seeds": len(values),
-            "seeds_clearing_floor": positive,
+            "seeds_clearing_floor": clearing,
+            "seeds_below_floor": below,
+            "seeds_reproducing_regression": reproduced,
             "clears_floor_on_mean": mean >= RETENTION_FLOOR,
             "floor_inside_one_sd": abs(mean - RETENTION_FLOOR) <= sd,
             "verdict": "seed-sensitive regression",
@@ -187,9 +201,7 @@ def loss_locality(*, context: Mapping[str, Any]) -> dict[str, Any]:
 def operating_rule(*, dose: Mapping[str, Any], width: Mapping[str, Any]) -> dict[str, Any]:
     """State the rule, and refuse to state it if the evidence stopped supporting it."""
     low_flat = bool(dose["low_dose"]["clears_floor"])
-    high_sensitive = int(dose["high_dose"]["seeds_clearing_floor"]) < int(
-        dose["high_dose"]["seeds"]
-    )
+    high_sensitive = int(dose["high_dose"]["seeds_below_floor"]) > 0
     width_not_worth_it = not bool(width["capacity_absorbs_dose_claim_supported"])
     supported = low_flat and high_sensitive and width_not_worth_it
     if not supported:
