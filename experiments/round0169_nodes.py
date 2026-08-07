@@ -724,7 +724,13 @@ def _matched_2m_panel(
     reference_identity = {
         "data_identity": q2.prompt_nodes._data_identity(assembly, arm="document"),
         "convention": {
-            "row_order": "R0113 shared union-representative compact order",
+            # Must reproduce the accepted R0160 reference's own stored convention
+            # exactly or `_resolve_reference` fails closed on the key. This stays
+            # an independent literal rather than being read back off the
+            # reference, which would make the key check vacuous for this field.
+            "row_order": (
+                "R0113 shared source/raw/document union-representative compact order"
+            ),
             "distance": "cosine via fp32-L2-normalized squared L2",
             "self_exclusion": True,
             "anchor_namespace": "R0113 compact IDs",

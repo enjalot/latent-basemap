@@ -291,3 +291,79 @@ def test_probe_receipt_guard_still_rejects_a_foreign_pack_round() -> None:
             diverse._load_language_probe(probe_dir, "arb_Arab")
     finally:
         diverse.LANGUAGE_RECEIPT_ROUND_ID = saved
+
+
+def test_matched_2m_reference_convention_matches_the_accepted_reference() -> None:
+    """The matched-2M panel's declared convention must reproduce the reference key.
+
+    `_matched_2m_panel` declares the reference identity independently and
+    `_resolve_reference` recomputes the key from it, so any drift between the
+    declared convention and the accepted R0160 reference's stored convention
+    fails closed at score time — after the model transform has already been
+    paid for. Catch it on CPU instead.
+    """
+    import dataclasses
+    import json
+
+    from basemap import round0113_prompt_contrast as pc
+    from basemap.artifact_identity import expected_input_signature
+    from basemap.panel_v2 import load_hiD_reference
+    from experiments import round0166_nodes as q2
+    from experiments.prepare_round0169_queue import FAMILY_PATH, _read_sealed
+
+    if not os.path.exists(FAMILY_PATH):
+        pytest.skip("accepted R0160 family is not present on this machine")
+    family = _read_sealed(expected_input_signature(FAMILY_PATH), label="family")
+    reference = load_hiD_reference(
+        pc.verify_signature(family["shared_prompted_reference"], label="reference")
+    )
+    stored = reference["key_parts"]
+    declared_row_order = (
+        "R0113 shared source/raw/document union-representative compact order"
+    )
+    assert stored["convention"]["row_order"] == declared_row_order
+    assert stored["convention"]["anchor_namespace"] == "R0113 compact IDs"
+    assert stored["convention"]["embedding_prompt"] == "document"
+    assert (
+        stored["convention"]["distance"]
+        == "cosine via fp32-L2-normalized squared L2"
+    )
+    assert stored["convention"]["self_exclusion"] is True
+    # The panel config and the reference's bound data identity must also agree.
+    cfg = pc.panel_config()
+    assert stored["formula"] == cfg.formula_version
+    assert json.dumps(stored["config"], sort_keys=True) == json.dumps(
+        dataclasses.asdict(cfg), sort_keys=True
+    )
+    assembly = q2._read_sealed(family["lineage"]["assembly"], label="assembly")
+    assert json.dumps(
+        q2.prompt_nodes._data_identity(assembly, arm="document"), sort_keys=True
+    ) == json.dumps(stored["data"], sort_keys=True)
+
+
+def test_accepted_matched_query_truth_assertions_hold() -> None:
+    """Pre-verify the assertions `_matched_2m_panel` makes after the transform."""
+    from basemap import round0113_prompt_contrast as pc
+    from basemap.artifact_identity import expected_input_signature
+    from basemap.panel_v2 import load_query_truth
+    from experiments import round0166_nodes as q2
+    from experiments.prepare_round0169_queue import FAMILY_PATH, _read_sealed
+
+    if not os.path.exists(FAMILY_PATH):
+        pytest.skip("accepted R0160 family is not present on this machine")
+    family = _read_sealed(expected_input_signature(FAMILY_PATH), label="family")
+    seed42 = family["cells"]["seed42"]
+    score = q2._read_sealed(seed42["native_score"], label="score")
+    assert score["round_id"] == "0115" and score["arm"] == "document"
+    assert score["projections"]["matched"]["truth_row_range"] == [0, q2.QUERY_ROWS]
+    truth_path = pc.verify_signature(score["combined_query_truth"], label="truth")
+    try:
+        truth = load_query_truth(truth_path)
+    except ValueError as error:
+        # `load_query_truth` binds the exact CUDA backend identity that produced
+        # the truth, which cannot reproduce in this CUDA-hidden test process.
+        # The production node runs with CUDA present.
+        if "backend identity" not in str(error):
+            raise
+        pytest.skip(f"query truth needs its CUDA backend: {error}")
+    assert truth["corpus_cardinality"] == q2.MATCHED_ROWS
