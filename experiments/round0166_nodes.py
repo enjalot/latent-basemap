@@ -137,17 +137,34 @@ def _merge_ann_topk(
     ids = np.concatenate((left_ids, right_ids), axis=1).astype(
         np.int64, copy=False
     )
-    if not np.isfinite(sims).all() or np.any(ids < 0):
+    # FAISS returns id -1 with a sentinel score when a query's probed lists
+    # hold fewer than k vectors *in this shard*.  On a homogeneous population
+    # (R0166/R0171 English) that never happens, but on a population whose
+    # compact order blocks by corpus and language a contiguous shard can hold
+    # zero vectors in the lists a given query probes.  Such a slot carries no
+    # candidate: it must be excluded from the merge, never ranked as one.
+    # Every slot that does carry a candidate must still be finite.
+    missing = ids < 0
+    if not np.isfinite(sims[~missing]).all():
         raise Round0166Error("sharded ANN merge received invalid candidates")
+    absent = np.iinfo(np.int64).max
+    sims = np.where(missing, -np.inf, sims)
+    ids = np.where(missing, absent, ids)
     # The merged table is only 2k wide (100 columns for the registered graph),
     # so sort the complete candidate set.  Besides being cheap at this width,
     # this avoids argpartition choosing an arbitrary member of a score tie at
     # the kth boundary.
     order = np.lexsort((ids, -sims), axis=1)[:, :k]
-    return (
-        np.take_along_axis(sims, order, axis=1),
-        np.take_along_axis(ids, order, axis=1),
-    )
+    merged_sims = np.take_along_axis(sims, order, axis=1)
+    merged_ids = np.take_along_axis(ids, order, axis=1)
+    # Re-emit unfilled slots as the -1 the caller's completeness guard checks,
+    # so a row that never reaches k real candidates across every shard still
+    # fails closed instead of carrying a sentinel neighbour.
+    unfilled = merged_ids == absent
+    if unfilled.any():
+        merged_ids = np.where(unfilled, -1, merged_ids)
+        merged_sims = np.where(unfilled, -np.inf, merged_sims)
+    return merged_sims, merged_ids
 
 
 def _signature(path: str, *, label: str) -> dict[str, Any]:

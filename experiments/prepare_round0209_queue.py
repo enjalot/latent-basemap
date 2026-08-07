@@ -58,13 +58,26 @@ GPU_HOURS_CAP = 3.0
 
 
 def _issued_round(release_sha: str) -> dict[str, Any]:
+    """Accept the issued round at its base commit or any descendant release.
+
+    A setup-class correction inside the same round advances the release without
+    changing the treatment, so the R0173 ancestor test is used here rather than
+    exact equality; an issued round file is append-only and its `base_commit`
+    cannot be rewritten to name the corrected release.
+    """
     frontmatter = _frontmatter(ROUND_FILE)
+    base_commit = str(frontmatter.get("base_commit") or "")
+    descendant = subprocess.run(
+        ["git", "-C", RELEASE_ROOT, "merge-base", "--is-ancestor", base_commit, release_sha],
+        check=False,
+        timeout=10,
+    ).returncode == 0
     if (
         frontmatter.get("round_id") != ROUND_ID
         or frontmatter.get("status") != "issued"
-        or frontmatter.get("base_commit") != release_sha
+        or not descendant
     ):
-        raise RuntimeError("R0209 round is not issued for this exact release")
+        raise RuntimeError("R0209 round is not issued for this release")
     return expected_input_signature(ROUND_FILE)
 
 
