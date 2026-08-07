@@ -66,8 +66,12 @@ OOD_PACK_PATH = (
     "/data/latent-basemap/runs/round-0208/queue/artifacts/"
     "jina-prompted-u12-ood-probe-pack-v2/probe-pack.json"
 )
+# R0210's first queue reached a registered terminal `failed` state before any
+# CUDA training child started and published no model; the map was trained by its
+# dated `queue-correction-1` relaunch.
 TRAIN_OUTPUT = (
-    "/data/latent-basemap/runs/round-0210/queue/artifacts/seed42-low-dose-train"
+    "/data/latent-basemap/runs/round-0210/queue-correction-1/artifacts/"
+    "seed42-low-dose-train"
 )
 R0173_PACK_ROOT = "/data/latent-basemap/runs/round-0173/queue/artifacts"
 GPU_HOURS_CAP = 2.5

@@ -206,3 +206,41 @@ def test_removed_overlap_rows_are_absent_from_the_retained_corpus() -> None:
 def test_capability_and_round_identity() -> None:
     assert CAPABILITY == "jina-prompted-diverse-u12-evaluation-panel-v1"
     assert ROUND_ID == "0211"
+
+
+def test_bound_upstream_paths_are_the_queues_that_actually_sealed() -> None:
+    """Guard the 'bound the failed queue' bug class.
+
+    R0209 and R0210 each reached a registered terminal `failed` state on their
+    first queue and sealed their artifact in a dated `queue-correction-N`
+    relaunch. A prepare script that keeps pointing at `queue/` binds a path that
+    does not exist, and the failure surfaces only at launch.
+    """
+    from experiments.prepare_round0210_queue import GRAPH_MANIFEST
+    from experiments.prepare_round0211_queue import OOD_PACK_PATH, TRAIN_OUTPUT
+
+    for path, label in (
+        (GRAPH_MANIFEST, "sealed R0209 graph manifest"),
+        (os.path.join(TRAIN_OUTPUT, "train-receipt.json"), "sealed R0210 train receipt"),
+        (os.path.join(TRAIN_OUTPUT, "model.pt"), "sealed R0210 model"),
+        (OOD_PACK_PATH, "sealed R0208 pack v2"),
+    ):
+        assert os.path.exists(path), f"{label} is not at the bound path {path}"
+
+
+def test_train_receipt_matches_the_sealed_graph_horizon() -> None:
+    """The panel must not score a model trained off a different edge count."""
+    from basemap.round0210_prompted_diverse_low_dose import successful_updates_for_edges
+    from basemap import round0113_prompt_contrast as prompt_contract
+    from experiments.prepare_round0210_queue import GRAPH_MANIFEST
+    from experiments.prepare_round0211_queue import TRAIN_OUTPUT
+
+    receipt_path = os.path.join(TRAIN_OUTPUT, "train-receipt.json")
+    if not (os.path.exists(GRAPH_MANIFEST) and os.path.exists(receipt_path)):
+        pytest.skip("sealed R0209/R0210 artifacts are not present on this machine")
+    graph = prompt_contract.read_sealed(GRAPH_MANIFEST, label="graph")
+    train = prompt_contract.read_sealed(receipt_path, label="train")
+    edges = int(graph["directed_edge_count"])
+    assert int(train["train_accounting"]["n_pos_edges"]) == edges
+    assert int(train["optimizer_updates"]) == successful_updates_for_edges(edges)
+    assert train["graph_manifest"]["canonical_path"] == GRAPH_MANIFEST
