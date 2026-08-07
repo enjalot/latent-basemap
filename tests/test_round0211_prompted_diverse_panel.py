@@ -244,3 +244,50 @@ def test_train_receipt_matches_the_sealed_graph_horizon() -> None:
     assert int(train["train_accounting"]["n_pos_edges"]) == edges
     assert int(train["optimizer_updates"]) == successful_updates_for_edges(edges)
     assert train["graph_manifest"]["canonical_path"] == GRAPH_MANIFEST
+
+
+def test_probe_receipt_guard_names_the_embedding_round_not_the_executing_one() -> None:
+    """A later round must be able to load the R0173 probe receipts.
+
+    `_load_language_probe` guards the receipt's `round_id`. That receipt names the
+    round that embedded the probe (0173), not the round executing the check, so
+    comparing it against `ROUND_ID` made the guard pass only inside R0173 itself.
+    """
+    from experiments import round0169_nodes as diverse
+
+    probe_dir = os.path.join(
+        "/data/latent-basemap/runs/round-0173/queue/artifacts", "prompted-arb_Arab"
+    )
+    if not os.path.exists(os.path.join(probe_dir, "receipt.json")):
+        pytest.skip("R0173 probe receipts are not present on this machine")
+    assert diverse.LANGUAGE_RECEIPT_ROUND_ID == "0173"
+    saved = diverse.ROUND_ID
+    try:
+        # Any executing round other than 0173 must still load the pack.
+        diverse.ROUND_ID = "0211"
+        corpus, queries, corpus_rows, query_rows, _sigs = diverse._load_language_probe(
+            probe_dir, "arb_Arab"
+        )
+        assert corpus.shape == (49_500, 768)
+        assert queries.shape == (500, 768)
+        assert corpus_rows.shape == (49_500,) and query_rows.shape == (500,)
+    finally:
+        diverse.ROUND_ID = saved
+
+
+def test_probe_receipt_guard_still_rejects_a_foreign_pack_round() -> None:
+    from experiments import round0169_nodes as diverse
+    from basemap.round0169_prompted_diverse import Round0169Error
+
+    probe_dir = os.path.join(
+        "/data/latent-basemap/runs/round-0173/queue/artifacts", "prompted-arb_Arab"
+    )
+    if not os.path.exists(os.path.join(probe_dir, "receipt.json")):
+        pytest.skip("R0173 probe receipts are not present on this machine")
+    saved = diverse.LANGUAGE_RECEIPT_ROUND_ID
+    try:
+        diverse.LANGUAGE_RECEIPT_ROUND_ID = "9999"
+        with pytest.raises(Round0169Error):
+            diverse._load_language_probe(probe_dir, "arb_Arab")
+    finally:
+        diverse.LANGUAGE_RECEIPT_ROUND_ID = saved

@@ -431,7 +431,12 @@ def _load_language_probe(
     )
     if (
         receipt.get("schema") != LANGUAGE_PROBE_SCHEMA
-        or receipt.get("round_id") != ROUND_ID
+        # The receipt names the round that *embedded* the probe, which is not the
+        # round executing this check whenever a later round consumes the pack.
+        # `LANGUAGE_RECEIPT_ROUND_ID` exists for exactly that and defaults to the
+        # probe pack's own round; comparing against `ROUND_ID` made this guard
+        # pass only when the executing round was itself the embedding round.
+        or receipt.get("round_id") != LANGUAGE_RECEIPT_ROUND_ID
         or receipt.get("language") != language
         or receipt.get("prompt_applied") is not True
     ):
