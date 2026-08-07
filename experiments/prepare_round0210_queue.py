@@ -53,8 +53,10 @@ QUEUE_ROOT = os.path.join(ROUND_ROOT, "queue")
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE = os.path.join(LAB_ROOT, "round-0210-2026-08-07.md")
 R0168_REVIEW = os.path.join(LAB_ROOT, "review-0168-2026-08-03-01.md")
+# R0209's first queue reached a registered terminal `failed` state and sealed no
+# manifest; the graph was sealed by its dated `queue-correction-1` relaunch.
 GRAPH_MANIFEST = (
-    "/data/latent-basemap/runs/round-0209/queue/artifacts/"
+    "/data/latent-basemap/runs/round-0209/queue-correction-1/artifacts/"
     "fuzzy-k50-graph-and-reference/graph-manifest.json"
 )
 GPU_HOURS_CAP = 8.0
@@ -64,13 +66,25 @@ REGISTERED_UPDATE_BOUND = 2_100_000
 
 
 def _issued_round(release_sha: str) -> dict[str, Any]:
+    """Accept the issued round at its base commit or any descendant release.
+
+    The R0173 ancestor test rather than exact equality: an issued round file is
+    append-only, so its `base_commit` cannot be rewritten when a setup-class
+    correction elsewhere in the campaign advances the shared release.
+    """
     frontmatter = _frontmatter(ROUND_FILE)
+    base_commit = str(frontmatter.get("base_commit") or "")
+    descendant = subprocess.run(
+        ["git", "-C", RELEASE_ROOT, "merge-base", "--is-ancestor", base_commit, release_sha],
+        check=False,
+        timeout=10,
+    ).returncode == 0
     if (
         frontmatter.get("round_id") != ROUND_ID
         or frontmatter.get("status") != "issued"
-        or frontmatter.get("base_commit") != release_sha
+        or not descendant
     ):
-        raise RuntimeError("R0210 round is not issued for this exact release")
+        raise RuntimeError("R0210 round is not issued for this release")
     return expected_input_signature(ROUND_FILE)
 
 
