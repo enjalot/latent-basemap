@@ -299,14 +299,18 @@ def prepare_round0211(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
     ]
     train_receipt_path = os.path.join(TRAIN_OUTPUT, "train-receipt.json")
     train_signature = expected_input_signature(train_receipt_path)
-    train = _read_sealed(train_signature, label="sealed R0210 train receipt")
+    train = _read_sealed(train_signature, label="sealed R0212 seed-43 train receipt")
     updates = successful_updates_for_edges(edges)
     if (
-        train.get("round_id") != "0210"
+        train.get("round_id") != "0212"
+        or int(train.get("training_seed", -1)) != SEED
         or int(train.get("optimizer_updates", -1)) != updates
         or train.get("graph_manifest") != graph_signature
     ):
-        raise RuntimeError("R0214 sealed R0210 train receipt does not match the graph")
+        raise RuntimeError(
+            "R0214 sealed R0212 seed-43 train receipt does not match the sealed "
+            "graph, the dose rule, or seed 43"
+        )
     train_inputs = [train_signature, dict(train["model"]), dict(train["production_config"])]
 
     pack_signature, pack_inputs, language_outputs = _pack_inputs()
