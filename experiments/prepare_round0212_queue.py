@@ -63,7 +63,7 @@ GRAPH_MANIFEST = (
     "/data/latent-basemap/runs/round-0209/queue-correction-1/artifacts/"
     "fuzzy-k50-graph-and-reference/graph-manifest.json"
 )
-GPU_HOURS_CAP = 8.0
+GPU_HOURS_CAP = 4.6
 #: Refuse to launch if the sealed graph implies a horizon this queue's budget
 #: cannot honour. Registered in the round file alongside the GPU bound.
 REGISTERED_UPDATE_BOUND = 2_100_000
