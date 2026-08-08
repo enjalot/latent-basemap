@@ -111,6 +111,7 @@ def _release_cpu_smoke(release_sha: str) -> dict[str, Any]:
         "-p",
         "no:cacheprovider",
         "tests/test_round0224_cuvs_memory.py",
+        "tests/test_round0224_assembly_smoke.py",
     ]
     environment = os.environ.copy()
     environment.update({

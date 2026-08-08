@@ -459,10 +459,24 @@ def _run_build(
 
 
 def _sealed_substrate(job: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
-    signature = dict(job["benchmark_substrate_manifest_signature"])
-    path = prompt_contract.verify_signature(
-        signature, label="R0224 sealed benchmark substrate receipt"
-    )
+    """Resolve the assembly node's own output, produced earlier in this queue.
+
+    A node output has no sha256 when the queue manifest is written, so the
+    reference names a path. Integrity binds through the artifact's internal
+    `prompt_contract` seal, which `read_sealed` verifies, plus the runner's own
+    output validation; a reference that does carry a hash is verified against it.
+    """
+    reference = dict(job["benchmark_substrate_manifest_signature"])
+    if reference.get("sha256"):
+        path = prompt_contract.verify_signature(
+            reference, label="R0224 sealed benchmark substrate receipt"
+        )
+    else:
+        path = str(reference["canonical_path"])
+        if not os.path.exists(path):
+            raise Round0224Error(
+                f"R0224 benchmark substrate receipt is absent at {path}"
+            )
     manifest = prompt_contract.read_sealed(
         path, label="R0224 sealed benchmark substrate receipt"
     )
