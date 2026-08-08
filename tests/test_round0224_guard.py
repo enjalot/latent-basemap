@@ -271,8 +271,8 @@ def test_a_skipped_cell_states_why() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_watchdog_trips_on_swap(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Swap above the threshold aborts the cell, and SIGTERM is what is sent."""
+def test_watchdog_trips_on_swap_growth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Swap growth above the threshold aborts the cell, via SIGTERM."""
     import experiments.round0224_nodes as nodes
 
     signalled: list[tuple[int, int]] = []
@@ -290,6 +290,7 @@ def test_watchdog_trips_on_swap(monkeypatch: pytest.MonkeyPatch) -> None:
         host_rss_budget_bytes=GUARD_HOST_RSS_BUDGET_BYTES,
         swap_abort_bytes=GUARD_SWAP_ABORT_BYTES,
         device_baseline_bytes=0,
+        swap_baseline_bytes=0,
     )
     watchdog.start()
     deadline = time.time() + 5.0
@@ -306,6 +307,91 @@ def test_watchdog_trips_on_swap(monkeypatch: pytest.MonkeyPatch) -> None:
     assert readings["watchdog_aborted"] is True
     assert readings["system_swap_peak_bytes"] == 4 * GIB
     assert readings["device_wide_peak_bytes"] == 1 * GIB
+
+
+def test_watchdog_ignores_swap_already_in_use_before_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-existing daemon swap must not abort a healthy cell.
+
+    Caught live: during R0224's assembly node the kernel evicted ~1.8 GB of
+    cold anonymous pages belonging to idle long-lived daemons under page-cache
+    pressure. None of it was attributable to any build, and `available` stayed
+    at 122 GiB — but an ABSOLUTE 1 GiB swap threshold would have aborted all
+    fifteen sweep cells on arrival and the round would have measured nothing.
+
+    The watchdog therefore judges swap as growth over a baseline read
+    immediately before the child starts. The safety property is unchanged: the
+    cell that took the box down drove swap from its baseline to exhaustion.
+    """
+    import experiments.round0224_nodes as nodes
+
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(nodes, "_nvidia_smi_device_bytes", lambda: 0)
+    monkeypatch.setattr(nodes, "_nvidia_smi_per_process_bytes", lambda pid: 0)
+    monkeypatch.setattr(nodes, "_proc_memory_bytes", lambda pid: (2 * GIB, 1 * GIB))
+    # 1.8 GiB already in use, and it does not move while the build runs.
+    baseline = 1843 * 1024 * 1024
+    monkeypatch.setattr(nodes, "_swap_used_bytes", lambda: baseline)
+    monkeypatch.setattr(
+        nodes.os, "kill", lambda pid, sig: signalled.append((pid, sig))
+    )
+
+    watchdog = BuildWatchdog(
+        pid=os.getpid(),
+        poll_s=0.01,
+        host_rss_budget_bytes=GUARD_HOST_RSS_BUDGET_BYTES,
+        swap_abort_bytes=GUARD_SWAP_ABORT_BYTES,
+        device_baseline_bytes=0,
+        swap_baseline_bytes=baseline,
+    )
+    watchdog.start()
+    time.sleep(0.25)
+    watchdog.stop()
+    watchdog.join(timeout=5)
+
+    assert watchdog.abort_reason is None, watchdog.abort_reason
+    assert signalled == []
+    readings = watchdog.readings()
+    assert readings["system_swap_baseline_bytes"] == baseline
+    assert readings["system_swap_growth_bytes"] == 0
+
+
+def test_watchdog_still_trips_when_the_build_itself_drives_swap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The safety property survives the baseline fix."""
+    import experiments.round0224_nodes as nodes
+
+    signalled: list[tuple[int, int]] = []
+    baseline = 1843 * 1024 * 1024
+    monkeypatch.setattr(nodes, "_nvidia_smi_device_bytes", lambda: 0)
+    monkeypatch.setattr(nodes, "_nvidia_smi_per_process_bytes", lambda pid: 0)
+    monkeypatch.setattr(nodes, "_proc_memory_bytes", lambda pid: (2 * GIB, 1 * GIB))
+    # Baseline plus 2 GiB driven by the build: this is the crash signature.
+    monkeypatch.setattr(nodes, "_swap_used_bytes", lambda: baseline + 2 * GIB)
+    monkeypatch.setattr(
+        nodes.os, "kill", lambda pid, sig: signalled.append((pid, sig))
+    )
+
+    watchdog = BuildWatchdog(
+        pid=os.getpid(),
+        poll_s=0.01,
+        host_rss_budget_bytes=GUARD_HOST_RSS_BUDGET_BYTES,
+        swap_abort_bytes=GUARD_SWAP_ABORT_BYTES,
+        device_baseline_bytes=0,
+        swap_baseline_bytes=baseline,
+    )
+    watchdog.start()
+    deadline = time.time() + 5.0
+    while watchdog.abort_reason is None and time.time() < deadline:
+        time.sleep(0.01)
+    watchdog.stop()
+    watchdog.join(timeout=5)
+
+    assert watchdog.abort_reason is not None
+    assert "grew" in watchdog.abort_reason
+    assert signalled and signalled[0][1] == signal.SIGTERM
 
 
 def test_watchdog_trips_on_host_rss(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -328,6 +414,7 @@ def test_watchdog_trips_on_host_rss(monkeypatch: pytest.MonkeyPatch) -> None:
         host_rss_budget_bytes=GUARD_HOST_RSS_BUDGET_BYTES,
         swap_abort_bytes=GUARD_SWAP_ABORT_BYTES,
         device_baseline_bytes=0,
+        swap_baseline_bytes=0,
     )
     watchdog.start()
     deadline = time.time() + 5.0

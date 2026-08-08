@@ -484,14 +484,25 @@ class BuildWatchdog(threading.Thread):
         host_rss_budget_bytes: int,
         swap_abort_bytes: int,
         device_baseline_bytes: int,
+        swap_baseline_bytes: int = 0,
     ) -> None:
         super().__init__(daemon=True)
         self._pid = int(pid)
         self._poll_s = float(poll_s)
         self._host_budget = int(host_rss_budget_bytes)
         self._swap_abort = int(swap_abort_bytes)
+        # Swap is judged as GROWTH over a baseline read immediately before the
+        # child starts, never as an absolute level. On this box roughly 1.8 GB
+        # of swap is already in use by idle long-lived daemons that the kernel
+        # evicted under page-cache pressure from an earlier node — none of it
+        # attributable to any build. An absolute 1 GiB threshold would abort
+        # every cell on arrival and the round would measure nothing. The safety
+        # property is unchanged: what took the box down was a build driving swap
+        # from its baseline to exhaustion, and that is exactly what growth sees.
+        self._swap_baseline = int(swap_baseline_bytes)
         self._stop_event = threading.Event()
         self.device_baseline_bytes = int(device_baseline_bytes)
+        self.swap_baseline_bytes = int(swap_baseline_bytes)
         self.device_peak_bytes = 0
         self.host_rss_peak_bytes = 0
         self.host_anon_peak_bytes = 0
@@ -528,10 +539,13 @@ class BuildWatchdog(threading.Thread):
                 _nvidia_smi_per_process_bytes(self._pid),
             )
             self.samples += 1
-            if swap > self._swap_abort:
+            swap_growth = swap - self._swap_baseline
+            if swap_growth > self._swap_abort:
                 self._trip(
-                    f"system swap in use {swap / 1024 ** 3:.2f} GiB exceeds the "
-                    f"{self._swap_abort / 1024 ** 3:.2f} GiB abort threshold"
+                    f"system swap grew {swap_growth / 1024 ** 3:.2f} GiB over its "
+                    f"{self._swap_baseline / 1024 ** 3:.2f} GiB pre-launch "
+                    f"baseline (now {swap / 1024 ** 3:.2f} GiB), exceeding the "
+                    f"{self._swap_abort / 1024 ** 3:.2f} GiB growth threshold"
                 )
             elif rss > self._host_budget:
                 self._trip(
@@ -555,6 +569,10 @@ class BuildWatchdog(threading.Thread):
             "host_rss_peak_bytes": int(self.host_rss_peak_bytes),
             "host_anon_peak_bytes": int(self.host_anon_peak_bytes),
             "system_swap_peak_bytes": int(self.swap_peak_bytes),
+            "system_swap_baseline_bytes": int(self.swap_baseline_bytes),
+            "system_swap_growth_bytes": int(
+                max(0, self.swap_peak_bytes - self.swap_baseline_bytes)
+            ),
             CONTROL_INSTRUMENT: int(self.nvidia_smi_per_process_peak_bytes),
             "watchdog_aborted": self.abort_reason is not None,
             "watchdog_abort_reason": self.abort_reason,
@@ -734,6 +752,7 @@ def _run_build(
         out_dir,
     ]
     device_baseline = _nvidia_smi_device_bytes()
+    swap_baseline = _swap_used_bytes()
     started = time.perf_counter()
     process = subprocess.Popen(
         command,
@@ -749,6 +768,7 @@ def _run_build(
         host_rss_budget_bytes=GUARD_HOST_RSS_BUDGET_BYTES,
         swap_abort_bytes=GUARD_SWAP_ABORT_BYTES,
         device_baseline_bytes=device_baseline,
+        swap_baseline_bytes=swap_baseline,
     )
     watchdog.start()
     timed_out = False
