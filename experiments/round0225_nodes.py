@@ -191,20 +191,36 @@ def assess_precedent_exposure() -> dict[str, Any]:
     for round_id, path in PRECEDENTS.items():
         artifact = _read_json(path, f"R{round_id} precedent gate")
         gates = artifact.get("gates") or {}
+        artifact_n = artifact.get("n")
         entries: dict[str, Any] = {}
         for metric, cell in gates.items():
+            # The precedent artifacts carry `n` at the top level, not per metric.
             n = cell.get("n")
+            if not isinstance(n, int):
+                n = artifact_n if isinstance(artifact_n, int) else None
             entries[metric] = {
                 "floor": cell.get("floor"),
                 "n": n,
+                "n_source": "metric" if cell.get("n") is not None else "artifact",
                 "mean": cell.get("mean"),
                 "sample_sd": cell.get("sample_sd") or cell.get("sample_sd_ddof1"),
                 "is_purity_ratio_metric": metric in PURITY_METRICS,
             }
             if isinstance(n, int) and n >= 3:
                 derived = one_sided_tolerance_factor(n)["k"]
+                floor = cell.get("floor")
+                mean = cell.get("mean")
+                sd = cell.get("sample_sd") or cell.get("sample_sd_ddof1")
                 entries[metric]["one_sided_95_95_factor_at_this_n"] = derived
                 entries[metric]["multiplier_shortfall"] = derived - 2.0
+                entries[metric]["factor_ratio_to_registered"] = derived / 2.0
+                if isinstance(mean, (int, float)) and isinstance(sd, (int, float)):
+                    would_be = float(mean) - derived * float(sd)
+                    entries[metric]["floor_under_95_95"] = would_be
+                    if isinstance(floor, (int, float)):
+                        entries[metric]["floor_shift_under_95_95"] = (
+                            would_be - float(floor)
+                        )
         exposure[round_id] = {
             "artifact": path,
             "capability": artifact.get("capability"),
