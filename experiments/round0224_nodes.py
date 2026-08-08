@@ -173,6 +173,7 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         offsets = np.concatenate([[0], np.cumsum([r for _p, r, _n in shards])])
         rng = np.random.RandomState(BENCHMARK_SELECTION_SEED + index)
         picked = np.zeros(total, dtype=bool)
+        corpus_written = 0
         need = want
         dropped = 0
         rounds = 0
@@ -214,12 +215,15 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                     provenance["shard"][destinations] = shard_index
                     provenance["row"][destinations] = local[start:stop][ok]
                     written += int(kept.shape[0])
+                    corpus_written += int(kept.shape[0])
                     del block, kept, destinations
                 del array
-            need = want - (written - sum(
-                int(base) * BENCHMARK_COMPOSITION_SCALE
-                for base in [row[1] for row in COMPOSITION[:index]]
-            ))
+            need = want - corpus_written
+            if need < 0:
+                raise Round0224Error(
+                    f"R0224 {corpus} wrote {corpus_written} rows against a target "
+                    f"of {want}"
+                )
         del picked
         gc.collect()
         coverage = len(touched) / len(shards)
@@ -235,6 +239,10 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "coverage": coverage,
             "replacement_rounds": rounds,
         }
+        if corpus_written != want:
+            raise Round0224Error(
+                f"R0224 {corpus} wrote {corpus_written} rows, registered {want}"
+            )
         rejects[corpus] = dropped
         sources[corpus] = {
             "shards": len(shards),
