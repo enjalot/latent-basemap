@@ -96,6 +96,20 @@ SWEEP_INTERMEDIATE_DEGREES: tuple[int, ...] = (48, 96, 128)
 SWEEP_ROWS: tuple[int, ...] = (2_000_000, 4_000_000, 8_000_000, 16_000_000)
 SAMPLE_INTERVAL_S = 0.005
 
+#: Dataset mode per rung. `materialize` copies the prefix into host RAM on top of
+#: the page-cached file; at 16,000,000 rows that is a 24.58 GB duplicate, and the
+#: first attempt drove this box to 46.7 GB RSS with 8 GB of swap in use and a
+#: single build still unfinished at 37 minutes. That is a **measurement**: a
+#: resident host array is already the binding constraint at 16M, so the top rung
+#: is fed from the memmap instead. The comparison at 2M (both modes, the
+#: residency probe) is what licenses reading the two rungs together.
+DATASET_MODE_BY_ROWS: dict[int, str] = {
+    2_000_000: "materialize",
+    4_000_000: "materialize",
+    8_000_000: "materialize",
+    16_000_000: "memmap",
+}
+
 #: The dataset-residency probe, run at the smallest N only: does the builder
 #: accept a memmap without materializing it in host RAM? A 100M x 384 fp32
 #: substrate cannot be a resident host array on this box, so the answer bounds
@@ -125,7 +139,24 @@ INSTRUMENTS: tuple[str, ...] = (
 DEVICE_INSTRUMENTS: tuple[str, ...] = (
     "rmm_peak_bytes",
     "device_peak_sampled_bytes",
+    "device_peak_bytes",
     "nvidia_smi_peak_bytes",
+)
+#: The device figure the budget verdict uses. The 5 ms `cudaMemGetInfo` sampler
+#: is demonstrably unreliable on this workload: in the first attempt it read
+#: `0.61 GiB` at cells where the RMM allocator counter simultaneously recorded a
+#: `7.81 GiB` peak, which is physically impossible — RMM allocations *are* device
+#: memory. It misses transient peaks between samples. The RMM counter is exact
+#: for everything routed through RMM but blind to anything cuVS allocates
+#: outside it. Neither alone is right, so the budget instrument is the maximum
+#: of the two, and it is a **lower bound** on true device peak, reported as such.
+DEVICE_BUDGET_INSTRUMENT = "device_peak_bytes"
+DEVICE_BUDGET_NOTE = (
+    "device_peak_bytes = max(device_peak_sampled_bytes, rmm_peak_bytes). The "
+    "sampler misses transient peaks (it read below the RMM counter at the same "
+    "cells in the first attempt); the RMM counter cannot see allocations made "
+    "outside RMM. The maximum of the two is a LOWER BOUND on device peak, so a "
+    "'does not fit' verdict from it is conservative and a 'fits' verdict is not."
 )
 HOST_INSTRUMENTS: tuple[str, ...] = ("host_peak_sampled_bytes", "host_vmhwm_bytes")
 CONTROL_INSTRUMENT = "nvidia_smi_peak_bytes"
@@ -156,8 +187,11 @@ PROJECTION_DISCIPLINE = (
 
 GPU_HOURS_CAP = 2.5
 #: A single build that has not finished in this long has stopped being a
-#: measurement and starts being a budget risk.
-BUILD_TIMEOUT_S = 3_600.0
+#: measurement and started being a budget risk. A timeout is recorded as
+#: `fit: false, timed_out: true` and the sweep continues — the same treatment an
+#: OOM gets, and for the same reason: where the builder stops working is the
+#: thing this round is trying to find out.
+BUILD_TIMEOUT_S = 900.0
 HOST_RSS_LIMIT_GIB = 96.0
 
 
@@ -178,7 +212,7 @@ def sweep_settings() -> tuple[dict[str, Any], ...]:
                 "intermediate_graph_degree": int(igd),
                 "max_iterations": SWEEP_MAX_ITERATIONS,
                 "metric": SWEEP_METRIC,
-                "dataset_mode": "materialize",
+                "dataset_mode": DATASET_MODE_BY_ROWS[int(rows)],
             })
     return tuple(out)
 
@@ -481,6 +515,7 @@ def summarize_sweep(
                 "rows": int(item["rows"]),
                 "intermediate_graph_degree": int(item["intermediate_graph_degree"]),
                 "oom": bool(item.get("oom")),
+                "timed_out": bool(item.get("timed_out")),
                 "error_type": item.get("error_type"),
             }
             for item in failed
@@ -490,6 +525,9 @@ def summarize_sweep(
         "host_total_bytes": int(host_total_bytes),
         "projection_substrate_bytes_at_100m": PROJECTION_SUBSTRATE_BYTES,
         "projection_discipline": PROJECTION_DISCIPLINE,
+        "device_budget_instrument": DEVICE_BUDGET_INSTRUMENT,
+        "device_budget_note": DEVICE_BUDGET_NOTE,
+        "dataset_mode_by_rows": {str(k): v for k, v in DATASET_MODE_BY_ROWS.items()},
     }
 
     if not sensitivity["any_instrument_sensitive"]:
@@ -521,7 +559,7 @@ def summarize_sweep(
             continue
         sizes = [int(item["rows"]) for item in cells]
         device_fit = linear_fit(
-            sizes, [float(item["device_peak_sampled_bytes"]) for item in cells]
+            sizes, [float(item["device_peak_bytes"]) for item in cells]
         )
         host_fit = linear_fit(
             sizes, [float(item["host_peak_sampled_bytes"]) for item in cells]
@@ -539,10 +577,13 @@ def summarize_sweep(
         cell: dict[str, Any] = {
             "measured_cells": len(cells),
             "fittable": True,
+            "device_budget_instrument": DEVICE_BUDGET_INSTRUMENT,
+            "device_budget_note": DEVICE_BUDGET_NOTE,
             "measured": [
                 {
                     "rows": int(item["rows"]),
                     "builder_seconds": float(item["builder_seconds"]),
+                    "device_peak_bytes": int(item["device_peak_bytes"]),
                     "device_peak_sampled_bytes": int(item["device_peak_sampled_bytes"]),
                     "host_peak_sampled_bytes": int(item["host_peak_sampled_bytes"]),
                     "host_vmhwm_bytes": int(item["host_vmhwm_bytes"]),
@@ -596,6 +637,9 @@ __all__ = [
     "CONTROL_INSTRUMENT",
     "CONTROL_NOTE",
     "DATASET_MODES",
+    "DATASET_MODE_BY_ROWS",
+    "DEVICE_BUDGET_INSTRUMENT",
+    "DEVICE_BUDGET_NOTE",
     "DEVICE_INSTRUMENTS",
     "DIMENSION",
     "GPU_HOURS_CAP",

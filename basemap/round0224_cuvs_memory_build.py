@@ -217,12 +217,19 @@ def main(argv: list[str] | None = None) -> int:
         receipt.update({
             "fit": True,
             "oom": False,
+            "timed_out": False,
             "build_seconds": build_seconds,
             "builder_seconds": build_seconds,
             "graph_shape": graph_shape,
             "rmm_peak_bytes": int(statistics.allocation_counts.peak_bytes),
             "rmm_current_bytes": int(statistics.allocation_counts.current_bytes),
             "device_peak_sampled_bytes": int(sampler.device_peak),
+            # The budget instrument: the sampler misses transient peaks and the
+            # RMM counter cannot see allocations made outside RMM, so the maximum
+            # of the two is used and is a LOWER BOUND on true device peak.
+            "device_peak_bytes": int(
+                max(sampler.device_peak, statistics.allocation_counts.peak_bytes)
+            ),
             "device_peak_over_baseline_bytes": int(
                 sampler.device_peak - device_baseline
             ),
@@ -237,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
         receipt.update({
             "fit": False,
             "oom": bool(is_oom),
+            "timed_out": False,
             "error_type": type(exc).__name__,
             "error": str(exc)[:2000],
             "traceback_tail": traceback.format_exc()[-2000:],

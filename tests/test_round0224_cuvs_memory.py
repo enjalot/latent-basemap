@@ -71,6 +71,7 @@ def _cell(
         "host_peak_sampled_bytes": host,
         "host_vmhwm_bytes": host + 1_000_000,
         "rmm_peak_bytes": 524_000_000,
+        "device_peak_bytes": max(device, 524_000_000),
         CONTROL_INSTRUMENT: 2_625_634_304,
     }
 
@@ -81,6 +82,29 @@ def _matrix(**kwargs: Any) -> list[dict[str, Any]]:
         for rows in (2_000_000, 4_000_000, 8_000_000)
         for igd in SWEEP_INTERMEDIATE_DEGREES
     ]
+
+
+def test_the_top_rung_is_memmap_fed_and_the_rest_materialize() -> None:
+    from basemap.round0224_cuvs_memory import DATASET_MODE_BY_ROWS
+
+    assert DATASET_MODE_BY_ROWS[16_000_000] == "memmap"
+    assert set(DATASET_MODE_BY_ROWS) == set(SWEEP_ROWS)
+    modes = {item["rows"]: item["dataset_mode"] for item in sweep_settings()}
+    assert modes[16_000_000] == "memmap"
+    assert modes[2_000_000] == "materialize"
+
+
+def test_device_budget_instrument_is_the_max_of_two_lower_bounds() -> None:
+    from basemap.round0224_cuvs_memory import (
+        DEVICE_BUDGET_INSTRUMENT,
+        DEVICE_BUDGET_NOTE,
+    )
+
+    assert DEVICE_BUDGET_INSTRUMENT == "device_peak_bytes"
+    assert "LOWER BOUND" in DEVICE_BUDGET_NOTE
+    cell = _cell(8_000_000, 48)
+    assert cell["device_peak_bytes"] >= cell["rmm_peak_bytes"]
+    assert cell["device_peak_bytes"] >= cell["device_peak_sampled_bytes"]
 
 
 def test_sweep_matrix_holds_everything_but_intermediate_degree_fixed() -> None:
@@ -214,22 +238,33 @@ def test_a_failed_cell_is_a_measurement_not_a_crash() -> None:
         "intermediate_graph_degree": 128,
         "fit": False,
         "oom": True,
+        "timed_out": False,
         "error_type": "MemoryError",
+    })
+    measurements.append({
+        "rows": 16_000_000,
+        "intermediate_graph_degree": 96,
+        "fit": False,
+        "oom": False,
+        "timed_out": True,
+        "error_type": "TimeoutExpired",
     })
     summary = summarize_sweep(
         measurements=measurements,
         device_total_bytes=DEVICE_TOTAL,
         host_total_bytes=HOST_TOTAL,
     )
-    assert summary["failed_cells"] == [
-        {
-            "rows": 16_000_000,
-            "intermediate_graph_degree": 128,
-            "oom": True,
-            "error_type": "MemoryError",
-        }
-    ]
+    assert {
+        "rows": 16_000_000,
+        "intermediate_graph_degree": 128,
+        "oom": True,
+        "timed_out": False,
+        "error_type": "MemoryError",
+    } in summary["failed_cells"]
+    assert len(summary["failed_cells"]) == 2
     assert summary["largest_measured_rows_that_fit_by_igd"]["128"] == 8_000_000
+    timed = [c for c in summary["failed_cells"] if c["timed_out"]]
+    assert len(timed) == 1 and timed[0]["intermediate_graph_degree"] == 96
 
 
 def test_prefix_composition_tolerance_is_binomial_not_fixed() -> None:

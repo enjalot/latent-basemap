@@ -59,6 +59,7 @@ from basemap.round0224_cuvs_memory import (
     DIMENSION,
     GPU_HOURS_CAP,
     HOST_RSS_LIMIT_GIB,
+    DEVICE_BUDGET_NOTE,
     INSTRUMENTS,
     PROJECTION_SUBSTRATE_BYTES,
     REGISTERED_DEVICE_TOTAL_BYTES,
@@ -436,9 +437,27 @@ def _run_build(
         stdout, stderr = process.communicate()
         stop.set()
         watcher.join(timeout=5)
-        raise Round0224Error(
-            f"R0224 build {config['setting_id']} exceeded {BUILD_TIMEOUT_S:.0f}s"
-        )
+        # A timeout is a measurement, not a crash: where the builder stops being
+        # usable on this box is exactly what the round is trying to find out.
+        return {
+            "schema": "round0224-cuvs-memory-build-v1",
+            "setting_id": str(config["setting_id"]),
+            "config": dict(config),
+            "rows": int(config["rows"]),
+            "dimension": int(config["dimension"]),
+            "intermediate_graph_degree": int(config["intermediate_graph_degree"]),
+            "graph_degree": int(config["graph_degree"]),
+            "max_iterations": int(config["max_iterations"]),
+            "metric": str(config["metric"]),
+            "fit": False,
+            "oom": False,
+            "timed_out": True,
+            "timeout_s": BUILD_TIMEOUT_S,
+            "error_type": "TimeoutExpired",
+            "subprocess_seconds": time.perf_counter() - started,
+            CONTROL_INSTRUMENT: int(sink.get(CONTROL_INSTRUMENT, 0)),
+            "stderr_tail": stderr[-2000:],
+        }
     finally:
         stop.set()
         watcher.join(timeout=5)
@@ -623,6 +642,9 @@ def run_sweep(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 
     execution_checks = {
         "every_cell_attempted": len(measurements) == len(sweep_settings()),
+        "device_budget_instrument_present": all(
+            "device_peak_bytes" in item for item in measurements if item.get("fit")
+        ),
         "instrument_set_complete": all(
             all(
                 instrument in item
@@ -671,6 +693,7 @@ def run_sweep(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "cells": len(sweep_settings()),
         },
         "instruments": list(INSTRUMENTS),
+        "device_budget_note": DEVICE_BUDGET_NOTE,
         "sample_interval_s": SAMPLE_INTERVAL_S,
         "budgets": budget_check,
         "builds": measurements,
