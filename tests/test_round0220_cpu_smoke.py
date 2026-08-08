@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import textwrap
 
 import numpy as np
 import pytest
@@ -163,3 +164,21 @@ def test_truth_receipt_shape_seals():
         },
     })
     prompt_contract.validate_seal(receipt, label="R0220 truth smoke receipt")
+
+
+def test_truth_cosines_are_never_rebound_in_run_truth():
+    """R0220's first queue shadowed the truth cosines with a probe block."""
+    import ast
+    import inspect
+
+    from experiments import round0220_nodes
+
+    source = inspect.getsource(round0220_nodes.run_truth)
+    tree = ast.parse(textwrap.dedent(source))
+    stores = [
+        node.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+    ]
+    assert stores.count("cos_np") == 1, "truth cosines must be bound exactly once"
+    assert stores.count("ids_np") == 1

@@ -203,13 +203,15 @@ def run_truth(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         if flat.size:
             flat_t = torch.from_numpy(flat).to(device)
             owner_rows = torch.from_numpy(rows_here[owner]).to(device)
-            cos = (tensor[flat_t] * tensor[owner_rows]).sum(dim=1).to(torch.float64)
-            cos_np = cos.cpu().numpy()
+            member_cos = (
+                (tensor[flat_t] * tensor[owner_rows]).sum(dim=1).to(torch.float64)
+            )
+            member_cos_np = member_cos.cpu().numpy()
         else:
-            cos_np = np.zeros(0, dtype=np.float64)
+            member_cos_np = np.zeros(0, dtype=np.float64)
         thresholds = kth[start:stop][owner] - TIE_TOLERANCE
         valid = np.zeros(rows_here.size, dtype=np.int64)
-        np.add.at(valid, owner, (cos_np >= thresholds).astype(np.int64))
+        np.add.at(valid, owner, (member_cos_np >= thresholds).astype(np.int64))
         tie_values[start:stop] = np.minimum(valid, GRAPH_K) / float(GRAPH_K)
         for offset, member_set in enumerate(members):
             truth_row = ids_np[rows_here[offset]].astype(np.int64)
@@ -226,6 +228,16 @@ def run_truth(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     cos_path = os.path.join(output, "truth-k15-cos.f32.npy")
     np.save(ids_path, ids_np)
     np.save(cos_path, cos_np)
+    # Fail closed in the producing node: R0220's first queue shipped a probe
+    # variable that shadowed `cos_np`, so the cosine file held one probe block
+    # instead of the truth. The consumer caught it six GPU-minutes later.
+    for path, expected_dtype in ((ids_path, np.int32), (cos_path, np.float32)):
+        written = np.load(path, mmap_mode="r")
+        if written.shape != (ROWS, GRAPH_K) or written.dtype != expected_dtype:
+            raise Round0220Error(
+                f"{os.path.basename(path)} is {written.shape}/{written.dtype}, "
+                f"not ({ROWS}, {GRAPH_K})/{np.dtype(expected_dtype).name}"
+            )
     receipt = prompt_contract.seal({
         "schema": TRUTH_SCHEMA,
         "round_id": ROUND_ID,
