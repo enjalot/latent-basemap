@@ -85,7 +85,9 @@ from basemap.round0223_cuvs_graph_map import (
     GRAPH_K,
     HOST_RSS_LIMIT_GIB,
     MAP_CAPABILITIES,
-    MAX_NEGATIVE_DISTANCE_FRACTION,
+    MIN_ADMISSIBLE_NEGATIVE_DISTANCE,
+    R0216_EXACT_KERNEL_MIN_DISTANCE,
+    R0216_EXACT_KERNEL_NEGATIVE_ENTRIES,
     PENDING_FLOOR_METRICS,
     PIPELINE_STAMP_LABEL_CARRYOVER,
     POSITIVE_ROWS_PER_UPDATE,
@@ -287,11 +289,14 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     del order, leading, candidate_cos
 
     dists = (1.0 - cos_sorted).astype(np.float32)
-    negative = int((dists < 0.0).sum())
-    if negative > MAX_NEGATIVE_DISTANCE_FRACTION * dists.size:
+    negative_mask = dists < 0.0
+    negative = int(negative_mask.sum())
+    most_negative = float(dists.min()) if negative else 0.0
+    if most_negative < MIN_ADMISSIBLE_NEGATIVE_DISTANCE:
         raise Round0223Error(
-            f"R0223 found {negative} negative cosine distances out of {dists.size}; "
-            "the cosines are not what they claim to be"
+            f"R0223 found a cosine distance of {most_negative!r}, below the "
+            f"registered {MIN_ADMISSIBLE_NEGATIVE_DISTANCE} floor; that is not "
+            "float32 rounding, it is a cosine that is not a cosine"
         )
     np.maximum(dists, 0.0, out=dists)
     if not np.isfinite(dists).all():
@@ -403,8 +408,17 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "distances": {
             "law": "1 - exact fp32 cosine of the substrate rows",
             "negative_entries_clipped_to_zero": negative,
+            "most_negative_distance": most_negative,
             "entries": int(ROWS * GRAPH_K),
-            "max_negative_fraction": MAX_NEGATIVE_DISTANCE_FRACTION,
+            "min_admissible_negative_distance": MIN_ADMISSIBLE_NEGATIVE_DISTANCE,
+            "check_shape": (
+                "magnitude, not count: the number of tied entries is a property "
+                "of the substrate's duplicate structure, not of the builder"
+            ),
+            "r0216_exact_kernel_negative_entries": (
+                R0216_EXACT_KERNEL_NEGATIVE_ENTRIES
+            ),
+            "r0216_exact_kernel_min_distance": R0216_EXACT_KERNEL_MIN_DISTANCE,
         },
         "substrate": dict(sealed["substrate_signature"]),
         "provenance": dict(sealed["provenance_signature"]),

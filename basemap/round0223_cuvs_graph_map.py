@@ -172,11 +172,18 @@ FUZZY_LAW = (
     "random_state=RandomState(42), knn_indices=<builder k15 ids>, "
     "knn_dists=1-cosine); identical to R0216's call in every argument but the ids"
 )
-#: fp32 cosines of near-duplicate rows can exceed 1 by ~1e-7, making `1 - cos`
-#: very slightly negative. Those are clipped to zero and counted; more than this
-#: fraction of the 30,000,000 entries aborts, because it would mean the cosines
-#: are not what they claim to be.
-MAX_NEGATIVE_DISTANCE_FRACTION = 1.0e-5
+#: fp32 cosines of near-duplicate rows can exceed 1 by ~1 ULP, making `1 - cos`
+#: very slightly negative. Those are clipped to zero, counted, and — this is the
+#: check that matters — bounded in MAGNITUDE. A count cap is the wrong shape: the
+#: number of ties is a property of the substrate's duplicate structure, not of
+#: the builder, and R0216's own **exact** brute-force kernel produces 7,288 such
+#: entries (2.43e-4 of 30,000,000, minimum -1.0728836e-06) on the same rows. What
+#: a real defect would look like is a *large* negative distance, i.e. a cosine
+#: that is not a cosine. The floor is set two orders above the fp32 ULP at unit
+#: cosine (1.19e-07) and an order below R0216's observed exact-kernel extreme.
+MIN_ADMISSIBLE_NEGATIVE_DISTANCE = -1.0e-5
+R0216_EXACT_KERNEL_NEGATIVE_ENTRIES = 7_288
+R0216_EXACT_KERNEL_MIN_DISTANCE = -1.0728836e-06
 
 #: R0222's registered-not-released `n = 8` floors live in its sealed artifact and
 #: are read from it, never typed here. This is the artifact identity.
@@ -922,7 +929,9 @@ __all__ = [
     "HOST_RSS_LIMIT_GIB",
     "MAP_CAPABILITIES",
     "MAP_CAPABILITY_TEMPLATE",
-    "MAX_NEGATIVE_DISTANCE_FRACTION",
+    "MIN_ADMISSIBLE_NEGATIVE_DISTANCE",
+    "R0216_EXACT_KERNEL_MIN_DISTANCE",
+    "R0216_EXACT_KERNEL_NEGATIVE_ENTRIES",
     "NEGATIVE_RNG_SEED_OFFSET",
     "OUTPUT_DIMENSION",
     "PENDING_FLOOR_METRICS",

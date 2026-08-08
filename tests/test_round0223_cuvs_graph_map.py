@@ -239,6 +239,23 @@ def test_cuvs_graph_validation_applies_r0171_floors_and_the_tripwire() -> None:
         )
 
 
+def test_negative_distance_floor_is_a_magnitude_not_a_count() -> None:
+    """R0216's own exact kernel emits more tied entries than cuVS does."""
+    from basemap.round0223_cuvs_graph_map import (
+        MIN_ADMISSIBLE_NEGATIVE_DISTANCE,
+        R0216_EXACT_KERNEL_MIN_DISTANCE,
+        R0216_EXACT_KERNEL_NEGATIVE_ENTRIES,
+    )
+
+    ulp_at_unit_cosine = 2.0 ** -23
+    # The floor must tolerate float32 rounding and R0216's measured exact-kernel
+    # extreme, and must still reject anything an order of magnitude larger.
+    assert MIN_ADMISSIBLE_NEGATIVE_DISTANCE < -10 * ulp_at_unit_cosine
+    assert MIN_ADMISSIBLE_NEGATIVE_DISTANCE < R0216_EXACT_KERNEL_MIN_DISTANCE
+    assert MIN_ADMISSIBLE_NEGATIVE_DISTANCE > -1.0e-3
+    assert R0216_EXACT_KERNEL_NEGATIVE_ENTRIES > 0
+
+
 def test_full_population_map_validation() -> None:
     good = np.tile(np.asarray([[1.0, -2.0], [3.0, 4.0]], dtype=np.float32), (ROWS // 2, 1))
     checked = validate_full_population_map(good)
