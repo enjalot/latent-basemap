@@ -88,6 +88,7 @@ def run_assemble_and_graph(active: Mapping[str, Any], job: Mapping[str, Any]) ->
         ("corpus", "u1"), ("shard", "u2"), ("row", "i8")]))
     counts: dict[str, int] = {}
     rejects: dict[str, int] = {}
+    spans: dict[str, Any] = {}
     sources: dict[str, Any] = {}
     at = 0
     for ci, (corpus, want) in enumerate(COMPOSITION):
@@ -96,46 +97,71 @@ def run_assemble_and_graph(active: Mapping[str, Any], job: Mapping[str, Any]) ->
         if total < want:
             raise Round0216Error(f"{corpus}: need {want} rows, corpus has {total}")
         rng = np.random.RandomState(SELECTION_SEED + ci)
-        # Oversample, then drop exactly-zero / nonfinite rows and keep the first
-        # `want` survivors in ascending order. Deterministic given the seed.
-        over = min(total, int(want * 1.05) + 10_000)
-        picks = np.sort(rng.choice(total, over, replace=False)).astype(np.int64)
-        offs, acc = [], 0
-        for _p, r, _n in shards:
-            offs.append(acc); acc += r
-        offs = np.asarray(offs, dtype=np.int64)
-        shard_of = np.searchsorted(offs, picks, side="right") - 1
-        kept = 0
+        # Uniform over the WHOLE corpus, with rejected rows replaced by fresh
+        # uniform draws from the unpicked complement. The earlier
+        # oversample-then-stop-at-`want` approach silently produced a leading
+        # PREFIX of each corpus (fineweb reached only 94.16% of its rows,
+        # RedPajama and pile 93.44%, code 90.87%) because it walked shards in
+        # order and stopped once quota was met. The registered law says the
+        # sample spans every shard, so replacement rounds are used instead.
+        offs_all = np.concatenate([[0], np.cumsum([r for _p, r, _n in shards])])
+        chosen: list[np.ndarray] = []
+        chosen_vecs: list[np.ndarray] = []
+        picked = np.zeros(total, dtype=bool)
+        need = want
         dropped = 0
-        for si, (path, rows, real_npy) in enumerate(shards):
-            if kept >= want:
-                break
-            local = picks[shard_of == si] - offs[si]
-            if local.size == 0:
-                continue
-            arr = _open(path, rows, real_npy)
-            block = np.asarray(arr[local], dtype=np.float32)
-            norm = np.linalg.norm(block, axis=1)
-            ok = np.isfinite(block).all(axis=1) & (norm > 0)
-            dropped += int((~ok).sum())
-            block = block[ok]
-            local = local[ok]
-            take = min(len(block), want - kept)
-            if take:
-                X[at:at + take] = block[:take]
-                provenance["corpus"][at:at + take] = ci
-                provenance["shard"][at:at + take] = si
-                provenance["row"][at:at + take] = local[:take]
-                at += take
-                kept += take
-            del arr, block
-        if kept != want:
+        rounds = 0
+        while need > 0:
+            rounds += 1
+            if rounds > 8:
+                raise Round0216Error(
+                    f"{corpus}: replacement did not converge after 8 rounds"
+                )
+            free = np.flatnonzero(~picked)
+            if free.size < need:
+                raise Round0216Error(f"{corpus}: exhausted usable rows")
+            draw = np.sort(rng.choice(free, need, replace=False)).astype(np.int64)
+            picked[draw] = True
+            shard_of = np.searchsorted(offs_all, draw, side="right") - 1
+            for si, (path, rows, real_npy) in enumerate(shards):
+                local = draw[shard_of == si] - offs_all[si]
+                if local.size == 0:
+                    continue
+                arr = _open(path, rows, real_npy)
+                block = np.asarray(arr[local], dtype=np.float32)
+                norm = np.linalg.norm(block, axis=1)
+                ok = np.isfinite(block).all(axis=1) & (norm > 0)
+                dropped += int((~ok).sum())
+                if ok.any():
+                    chosen.append(draw[shard_of == si][ok])
+                    chosen_vecs.append(block[ok])
+                del arr, block
+            got = sum(len(c) for c in chosen)
+            need = want - got
+        order = np.argsort(np.concatenate(chosen))
+        sel = np.concatenate(chosen)[order]
+        vecs = np.concatenate(chosen_vecs, axis=0)[order]
+        shard_of = np.searchsorted(offs_all, sel, side="right") - 1
+        X[at:at + want] = vecs
+        provenance["corpus"][at:at + want] = ci
+        provenance["shard"][at:at + want] = shard_of
+        provenance["row"][at:at + want] = sel - offs_all[shard_of]
+        at += want
+        shards_touched = int(len(np.unique(shard_of)))
+        coverage = shards_touched / len(shards)
+        if coverage < 0.999:
             raise Round0216Error(
-                f"{corpus}: kept {kept} usable rows of {want} after dropping "
-                f"{dropped} degenerate rows; raise the oversample factor"
+                f"{corpus}: selection touched {shards_touched}/{len(shards)} "
+                f"shards ({coverage:.2%}); the registered law requires the sample "
+                "to span every shard"
             )
+        del chosen, chosen_vecs, vecs
         counts[corpus] = want
         rejects[corpus] = dropped
+        spans[corpus] = {"shards_touched": shards_touched,
+                          "shards_total": len(shards),
+                          "coverage": coverage,
+                          "replacement_rounds": rounds}
         sources[corpus] = {
             "shards": len(shards), "corpus_rows": int(total),
             "selected_rows": int(want),
@@ -253,11 +279,12 @@ def run_assemble_and_graph(active: Mapping[str, Any], job: Mapping[str, Any]) ->
                              "trailing_fragment_policy": TRAILING_FRAGMENT_POLICY},
         "selection": {
             "seed": SELECTION_SEED,
-            "law": "per-corpus uniform without replacement over all complete rows "
-                   "of non-excluded shards, degenerate rows dropped, first `want` "
-                   "survivors ascending",
+            "law": "per-corpus uniform over ALL complete rows of non-excluded "
+                   "shards; rejected rows replaced by fresh uniform draws from the "
+                   "unpicked complement until quota is met; never a prefix",
             "zero_row_policy": ZERO_ROW_POLICY,
             "degenerate_rows_dropped": rejects,
+            "shard_span": spans,
             "excluded_shards": {k: v["reason"] for k, v in EXCLUDED_SHARDS.items()},
         },
         "substrate": expected_input_signature(sub_path),
