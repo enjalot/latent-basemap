@@ -133,11 +133,26 @@ def test_round0219_density_is_transcribed_never_gated() -> None:
     assert diagnostic["role"] == "diagnostic-only, transcribed"
     assert diagnostic["values"] == pytest.approx(list(DENSITIES), rel=1e-12)
     assert registration["density_v2_role"] == "diagnostic-only, transcribed"
-    # The exclusion is empirically motivated: density's relative spread on this
-    # synthetic family dwarfs FFR's, which is the R0214 pattern in miniature.
-    assert diagnostic["relative_spread_of_mean"] > (
+
+
+def test_round0219_density_stays_excluded_even_when_it_is_the_tightest_metric() -> None:
+    """The exclusion is unconditional, not contingent on the observed spread.
+
+    R0214 justified excluding `density_v2` on a measured two-cell spread, but the
+    registration must not quietly re-admit it on a family where density happens
+    to be the *steadiest* number. Pre-registration is worth nothing if the metric
+    set moves once the data is visible.
+    """
+    evidence = _evidence()
+    for index, seed in enumerate(SEEDS):
+        evidence["panel_metric_cells"][str(seed)]["density_v2"] = 0.4400 + 1e-6 * index
+    registration = register_minilm_gates(evidence)
+    diagnostic = registration["diagnostic_metrics"]["density_v2"]
+    assert diagnostic["relative_spread_of_mean"] < (
         registration["gates"]["ffr"]["relative_spread_of_mean"]
     )
+    assert "density_v2" not in registration["gates"]
+    assert diagnostic["registered_as_floor"] is False
 
 
 def test_round0219_per_corpus_ffr_is_descriptive_not_a_floor() -> None:
