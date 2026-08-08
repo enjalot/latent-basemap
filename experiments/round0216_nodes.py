@@ -13,7 +13,7 @@ from basemap.output_safety import (
     create_fresh_directory,
 )
 from basemap.round0216_minilm_2m_substrate import (
-    CAPABILITY, COMPOSITION, DIMENSION, GRAPH_K, GRAPH_SCHEMA,
+    CAPABILITY, COMPOSITION, DIMENSION, EXCLUDED_SHARDS, GRAPH_K, GRAPH_SCHEMA,
     MEAN_RECALL_FLOOR, P10_RECALL_FLOOR, RAW_FORMAT, RECALL_PROBE_ROWS,
     RECALL_PROBE_SEED, ROUND_ID, ROWS, ROW_POLICY, Round0216Error,
     SELECTION_SEED, SUBSTRATE_SCHEMA, TRAILING_FRAGMENT_POLICY,
@@ -52,6 +52,8 @@ def _shards(corpus: str) -> list[tuple[str, int, bool]]:
     for path in sorted(glob.glob(os.path.join(EMB, corpus, "train", "*.npy"))):
         if path.endswith(".tmp.npy"):
             continue
+        if os.path.relpath(path, EMB) in EXCLUDED_SHARDS:
+            continue
         with open(path, "rb") as h:
             real_npy = h.read(6) == b"\x93NUMPY"
         if real_npy:
@@ -84,6 +86,7 @@ def run_assemble_and_graph(active: Mapping[str, Any], job: Mapping[str, Any]) ->
     provenance = np.empty(ROWS, dtype=np.dtype([
         ("corpus", "u1"), ("shard", "u2"), ("row", "i8")]))
     counts: dict[str, int] = {}
+    rejects: dict[str, int] = {}
     sources: dict[str, Any] = {}
     at = 0
     for ci, (corpus, want) in enumerate(COMPOSITION):
@@ -92,26 +95,46 @@ def run_assemble_and_graph(active: Mapping[str, Any], job: Mapping[str, Any]) ->
         if total < want:
             raise Round0216Error(f"{corpus}: need {want} rows, corpus has {total}")
         rng = np.random.RandomState(SELECTION_SEED + ci)
-        picks = np.sort(rng.choice(total, want, replace=False)).astype(np.int64)
+        # Oversample, then drop exactly-zero / nonfinite rows and keep the first
+        # `want` survivors in ascending order. Deterministic given the seed.
+        over = min(total, int(want * 1.05) + 10_000)
+        picks = np.sort(rng.choice(total, over, replace=False)).astype(np.int64)
         offs, acc = [], 0
         for _p, r, _n in shards:
             offs.append(acc); acc += r
         offs = np.asarray(offs, dtype=np.int64)
         shard_of = np.searchsorted(offs, picks, side="right") - 1
-        sig_list = []
+        kept = 0
+        dropped = 0
         for si, (path, rows, real_npy) in enumerate(shards):
+            if kept >= want:
+                break
             local = picks[shard_of == si] - offs[si]
             if local.size == 0:
                 continue
             arr = _open(path, rows, real_npy)
             block = np.asarray(arr[local], dtype=np.float32)
-            X[at:at + len(local)] = block
-            provenance["corpus"][at:at + len(local)] = ci
-            provenance["shard"][at:at + len(local)] = si
-            provenance["row"][at:at + len(local)] = local
-            at += len(local)
+            norm = np.linalg.norm(block, axis=1)
+            ok = np.isfinite(block).all(axis=1) & (norm > 0)
+            dropped += int((~ok).sum())
+            block = block[ok]
+            local = local[ok]
+            take = min(len(block), want - kept)
+            if take:
+                X[at:at + take] = block[:take]
+                provenance["corpus"][at:at + take] = ci
+                provenance["shard"][at:at + take] = si
+                provenance["row"][at:at + take] = local[:take]
+                at += take
+                kept += take
             del arr, block
+        if kept != want:
+            raise Round0216Error(
+                f"{corpus}: kept {kept} usable rows of {want} after dropping "
+                f"{dropped} degenerate rows; raise the oversample factor"
+            )
         counts[corpus] = want
+        rejects[corpus] = dropped
         sources[corpus] = {
             "shards": len(shards), "corpus_rows": int(total),
             "selected_rows": int(want),
@@ -227,8 +250,15 @@ def run_assemble_and_graph(active: Mapping[str, Any], job: Mapping[str, Any]) ->
         "sources": sources,
         "loading_contract": {"raw_format": RAW_FORMAT, "row_policy": ROW_POLICY,
                              "trailing_fragment_policy": TRAILING_FRAGMENT_POLICY},
-        "selection": {"seed": SELECTION_SEED,
-                      "law": "per-corpus uniform without replacement over all complete rows, ascending"},
+        "selection": {
+            "seed": SELECTION_SEED,
+            "law": "per-corpus uniform without replacement over all complete rows "
+                   "of non-excluded shards, degenerate rows dropped, first `want` "
+                   "survivors ascending",
+            "zero_row_policy": ZERO_ROW_POLICY,
+            "degenerate_rows_dropped": rejects,
+            "excluded_shards": {k: v["reason"] for k, v in EXCLUDED_SHARDS.items()},
+        },
         "substrate": expected_input_signature(sub_path),
         "provenance": expected_input_signature(prov_path),
         "ordered_substrate_sha256": ordered_array_sha256(X),

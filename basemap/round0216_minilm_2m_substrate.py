@@ -63,6 +63,33 @@ KNOWN_TRAILING_FRAGMENTS = {
     "data-00037-of-00099.npy": {"bytes": 802, "full_rows": 912_356},
 }
 
+#: Shards excluded from every selection pool, with the measurement that
+#: justifies each. R0025 treated shard 37 as merely *ragged* — 802 trailing
+#: bytes over whole rows — but it is **damaged**: 24.89% of its rows are exactly
+#: zero, against 0.00% in both immediate neighbours, and the damage grows toward
+#: the tail (11.81% over the first 70%, 55.42% over the last 30%). That is a
+#: partially-failed write, and its ~227,000 zero rows account for roughly 97% of
+#: the 235,469 zero rows R0033 catalogued across the whole 150M population.
+#: The whole shard is dropped rather than filtered: when a quarter of a shard
+#: failed to write, its surviving non-zero rows are not trustworthy either, and
+#: 912,356 rows out of a 93.9M corpus costs nothing.
+EXCLUDED_SHARDS = {
+    "fineweb-edu-sample-10BT-chunked-120-all-MiniLM-L6-v2/train/"
+    "data-00037-of-00099.npy": {
+        "reason": "partially-failed write: 24.89% exactly-zero rows vs 0.00% in "
+                  "shards 36 and 38; zero fraction rises to 55.42% in the tail",
+        "measured_utc": "2026-08-08",
+        "zero_rate": 0.2489,
+        "rows_dropped": 912_356,
+    },
+}
+
+#: Zero rows exist outside shard 37 too, at trace levels (17 in a 500k RedPajama
+#: sample, 6 in a 500k pile sample). R0033 established the policy — exclude
+#: them — and R0215 showed why it matters: a degenerate row cannot acquire
+#: meaningful edges, and edgeless rows are what produced the v1 clumps.
+ZERO_ROW_POLICY = "exclude exactly-zero and nonfinite rows from the selection pool"
+
 #: Exact-graph qualification. These are floors on a *brute-force* comparison,
 #: so unlike R0171's ANN qualification a miss here means the builder is wrong,
 #: not that a parameter needs tuning.
@@ -158,6 +185,7 @@ __all__ = [
     "DIMENSION",
     "GRAPH_K",
     "GRAPH_SCHEMA",
+    "EXCLUDED_SHARDS",
     "KNOWN_TRAILING_FRAGMENTS",
     "MAX_ZERO_DEGREE_ROWS",
     "MEAN_RECALL_FLOOR",
@@ -168,6 +196,7 @@ __all__ = [
     "ROUND_ID",
     "ROWS",
     "ROW_POLICY",
+    "ZERO_ROW_POLICY",
     "Round0216Error",
     "SELECTION_SEED",
     "SUBSTRATE_SCHEMA",
