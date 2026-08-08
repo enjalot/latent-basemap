@@ -232,20 +232,30 @@ def test_a_failed_cell_is_a_measurement_not_a_crash() -> None:
     assert summary["largest_measured_rows_that_fit_by_igd"]["128"] == 8_000_000
 
 
-def test_prefix_composition_validation() -> None:
+def test_prefix_composition_tolerance_is_binomial_not_fixed() -> None:
+    from basemap.round0224_cuvs_memory import prefix_share_tolerance
+
     targets = {name: rows / 2_000_000 for name, rows in COMPOSITION}
+    # A fixed 0.01 would be ~29 binomial sd at 2M rows: vacuous where it matters.
+    tight = prefix_share_tolerance(rows=2_000_000, target=0.4)
+    loose = prefix_share_tolerance(rows=2_000, target=0.4)
+    assert tight < 0.01 < loose
+    assert prefix_share_tolerance(rows=10 ** 12, target=0.4) == 0.002
     ok = validate_prefix_composition(
-        shares={name: value + 0.002 for name, value in targets.items()},
+        shares={name: value + 0.0005 for name, value in targets.items()},
         targets=targets,
+        rows=2_000_000,
     )
-    assert ok["worst_absolute_deviation"] < 0.01
+    assert ok["rows"] == 2_000_000
+    assert all(value > 0 for value in ok["tolerances"].values())
     with pytest.raises(Round0224Error):
         validate_prefix_composition(
             shares={name: value + 0.05 for name, value in targets.items()},
             targets=targets,
+            rows=2_000_000,
         )
     with pytest.raises(Round0224Error):
-        validate_prefix_composition(shares={"nope": 1.0}, targets=targets)
+        validate_prefix_composition(shares={"nope": 1.0}, targets=targets, rows=100)
 
 
 def test_the_100m_substrate_does_not_fit_host_ram_and_the_constant_says_so() -> None:

@@ -78,9 +78,13 @@ BENCHMARK_NOTE = (
 #: Minimum shard span per corpus. R0216's assertion, unchanged: the defect it
 #: guards against (a leading prefix of each corpus) is invisible in the output.
 SHARD_SPAN_FLOOR = 0.999
-#: Realized composition in a prefix is binomial, not exact, so a prefix is
-#: admissible when every corpus share lands within this of its target.
-PREFIX_SHARE_TOLERANCE = 0.01
+#: Realized composition in a prefix is binomial, not exact, so the tolerance is
+#: derived from the prefix size rather than fixed: `max(floor, k * sqrt(p(1-p)/n))`.
+#: A fixed absolute tolerance is scale-blind — 0.01 is ~29 binomial sd at the
+#: 2,000,000-row prefix and ~1 sd at 2,000 rows, so it would be vacuous where it
+#: matters and trip where it does not.
+PREFIX_SHARE_SIGMA_MULTIPLIER = 6.0
+PREFIX_SHARE_ABSOLUTE_FLOOR = 0.002
 
 #: The sweep. `graph_degree` and `max_iterations` are held FIXED so that
 #: `intermediate_graph_degree` is the only moving parameter — R0220 varied all
@@ -195,27 +199,46 @@ def residency_probe_settings() -> tuple[dict[str, Any], ...]:
     )
 
 
+def prefix_share_tolerance(*, rows: int, target: float) -> float:
+    """Binomial tolerance on a prefix share: `max(floor, k*sqrt(p(1-p)/n))`."""
+    if int(rows) <= 0 or not 0.0 < float(target) < 1.0:
+        raise Round0224Error("R0224 prefix tolerance needs n > 0 and 0 < p < 1")
+    sigma = math.sqrt(float(target) * (1.0 - float(target)) / float(rows))
+    return max(PREFIX_SHARE_ABSOLUTE_FLOOR, PREFIX_SHARE_SIGMA_MULTIPLIER * sigma)
+
+
 def validate_prefix_composition(
-    *, shares: Mapping[str, float], targets: Mapping[str, float]
+    *, shares: Mapping[str, float], targets: Mapping[str, float], rows: int
 ) -> dict[str, Any]:
-    """A prefix is admissible when every corpus share is near its target."""
+    """A prefix is admissible when every share is inside its binomial band."""
     if set(shares) != set(targets):
         raise Round0224Error("R0224 prefix composition covers the wrong corpora")
     deviations = {
         name: float(shares[name]) - float(targets[name]) for name in sorted(targets)
     }
-    worst = max(abs(value) for value in deviations.values())
-    if worst > PREFIX_SHARE_TOLERANCE:
+    tolerances = {
+        name: prefix_share_tolerance(rows=int(rows), target=float(targets[name]))
+        for name in sorted(targets)
+    }
+    breaches = {
+        name: {"deviation": deviations[name], "tolerance": tolerances[name]}
+        for name in sorted(targets)
+        if abs(deviations[name]) > tolerances[name]
+    }
+    if breaches:
         raise Round0224Error(
-            f"R0224 prefix composition deviates by {worst:.4f}, beyond the "
-            f"registered {PREFIX_SHARE_TOLERANCE}"
+            f"R0224 prefix composition at {int(rows)} rows breaches its binomial "
+            f"tolerance: {breaches}"
         )
     return {
+        "rows": int(rows),
         "shares": {name: float(value) for name, value in shares.items()},
         "targets": {name: float(value) for name, value in targets.items()},
         "deviations": deviations,
-        "worst_absolute_deviation": worst,
-        "tolerance": PREFIX_SHARE_TOLERANCE,
+        "tolerances": tolerances,
+        "worst_absolute_deviation": max(abs(value) for value in deviations.values()),
+        "sigma_multiplier": PREFIX_SHARE_SIGMA_MULTIPLIER,
+        "absolute_floor": PREFIX_SHARE_ABSOLUTE_FLOOR,
     }
 
 
@@ -580,7 +603,8 @@ __all__ = [
     "HOST_INSTRUMENTS",
     "HOST_RSS_LIMIT_GIB",
     "INSTRUMENTS",
-    "PREFIX_SHARE_TOLERANCE",
+    "PREFIX_SHARE_ABSOLUTE_FLOOR",
+    "PREFIX_SHARE_SIGMA_MULTIPLIER",
     "PROJECTION_DISCIPLINE",
     "PROJECTION_ROWS",
     "PROJECTION_SUBSTRATE_BYTES",
@@ -606,6 +630,7 @@ __all__ = [
     "instrument_sensitivity",
     "linear_fit",
     "power_law_fit",
+    "prefix_share_tolerance",
     "project_linear",
     "project_wall",
     "residency_probe_settings",

@@ -282,9 +282,8 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             for index, (name, _n) in enumerate(COMPOSITION)
         }
         prefixes[str(rows)] = validate_prefix_composition(
-            shares=shares, targets=targets
+            shares=shares, targets=targets, rows=int(rows)
         )
-        prefixes[str(rows)]["rows"] = int(rows)
 
     peak_rss_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
     if peak_rss_gib > HOST_RSS_LIMIT_GIB:
