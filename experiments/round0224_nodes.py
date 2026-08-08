@@ -23,10 +23,11 @@ import glob
 import json
 import os
 import resource
+import signal
 import subprocess
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -56,6 +57,11 @@ from basemap.round0224_cuvs_memory import (
     BUDGET_TOLERANCE,
     BUILD_TIMEOUT_S,
     CONTROL_INSTRUMENT,
+    GUARD_HOST_RSS_BUDGET_BYTES,
+    GUARD_SIGTERM_GRACE_S,
+    GUARD_SWAP_ABORT_BYTES,
+    WATCHDOG_POLL_S,
+    guard_decision,
     DIMENSION,
     GPU_HOURS_CAP,
     HOST_RSS_LIMIT_GIB,
@@ -363,30 +369,197 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _poll_nvidia_smi(pid: int, stop: threading.Event, sink: dict[str, int]) -> None:
-    """R0220's instrument, carried as a control."""
-    peak = 0
-    while not stop.is_set():
+def _nvidia_smi_per_process_bytes(pid: int) -> int:
+    """R0220's instrument, carried unchanged as a control."""
+    try:
+        completed = subprocess.run(
+            [
+                NVIDIA_SMI,
+                "--query-compute-apps=pid,used_gpu_memory",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    for line in completed.stdout.splitlines():
+        parts = [item.strip() for item in line.split(",")]
+        if len(parts) == 2 and parts[0].isdigit() and int(parts[0]) == pid:
+            try:
+                return int(parts[1]) * 1024 * 1024
+            except ValueError:
+                return 0
+    return 0
+
+
+def _nvidia_smi_device_bytes() -> int:
+    """Device-wide bytes in use, from the driver.
+
+    This is the instrument the first attempt lacked. It is immune to both
+    failure modes that blinded the others:
+
+    * it runs in a **separate process**, so it cannot be starved by
+      `nn_descent.build` holding the child's GIL (the in-process 5 ms sampler
+      managed 1-2 samples per build);
+    * it reads the **device**, not a bookkeeper, so cuVS allocating outside
+      RMM's current device resource — which the byte-identical
+      `rmm_peak_bytes` across igd 48/96/128 proves it does — cannot hide from
+      it.
+
+    It is device-wide, not per-process. The queue holds an exclusive GPU lease
+    and the baseline is recorded immediately before each child starts, so the
+    over-baseline figure is attributable to the build.
+    """
+    try:
+        completed = subprocess.run(
+            [NVIDIA_SMI, "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        return int(completed.stdout.strip().splitlines()[0].strip()) * 1024 * 1024
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return 0
+
+
+def _proc_memory_bytes(pid: int) -> tuple[int, int]:
+    """`(VmRSS, RssAnon)` for a pid. Anonymous bytes are the swappable ones."""
+    rss = 0
+    anon = 0
+    try:
+        with open(f"/proc/{pid}/status", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    rss = int(line.split()[1]) * 1024
+                elif line.startswith("RssAnon:"):
+                    anon = int(line.split()[1]) * 1024
+    except (OSError, IndexError, ValueError):
+        pass
+    return rss, anon
+
+
+def _swap_used_bytes() -> int:
+    total = 0
+    free = 0
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("SwapTotal:"):
+                    total = int(line.split()[1]) * 1024
+                elif line.startswith("SwapFree:"):
+                    free = int(line.split()[1]) * 1024
+    except (OSError, IndexError, ValueError):
+        pass
+    return max(0, total - free)
+
+
+class BuildWatchdog(threading.Thread):
+    """Live host/device sampling with a cooperative abort.
+
+    The first attempt had an OOM *catch* and no live guard: the `16M`
+    `materialize` cell climbed to `46.7 GB` RSS, consumed all `7 GB` of swap,
+    and was SIGKILLed after 37 minutes. Because it held a CUDA context, the
+    kill left a UVM teardown thread uninterruptible, which deadlocked RCU, put
+    PID 1 into `D` state and cost a hard reboot.
+
+    So this watchdog trips on **swap**, not only on RSS. Swap is the signal
+    that the box is on the path that wedged it, and it is a system-wide reading
+    rather than a per-process one precisely because UVM host backing for an
+    oversubscribed device does not all appear in the child's RSS.
+
+    An abort is **SIGTERM**, never SIGKILL. The build script installs a handler
+    that raises, so Python unwinds and CUDA tears the context down through its
+    own path. Escalation past SIGTERM is recorded in the receipt.
+    """
+
+    def __init__(
+        self,
+        *,
+        pid: int,
+        poll_s: float,
+        host_rss_budget_bytes: int,
+        swap_abort_bytes: int,
+        device_baseline_bytes: int,
+    ) -> None:
+        super().__init__(daemon=True)
+        self._pid = int(pid)
+        self._poll_s = float(poll_s)
+        self._host_budget = int(host_rss_budget_bytes)
+        self._swap_abort = int(swap_abort_bytes)
+        self._stop_event = threading.Event()
+        self.device_baseline_bytes = int(device_baseline_bytes)
+        self.device_peak_bytes = 0
+        self.host_rss_peak_bytes = 0
+        self.host_anon_peak_bytes = 0
+        self.swap_peak_bytes = 0
+        self.nvidia_smi_per_process_peak_bytes = 0
+        self.samples = 0
+        self.abort_reason: str | None = None
+        self.abort_signalled_at: float | None = None
+        self.escalations: list[str] = []
+
+    def _trip(self, reason: str) -> None:
+        if self.abort_reason is not None:
+            return
+        self.abort_reason = reason
+        self.abort_signalled_at = time.time()
         try:
-            completed = subprocess.run(
-                [
-                    NVIDIA_SMI,
-                    "--query-compute-apps=pid,used_gpu_memory",
-                    "--format=csv,noheader,nounits",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
+            os.kill(self._pid, signal.SIGTERM)
+            self.escalations.append("SIGTERM")
+        except OSError as exc:  # already gone
+            self.escalations.append(f"SIGTERM-failed:{exc}")
+
+    def run(self) -> None:
+        while not self._stop_event.is_set():
+            device = _nvidia_smi_device_bytes()
+            if device:
+                self.device_peak_bytes = max(self.device_peak_bytes, device)
+            rss, anon = _proc_memory_bytes(self._pid)
+            self.host_rss_peak_bytes = max(self.host_rss_peak_bytes, rss)
+            self.host_anon_peak_bytes = max(self.host_anon_peak_bytes, anon)
+            swap = _swap_used_bytes()
+            self.swap_peak_bytes = max(self.swap_peak_bytes, swap)
+            self.nvidia_smi_per_process_peak_bytes = max(
+                self.nvidia_smi_per_process_peak_bytes,
+                _nvidia_smi_per_process_bytes(self._pid),
             )
-            for line in completed.stdout.splitlines():
-                parts = [item.strip() for item in line.split(",")]
-                if len(parts) == 2 and parts[0].isdigit() and int(parts[0]) == pid:
-                    peak = max(peak, int(parts[1]) * 1024 * 1024)
-        except (OSError, subprocess.SubprocessError, ValueError):
-            pass
-        stop.wait(NVIDIA_SMI_POLL_S)
-    sink["nvidia_smi_peak_bytes"] = peak
+            self.samples += 1
+            if swap > self._swap_abort:
+                self._trip(
+                    f"system swap in use {swap / 1024 ** 3:.2f} GiB exceeds the "
+                    f"{self._swap_abort / 1024 ** 3:.2f} GiB abort threshold"
+                )
+            elif rss > self._host_budget:
+                self._trip(
+                    f"child RSS {rss / 1024 ** 3:.2f} GiB exceeds the "
+                    f"{self._host_budget / 1024 ** 3:.2f} GiB budget"
+                )
+            self._stop_event.wait(self._poll_s)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def readings(self) -> dict[str, Any]:
+        return {
+            "watchdog_samples": int(self.samples),
+            "watchdog_poll_interval_s": self._poll_s,
+            "device_wide_peak_bytes": int(self.device_peak_bytes),
+            "device_wide_baseline_bytes": int(self.device_baseline_bytes),
+            "device_wide_peak_over_baseline_bytes": int(
+                max(0, self.device_peak_bytes - self.device_baseline_bytes)
+            ),
+            "host_rss_peak_bytes": int(self.host_rss_peak_bytes),
+            "host_anon_peak_bytes": int(self.host_anon_peak_bytes),
+            "system_swap_peak_bytes": int(self.swap_peak_bytes),
+            CONTROL_INSTRUMENT: int(self.nvidia_smi_per_process_peak_bytes),
+            "watchdog_aborted": self.abort_reason is not None,
+            "watchdog_abort_reason": self.abort_reason,
+            "watchdog_escalations": list(self.escalations),
+        }
 
 
 def _child_environment(cache_root: str) -> dict[str, str]:
@@ -401,9 +574,154 @@ def _child_environment(cache_root: str) -> dict[str, str]:
     return env
 
 
+def _cell_identity(config: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "schema": "round0224-cuvs-memory-build-v1",
+        "setting_id": str(config["setting_id"]),
+        "config": dict(config),
+        "rows": int(config["rows"]),
+        "dimension": int(config["dimension"]),
+        "intermediate_graph_degree": int(config["intermediate_graph_degree"]),
+        "graph_degree": int(config["graph_degree"]),
+        "max_iterations": int(config["max_iterations"]),
+        "metric": str(config["metric"]),
+        "dataset_mode": str(config.get("dataset_mode", "materialize")),
+    }
+
+
+def refused_cell(config: Mapping[str, Any], guard: Mapping[str, Any]) -> dict[str, Any]:
+    """A cell the predictive guard would not launch. This is DATA, not a failure."""
+    return {
+        **_cell_identity(config),
+        "fit": False,
+        "oom": False,
+        "timed_out": False,
+        "refused_a_priori": True,
+        "aborted_by_watchdog": False,
+        "error_type": "RefusedAPriori",
+        "guard": dict(guard),
+        "refusal_reasons": list(guard.get("refusal_reasons") or []),
+        "builder_seconds": None,
+    }
+
+
+def skipped_cell(config: Mapping[str, Any], reason: str) -> dict[str, Any]:
+    """A cell not attempted because a SMALLER N already failed for this igd."""
+    return {
+        **_cell_identity(config),
+        "fit": False,
+        "oom": False,
+        "timed_out": False,
+        "refused_a_priori": False,
+        "aborted_by_watchdog": False,
+        "skipped_after_failure_at_smaller_n": True,
+        "error_type": "SkippedAfterSmallerNFailed",
+        "skip_reason": str(reason),
+        "builder_seconds": None,
+    }
+
+
+def _terminate_cooperatively(
+    process: "subprocess.Popen[str]", escalations: list[str]
+) -> None:
+    """Stop a build that holds a CUDA context, without wedging the kernel.
+
+    SIGKILL on a process inside a CUDA/UVM call is what deadlocked RCU and put
+    PID 1 into `D` state on the first attempt. SIGTERM is raised inside Python
+    by the build script's handler, so the interpreter unwinds and the driver
+    tears the context down normally. SIGKILL stays available as an absolute
+    last resort after a long grace period, and is recorded when used.
+    """
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        escalations.append("SIGTERM")
+    except OSError:
+        return
+    try:
+        process.wait(timeout=GUARD_SIGTERM_GRACE_S)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        process.terminate()
+        escalations.append("SIGTERM-repeat")
+        process.wait(timeout=GUARD_SIGTERM_GRACE_S)
+        return
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    # Last resort. Recorded loudly: this is the operation that cost a reboot.
+    try:
+        process.kill()
+        escalations.append("SIGKILL-last-resort")
+        process.wait(timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        escalations.append("SIGKILL-did-not-reap")
+
+
+def run_ascending_sweep(
+    *,
+    settings: "Sequence[Mapping[str, Any]]",
+    make_config: "Callable[[Mapping[str, Any]], dict[str, Any]]",
+    run_cell: "Callable[[dict[str, Any], Mapping[str, Any]], dict[str, Any]]",
+) -> list[dict[str, Any]]:
+    """Run the matrix in ascending N, stopping each igd at its first failure.
+
+    `sweep_settings()` is ordered by N, so every cell at a given N is attempted
+    only after every cell at every smaller N has resolved. Once an igd has been
+    refused, aborted, timed out or OOMed at some N, no LARGER N is attempted for
+    that igd — a bigger build of a setting that already failed cannot succeed,
+    and attempting one anyway is exactly how the first attempt came to have two
+    heavier cells queued behind the one that took the box down.
+
+    A skipped cell is still reported, as `skipped_after_failure_at_smaller_n`,
+    so the matrix stays complete and the reason each cell was not measured is
+    on the record.
+    """
+    measurements: list[dict[str, Any]] = []
+    blocked: dict[int, str] = {}
+    for setting in settings:
+        igd = int(setting["intermediate_graph_degree"])
+        config = make_config(setting)
+        if igd in blocked:
+            measurements.append(skipped_cell(config, blocked[igd]))
+            continue
+        receipt = run_cell(config, setting)
+        measurements.append(receipt)
+        if not receipt.get("fit"):
+            blocked[igd] = (
+                f"igd {igd} did not complete at {int(setting['rows']):,} rows "
+                f"({receipt.get('error_type') or 'oom'}); the ascent for this "
+                "setting stops here"
+            )
+    return measurements
+
+
 def _run_build(
     *, config: dict[str, Any], out_dir: str, cache_root: str, repo_root: str
 ) -> dict[str, Any]:
+    """Guard, launch, watch, and record. Every exit path yields a measurement."""
+    guard = guard_decision(
+        rows=int(config["rows"]),
+        dimension=int(config["dimension"]),
+        graph_degree=int(config["graph_degree"]),
+        intermediate_degree=int(config["intermediate_graph_degree"]),
+        dataset_mode=str(config.get("dataset_mode", "materialize")),
+    )
+    if not guard["allowed"]:
+        # Refused BEFORE the process exists. Nothing is launched, so nothing can
+        # swap, thrash, or need killing.
+        ensure_data_directory(out_dir)
+        atomic_write_new_json(
+            os.path.join(out_dir, "config.json"), config, immutable=True
+        )
+        receipt = refused_cell(config, guard)
+        atomic_write_new_json(
+            os.path.join(out_dir, "build-receipt.json"), receipt, immutable=True
+        )
+        return receipt
+
     ensure_data_directory(out_dir)
     config_path = os.path.join(out_dir, "config.json")
     atomic_write_new_json(config_path, config, immutable=True)
@@ -415,8 +733,7 @@ def _run_build(
         "--out",
         out_dir,
     ]
-    sink: dict[str, int] = {}
-    stop = threading.Event()
+    device_baseline = _nvidia_smi_device_bytes()
     started = time.perf_counter()
     process = subprocess.Popen(
         command,
@@ -426,42 +743,70 @@ def _run_build(
         stderr=subprocess.PIPE,
         text=True,
     )
-    watcher = threading.Thread(
-        target=_poll_nvidia_smi, args=(process.pid, stop, sink), daemon=True
+    watchdog = BuildWatchdog(
+        pid=process.pid,
+        poll_s=WATCHDOG_POLL_S,
+        host_rss_budget_bytes=GUARD_HOST_RSS_BUDGET_BYTES,
+        swap_abort_bytes=GUARD_SWAP_ABORT_BYTES,
+        device_baseline_bytes=device_baseline,
     )
-    watcher.start()
+    watchdog.start()
+    timed_out = False
     try:
         stdout, stderr = process.communicate(timeout=BUILD_TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        process.kill()
+        timed_out = True
+        escalations: list[str] = []
+        _terminate_cooperatively(process, escalations)
         stdout, stderr = process.communicate()
-        stop.set()
-        watcher.join(timeout=5)
-        # A timeout is a measurement, not a crash: where the builder stops being
+        watchdog.stop()
+        watchdog.join(timeout=10)
+        readings = watchdog.readings()
+        readings["watchdog_escalations"] = (
+            list(readings.get("watchdog_escalations") or []) + escalations
+        )
+        # A timeout aborts THIS CELL, not the node: where the builder stops being
         # usable on this box is exactly what the round is trying to find out.
         return {
-            "schema": "round0224-cuvs-memory-build-v1",
-            "setting_id": str(config["setting_id"]),
-            "config": dict(config),
-            "rows": int(config["rows"]),
-            "dimension": int(config["dimension"]),
-            "intermediate_graph_degree": int(config["intermediate_graph_degree"]),
-            "graph_degree": int(config["graph_degree"]),
-            "max_iterations": int(config["max_iterations"]),
-            "metric": str(config["metric"]),
+            **_cell_identity(config),
             "fit": False,
             "oom": False,
             "timed_out": True,
+            "refused_a_priori": False,
+            "aborted_by_watchdog": bool(readings.get("watchdog_aborted")),
             "timeout_s": BUILD_TIMEOUT_S,
             "error_type": "TimeoutExpired",
             "subprocess_seconds": time.perf_counter() - started,
-            CONTROL_INSTRUMENT: int(sink.get(CONTROL_INSTRUMENT, 0)),
+            "guard": dict(guard),
+            "builder_seconds": None,
+            **readings,
             "stderr_tail": stderr[-2000:],
         }
     finally:
-        stop.set()
-        watcher.join(timeout=5)
+        watchdog.stop()
+        watchdog.join(timeout=10)
+    readings = watchdog.readings()
     subprocess_seconds = time.perf_counter() - started
+
+    if readings["watchdog_aborted"]:
+        # The child was SIGTERMed by the watchdog and unwound. Record the abort
+        # with its readings and let the sweep continue at this igd's next stop.
+        return {
+            **_cell_identity(config),
+            "fit": False,
+            "oom": False,
+            "timed_out": timed_out,
+            "refused_a_priori": False,
+            "aborted_by_watchdog": True,
+            "error_type": "WatchdogAbort",
+            "subprocess_seconds": subprocess_seconds,
+            "returncode": process.returncode,
+            "guard": dict(guard),
+            "builder_seconds": None,
+            **readings,
+            "stderr_tail": stderr[-2000:],
+        }
+
     receipt_path = os.path.join(out_dir, "build-receipt.json")
     if process.returncode != 0 or not os.path.exists(receipt_path):
         raise Round0224Error(
@@ -471,8 +816,21 @@ def _run_build(
     with open(receipt_path, encoding="utf-8") as handle:
         receipt = json.load(handle)
     receipt["subprocess_seconds"] = subprocess_seconds
-    receipt[CONTROL_INSTRUMENT] = int(sink.get(CONTROL_INSTRUMENT, 0))
-    receipt["nvidia_smi_poll_interval_s"] = NVIDIA_SMI_POLL_S
+    receipt["nvidia_smi_poll_interval_s"] = WATCHDOG_POLL_S
+    receipt["refused_a_priori"] = False
+    receipt["aborted_by_watchdog"] = False
+    receipt["guard"] = dict(guard)
+    receipt.update(readings)
+    # The budget instrument now includes the parent-side device-wide reading,
+    # which is the only one immune to both GIL starvation and cuVS allocating
+    # outside RMM. See DEVICE_BUDGET_NOTE.
+    receipt["device_peak_bytes"] = int(
+        max(
+            int(receipt.get("device_peak_sampled_bytes") or 0),
+            int(receipt.get("rmm_peak_bytes") or 0),
+            int(readings.get("device_wide_peak_bytes") or 0),
+        )
+    )
     receipt["stderr_tail"] = stderr[-2000:]
     return receipt
 
@@ -558,22 +916,22 @@ def run_sweep(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             f"{REGISTERED_DEVICE_TOTAL_BYTES}; the budget verdicts would be wrong"
         )
 
-    measurements: list[dict[str, Any]] = []
-    for setting in sweep_settings():
-        config = {
+    measurements = run_ascending_sweep(
+        settings=sweep_settings(),
+        make_config=lambda setting: {
             **setting,
             "setting_id": setting["id"],
             "dataset": substrate_path,
             "dimension": DIMENSION,
             "sample_interval_s": SAMPLE_INTERVAL_S,
-        }
-        receipt = _run_build(
+        },
+        run_cell=lambda config, setting: _run_build(
             config=config,
             out_dir=os.path.join(builds_root, str(setting["id"])),
             cache_root=cache_root,
             repo_root=repo_root,
-        )
-        measurements.append(receipt)
+        ),
+    )
 
     residency: list[dict[str, Any]] = []
     for setting in residency_probe_settings():

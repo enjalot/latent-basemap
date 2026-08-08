@@ -34,11 +34,40 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import threading
 import time
 import traceback
 
 import numpy as np
+
+
+class CooperativeAbort(RuntimeError):
+    """The parent watchdog asked this build to stop."""
+
+
+def _install_sigterm_handler() -> None:
+    """Turn SIGTERM into a Python exception.
+
+    The parent's watchdog aborts a cell with SIGTERM, and this handler is what
+    makes that abort safe. Raising inside Python unwinds the interpreter, so
+    `nn_descent`'s allocations are released and the CUDA context is torn down
+    through the driver's normal path.
+
+    The alternative is what happened on the first attempt: the `16M`
+    `materialize` cell was SIGKILLed while inside a CUDA/UVM call, the teardown
+    thread became uninterruptible, RCU deadlocked, PID 1 went into `D` state,
+    and the box needed a SysRq reboot. A process holding a CUDA context must
+    never be killed outright while a cooperative path exists.
+    """
+
+    def _handler(signum: int, _frame: object) -> None:
+        raise CooperativeAbort(
+            f"aborted by parent watchdog (signal {signum}); unwinding so CUDA "
+            "can tear the context down cleanly"
+        )
+
+    signal.signal(signal.SIGTERM, _handler)
 
 
 OOM_MARKERS = (
@@ -134,6 +163,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True)
     args = parser.parse_args(argv)
 
+    _install_sigterm_handler()
+
     with open(args.config, encoding="utf-8") as handle:
         config = json.load(handle)
     os.makedirs(args.out, exist_ok=True)
@@ -149,6 +180,13 @@ def main(argv: list[str] | None = None) -> int:
 
     import cuvs
     from cuvs.neighbors import nn_descent
+
+    # Does cuVS install its own device resource, or keep the one we set? If it
+    # replaces ours, `rmm_peak_bytes` is measuring an allocator nobody is using
+    # and is as blind as `nvidia-smi` was in R0220. Recorded either way, because
+    # the round's first job is to say what each instrument can actually see.
+    resource_type_after_import = str(type(rmm.mr.get_current_device_resource()))
+    resource_replaced = resource_type_after_import != resource_type
 
     # Warm the CUDA context and JIT before any measurement, so the baseline is
     # a real baseline and the build wall is a build wall.
@@ -185,6 +223,17 @@ def main(argv: list[str] | None = None) -> int:
         "metric": str(config["metric"]),
         "cuvs_version": str(cuvs.__version__),
         "rmm_resource_type": resource_type,
+        "rmm_resource_type_after_cuvs_import": resource_type_after_import,
+        "rmm_resource_replaced_by_cuvs": bool(resource_replaced),
+        "sampler_note": (
+            "device_peak_sampled_bytes and host_peak_sampled_bytes come from a "
+            "Python thread inside this process. nn_descent.build holds the GIL "
+            "for the whole build, so that thread is starved: samples_taken was "
+            "1-2 per cell in the first attempt regardless of build length. Read "
+            "host_vmhwm_bytes (kernel high-water mark) and the parent's "
+            "device_wide_peak_bytes (separate process) instead; samples_taken "
+            "is published so the starvation is visible rather than implied."
+        ),
         "sample_interval_s": interval,
         "warmup_seconds": warmup_seconds,
         "device_total_bytes": device_total,

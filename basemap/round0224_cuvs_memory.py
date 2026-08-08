@@ -93,7 +93,20 @@ SWEEP_GRAPH_DEGREE = 32
 SWEEP_MAX_ITERATIONS = 20
 SWEEP_METRIC = "sqeuclidean"
 SWEEP_INTERMEDIATE_DEGREES: tuple[int, ...] = (48, 96, 128)
-SWEEP_ROWS: tuple[int, ...] = (2_000_000, 4_000_000, 8_000_000, 16_000_000)
+#: `12M` is an addendum-2 rung. The structural device model puts the guard's
+#: ceiling at ~`12.3M` rows for igd48, ~`10.4M` for igd96 and ~`9.4M` for igd128,
+#: so a rung at `12,000,000` is the one place in the matrix where the *same* N is
+#: launchable at igd48 and refused at igd96/128. Without it the wall between `8M`
+#: and `16M` would be located only by prediction; with it, igd48 is measured on
+#: the far side of where the two heavier settings have already been refused, and
+#: the igd-dependence of reachability is a measurement rather than an inference.
+SWEEP_ROWS: tuple[int, ...] = (
+    2_000_000,
+    4_000_000,
+    8_000_000,
+    12_000_000,
+    16_000_000,
+)
 SAMPLE_INTERVAL_S = 0.005
 
 #: Dataset mode per rung. `materialize` copies the prefix into host RAM on top of
@@ -107,6 +120,7 @@ DATASET_MODE_BY_ROWS: dict[int, str] = {
     2_000_000: "materialize",
     4_000_000: "materialize",
     8_000_000: "materialize",
+    12_000_000: "memmap",
     16_000_000: "memmap",
 }
 
@@ -132,13 +146,17 @@ BUDGET_TOLERANCE = 0.05
 INSTRUMENTS: tuple[str, ...] = (
     "rmm_peak_bytes",
     "device_peak_sampled_bytes",
+    "device_wide_peak_bytes",
     "host_peak_sampled_bytes",
     "host_vmhwm_bytes",
+    "host_rss_peak_bytes",
+    "host_anon_peak_bytes",
     "nvidia_smi_peak_bytes",
 )
 DEVICE_INSTRUMENTS: tuple[str, ...] = (
     "rmm_peak_bytes",
     "device_peak_sampled_bytes",
+    "device_wide_peak_bytes",
     "device_peak_bytes",
     "nvidia_smi_peak_bytes",
 )
@@ -152,11 +170,18 @@ DEVICE_INSTRUMENTS: tuple[str, ...] = (
 #: of the two, and it is a **lower bound** on true device peak, reported as such.
 DEVICE_BUDGET_INSTRUMENT = "device_peak_bytes"
 DEVICE_BUDGET_NOTE = (
-    "device_peak_bytes = max(device_peak_sampled_bytes, rmm_peak_bytes). The "
-    "sampler misses transient peaks (it read below the RMM counter at the same "
-    "cells in the first attempt); the RMM counter cannot see allocations made "
-    "outside RMM. The maximum of the two is a LOWER BOUND on device peak, so a "
-    "'does not fit' verdict from it is conservative and a 'fits' verdict is not."
+    "device_peak_bytes = max(device_peak_sampled_bytes, rmm_peak_bytes, "
+    "device_wide_peak_bytes). Addendum 2 adds the third term and it is the one "
+    "that carries the verdict: device_wide_peak_bytes is nvidia-smi "
+    "--query-gpu=memory.used, polled from the PARENT at 250 ms against a "
+    "baseline taken immediately before the child starts, under the queue's "
+    "exclusive GPU lease. It is the only device instrument here that is "
+    "immune to BOTH failure modes seen in the first attempt: it runs outside "
+    "the child so nn_descent.build holding the GIL cannot starve it (the "
+    "in-process 5 ms sampler managed 1-2 samples per build), and it reads the "
+    "device rather than a bookkeeper so it sees allocations cuVS makes outside "
+    "RMM's current device resource. The first two terms remain LOWER bounds; "
+    "the third is a driver-reported figure for the whole card."
 )
 HOST_INSTRUMENTS: tuple[str, ...] = ("host_peak_sampled_bytes", "host_vmhwm_bytes")
 CONTROL_INSTRUMENT = "nvidia_smi_peak_bytes"
@@ -197,6 +222,216 @@ HOST_RSS_LIMIT_GIB = 96.0
 
 class Round0224Error(RuntimeError):
     """The registered R0224 memory-measurement contract changed."""
+
+
+# --------------------------------------------------------------------------- #
+# the predictive guard and the live watchdog (addendum 2 — 2026-08-08)
+# --------------------------------------------------------------------------- #
+#: The first `16M` `materialize` cell reached `46.7 GB` RSS, exhausted all `7 GB`
+#: of swap, and was still unfinished at `36:54` against `35.47 s` for the same
+#: setting at `8M`. It was SIGKILLed, and because it held a CUDA context the
+#: teardown thread wedged RCU, put PID 1 into `D` state and cost a hard reboot.
+#:
+#: The round had an OOM *catch* but no OOM *prediction*: nothing computed a
+#: cell's expected footprint and refused to launch it. These constants and the
+#: functions below are that missing guard. A refusal is DATA — it is recorded as
+#: `refused_a_priori` with its prediction, and the round reports it as a
+#: measurement of where the builder stops being launchable on this box.
+GUARD_DEVICE_BUDGET_BYTES = 24 * 1024 ** 3
+GUARD_HOST_RSS_BUDGET_BYTES = 60 * 1024 ** 3
+#: Any swap at all means the box is on the path that wedged it. `1 GiB` is a
+#: reaction threshold, not an acceptable level: swap climbed from `0` to `8 GB`
+#: over minutes, so a `0.25 s` sampler has ample time to abort the cell first.
+GUARD_SWAP_ABORT_BYTES = 1 * 1024 ** 3
+WATCHDOG_POLL_S = 0.25
+#: How long a cooperatively-aborted build is given to unwind before escalation.
+#: **A process holding a CUDA context is never SIGKILLed as a first resort** —
+#: that is precisely what wedged the kernel. SIGTERM raises inside Python, the
+#: interpreter unwinds, and CUDA tears the context down in its own atexit path.
+GUARD_SIGTERM_GRACE_S = 180.0
+
+GUARD_BUDGET_NOTE = (
+    "device budget 24 GiB of the card's 32 GiB (headroom, because cuVS "
+    "nn-descent oversubscribes via managed memory rather than failing); host "
+    "RSS budget 60 GiB of the box's 123 GiB, chosen so the box never touches "
+    "swap. A cell whose PREDICTED footprint exceeds either budget is refused "
+    "before launch and recorded as refused_a_priori."
+)
+
+#: Bytes of device memory per row that the RMM statistics adaptor observed, flat
+#: across igd 48/96/128 and exactly linear in N over the first attempt's nine
+#: measured cells (`2,096,000,000 B` at `2M`, `4,192,000,000` at `4M`,
+#: `8,384,000,000` at `8M`). Used only by the *predictor*; every published
+#: device number is measured, never this constant.
+GUARD_DEVICE_BYTES_PER_ROW = 1048.0
+#: Fixed process overhead: CUDA context, RAPIDS import closure, cuBLAS handles.
+GUARD_FIXED_OVERHEAD_BYTES = 3 * 1024 ** 3
+
+
+def predict_footprint(
+    *,
+    rows: int,
+    dimension: int,
+    graph_degree: int,
+    intermediate_degree: int,
+    dataset_mode: str,
+) -> dict[str, Any]:
+    """Expected host RSS and device bytes for a cell, BEFORE it is launched.
+
+    The host model is calibrated against the first attempt's measured
+    `rss_after_load_bytes`, which came out at exactly `2 x dataset + baseline`
+    for every `materialize` cell (`6,623,383,552 B` at `2M` against a predicted
+    `2 x 3,072,000,000 + 479,277,056`). The factor of two is not a bug in the
+    loader: `np.array(memmap[:rows], copy=True)` allocates one anonymous copy
+    *while the file pages it read are still mapped and resident*, so both are
+    counted in RSS at once.
+
+    That distinction is the whole point of the guard, so the prediction reports
+    the two kinds of memory separately:
+
+    * **anonymous** bytes can only be reclaimed by swapping, and swapping is
+      what took the box down;
+    * **file-backed** bytes are clean page cache and are *evicted*, not
+      swapped, so a memmap-fed build can exceed RAM in mapped bytes without
+      ever paging out.
+
+    `nn_descent` holds its intermediate graph as ids **and** distances, so the
+    build term is `rows * intermediate_degree * (4 + 4)`, plus the
+    `rows * graph_degree * 4` output graph. Charging it as anonymous is
+    deliberately conservative: some of it is managed memory that may live on
+    the device instead, and a guard that over-predicts refuses a survivable
+    cell (recoverable, and recorded as data) while one that under-predicts
+    reboots the machine.
+    """
+    rows = int(rows)
+    if rows <= 0:
+        raise Round0224Error("R0224 footprint prediction needs rows > 0")
+    if dataset_mode not in DATASET_MODES:
+        raise Round0224Error(f"R0224 unknown dataset_mode {dataset_mode!r}")
+    dataset_bytes = rows * int(dimension) * 4
+    intermediate_bytes = rows * int(intermediate_degree) * 8
+    output_graph_bytes = rows * int(graph_degree) * 4
+    resident_copy_bytes = dataset_bytes if dataset_mode == "materialize" else 0
+    # A memmap-fed build still maps and touches every page of the file; those
+    # pages are file-backed and evictable, and are counted separately.
+    file_backed_bytes = dataset_bytes
+    anonymous_bytes = (
+        resident_copy_bytes
+        + intermediate_bytes
+        + output_graph_bytes
+        + GUARD_FIXED_OVERHEAD_BYTES
+    )
+    host_rss_bytes = anonymous_bytes + file_backed_bytes
+
+    # Device. Two models, and the guard takes the larger, because the cheaper one
+    # is provably blind.
+    #
+    # 1. RMM-calibrated: `rows x 1048 B`, what the StatisticsResourceAdaptor
+    #    actually counted. It is byte-identical across igd 48/96/128, which is
+    #    only possible if the intermediate graph is NOT allocated through RMM's
+    #    current device resource.
+    # 2. Structural: the dataset, the intermediate graph (ids AND distances) and
+    #    the output graph all resident on the device.
+    #
+    # The evidence says model 2 is the real one. At `2M` the `cudaMemGetInfo`
+    # sampler caught `3.37 GiB` where RMM counted `1.95 GiB` and the structural
+    # model predicts `3.82 GiB`; and the `16M materialize` cell drove
+    # `nvidia-smi` to `32,118 MiB` of `32 GiB` — the card full — where the
+    # structural model predicts `30.5 GiB` and the RMM model predicts `16.1 GiB`.
+    # cuVS oversubscribes the device through **managed memory**, which is why
+    # that cell thrashed for 37 minutes instead of raising a clean OOM, and why
+    # its SIGKILL left a UVM teardown thread wedged in the kernel.
+    #
+    # Charging the structural model is what makes the guard refuse a cell whose
+    # working set does not fit the card, instead of letting UVM turn the overflow
+    # into host paging.
+    device_rmm_calibrated_bytes = int(rows * GUARD_DEVICE_BYTES_PER_ROW)
+    device_structural_bytes = (
+        dataset_bytes + intermediate_bytes + output_graph_bytes
+    )
+    device_context_bytes = int(0.5 * 1024 ** 3)
+    device_bytes = (
+        max(device_rmm_calibrated_bytes, device_structural_bytes)
+        + device_context_bytes
+    )
+    return {
+        "predicted_device_rmm_calibrated_bytes": device_rmm_calibrated_bytes,
+        "predicted_device_structural_bytes": device_structural_bytes,
+        "predicted_device_context_bytes": device_context_bytes,
+        "rows": rows,
+        "dimension": int(dimension),
+        "graph_degree": int(graph_degree),
+        "intermediate_graph_degree": int(intermediate_degree),
+        "dataset_mode": str(dataset_mode),
+        "dataset_bytes": int(dataset_bytes),
+        "resident_copy_bytes": int(resident_copy_bytes),
+        "intermediate_graph_bytes": int(intermediate_bytes),
+        "output_graph_bytes": int(output_graph_bytes),
+        "fixed_overhead_bytes": int(GUARD_FIXED_OVERHEAD_BYTES),
+        "predicted_anonymous_bytes": int(anonymous_bytes),
+        "predicted_file_backed_bytes": int(file_backed_bytes),
+        "predicted_host_rss_bytes": int(host_rss_bytes),
+        "predicted_host_rss_gib": host_rss_bytes / (1024 ** 3),
+        "predicted_device_bytes": int(device_bytes),
+        "predicted_device_gib": device_bytes / (1024 ** 3),
+        "device_model": (
+            "max(rows x 1048 B [what RMM counted, and it is igd-blind], "
+            "dataset + rows x igd x 8 + rows x gd x 4 [structural, everything "
+            "resident on the card]) + 0.5 GiB context. The structural term "
+            "governs: cuVS oversubscribes via managed memory, so exceeding the "
+            "card degrades into UVM host paging instead of a clean OOM. "
+            "Predictor only; every published device number is measured."
+        ),
+        "host_model": (
+            "anonymous = resident copy (materialize only) + rows x igd x 8 "
+            "(intermediate ids AND distances) + rows x gd x 4 (output) + 3 GiB "
+            "overhead; file-backed = the whole dataset, evictable not swappable"
+        ),
+    }
+
+
+def guard_decision(
+    *,
+    rows: int,
+    dimension: int,
+    graph_degree: int,
+    intermediate_degree: int,
+    dataset_mode: str,
+    device_budget_bytes: int = GUARD_DEVICE_BUDGET_BYTES,
+    host_rss_budget_bytes: int = GUARD_HOST_RSS_BUDGET_BYTES,
+) -> dict[str, Any]:
+    """Launch this cell, or refuse it and record the refusal as a measurement."""
+    prediction = predict_footprint(
+        rows=rows,
+        dimension=dimension,
+        graph_degree=graph_degree,
+        intermediate_degree=intermediate_degree,
+        dataset_mode=dataset_mode,
+    )
+    device_over = prediction["predicted_device_bytes"] > int(device_budget_bytes)
+    host_over = prediction["predicted_host_rss_bytes"] > int(host_rss_budget_bytes)
+    reasons: list[str] = []
+    if device_over:
+        reasons.append(
+            f"predicted device {prediction['predicted_device_gib']:.2f} GiB "
+            f"exceeds the {device_budget_bytes / 1024 ** 3:.2f} GiB budget"
+        )
+    if host_over:
+        reasons.append(
+            f"predicted host RSS {prediction['predicted_host_rss_gib']:.2f} GiB "
+            f"exceeds the {host_rss_budget_bytes / 1024 ** 3:.2f} GiB budget"
+        )
+    return {
+        "prediction": prediction,
+        "device_budget_bytes": int(device_budget_bytes),
+        "host_rss_budget_bytes": int(host_rss_budget_bytes),
+        "device_over_budget": bool(device_over),
+        "host_over_budget": bool(host_over),
+        "allowed": not (device_over or host_over),
+        "refused_a_priori": bool(device_over or host_over),
+        "refusal_reasons": reasons,
+        "budget_note": GUARD_BUDGET_NOTE,
+    }
 
 
 def sweep_settings() -> tuple[dict[str, Any], ...]:
@@ -516,11 +751,63 @@ def summarize_sweep(
                 "intermediate_graph_degree": int(item["intermediate_graph_degree"]),
                 "oom": bool(item.get("oom")),
                 "timed_out": bool(item.get("timed_out")),
+                "refused_a_priori": bool(item.get("refused_a_priori")),
+                "aborted_by_watchdog": bool(item.get("aborted_by_watchdog")),
+                "skipped_after_failure_at_smaller_n": bool(
+                    item.get("skipped_after_failure_at_smaller_n")
+                ),
                 "error_type": item.get("error_type"),
+                "refusal_reasons": list(item.get("refusal_reasons") or []),
+                "predicted_host_rss_bytes": (
+                    item.get("guard", {}).get("prediction", {})
+                ).get("predicted_host_rss_bytes"),
+                "predicted_device_bytes": (
+                    item.get("guard", {}).get("prediction", {})
+                ).get("predicted_device_bytes"),
             }
             for item in failed
         ],
+        #: A refusal is a measurement of launchability, so it gets its own view:
+        #: the largest N the guard was willing to *start* per igd, beside the
+        #: largest N that actually built.
+        "refused_cells": [
+            {
+                "rows": int(item["rows"]),
+                "intermediate_graph_degree": int(item["intermediate_graph_degree"]),
+                "reasons": list(item.get("refusal_reasons") or []),
+                "predicted_device_gib": (
+                    item.get("guard", {}).get("prediction", {})
+                ).get("predicted_device_gib"),
+                "predicted_host_rss_gib": (
+                    item.get("guard", {}).get("prediction", {})
+                ).get("predicted_host_rss_gib"),
+            }
+            for item in measurements
+            if item.get("refused_a_priori")
+        ],
         "largest_measured_rows_that_fit_by_igd": largest_fitting,
+        "largest_launchable_rows_by_igd": {
+            str(igd): (
+                max(
+                    [
+                        int(item["rows"])
+                        for item in measurements
+                        if int(item["intermediate_graph_degree"]) == igd
+                        and not item.get("refused_a_priori")
+                    ],
+                    default=None,
+                )
+                if any(
+                    int(item["intermediate_graph_degree"]) == igd
+                    for item in measurements
+                )
+                else None
+            )
+            for igd in SWEEP_INTERMEDIATE_DEGREES
+        },
+        "guard_budget_note": GUARD_BUDGET_NOTE,
+        "guard_device_budget_bytes": GUARD_DEVICE_BUDGET_BYTES,
+        "guard_host_rss_budget_bytes": GUARD_HOST_RSS_BUDGET_BYTES,
         "device_total_bytes": int(device_total_bytes),
         "host_total_bytes": int(host_total_bytes),
         "projection_substrate_bytes_at_100m": PROJECTION_SUBSTRATE_BYTES,
@@ -561,8 +848,15 @@ def summarize_sweep(
         device_fit = linear_fit(
             sizes, [float(item["device_peak_bytes"]) for item in cells]
         )
+        # `host_vmhwm_bytes`, not `host_peak_sampled_bytes`. The in-process 5 ms
+        # sampler is a Python thread and `nn_descent.build` holds the GIL for the
+        # whole build, so it took 1-2 samples per cell in the first attempt and
+        # its readings are the arrival times of those one or two samples, not
+        # peaks. `VmHWM` is the kernel's own high-water mark for the process,
+        # read after the build from `/proc/self/status`: it cannot miss a peak,
+        # and in a fresh process per build it is a per-build number.
         host_fit = linear_fit(
-            sizes, [float(item["host_peak_sampled_bytes"]) for item in cells]
+            sizes, [float(item["host_vmhwm_bytes"]) for item in cells]
         )
         wall_fit = power_law_fit(
             sizes, [float(item["builder_seconds"]) for item in cells]

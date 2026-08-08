@@ -37,7 +37,12 @@ from basemap.round0224_cuvs_memory import (
     CONTROL_INSTRUMENT,
     DIMENSION,
     GPU_HOURS_CAP,
+    GUARD_BUDGET_NOTE,
+    GUARD_DEVICE_BUDGET_BYTES,
+    GUARD_HOST_RSS_BUDGET_BYTES,
+    GUARD_SWAP_ABORT_BYTES,
     HOST_RSS_LIMIT_GIB,
+    WATCHDOG_POLL_S,
     INSTRUMENTS,
     PROJECTION_DISCIPLINE,
     PROJECTION_ROWS,
@@ -112,6 +117,10 @@ def _release_cpu_smoke(release_sha: str) -> dict[str, Any]:
         "no:cacheprovider",
         "tests/test_round0224_cuvs_memory.py",
         "tests/test_round0224_assembly_smoke.py",
+        # Addendum 2. The guard, the watchdog and the ascent are the checks that
+        # stand between this queue and a second hard reboot, so they are in the
+        # pre-launch smoke rather than only in the developer's test run.
+        "tests/test_round0224_guard.py",
     ]
     environment = os.environ.copy()
     environment.update({
@@ -143,7 +152,9 @@ def _release_cpu_smoke(release_sha: str) -> dict[str, Any]:
         "path_exercised": (
             "sweep matrix construction, instrument-sensitivity rule, linear and "
             "power-law fits, budget verdicts, projection labelling, the "
-            "no-sensitivity abort path, and prefix-composition validation"
+            "no-sensitivity abort path, prefix-composition validation, and "
+            "addendum 2's predictive guard, watchdog trips, cooperative SIGTERM "
+            "abort and ascending stop-on-failure"
         ),
     })
     if completed.returncode != 0:
@@ -270,6 +281,17 @@ def prepare_round0224(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
             "projection_substrate_bytes": PROJECTION_SUBSTRATE_BYTES,
             "registered_device_total_bytes": REGISTERED_DEVICE_TOTAL_BYTES,
             "host_rss_limit_gib": HOST_RSS_LIMIT_GIB,
+            # Addendum 2: the guard that refuses a cell before it is launched.
+            "guard_device_budget_bytes": GUARD_DEVICE_BUDGET_BYTES,
+            "guard_host_rss_budget_bytes": GUARD_HOST_RSS_BUDGET_BYTES,
+            "guard_swap_abort_bytes": GUARD_SWAP_ABORT_BYTES,
+            "guard_budget_note": GUARD_BUDGET_NOTE,
+            "watchdog_poll_s": WATCHDOG_POLL_S,
+            "refusal_is_data": (
+                "a cell whose predicted footprint exceeds a budget is recorded "
+                "as refused_a_priori with its prediction and never launched; a "
+                "refusal is a measurement of launchability, not a failure"
+            ),
             "training_performed": False,
             "evaluation_performed": False,
             "gate_registerable_here": False,

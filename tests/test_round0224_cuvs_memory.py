@@ -94,14 +94,24 @@ def test_the_top_rung_is_memmap_fed_and_the_rest_materialize() -> None:
     assert modes[2_000_000] == "materialize"
 
 
-def test_device_budget_instrument_is_the_max_of_two_lower_bounds() -> None:
+def test_device_budget_instrument_dominates_every_device_instrument() -> None:
+    """The budget figure is the max over all three device instruments.
+
+    Addendum 2 adds `device_wide_peak_bytes` — the parent-side nvidia-smi
+    reading — and it is the term that carries the verdict, because it is the
+    only one that survives both failure modes: GIL starvation of the
+    in-process sampler, and cuVS allocating outside RMM's device resource.
+    """
     from basemap.round0224_cuvs_memory import (
         DEVICE_BUDGET_INSTRUMENT,
         DEVICE_BUDGET_NOTE,
+        DEVICE_INSTRUMENTS,
     )
 
     assert DEVICE_BUDGET_INSTRUMENT == "device_peak_bytes"
-    assert "LOWER BOUND" in DEVICE_BUDGET_NOTE
+    assert "LOWER bound" in DEVICE_BUDGET_NOTE
+    assert "device_wide_peak_bytes" in DEVICE_BUDGET_NOTE
+    assert "device_wide_peak_bytes" in DEVICE_INSTRUMENTS
     cell = _cell(8_000_000, 48)
     assert cell["device_peak_bytes"] >= cell["rmm_peak_bytes"]
     assert cell["device_peak_bytes"] >= cell["device_peak_sampled_bytes"]
@@ -254,13 +264,19 @@ def test_a_failed_cell_is_a_measurement_not_a_crash() -> None:
         device_total_bytes=DEVICE_TOTAL,
         host_total_bytes=HOST_TOTAL,
     )
-    assert {
+    # `failed_cells` carries more fields since addendum 2 (refusals, watchdog
+    # aborts, predictions), so the record is checked as a superset rather than
+    # by exact equality. The assertion itself is unchanged.
+    expected = {
         "rows": 16_000_000,
         "intermediate_graph_degree": 128,
         "oom": True,
         "timed_out": False,
         "error_type": "MemoryError",
-    } in summary["failed_cells"]
+    }
+    assert any(
+        expected.items() <= cell.items() for cell in summary["failed_cells"]
+    ), summary["failed_cells"]
     assert len(summary["failed_cells"]) == 2
     assert summary["largest_measured_rows_that_fit_by_igd"]["128"] == 8_000_000
     timed = [c for c in summary["failed_cells"] if c["timed_out"]]
