@@ -454,6 +454,27 @@ def run_build_graph(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _intra_queue_signature(
+    reference: Mapping[str, Any], *, label: str
+) -> tuple[str, dict[str, Any]]:
+    """Resolve a reference to an artifact produced earlier in THIS queue.
+
+    A node's output has no hash at prepare time, so the queue can only name its
+    path. Integrity still binds: the file carries `prompt_contract`'s internal
+    seal, which `read_sealed` verifies, and the runner independently validates
+    every declared node output before minting a completion receipt. A reference
+    that *does* carry a hash is verified against it in the ordinary way.
+    """
+    reference = dict(reference)
+    if reference.get("sha256"):
+        path = prompt_contract.verify_signature(reference, label=label)
+        return path, reference
+    path = str(reference["canonical_path"])
+    if not os.path.exists(path):
+        raise Round0223Error(f"{label} is absent at {path}")
+    return path, expected_input_signature(path)
+
+
 def _seed(job: Mapping[str, Any]) -> int:
     seed = job.get("training_seed")
     if isinstance(seed, bool) or not isinstance(seed, int) or seed not in SEEDS:
@@ -465,9 +486,8 @@ def _seed(job: Mapping[str, Any]) -> int:
 
 def _sealed_cuvs_graph(job: Mapping[str, Any]) -> dict[str, Any]:
     """Read R0223's own sealed cuVS graph receipt and load its edges."""
-    manifest_signature = dict(job["cuvs_graph_manifest_signature"])
-    manifest_path = prompt_contract.verify_signature(
-        manifest_signature, label="R0223 sealed cuVS graph receipt"
+    manifest_path, manifest_signature = _intra_queue_signature(
+        job["cuvs_graph_manifest_signature"], label="R0223 sealed cuVS graph receipt"
     )
     manifest = prompt_contract.read_sealed(
         manifest_path, label="R0223 sealed cuVS graph receipt"
@@ -819,9 +839,8 @@ def _authenticate_cuvs_map(
     capability = map_capability(seed)
     if str(cell.get("capability") or "") != capability:
         raise Round0223Error(f"R0223 seed-{seed} cell capability changed")
-    receipt_signature = dict(cell["train_receipt"])
-    receipt_path = prompt_contract.verify_signature(
-        receipt_signature, label=f"R0223 seed-{seed} train receipt"
+    receipt_path, receipt_signature = _intra_queue_signature(
+        cell["train_receipt"], label=f"R0223 seed-{seed} train receipt"
     )
     receipt = prompt_contract.read_sealed(
         receipt_path, label=f"R0223 seed-{seed} train receipt"
@@ -1174,7 +1193,9 @@ def run_compare(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "comparison": comparison,
         "evidence_limits": EVIDENCE_LIMITS,
         "cells": {str(seed): cells[seed] for seed in SEEDS},
-        "graph_manifest": dict(job["cuvs_graph_manifest_signature"]),
+        "graph_manifest": dict(
+            authenticated[SEEDS[0]]["receipt"]["graph_manifest"]
+        ),
         "r0222_gate_artifact": gate_signature,
         "panel_evidence": panel_signature,
         "lineage": {
