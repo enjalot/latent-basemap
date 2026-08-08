@@ -17,6 +17,7 @@ from basemap.round0216_minilm_2m_substrate import (
     MEAN_RECALL_FLOOR, P10_RECALL_FLOOR, RAW_FORMAT, RECALL_PROBE_ROWS,
     RECALL_PROBE_SEED, ROUND_ID, ROWS, ROW_POLICY, Round0216Error,
     SELECTION_SEED, SUBSTRATE_SCHEMA, TRAILING_FRAGMENT_POLICY,
+    ZERO_ROW_POLICY,
     resolve_shard_rows, validate_composition, validate_graph,
 )
 from basemap import round0113_prompt_contrast as prompt_contract
