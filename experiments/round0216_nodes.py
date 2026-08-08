@@ -26,6 +26,26 @@ SEARCH_BLOCK = 100_000
 QUERY_BLOCK = 16_384
 
 
+def _verify_sizes(job: Mapping[str, Any]) -> None:
+    """Re-verify every base-corpus shard byte size against the bound manifest."""
+    sig = job.get("source_size_manifest")
+    if sig is None:
+        raise Round0216Error("R0216 requires the bound source size manifest")
+    path = prompt_contract.verify_signature(sig, label="R0216 source size manifest")
+    import json as _json
+    manifest = _json.load(open(path))
+    drift = []
+    for corpus, entry in (manifest.get("corpora") or {}).items():
+        for rel, want in (entry.get("shard_sizes") or {}).items():
+            actual = os.path.getsize(os.path.join(EMB, rel))
+            if actual != int(want):
+                drift.append(f"{rel}: {actual} != {want}")
+    if drift:
+        raise Round0216Error(
+            f"R0216 source shards changed size since preparation: {drift[:4]}"
+        )
+
+
 def _shards(corpus: str) -> list[tuple[str, int, bool]]:
     """(path, complete_rows, is_real_npy) honouring the R0025 loading contract."""
     out = []
@@ -57,6 +77,7 @@ def run_assemble_and_graph(active: Mapping[str, Any], job: Mapping[str, Any]) ->
     if active.get("manifest", {}).get("round_id") != ROUND_ID:
         raise Round0216Error("R0216 handler received another queue")
     started = time.monotonic()
+    _verify_sizes(job)
     output = create_fresh_directory(str(job["outputs"][0]), label="R0216 substrate+graph")
 
     X = np.empty((ROWS, DIMENSION), dtype=np.float32)

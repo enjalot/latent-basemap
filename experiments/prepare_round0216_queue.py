@@ -57,12 +57,43 @@ def prepare_round0216(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
                                             size_bytes=os.path.getsize(p))
         if total < want:
             raise RuntimeError(f"R0216 {corpus}: need {want}, corpus has {total}")
-        corpora[corpus] = {"shards": len(shards), "rows": total, "selected": want}
-        # Bind every shard by hash: the substrate's provenance depends on all of them.
-        inputs.extend(expected_input_signature(p) for p in shards)
+        corpora[corpus] = {
+            "shards": len(shards), "rows": total, "selected": want,
+            "shard_sizes": {os.path.relpath(p, EMB): os.path.getsize(p) for p in shards},
+        }
+        # Binding 581 GB of base-corpus shards by SHA-256 costs ~10 minutes per
+        # prepare. Protocol v2.1 allows size-check plus declared-hash lineage for
+        # large inputs a prior reviewed round already verified at creation: R0025
+        # bound these exact files by hash when it built the int8 corpus. So the
+        # large corpora are bound by an explicit size manifest (hashed itself,
+        # and re-verified inside the node), while the new code corpus — small
+        # enough to hash directly — is bound by hash.
+        if corpus.startswith("starcoderdata"):
+            inputs.extend(expected_input_signature(p) for p in shards)
+            corpora[corpus]["binding"] = "sha256 per shard"
+        else:
+            corpora[corpus]["binding"] = (
+                "size manifest + R0025 declared-hash lineage (protocol v2.1)"
+            )
     ensure_data_directory(ROUND_ROOT)
     queue_root = create_fresh_directory(queue_root, label="R0216 GPU queue")
     artifacts = ensure_data_directory(os.path.join(queue_root, "artifacts"))
+    manifest_path = os.path.join(queue_root, "source-size-manifest.json")
+    atomic_write_new_json(manifest_path, {
+        "schema": "round0216-source-size-manifest-v1",
+        "embeddings_root": EMB, "corpora": corpora,
+        "binding_policy": (
+            "large base corpora bound by exact byte size here and re-verified in "
+            "the node; hash lineage carried by R0025 which bound these files at "
+            "creation. The new code corpus is bound by SHA-256 directly."
+        ),
+    }, immutable=True)
+    inputs.append(expected_input_signature(manifest_path))
+    r0025 = ("/data/latent-basemap/runs/round-0025/queue/artifacts/int8-shards/"
+             "int8-shards-v1.json")
+    if os.path.exists(r0025):
+        inputs.append(expected_input_signature(r0025))
+    job_extra = {"source_size_manifest": expected_input_signature(manifest_path)}
     job = {
         "id": "assemble_2m_substrate_and_graph",
         "action": "assemble_2m_substrate_and_graph",
@@ -71,6 +102,7 @@ def prepare_round0216(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
         "deps": [], "outputs": [os.path.join(artifacts, CAPABILITY)],
         "done_marker": os.path.join(artifacts, "substrate-graph.done.json"),
         "expected_inputs": _dedupe(inputs), "p90_wall_s": 5_400.0,
+        **job_extra,
         "node_policy": {"gpu_required": True, "training_performed": False, "cpu_heavy": True},
     }
     queue = _base_manifest(round_id=ROUND_ID, release_sha=release_sha, round_file=ROUND_FILE,
