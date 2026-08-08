@@ -18,9 +18,18 @@ import builtins
 import sys
 
 
+#: Names the import machinery always binds in a module namespace. They are not
+#: in `dir(builtins)`, so without this the guard reports a false UNDEFINED on
+#: every module that uses the `os.path.dirname(__file__)` sys.path idiom.
+MODULE_GLOBALS = frozenset({
+    "__file__", "__name__", "__doc__", "__package__", "__spec__", "__loader__",
+    "__builtins__", "__dict__",
+})
+
+
 def undefined(path: str) -> list[str]:
     tree = ast.parse(open(path).read())
-    bound = set(dir(builtins))
+    bound = set(dir(builtins)) | set(MODULE_GLOBALS)
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:

@@ -91,14 +91,14 @@ def test_dose_is_derived_from_the_sealed_edge_count_not_hardcoded() -> None:
     assert updates == -(
         -FULL_SUCCESSFUL_UPDATES * SEALED_DIRECTED_EDGES // FULL_GRAPH_EDGES
     )
-    assert updates == 80_094
+    assert updates == 80_163
     achieved = achieved_draws_per_edge(
         updates=updates, edge_count=SEALED_DIRECTED_EDGES
     )
     quantum = dose_quantum(SEALED_DIRECTED_EDGES)
     assert quantum == POSITIVE_ROWS_PER_UPDATE / SEALED_DIRECTED_EDGES
     # The rule is a ceil, so the achieved dose lives on a lattice of spacing
-    # `quantum`. At this edge count that spacing is 8.47e-06, which is why the
+    # `quantum`. At this edge count that spacing is 8.46e-06, which is why the
     # registered bound is one lattice step and not an arbitrary 1e-06.
     assert abs(achieved - TARGET_POSITIVE_DRAWS_PER_EDGE) <= quantum
     assert not math.isclose(

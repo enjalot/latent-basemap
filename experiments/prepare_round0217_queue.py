@@ -60,10 +60,13 @@ ROUND_ROOT = "/data/latent-basemap/runs/round-0217"
 QUEUE_ROOT = os.path.join(ROUND_ROOT, "queue")
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE = os.path.join(LAB_ROOT, "round-0217-2026-08-08.md")
-#: The sealed R0216 artifact directory (queue-correction-2 is the queue that
-#: succeeded; the two earlier queues sealed nothing).
+#: The sealed R0216 artifact directory. `queue-correction-3` is the terminal
+#: queue: `queue/` and `queue-correction-1/` failed and sealed nothing, and
+#: `queue-correction-2/` succeeded but was downgraded to partial by review
+#: 0216-01 for taking a leading prefix of each corpus instead of spanning it.
+#: Only correction-3's selection covers 100% of every corpus's shards.
 R0216_ARTIFACTS = (
-    "/data/latent-basemap/runs/round-0216/queue-correction-2/artifacts/"
+    "/data/latent-basemap/runs/round-0216/queue-correction-3/artifacts/"
     f"{R0216_CAPABILITY}"
 )
 GRAPH_MANIFEST = os.path.join(R0216_ARTIFACTS, "substrate-graph.json")

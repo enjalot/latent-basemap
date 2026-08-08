@@ -5,6 +5,11 @@ MiniLM substrate and its **exact** k15 fuzzy graph — mean recall `1.000000`
 against brute-force truth, and `0` zero-degree rows, the R0215 tripwire. This
 round trains four maps on exactly those bytes with seeds 42/43/44/45.
 
+The bytes are R0216's **queue-correction-3** artifacts: the terminal queue, whose
+selection spans 100% of the shards of all four corpora. Review 0216-01 found
+queue-correction-2's selection was a 90.9-94.2% leading prefix, so that substrate
+and its graph are superseded and must not be consumed.
+
 Everything except the seed is byte-identical across the four cells. That is the
 whole point: a seed family is only interpretable when the seed is the *only*
 free variable, so `assert_family_differs_only_by_seed` is a registered,
@@ -27,8 +32,8 @@ Both constants are the accepted R0184 full-rung values and are imported, never
 restated. One consequence has to be stated explicitly, because it is a real
 property of the rule at this graph size and not a slackened check: the rule is a
 `ceil`, so the achieved draws-per-edge can only land on a lattice of spacing
-`POSITIVE_ROWS_PER_UPDATE / active_edges`. At the sealed `48,303,258` edges that
-spacing is `8.467e-06`, so **no** integer horizon reproduces the target
+`POSITIVE_ROWS_PER_UPDATE / active_edges`. At the sealed `48,344,648` edges that
+spacing is `8.460e-06`, so **no** integer horizon reproduces the target
 `0.6781781544098838` to within `1e-06`; the tightest bound the registered rule
 admits is one lattice step. The dose check therefore pins two things exactly —
 the horizon equals the exact `ceil`, and the achieved dose is inside one
@@ -81,7 +86,13 @@ GRAPH_SOURCE_ROUND_ID = "0216"
 #: R0216's sealed receipt reports exactly this many directed edges. The graph is
 #: an immutable published artifact, so this is an equality check, not a
 #: plausibility band: if the number moves, the input is not the sealed graph.
-SEALED_DIRECTED_EDGES = 48_303_258
+#:
+#: This is the **queue-correction-3** graph. Review 0216-01 downgraded
+#: queue-correction-2 to partial because its selection took a leading prefix of
+#: each corpus; the corrected span-sampled substrate is a different (correct) 2M
+#: draw, so its exact k15 graph carries 48,344,648 directed edges rather than
+#: correction-2's 48,303,258. The horizon is derived, so it moves with it.
+SEALED_DIRECTED_EDGES = 48_344_648
 
 CAPABILITY_TEMPLATE = "minilm-mixed-2m-map-seed{seed}-low-dose-v1"
 TRAIN_SCHEMA = "round0217-minilm-mixed-2m-seed-family-train-receipt-v1"
