@@ -191,7 +191,7 @@ R0222_GATE_ARTIFACT_ROOT = (
     "/data/latent-basemap/runs/round-0222/queue/artifacts/"
     "minilm-mixed-2m-quality-gates-n8-v1"
 )
-R0222_GATE_SCHEMA = "round0222-minilm-mixed-2m-quality-gate-registration-v1"
+R0222_GATE_SCHEMA = "round0222-minilm-mixed-2m-quality-gates-n8-v1"
 R0222_POOLED_SEEDS: tuple[int, ...] = (42, 43, 44, 45, 46, 47, 48, 49)
 PENDING_FLOOR_METRICS: tuple[str, ...] = tuple(PANEL_METRICS)
 

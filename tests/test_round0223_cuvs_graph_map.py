@@ -268,6 +268,26 @@ def test_full_population_map_validation() -> None:
         validate_full_population_map(good[:10])
 
 
+def test_r0222_gate_schema_matches_the_published_artifact() -> None:
+    """The constant is the schema R0222 actually sealed, not a plausible name."""
+    import json
+    import os
+
+    from basemap.round0223_cuvs_graph_map import (
+        R0222_GATE_ARTIFACT_ROOT,
+        R0222_GATE_SCHEMA,
+    )
+
+    path = os.path.join(R0222_GATE_ARTIFACT_ROOT, "minilm-quality-gates-n8.json")
+    if not os.path.exists(path):
+        pytest.skip("R0222 gate artifact is not on this machine")
+    with open(path, encoding="utf-8") as handle:
+        artifact = json.load(handle)
+    assert artifact["schema"] == R0222_GATE_SCHEMA
+    assert artifact["round_id"] == "0222"
+    assert artifact["gate_registered"] is True
+
+
 def test_tolerance_factor_reproduces_review_0222() -> None:
     factor = tolerance_factor(8)
     assert factor["reproduces_review_0222"] is True
