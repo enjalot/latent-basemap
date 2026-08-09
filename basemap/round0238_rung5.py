@@ -434,10 +434,70 @@ RESERVE_NOTE = (
 # --------------------------------------------------------------------------- #
 # the builder — R0229's adopted arm, unchanged since R0233
 # --------------------------------------------------------------------------- #
-#: The `c` values whose imbalance is MEASURED at this N, unchanged from R0235,
-#: R0236 and R0237 so the four-rung drift table stays like-for-like. `400` is
-#: the value this rung builds at; the rest are priced and published beside it.
-IMBALANCE_PROBE_CLUSTERS: tuple[int, ...] = (16, 32, 64, 128, 200, 400)
+#: **Reduced to `(400,)` by the 2026-08-09 addendum, and this is a deviation
+#: registered with its arithmetic, not a silently edited constant.** The
+#: six-point grid is what every earlier rung measured, and at 50M it cost
+#: `371.9 s` for all 30 cells (`12.32 s` each) because the `76.8 GB` substrate
+#: was page-resident. At 100M it is not: `_assign` passes the whole `153.6 GB`
+#: substrate once per cell, the first attempt's child read `1,511 GB` in
+#: `3,600 s` before its wall expired — about `9.8` passes, i.e. **`~366 s` per
+#: pass against `12.32 s` at half the rows, a `~30x` jump for a `2x` rise in
+#: `N`** — and 30 cells therefore need `~10,980 s` where the registered wall
+#: allowed `3,600`. Raising the wall to fit would be enlarging a budget to
+#: accommodate a measurement; this round instead reduces the work to the cells
+#: it actually owes. `c = 400` is the partition this rung builds and the one
+#: the registered comparison against `PREDICTION_IMBALANCE_AT_C400` is defined
+#: on, so five seeds at `c = 400` are exactly the obligation. The five `c` this
+#: round drops are **not** re-priced from a 100M measurement, and the result
+#: says so rather than carrying R0237's values forward as if they were.
+IMBALANCE_PROBE_CLUSTERS: tuple[int, ...] = (400,)
+#: The six values earlier rungs measured, kept so the result can state exactly
+#: which cells were dropped and why.
+IMBALANCE_PROBE_CLUSTERS_REGISTERED_AT_ISSUE: tuple[int, ...] = (
+    16, 32, 64, 128, 200, 400,
+)
+#: Per-cell wall for the grid, derived rather than inherited: one full substrate
+#: pass per cell at the measured off-cache cost, with a `2x` margin.
+GRID_TIMEOUT_S = 5_400.0
+GRID_SCOPE_NOTE = (
+    "five seeds at c = 400 only. The grid's cost is one full pass over the "
+    "153.6 GB substrate per cell, and at this rung that pass cannot be served "
+    "from page cache: the first attempt measured ~366 s per pass against "
+    "12.32 s at 50M where the substrate WAS resident. Six c x five seeds = 30 "
+    "passes = ~10,980 s, which does not fit; five passes = ~1,830 s, which "
+    "does. The reduction is registered as a deviation with this arithmetic, "
+    "and the dropped c are reported as dropped, never back-filled from another "
+    "rung's numbers."
+)
+
+# --------------------------------------------------------------------------- #
+# the wall-budget guard — added by the 2026-08-09 addendum
+# --------------------------------------------------------------------------- #
+#: R0237's measured build phases at 50,000,000 rows, `c = 128`, `s = 8`, read
+#: from its hash-bound ladder at run time. The literals exist so a CPU test can
+#: check the extrapolation arithmetic against a known answer.
+R0237_BUILDER_SECONDS = 5833.871024230895
+R0237_SPILL_WRITE_SECONDS = 842.3103793350165
+#: Everything in a build cell that is NOT the substrate-pass term, extrapolated
+#: by the spilled-row doubling this rung represents (`400M -> 800M`, `2.0x`).
+#: `5833.871 - 842.310 = 4991.561`, doubled = `9983.121 s`.
+BUILD_NON_READ_SECONDS_AT_THIS_RUNG = (
+    R0237_BUILDER_SECONDS - R0237_SPILL_WRITE_SECONDS
+) * 2.0
+WALL_BUDGET_NOTE = (
+    "a predictive guard on WALL, alongside the existing device, host-anonymous "
+    "and disk guards, and it obeys the same rule they do: a refusal is a "
+    "MEASUREMENT, recorded as data, never a silent skip. The build cell's cost "
+    "is modelled as (predicted substrate passes x the seconds per pass this "
+    "round's own grid just measured) + (R0237's measured non-spill-write "
+    "phases scaled by the 2x spilled-row doubling). If that exceeds the wall "
+    "the queue has left inside the round's GPU cap, the cell is refused before "
+    "any CUDA context exists and the arithmetic is sealed. This exists because "
+    "the alternative is a cooperative abort at the deadline, which burns the "
+    "entire remaining budget and produces nothing: a refusal costs zero and "
+    "carries the same information. It can only refuse a cell the other guards "
+    "admitted; it can never admit one they refused."
+)
 
 #: **The same five k-means seeds R0237 used**, so all five columns compare
 #: directly against the sealed 50M grid and the 50M -> 100M doubling can be read
@@ -1518,4 +1578,11 @@ __all__ = [
     "POOL_EXTENSION_UNIFORMITY",
     "PREDICTION_IMBALANCE_AT_C400",
     "PREDICTION_TOLERANCE_AT_C400",
+    "GRID_SCOPE_NOTE",
+    "GRID_TIMEOUT_S",
+    "IMBALANCE_PROBE_CLUSTERS_REGISTERED_AT_ISSUE",
+    "BUILD_NON_READ_SECONDS_AT_THIS_RUNG",
+    "R0237_BUILDER_SECONDS",
+    "R0237_SPILL_WRITE_SECONDS",
+    "WALL_BUDGET_NOTE",
 ]

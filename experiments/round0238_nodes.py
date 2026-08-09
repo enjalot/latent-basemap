@@ -206,6 +206,13 @@ from basemap.round0238_rung5 import (
     DECLINED_DERISK_NOTE,
     GREAT2_GRANDPARENT_ROUND_ID,
     GREAT2_GRANDPARENT_ROWS,
+    BUILD_NON_READ_SECONDS_AT_THIS_RUNG,
+    GRID_SCOPE_NOTE,
+    GRID_TIMEOUT_S,
+    IMBALANCE_PROBE_CLUSTERS_REGISTERED_AT_ISSUE,
+    R0237_BUILDER_SECONDS,
+    R0237_SPILL_WRITE_SECONDS,
+    WALL_BUDGET_NOTE,
     RESERVE_DRAWN_BY_ROUND_ID,
     INHERITED_PREFIX_SHA256,
     MAX_REPLACEMENT_ROUNDS,
@@ -250,7 +257,7 @@ TRUTH_DB_CHUNK = 4_000_000
 TRUTH_DB_BLOCK = 65_536
 COSINE_BLOCK = 32_768
 COPY_BLOCK = 250_000
-IMBALANCE_PROBE_TIMEOUT_S = 3_600
+IMBALANCE_PROBE_TIMEOUT_S = GRID_TIMEOUT_S
 
 
 # --------------------------------------------------------------------------- #
@@ -2788,9 +2795,113 @@ def run_ladder(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     statvfs = os.statvfs("/data")
     disk_free = int(statvfs.f_bavail) * int(statvfs.f_frsize)
 
+    #: The grid just passed the whole substrate once per cell, so its own cells
+    #: measure the seconds-per-substrate-pass this rung actually gets. The build
+    #: cell's wall is predicted from that plus R0237's measured non-read phases,
+    #: and refused if it does not fit the wall this queue has left inside the
+    #: round's GPU cap. A refusal is a measurement (LADDER_RULE), not a skip.
+    pass_seconds = [
+        float(cell["elapsed_s"]) for cell in imbalance["cells"]
+        if cell.get("elapsed_s")
+    ]
+    measured_pass_s = max(pass_seconds) if pass_seconds else None
+    #: What the round has left inside its GPU cap, minus what this node has
+    #: already spent on the grid, minus the reserve the qualification node
+    #: needs. Computed here rather than at preparation time so it uses the
+    #: grid's ACTUAL wall, not an estimate of it.
+    remaining_s = job.get("gpu_budget_remaining_s")
+    qualify_reserve_s = float(job.get("qualify_reserve_s") or 0.0)
+    grid_wall_s = float(imbalance.get("wall_s") or 0.0)
+    wall_budget_s = (
+        None if remaining_s is None
+        else float(remaining_s) - grid_wall_s - qualify_reserve_s
+    )
+    predicted_passes = int(predicted_substrate_passes(
+        rows=ROWS, clusters=selected_clusters,
+        imbalance=float(worst[selected_clusters]),
+    ))
+    predicted_build_wall_s = (
+        float(measured_pass_s) * predicted_passes
+        + float(BUILD_NON_READ_SECONDS_AT_THIS_RUNG)
+        if measured_pass_s is not None else None
+    )
+    wall_budget = {
+        "note": WALL_BUDGET_NOTE,
+        "measured_seconds_per_substrate_pass": measured_pass_s,
+        "measured_pass_source": (
+            "the worst of this round's own grid cells at this N; each cell is "
+            "exactly one full pass over the substrate through _assign"
+        ),
+        "grid_cell_seconds": pass_seconds,
+        "predicted_substrate_passes": predicted_passes,
+        "predicted_read_term_s": (
+            float(measured_pass_s) * predicted_passes
+            if measured_pass_s is not None else None
+        ),
+        "non_read_term_s": float(BUILD_NON_READ_SECONDS_AT_THIS_RUNG),
+        "non_read_term_basis": (
+            f"R0237's measured builder_seconds {R0237_BUILDER_SECONDS} minus "
+            f"its spill_write_seconds {R0237_SPILL_WRITE_SECONDS}, scaled by "
+            "the 2.0x spilled-row doubling from 400,000,000 to 800,000,000"
+        ),
+        "predicted_build_wall_s": predicted_build_wall_s,
+        "wall_budget_s": (
+            None if wall_budget_s is None else float(wall_budget_s)
+        ),
+        "gpu_budget_remaining_s_at_node_start": (
+            None if remaining_s is None else float(remaining_s)
+        ),
+        "grid_wall_s_actually_spent": grid_wall_s,
+        "qualify_reserve_s": qualify_reserve_s,
+        "refused_even_at_zero_read_cost": (
+            None if wall_budget_s is None
+            else bool(float(BUILD_NON_READ_SECONDS_AT_THIS_RUNG)
+                      > float(wall_budget_s))
+        ),
+        "fits": (
+            None if predicted_build_wall_s is None or wall_budget_s is None
+            else bool(predicted_build_wall_s <= float(wall_budget_s))
+        ),
+    }
+    wall_refusal = wall_budget["fits"] is False
+
     cells: list[dict[str, Any]] = []
     stopped: str | None = None
-    for clusters in (selected_clusters,):
+    if wall_refusal:
+        cell_id = f"r0238-n{ROWS}-c{selected_clusters}-s{SPILL}"
+        cells.append({
+            "cell": cell_id, "clusters": int(selected_clusters), "spill": SPILL,
+            "role": "selected", "run": False,
+            "guard": guard_decision(
+                rows=ROWS, clusters=selected_clusters,
+                imbalance=worst[selected_clusters],
+                imbalance_source=(
+                    f"worst of {len(IMBALANCE_REPLICATE_SEEDS)} replicate seeds "
+                    "measured on this substrate at this N"
+                ),
+                laws=laws, disk_free_bytes=disk_free,
+            ),
+            "build": {
+                "fit": False,
+                "refused_a_priori": True,
+                "refusal_reasons": [
+                    "predicted build wall "
+                    f"{predicted_build_wall_s:.1f} s exceeds the "
+                    f"{float(wall_budget_s):.1f} s this queue has left inside "
+                    "the round's GPU cap"
+                ],
+                "wall_budget": wall_budget,
+                "oom": False, "timed_out": False,
+                "cooperatively_aborted": False,
+                "refused_after_assignment": False,
+                "signal_handler_installed": False,
+                "watchdog_escalations": [],
+                "cuvs_inputs_asserted_memmap": None,
+            },
+            "graph_ids": None, "graph_cos": None,
+        })
+        stopped = cell_id
+    for clusters in (() if wall_refusal else (selected_clusters,)):
         cell_id = f"r0238-n{ROWS}-c{clusters}-s{SPILL}"
         guard = guard_decision(
             rows=ROWS, clusters=clusters, imbalance=worst[clusters],
@@ -2860,6 +2971,17 @@ def run_ladder(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "max_iterations": MAX_ITERATIONS,
         },
         "measured_imbalance": imbalance,
+        "grid_scope_note": GRID_SCOPE_NOTE,
+        "grid_clusters_measured": [int(v) for v in IMBALANCE_PROBE_CLUSTERS],
+        "grid_clusters_registered_at_issue": [
+            int(v) for v in IMBALANCE_PROBE_CLUSTERS_REGISTERED_AT_ISSUE
+        ],
+        "grid_clusters_dropped": [
+            int(v) for v in IMBALANCE_PROBE_CLUSTERS_REGISTERED_AT_ISSUE
+            if int(v) not in {int(x) for x in IMBALANCE_PROBE_CLUSTERS}
+        ],
+        "grid_timeout_s": GRID_TIMEOUT_S,
+        "wall_budget": wall_budget,
         "primary_seed_imbalance_at_this_rung": measured,
         "worst_seed_imbalance_at_this_rung": worst,
         "selection_imbalance_rule": (

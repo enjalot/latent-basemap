@@ -311,7 +311,17 @@ def test_the_grid_is_five_seeds_at_this_rung_only():
     assert len(IMBALANCE_REPLICATE_SEEDS) == 5
     assert PRIMARY_IMBALANCE_SEED == 226 == IMBALANCE_REPLICATE_SEEDS[0]
     assert IMBALANCE_PROBE_ROWS == (100_000_000,)
-    assert IMBALANCE_PROBE_CLUSTERS == (16, 32, 64, 128, 200, 400)
+    # Reduced to c = 400 by the 2026-08-09 addendum: the six-point grid needs
+    # 30 full passes over a substrate that no longer fits page cache.
+    assert IMBALANCE_PROBE_CLUSTERS == (400,)
+    assert rung5.IMBALANCE_PROBE_CLUSTERS_REGISTERED_AT_ISSUE == (
+        16, 32, 64, 128, 200, 400
+    )
+    assert rung5.GRID_TIMEOUT_S == 5_400.0
+    # the non-read term alone, extrapolated from R0237's measured phases
+    assert rung5.BUILD_NON_READ_SECONDS_AT_THIS_RUNG == pytest.approx(
+        (5833.871024230895 - 842.3103793350165) * 2.0, rel=1e-12
+    )
     # ALL FIVE are R0237's, so every column compares like-for-like across the
     # 50M -> 100M doubling, which is what review-0237-01 F5 wanted published.
     assert set(IMBALANCE_REPLICATE_SEEDS) == {226, 236, 1236, 2236, 3236}

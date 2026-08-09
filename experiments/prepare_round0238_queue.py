@@ -279,6 +279,27 @@ INHERIT_NODE = {
 }
 
 
+def _prior_gpu_wall(queue_root: str | None) -> float:
+    """GPU wall every earlier attempt of THIS round has already charged.
+
+    Read from the earlier queue's terminal receipt, so the wall-budget guard in
+    the ladder node is sized against the round's real remaining cap rather than
+    against a fresh 6.0 hours (review-0224: charge every attempt).
+    """
+    if not queue_root:
+        return 0.0
+    path = os.path.join(queue_root, "runner-terminal.json")
+    if not os.path.exists(path):
+        raise RuntimeError(f"R0238 --inherit-from: no terminal receipt at {path}")
+    with open(path, encoding="utf-8") as handle:
+        receipt = json.load(handle)
+    if str(receipt.get("round_id")) != ROUND_ID:
+        raise RuntimeError("R0238 --inherit-from: terminal receipt is another round")
+    return float(receipt.get("gpu_wall_s") or 0.0) + float(
+        receipt.get("prior_attempt_gpu_wall_s") or 0.0
+    )
+
+
 def _discover_inheritable(queue_root: str) -> dict[str, dict[str, Any]]:
     """Sealed manifests an earlier attempt of THIS round already produced."""
     found: dict[str, dict[str, Any]] = {}
@@ -306,6 +327,7 @@ def prepare_round0238(
     release_sha: str,
     queue_root: str = QUEUE_ROOT,
     inherit_from: str | None = None,
+    include_qualify: bool = True,
 ) -> str:
     """Build the queue.
 
@@ -338,6 +360,7 @@ def prepare_round0238(
     reused: dict[str, dict[str, Any]] = (
         _discover_inheritable(inherit_from) if inherit_from else {}
     )
+    prior_gpu_wall_s = _prior_gpu_wall(inherit_from)
     reused_substrate = reused.get("substrate")
 
     ensure_data_directory(ROUND_ROOT)
@@ -461,9 +484,14 @@ def prepare_round0238(
             "scratch_root": scratch_root,
             "cache_root": cache_root,
             "build_timeout_s": BUILD_TIMEOUT_S,
+            "gpu_budget_remaining_s": float(
+                GPU_HOURS_CAP * 3600.0 - prior_gpu_wall_s
+            ),
+            "qualify_reserve_s": QUALIFY_P90_WALL_S,
             "node_policy": dict(policy),
         })
-    jobs.append({
+    if include_qualify:
+        jobs.append({
             "id": "qualify_100000k", "action": QUALIFY_ACTION,
             "handler_module": "experiments.round0238_nodes",
             "handler_callable": "run_job",
@@ -485,7 +513,7 @@ def prepare_round0238(
             "probe_rows": TRUTH_PROBE_ROWS,
             "probe_seed": TRUTH_PROBE_SEED,
             "node_policy": dict(policy),
-    })
+        })
 
     queue = _base_manifest(
         round_id=ROUND_ID, release_sha=release_sha, round_file=ROUND_FILE,
@@ -510,8 +538,18 @@ def prepare_round0238(
             LADDER_CAPABILITY, GRAPH_CAPABILITY, IMBALANCE_CAPABILITY,
             IO_CAPABILITY,
         ],
+        "prior_attempt_gpu_wall_s": prior_gpu_wall_s,
+        "gpu_budget_remaining_s": float(GPU_HOURS_CAP * 3600.0 - prior_gpu_wall_s),
         "inherited_artifacts": sorted(reused),
         "inherited_from": inherit_from,
+        "qualify_included": bool(include_qualify),
+        "qualify_omitted_reason": (
+            None if include_qualify else
+            "the wall-budget guard refuses the c = 400 build a priori inside "
+            "the round's remaining GPU cap, so no graph exists to qualify. "
+            "Registered in the round's 2026-08-09 addendum; running the node "
+            "would raise rather than measure anything."
+        ),
         "substrate_inherited": bool(reused_substrate),
         "substrate_reference": substrate_reference,
         "inheritance_note": (
@@ -640,10 +678,19 @@ def main(argv: list[str] | None = None) -> int:
             "bound by sha256 and its node is dropped"
         ),
     )
+    parser.add_argument(
+        "--no-qualify", action="store_true",
+        help=(
+            "omit the qualification node. Only correct when the wall-budget "
+            "guard refuses the build a priori, so no graph exists to qualify; "
+            "registered in the round file when used"
+        ),
+    )
     args = parser.parse_args(argv)
     path = prepare_round0238(
         release_sha=args.release_sha, queue_root=args.queue_root,
         inherit_from=args.inherit_from,
+        include_qualify=not args.no_qualify,
     )
     print(json.dumps({"queue": path}, indent=2))
     return 0
