@@ -83,6 +83,80 @@ def test_io_sampler_reads_only_and_reports_the_registered_fields():
     assert nodes._proc_io(-1) == {}
 
 
+@pytest.fixture
+def data_tmp_path():
+    """A scratch directory under `/data`, which `output_safety` requires."""
+    import shutil
+    import tempfile
+
+    root = tempfile.mkdtemp(prefix="round0236-test-", dir="/data/latent-basemap")
+    try:
+        yield root
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_imbalance_grid_returns_the_record_and_the_grid_the_ladder_unpacks(
+    data_tmp_path, monkeypatch
+):
+    """The first R0236 ladder attempt died here on an arity mismatch.
+
+    The grid runs in a RAPIDS child, so no CPU test reached this function and a
+    plain `return` arity error survived to the GPU. This stubs the child - it
+    writes the artifact the real probe writes - and calls the real function, so
+    the contract between it and `run_ladder` is exercised on CPU.
+    """
+    written: dict[str, object] = {}
+
+    def _fake_run(command, **kwargs):
+        script = command[-1]
+        probe_dir = os.path.dirname(script)
+        assert os.path.exists(script), "the probe script must be written first"
+        body = open(script, encoding="utf-8").read()
+        # The child must assert its dataset is a read-only memmap before k-means.
+        assert "isinstance(dataset, np.memmap)" in body
+        assert "not dataset.flags.writeable" in body
+        cells = [
+            {"rows": rows, "clusters": clusters, "seed": seed, "spill": 8,
+             "min": 1, "max": 2, "mean": 1.5, "median": 1.5,
+             "empty_clusters": 0, "imbalance_max_over_mean": 1.5 + 0.01 * seed,
+             "elapsed_s": 0.1}
+            for rows in (6_250_000, 25_000_000)
+            for clusters in (64, 200)
+            for seed in (226, 236, 1236)
+        ]
+        with open(os.path.join(probe_dir, "imbalance.json"), "w") as handle:
+            json.dump({"spill": 8, "cells": cells}, handle)
+        written["cells"] = len(cells)
+
+        class _Completed:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return _Completed()
+
+    monkeypatch.setattr(nodes.subprocess, "run", _fake_run)
+    record, grid = nodes._measure_imbalance_grid(
+        substrate_path=os.path.join(data_tmp_path, "substrate.f32.npy"),
+        output=data_tmp_path, repo_root=data_tmp_path,
+        cache_root=data_tmp_path,
+    )
+    assert written["cells"] == 12
+    assert record["primary_seed"] == PRIMARY_IMBALANCE_SEED
+    assert record["replicate_seeds"] == [226, 236, 1236]
+    assert set(grid) == {6_250_000, 25_000_000}
+    assert set(grid[25_000_000]) == {64, 200}
+    assert set(grid[25_000_000][64]) == {226, 236, 1236}
+    # The exact consumption `run_ladder` performs, on the returned grid.
+    worst = {c: max(s.values()) for c, s in grid[25_000_000].items()}
+    primary = {
+        c: s[PRIMARY_IMBALANCE_SEED] for c, s in grid[25_000_000].items()
+    }
+    assert worst[64] > primary[64]
+    assert record["summary"]["25000000"]["64"]["n"] == 3
+
+
 def test_block_device_and_meminfo_instruments_answer_on_this_box():
     stat = nodes._data_block_device_stat()
     assert stat and stat["bytes_read"] >= 0 and stat["bytes_written"] >= 0

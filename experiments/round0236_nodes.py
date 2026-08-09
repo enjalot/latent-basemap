@@ -1156,7 +1156,7 @@ with open(os.path.join({probe_dir!r}, "imbalance.json"), "w") as handle:
             for rows, cells in grid.items()
         },
     })
-    return measured, grid, grid
+    return measured, grid
 
 
 def _read_bound(
