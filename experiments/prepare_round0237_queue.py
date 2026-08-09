@@ -247,17 +247,56 @@ def _source_size_manifest(queue_root: str) -> str:
     return path
 
 
+#: The sealed manifest each node produces, under a queue's `artifacts/` dir.
+INHERITABLE: dict[str, tuple[str, str]] = {
+    "reachability": (REACHABILITY_CAPABILITY, "reachability.json"),
+    "substrate": (SUBSTRATE_CAPABILITY, "substrate.json"),
+    "truth": (TRUTH_CAPABILITY, "probe-k15-truth.json"),
+    "ladder": (LADDER_CAPABILITY, "build-ladder.json"),
+}
+#: The node each inheritable artifact would otherwise be produced by.
+INHERIT_NODE = {
+    "reachability": "reachability_high_c_25000k",
+    "substrate": "assemble_50000k",
+    "truth": "truth_probe_50000k",
+    "ladder": "ladder_50000k",
+}
+
+
+def _discover_inheritable(queue_root: str) -> dict[str, dict[str, Any]]:
+    """Sealed manifests an earlier attempt of THIS round already produced."""
+    found: dict[str, dict[str, Any]] = {}
+    for key, (capability, name) in INHERITABLE.items():
+        path = os.path.join(queue_root, "artifacts", capability, name)
+        if not os.path.exists(path):
+            continue
+        with open(path, encoding="utf-8") as handle:
+            sealed = json.load(handle)
+        if str(sealed.get("round_id")) != ROUND_ID:
+            raise RuntimeError(
+                f"R0237 --inherit-from: {path} is round {sealed.get('round_id')}, "
+                "not this round"
+            )
+        found[key] = expected_input_signature(path)
+    if not found:
+        raise RuntimeError(
+            f"R0237 --inherit-from: no sealed R0237 manifest under {queue_root}"
+        )
+    return found
+
+
 def prepare_round0237(
     *,
     release_sha: str,
     queue_root: str = QUEUE_ROOT,
-    inherit_substrate: str | None = None,
+    inherit_from: str | None = None,
 ) -> str:
     """Build the queue.
 
-    `inherit_substrate` is the sealed R0237 substrate manifest of an earlier
-    attempt. When given, `assemble_50000k` is omitted and every downstream node
-    binds that manifest at its full signature instead of an intra-queue path.
+    `inherit_from` is an earlier attempt's queue root. Every sealed manifest it
+    already produced is bound at its FULL signature and the node that would have
+    produced it is dropped, so a correction after a setup-class defect costs the
+    failed node and nothing else.
     """
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0237 release SHA must be one full commit")
@@ -279,23 +318,10 @@ def prepare_round0237(
             raise RuntimeError(f"R0237 inherited input absent: {key} at {path}")
         signatures[key] = expected_input_signature(path)
 
-    reused_substrate: dict[str, Any] | None = None
-    if inherit_substrate:
-        if not os.path.exists(inherit_substrate):
-            raise RuntimeError(
-                f"R0237 inherited substrate manifest absent: {inherit_substrate}"
-            )
-        with open(inherit_substrate, encoding="utf-8") as handle:
-            sealed = json.load(handle)
-        if str(sealed.get("round_id")) != ROUND_ID or int(
-            sealed.get("rows", -1)
-        ) != ROWS:
-            raise RuntimeError(
-                "R0237 --inherit-substrate must name THIS round's 50,000,000-row "
-                f"substrate manifest, not {sealed.get('round_id')} / "
-                f"{sealed.get('rows')}"
-            )
-        reused_substrate = expected_input_signature(inherit_substrate)
+    reused: dict[str, dict[str, Any]] = (
+        _discover_inheritable(inherit_from) if inherit_from else {}
+    )
+    reused_substrate = reused.get("substrate")
 
     ensure_data_directory(ROUND_ROOT)
     queue_root = create_fresh_directory(queue_root, label="R0237 queue")
@@ -309,7 +335,7 @@ def prepare_round0237(
         expected_input_signature(smoke_path),
         expected_input_signature(manifest_path),
         *signatures.values(),
-        *([reused_substrate] if reused_substrate else []),
+        *reused.values(),
     ])
 
     artifacts = ensure_data_directory(os.path.join(queue_root, "artifacts"))
@@ -334,10 +360,21 @@ def prepare_round0237(
     #: already earned it. Both forms carry `canonical_path`; the inherited one
     #: additionally carries `sha256`, so it is bound MORE tightly, not less.
     substrate_reference = reused_substrate or intra(substrate_manifest)
+    reach_reference = reused.get("reachability") or intra(reach_manifest)
+    truth_reference = reused.get("truth") or intra(truth_manifest)
+    ladder_reference = reused.get("ladder") or intra(ladder_manifest)
     downstream_deps = [] if reused_substrate else ["assemble_50000k"]
 
-    jobs: list[dict[str, Any]] = [
-        {
+    def _deps(*names: str) -> list[str]:
+        """Depend only on nodes this queue actually runs."""
+        return [
+            name for name in names
+            if name not in {INHERIT_NODE[key] for key in reused}
+        ]
+
+    jobs: list[dict[str, Any]] = []
+    if "reachability" not in reused:
+        jobs.append({
             "id": "reachability_high_c_25000k", "action": REACHABILITY_ACTION,
             "handler_module": "experiments.round0237_nodes",
             "handler_callable": "run_job", "deps": [],
@@ -353,8 +390,7 @@ def prepare_round0237(
             "r0229_reachability": signatures["r0229_reachability"],
             "cache_root": cache_root,
             "node_policy": dict(policy),
-        },
-    ]
+        })
     if not reused_substrate:
         jobs.append({
             "id": "assemble_50000k", "action": ASSEMBLE_ACTION,
@@ -369,8 +405,8 @@ def prepare_round0237(
             "parent_substrate_manifest": signatures["parent_substrate"],
             "node_policy": {**policy, "cpu_heavy": True},
         })
-    jobs.extend([
-        {
+    if "truth" not in reused:
+        jobs.append({
             "id": "truth_probe_50000k", "action": TRUTH_ACTION,
             "handler_module": "experiments.round0237_nodes",
             "handler_callable": "run_job", "deps": list(downstream_deps),
@@ -383,11 +419,12 @@ def prepare_round0237(
             "probe_rows": TRUTH_PROBE_ROWS,
             "probe_seed": TRUTH_PROBE_SEED,
             "node_policy": dict(policy),
-        },
-        {
+        })
+    if "ladder" not in reused:
+        jobs.append({
             "id": "ladder_50000k", "action": LADDER_ACTION,
             "handler_module": "experiments.round0237_nodes",
-            "handler_callable": "run_job", "deps": ["truth_probe_50000k"],
+            "handler_callable": "run_job", "deps": _deps("truth_probe_50000k"),
             "outputs": [ladder_dir],
             "done_marker": os.path.join(artifacts, "ladder_50000k.done.json"),
             "expected_inputs": expected_inputs,
@@ -403,21 +440,21 @@ def prepare_round0237(
             "cache_root": cache_root,
             "build_timeout_s": BUILD_TIMEOUT_S,
             "node_policy": dict(policy),
-        },
-        {
+        })
+    jobs.append({
             "id": "qualify_50000k", "action": QUALIFY_ACTION,
             "handler_module": "experiments.round0237_nodes",
             "handler_callable": "run_job",
-            "deps": ["ladder_50000k", "reachability_high_c_25000k"],
+            "deps": _deps("ladder_50000k", "reachability_high_c_25000k"),
             "outputs": [graph_dir],
             "done_marker": os.path.join(artifacts, "qualify_50000k.done.json"),
             "expected_inputs": expected_inputs,
             "p90_wall_s": QUALIFY_P90_WALL_S,
             "capability": GRAPH_CAPABILITY,
             "substrate_manifest": substrate_reference,
-            "truth_reference": intra(truth_manifest),
-            "ladder_reference": intra(ladder_manifest),
-            "reachability_reference": intra(reach_manifest),
+            "truth_reference": truth_reference,
+            "ladder_reference": ladder_reference,
+            "reachability_reference": reach_reference,
             "r0229_reachability": signatures["r0229_reachability"],
             "r0233_ladder": signatures["r0233_ladder"],
             "r0235_ladder": signatures["r0235_ladder"],
@@ -425,8 +462,7 @@ def prepare_round0237(
             "probe_rows": TRUTH_PROBE_ROWS,
             "probe_seed": TRUTH_PROBE_SEED,
             "node_policy": dict(policy),
-        },
-    ])
+    })
 
     queue = _base_manifest(
         round_id=ROUND_ID, release_sha=release_sha, round_file=ROUND_FILE,
@@ -449,24 +485,27 @@ def prepare_round0237(
             LADDER_CAPABILITY, GRAPH_CAPABILITY, IMBALANCE_CAPABILITY,
             IO_CAPABILITY,
         ],
+        "inherited_artifacts": sorted(reused),
+        "inherited_from": inherit_from,
         "substrate_inherited": bool(reused_substrate),
         "substrate_reference": substrate_reference,
-        "substrate_inheritance_note": (
-            "a correction queue binds the sealed substrate of the attempt that "
-            "already earned it, by full sha256, and does not re-assemble it. At "
-            "50,000,000 rows a rebuild is 76.8 GB per attempt; /data has to "
-            "hold 236 GB for the 100M rung. review-0233-01 D7 prefers every "
-            "released capability to come from a queue that terminated "
-            "'succeeded'; the round file registers this trade in advance and "
-            "the result states which queue each artifact came from."
+        "inheritance_note": (
+            "a correction queue binds every sealed manifest the earlier attempt "
+            "already produced, by full sha256, and drops the node that would "
+            "have produced it. At 50,000,000 rows the substrate alone is "
+            "76.8 GB and the build cell alone is ~1.8 GPU-h; recomputing either "
+            "after a setup-class defect in a later node buys nothing and can "
+            "exhaust the round's cap, and /data has to hold 236 GB for the 100M "
+            "rung. review-0233-01 D7 prefers every released capability to come "
+            "from a queue that terminated 'succeeded'; the round file registers "
+            "this trade in a dated addendum and the result states which queue "
+            "each artifact came from."
         ),
         "training_performed": False,
         "jobs": jobs,
         "p90_gpu_seconds": {
-            "total": (
-                REACHABILITY_P90_WALL_S
-                + (0.0 if reused_substrate else ASSEMBLE_P90_WALL_S)
-                + TRUTH_P90_WALL_S + LADDER_P90_WALL_S + QUALIFY_P90_WALL_S
+            "total": sum(
+                float(job["p90_wall_s"]) for job in jobs
             )
         },
         "scientific_contract": {
@@ -551,16 +590,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--release-sha", required=True)
     parser.add_argument("--queue-root", default=QUEUE_ROOT)
     parser.add_argument(
-        "--inherit-substrate", default=None,
+        "--inherit-from", default=None,
         help=(
-            "sealed R0237 substrate.json from an earlier attempt; omits the "
-            "assemble node and binds those bytes by sha256"
+            "an earlier R0237 queue root; every sealed manifest it produced is "
+            "bound by sha256 and its node is dropped"
         ),
     )
     args = parser.parse_args(argv)
     path = prepare_round0237(
         release_sha=args.release_sha, queue_root=args.queue_root,
-        inherit_substrate=args.inherit_substrate,
+        inherit_from=args.inherit_from,
     )
     print(json.dumps({"queue": path}, indent=2))
     return 0

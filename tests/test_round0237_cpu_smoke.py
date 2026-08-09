@@ -614,3 +614,52 @@ def test_the_reachability_node_reads_r0236s_sealed_probe_and_truth():
     shared = (gathered[:, :, :, None] == mine[:, None, None, :]).any(3).any(2)
     strict = shared.sum(axis=1) / 2.0
     assert strict.tolist() == [1.0, 0.0]
+
+
+def test_intra_queue_references_are_resolved_by_the_intra_resolver():
+    """The defect that failed R0237's first queue, and R0233's before it.
+
+    `prompt_contract.verify_signature` requires a sha256 and refuses a reference
+    that has none. A first-attempt queue cannot know the sha256 of an artifact
+    its own node has not produced yet, so those references carry only a
+    `canonical_path` — and must be resolved with `_intra_signature`, which
+    checks the hash when one is present and the path when one is not.
+    """
+    import ast
+
+    tree = ast.parse(open(nodes.__file__, encoding="utf-8").read())
+    qualify = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "run_qualify"
+    )
+    intra_keys, bound_keys = set(), set()
+    for node in ast.walk(qualify):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if not node.args or not isinstance(node.args[-1], ast.Constant):
+            continue
+        key = node.args[-1].value
+        if node.func.id == "_intra":
+            intra_keys.add(key)
+        elif node.func.id == "_read_bound":
+            bound_keys.add(key)
+    # Every reference this round's own nodes produce is intra-resolved.
+    assert {"truth_reference", "ladder_reference", "reachability_reference"} <= (
+        intra_keys
+    )
+    # And none of them is resolved by the full-signature reader.
+    assert not (
+        {"truth_reference", "ladder_reference", "reachability_reference"}
+        & bound_keys
+    )
+
+
+def test_a_correction_queue_inherits_every_sealed_artifact_it_can():
+    """`--inherit-from` must drop a node whose artifact already exists."""
+    assert set(prepare.INHERITABLE) == {
+        "reachability", "substrate", "truth", "ladder"
+    }
+    assert set(prepare.INHERIT_NODE) == set(prepare.INHERITABLE)
+    for key, node_id in prepare.INHERIT_NODE.items():
+        assert key in prepare.INHERITABLE
+        assert node_id.startswith(("reachability_", "assemble_", "truth_", "ladder_"))

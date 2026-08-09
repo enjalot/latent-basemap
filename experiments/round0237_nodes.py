@@ -2690,9 +2690,18 @@ def run_qualify(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         }
 
     # ---- the 100M verdict: confirm c = 400, do not re-open the question ----
-    reachability_path, reachability = _read_bound(
-        job, "reachability_reference", label="R0237 high-c reachability",
-        sealed=True,
+    # `reachability_reference` may be an INTRA-queue reference (this queue's own
+    # node produced it, so no sha256 exists at preparation time) or a FULL
+    # signature (a correction queue binding an earlier attempt's sealed bytes).
+    # `_intra_signature` handles both: it requires the path to exist, and it
+    # checks the sha256 only when the reference carries one. `verify_signature`
+    # requires one unconditionally and refuses an intra-queue reference — the
+    # defect R0233 fixed once already and this round reproduced.
+    reachability_path, _observed = _intra(
+        job, "reachability_reference", label="R0237 high-c reachability"
+    )
+    reachability = prompt_contract.read_sealed(
+        reachability_path, label="R0237 high-c reachability"
     )
     if str(reachability.get("round_id")) != ROUND_ID:
         raise Round0237Error("R0237 reachability artifact is not this round's")
