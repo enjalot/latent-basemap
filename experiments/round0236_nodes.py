@@ -149,6 +149,7 @@ from basemap.round0236_rung3 import (
     io_hours,
     io_projection,
     io_scaling_fit,
+    json_safe,
     physical_io_prediction,
     predicted_substrate_passes,
     provenance_keys,
@@ -814,7 +815,7 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "floor on write throughput, not a write benchmark"
         ),
     }
-    receipt = prompt_contract.seal({
+    receipt = prompt_contract.seal(json_safe({
         "schema": SUBSTRATE_SCHEMA,
         "round_id": ROUND_ID,
         "release_sha": manifest["release_sha"],
@@ -882,7 +883,7 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         },
         "performance": {"total_wall_s": time.monotonic() - started},
         "training_performed": False,
-    })
+    }))
     atomic_write_new_json(
         os.path.join(output, "substrate.json"), receipt, immutable=True
     )
@@ -1017,7 +1018,7 @@ def run_truth(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     cos_path = atomic_save_new_npy(
         os.path.join(output, "truth-k15-cos.f32.npy"), cosines, immutable=True
     )
-    receipt = prompt_contract.seal({
+    receipt = prompt_contract.seal(json_safe({
         "schema": TRUTH_SCHEMA,
         "round_id": ROUND_ID,
         "release_sha": manifest["release_sha"],
@@ -1050,7 +1051,7 @@ def run_truth(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "peak_allocated_bytes": peak_allocated,
         },
         "training_performed": False,
-    })
+    }))
     atomic_write_new_json(
         os.path.join(output, "probe-k15-truth.json"), receipt, immutable=True
     )
@@ -1398,7 +1399,7 @@ def run_ladder(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         if not record.get("fit"):
             stopped = cell_id
     disk_free_after = os.statvfs("/data")
-    receipt = prompt_contract.seal({
+    receipt = prompt_contract.seal(json_safe({
         "schema": LADDER_SCHEMA,
         "round_id": ROUND_ID,
         "release_sha": manifest["release_sha"],
@@ -1448,7 +1449,7 @@ def run_ladder(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "determinism_note": DETERMINISM_NOTE,
         "performance": {"total_wall_s": time.monotonic() - started},
         "training_performed": False,
-    })
+    }))
     atomic_write_new_json(
         os.path.join(output, "build-ladder.json"), receipt, immutable=True
     )
@@ -1978,7 +1979,7 @@ def run_qualify(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         read_bytes_per_s=DATA_READ_CONTIGUOUS_BYTES_PER_S,
     )
 
-    receipt = prompt_contract.seal({
+    receipt = prompt_contract.seal(json_safe({
         "schema": GRAPH_SCHEMA,
         "law_schema": LAW_SCHEMA,
         "round_id": ROUND_ID,
@@ -2066,7 +2067,7 @@ def run_qualify(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "training_performed": False,
         "gate_registered": False,
         "adoption_claimed": False,
-    })
+    }))
     atomic_write_new_json(
         os.path.join(output, "qualified-graph.json"), receipt, immutable=True
     )

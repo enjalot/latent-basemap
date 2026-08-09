@@ -29,6 +29,7 @@ from basemap.round0236_rung3 import (
     fit_device_law,
     imbalance_tolerance,
     io_scaling_fit,
+    json_safe,
     physical_io_prediction,
     replicate_drift,
     truth_probe_query_rows,
@@ -155,6 +156,62 @@ def test_imbalance_grid_returns_the_record_and_the_grid_the_ladder_unpacks(
     }
     assert worst[64] > primary[64]
     assert record["summary"]["25000000"]["64"]["n"] == 3
+
+
+def test_a_sealed_receipt_with_int_keyed_maps_survives_the_json_round_trip(tmp_path):
+    """R0236's first correction queue lost a 48.7-minute build cell to this.
+
+    `seal` hashes `canonical_json` of the in-memory payload; `read_sealed` hashes
+    `canonical_json` of what `json.load` returns. A mapping keyed by `int` is
+    stringified by `json`, and a canonical sort then orders `'16','200','32'`
+    lexicographically where the original ordered `16,32,200` numerically — so the
+    seal is computed over one ordering and validated against another. The
+    artifact is intact and unreadable at the same time.
+    """
+    # Plain JSON types, so the ONLY defect in play is the key ordering.
+    payload = {
+        "schema": "round0236-seal-round-trip",
+        "worst_seed_imbalance_at_this_rung": {
+            16: 1.17, 32: 1.55, 64: 1.61, 128: 1.79, 200: 2.03, 400: 2.17,
+        },
+        "nested": {"by_rows": {6_250_000: {64: {226: 1.6}}}},
+        "training_performed": False,
+    }
+    # The defect, demonstrated: sealing the raw payload does NOT survive.
+    raw = tmp_path / "raw.json"
+    raw.write_text(
+        json.dumps(prompt_contract.seal(payload), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    with pytest.raises(Exception, match="identity seal is invalid"):
+        prompt_contract.read_sealed(str(raw), label="raw")
+
+    # The fix: json_safe first, and the same artifact reads back.
+    safe = tmp_path / "safe.json"
+    safe.write_text(
+        json.dumps(prompt_contract.seal(json_safe(payload)), indent=2,
+                   sort_keys=True),
+        encoding="utf-8",
+    )
+    reloaded = prompt_contract.read_sealed(str(safe), label="safe")
+    assert reloaded["worst_seed_imbalance_at_this_rung"]["200"] == 2.03
+    assert reloaded["nested"]["by_rows"]["6250000"]["64"]["226"] == 1.6
+
+    # numpy leaks into receipts through bincount/mean; json_safe unwraps them.
+    numpy_safe = json_safe({
+        "scalar": np.float32(1.5), "count": np.int64(7),
+        "array": np.arange(3, dtype=np.int64),
+    })
+    assert numpy_safe == {"scalar": pytest.approx(1.5), "count": 7,
+                          "array": [0, 1, 2]}
+    json.dumps(numpy_safe)
+
+
+def test_every_r0236_seal_site_goes_through_json_safe():
+    """Structural: no receipt in this round may be sealed unguarded."""
+    source = open(nodes.__file__, encoding="utf-8").read()
+    assert source.count("prompt_contract.seal(") == 4
+    assert source.count("prompt_contract.seal(json_safe(") == 4
 
 
 def test_block_device_and_meminfo_instruments_answer_on_this_box():

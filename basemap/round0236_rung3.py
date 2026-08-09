@@ -381,6 +381,34 @@ class Round0236Error(RuntimeError):
     """The registered R0236 contract changed."""
 
 
+def json_safe(value: Any) -> Any:
+    """Make a payload survive a JSON round trip before it is sealed.
+
+    `prompt_contract.seal` hashes `canonical_json` of the IN-MEMORY payload,
+    while `read_sealed` hashes `canonical_json` of what `json.load` returns.
+    Those differ whenever a mapping has non-string keys: `json` stringifies
+    them, and a canonical sort then orders `'16', '200', '32'` lexicographically
+    where the original ordered `16, 32, 200` numerically. The seal is computed
+    over one ordering and validated against the other, so the artifact is
+    unreadable even though its content is intact.
+
+    R0236's first correction queue lost a 48.7-minute build cell to exactly
+    this: two `{clusters: imbalance}` dicts keyed by `int`. Stringifying keys
+    here makes the whole class impossible rather than fixing two call sites.
+    """
+    if isinstance(value, Mapping):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (str, bytes)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return [json_safe(item) for item in value.tolist()]
+    return value
+
+
 # --------------------------------------------------------------------------- #
 # composition, span, nesting — same shapes as R0235, at this rung's counts
 # --------------------------------------------------------------------------- #
@@ -988,6 +1016,7 @@ __all__ = [
     "io_hours",
     "io_projection",
     "io_scaling_fit",
+    "json_safe",
     "law_device_bytes",
     "mean_cluster_rows",
     "pack_clusters_into_groups",
