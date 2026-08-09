@@ -12,6 +12,8 @@ import os
 import numpy as np
 import pytest
 
+from basemap.gpu_child_supervision import CooperativeChildResult
+
 from basemap.artifact_identity import expected_input_signature, ordered_array_sha256
 from basemap.round0220_cuvs_qualification import (
     graph_validity,
@@ -130,6 +132,10 @@ def test_imbalance_grid_returns_the_record_and_the_grid_the_ladder_unpacks(
         # The child must assert its dataset is a read-only memmap before k-means.
         assert "isinstance(dataset, np.memmap)" in body
         assert "not dataset.flags.writeable" in body
+        # R0239: the child must poll the cooperative flag, because the parent
+        # no longer has any way to signal it.
+        assert "_check_abort()" in body
+        assert "except _CooperativeAbort:" in body
         cells = [
             {"rows": rows, "clusters": clusters, "seed": seed, "spill": 8,
              "min": 1, "max": 2, "mean": 1.5, "median": 1.5,
@@ -143,14 +149,19 @@ def test_imbalance_grid_returns_the_record_and_the_grid_the_ladder_unpacks(
             json.dump({"spill": 8, "cells": cells}, handle)
         written["cells"] = len(cells)
 
-        class _Completed:
-            returncode = 0
-            stdout = ""
-            stderr = ""
+        # R0239: return the real supervision result, so this smoke exercises
+        # the receipt shape the node now seals rather than a stub that would
+        # drift away from it silently.
+        return CooperativeChildResult(
+            returncode=0, stdout="", stderr="",
+            elapsed_s=0.0, deadline_s=float(kwargs["deadline_s"]),
+            flag_written=False, flag_written_at_s=None, escalations=[],
+            io_readings={"child_io_samples": 0},
+            snapshot_before={"probe": "before"},
+            snapshot_after={"probe": "after"},
+        )
 
-        return _Completed()
-
-    monkeypatch.setattr(nodes.subprocess, "run", _fake_run)
+    monkeypatch.setattr(nodes, "run_gpu_child_cooperative", _fake_run)
     record, grid = nodes._measure_imbalance_grid(
         substrate_path=os.path.join(data_tmp_path, "substrate.f32.npy"),
         output=data_tmp_path, repo_root=data_tmp_path,

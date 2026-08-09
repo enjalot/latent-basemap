@@ -132,6 +132,10 @@ from basemap.round0235_rung2 import (
     validate_shard_span,
 )
 from basemap import round0113_prompt_contrast as prompt_contract
+from basemap.gpu_child_supervision import (
+    emit_child_abort_preamble,
+    run_gpu_child_cooperative,
+)
 from experiments.round0226_nodes import (
     _child_environment,
     _nvidia_smi_device_bytes,
@@ -804,6 +808,7 @@ def _measure_imbalance(
     """
     probe_dir = ensure_data_directory(os.path.join(output, "imbalance"))
     script = os.path.join(probe_dir, "probe.py")
+    flag_path = os.path.join(probe_dir, "abort.flag")
     body = f'''
 import json, os, sys
 import numpy as np
@@ -812,13 +817,16 @@ import cupy as cp
 import cupyx
 from basemap.round0226_cluster_spill_build import _assign, _kmeans
 from basemap.round0226_graph_builders import A_SEED
-
+{emit_child_abort_preamble(flag_path)}
 rows = {ROWS}
 spill = {SPILL}
 dataset = np.load({substrate_path!r}, mmap_mode="r")[:rows]
 assert isinstance(dataset, np.memmap) and not dataset.flags.writeable
 cells = {{}}
-for clusters in {tuple(int(value) for value in clusters)!r}:
+aborted = False
+try:
+  for clusters in {tuple(int(value) for value in clusters)!r}:
+    _check_abort()
     centroids = _kmeans(cp, cupyx, dataset, clusters=clusters, seed=A_SEED)
     assignment = _assign(cp, dataset, centroids, rows=rows, spill=spill)
     sizes = np.bincount(assignment.ravel(), minlength=clusters).astype(np.int64)
@@ -834,16 +842,19 @@ for clusters in {tuple(int(value) for value in clusters)!r}:
     }}
     del centroids, assignment, sizes
     cp.get_default_memory_pool().free_all_blocks()
+except _CooperativeAbort:
+    aborted = True
 with open(os.path.join({probe_dir!r}, "imbalance.json"), "w") as handle:
-    json.dump({{"rows": rows, "spill": spill, "cells": cells}}, handle,
+    json.dump({{"rows": rows, "spill": spill, "cells": cells,
+               "aborted_cooperatively": aborted}}, handle,
               indent=2, sort_keys=True)
 '''
     with open(script, "w", encoding="utf-8") as handle:
         handle.write(body)
-    completed = subprocess.run(
+    completed = run_gpu_child_cooperative(
         [CUML_LAUNCHER, script], cwd=repo_root,
-        env=_child_environment(cache_root), capture_output=True, text=True,
-        timeout=7_200,
+        env=_child_environment(cache_root),
+        flag_path=flag_path, deadline_s=7_200,
     )
     result_path = os.path.join(probe_dir, "imbalance.json")
     if completed.returncode != 0 or not os.path.exists(result_path):
@@ -853,6 +864,12 @@ with open(os.path.join({probe_dir!r}, "imbalance.json"), "w") as handle:
         )
     with open(result_path, encoding="utf-8") as handle:
         measured = json.load(handle)
+    if measured.get("aborted_cooperatively"):
+        raise Round0235Error(
+            f"R0235 imbalance probe hit its {completed.deadline_s:.0f} s "
+            "cooperative deadline and unwound its own CUDA context; no signal "
+            "was delivered. Partial cells are sealed in imbalance.json."
+        )
     measured["method"] = (
         "R0226's _kmeans and _assign, imported unmodified, at seed 226 with 25 "
         "Lloyd iterations on a 1,000,000-row subsample; imbalance is "

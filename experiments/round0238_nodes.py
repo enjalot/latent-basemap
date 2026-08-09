@@ -222,6 +222,10 @@ from basemap.round0238_rung5 import (
     R0237_25M_S8_CEILING_REFERENCE,
 )
 from basemap import round0113_prompt_contrast as prompt_contract
+from basemap.gpu_child_supervision import (
+    emit_child_abort_preamble,
+    run_gpu_child_cooperative,
+)
 from experiments.round0226_nodes import (
     _child_environment,
     _nvidia_smi_device_bytes,
@@ -401,6 +405,11 @@ def _device_free_bytes() -> int:
     """
     try:
         completed = subprocess.run(
+            # signal-safe: `nvidia-smi` is an NVML query client. It never opens
+            # the CUDA driver and never creates a CUDA context, so the SIGKILL
+            # CPython delivers on expiry cannot reach one. This is the query,
+            # not the probe: it reads the driver's accounting and allocates
+            # nothing on the card.
             ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
             check=True, capture_output=True, text=True, timeout=30,
         )
@@ -418,6 +427,9 @@ def _foreign_gpu_processes(exclude_pid: int | None = None) -> list[dict[str, Any
     """
     try:
         completed = subprocess.run(
+            # signal-safe: `nvidia-smi` is an NVML query client. It never opens
+            # the CUDA driver and never creates a CUDA context, so the SIGKILL
+            # CPython delivers on expiry cannot reach one.
             ["nvidia-smi", "--query-compute-apps=pid,used_memory,process_name",
              "--format=csv,noheader,nounits"],
             check=True, capture_output=True, text=True, timeout=30,
@@ -1347,6 +1359,7 @@ def run_reachability(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     )
     started = time.monotonic()
     script = os.path.join(output, "reachability-probe.py")
+    flag_path = os.path.join(output, "abort.flag")
     body = f'''
 import json, os, sys, time
 import numpy as np
@@ -1354,7 +1367,7 @@ sys.path.insert(0, {repo_root!r})
 import cupy as cp
 import cupyx
 from basemap.round0226_cluster_spill_build import _assign, _kmeans
-
+{emit_child_abort_preamble(flag_path)}
 rows = {REACHABILITY_ROWS}
 spill = {SPILL}
 seed = {REACHABILITY_SEED}
@@ -1368,7 +1381,10 @@ truth = np.load({truth_ids_path!r}).astype(np.int64, copy=False)
 assert probe.shape == ({probe_rows_count},) and truth.shape[0] == probe.shape[0]
 k = int(truth.shape[1])
 cells = []
-for clusters in {tuple(int(v) for v in REACHABILITY_CLUSTERS)!r}:
+aborted = False
+try:
+  for clusters in {tuple(int(v) for v in REACHABILITY_CLUSTERS)!r}:
+    _check_abort()
     t0 = time.perf_counter()
     centroids = _kmeans(cp, cupyx, dataset, clusters=clusters, seed=seed)
     kmeans_s = time.perf_counter() - t0
@@ -1381,6 +1397,7 @@ for clusters in {tuple(int(v) for v in REACHABILITY_CLUSTERS)!r}:
     t0 = time.perf_counter()
     strict = np.empty(probe.size, dtype=np.float64)
     for begin in range(0, probe.size, block):
+        _check_abort()
         end = min(begin + block, probe.size)
         mine = assignment[probe[begin:end]]
         gathered = assignment[truth[begin:end]]
@@ -1416,15 +1433,24 @@ for clusters in {tuple(int(v) for v in REACHABILITY_CLUSTERS)!r}:
         "strict_scan_seconds": float(strict_s),
     }})
     del assignment, sizes, strict
+except _CooperativeAbort:
+    aborted = True
 with open(os.path.join({output!r}, "reachability-cells.json"), "w") as handle:
-    json.dump({{"cells": cells}}, handle, indent=2, sort_keys=True)
+    json.dump({{"cells": cells, "aborted_cooperatively": aborted}}, handle,
+              indent=2, sort_keys=True)
 '''
     with open(script, "w", encoding="utf-8") as handle:
         handle.write(body)
-    completed = subprocess.run(
+    completed = run_gpu_child_cooperative(
         [CUML_LAUNCHER, script], cwd=repo_root,
-        env=_child_environment(cache_root), capture_output=True, text=True,
-        timeout=REACHABILITY_TIMEOUT_S,
+        env=_child_environment(cache_root),
+        flag_path=flag_path, deadline_s=REACHABILITY_TIMEOUT_S,
+        sampler_factory=lambda pid: _IoSampler(pid=pid),
+        snapshot=lambda: {
+            "data_block_device": _data_block_device_stat(),
+            "mem_available_bytes": _mem_available_bytes(),
+            "substrate_page_cache": _page_cache_resident_bytes(substrate_path),
+        },
     )
     result_path = os.path.join(output, "reachability-cells.json")
     if completed.returncode != 0 or not os.path.exists(result_path):
@@ -1434,6 +1460,12 @@ with open(os.path.join({output!r}, "reachability-cells.json"), "w") as handle:
         )
     with open(result_path, encoding="utf-8") as handle:
         measured = json.load(handle)
+    if measured.get("aborted_cooperatively"):
+        raise Round0238Error(
+            f"R0238 reachability scan hit its {completed.deadline_s:.0f} s "
+            "cooperative deadline and unwound its own CUDA context; no signal "
+            "was delivered. Partial cells are sealed in reachability-cells.json."
+        )
 
     cells: list[dict[str, Any]] = []
     for cell in measured["cells"]:
@@ -1494,6 +1526,8 @@ with open(os.path.join({output!r}, "reachability-cells.json"), "w") as handle:
         ),
         "strict_ceiling_by_clusters": by_c,
         "concern_floor": REACHABILITY_CONCERN_FLOOR,
+        "supervision": completed.supervision_receipt(),
+        "io_instruments": completed.io_receipt(),
         "cells": cells,
         "control": {
             "clusters": int(SELECTION_CANDIDATES[0]),
@@ -2445,6 +2479,7 @@ def _measure_imbalance_grid(
     """
     probe_dir = ensure_data_directory(os.path.join(output, "imbalance"))
     script = os.path.join(probe_dir, "probe.py")
+    flag_path = os.path.join(probe_dir, "abort.flag")
     body = f'''
 import json, os, sys, time
 import numpy as np
@@ -2452,16 +2487,19 @@ sys.path.insert(0, {repo_root!r})
 import cupy as cp
 import cupyx
 from basemap.round0226_cluster_spill_build import _assign, _kmeans
-
+{emit_child_abort_preamble(flag_path)}
 spill = {SPILL}
 substrate = np.load({substrate_path!r}, mmap_mode="r")
 assert isinstance(substrate, np.memmap) and not substrate.flags.writeable
 cells = []
-for rows in {tuple(int(v) for v in IMBALANCE_PROBE_ROWS)!r}:
+aborted = False
+try:
+  for rows in {tuple(int(v) for v in IMBALANCE_PROBE_ROWS)!r}:
     dataset = substrate[:rows]
     assert isinstance(dataset, np.memmap) and not dataset.flags.writeable
     for clusters in {tuple(int(v) for v in IMBALANCE_PROBE_CLUSTERS)!r}:
         for seed in {tuple(int(v) for v in IMBALANCE_REPLICATE_SEEDS)!r}:
+            _check_abort()
             started = time.perf_counter()
             centroids = _kmeans(cp, cupyx, dataset, clusters=clusters, seed=seed)
             assignment = _assign(cp, dataset, centroids, rows=rows, spill=spill)
@@ -2481,16 +2519,26 @@ for rows in {tuple(int(v) for v in IMBALANCE_PROBE_ROWS)!r}:
             }})
             del centroids, assignment, sizes
             cp.get_default_memory_pool().free_all_blocks()
+except _CooperativeAbort:
+    aborted = True
 with open(os.path.join({probe_dir!r}, "imbalance.json"), "w") as handle:
-    json.dump({{"spill": spill, "cells": cells}}, handle, indent=2, sort_keys=True)
+    json.dump({{"spill": spill, "cells": cells,
+               "aborted_cooperatively": aborted}}, handle,
+              indent=2, sort_keys=True)
 '''
     with open(script, "w", encoding="utf-8") as handle:
         handle.write(body)
     started = time.monotonic()
-    completed = subprocess.run(
+    completed = run_gpu_child_cooperative(
         [CUML_LAUNCHER, script], cwd=repo_root,
-        env=_child_environment(cache_root), capture_output=True, text=True,
-        timeout=IMBALANCE_PROBE_TIMEOUT_S,
+        env=_child_environment(cache_root),
+        flag_path=flag_path, deadline_s=IMBALANCE_PROBE_TIMEOUT_S,
+        sampler_factory=lambda pid: _IoSampler(pid=pid),
+        snapshot=lambda: {
+            "data_block_device": _data_block_device_stat(),
+            "mem_available_bytes": _mem_available_bytes(),
+            "substrate_page_cache": _page_cache_resident_bytes(substrate_path),
+        },
     )
     result_path = os.path.join(probe_dir, "imbalance.json")
     if completed.returncode != 0 or not os.path.exists(result_path):
@@ -2500,6 +2548,12 @@ with open(os.path.join({probe_dir!r}, "imbalance.json"), "w") as handle:
         )
     with open(result_path, encoding="utf-8") as handle:
         measured = json.load(handle)
+    if measured.get("aborted_cooperatively"):
+        raise Round0238Error(
+            f"R0238 imbalance grid hit its {completed.deadline_s:.0f} s "
+            "cooperative deadline and unwound its own CUDA context; no signal "
+            "was delivered. Partial cells are sealed in imbalance.json."
+        )
     grid: dict[int, dict[int, dict[int, float]]] = {}
     for cell in measured["cells"]:
         grid.setdefault(int(cell["rows"]), {}).setdefault(
@@ -2518,6 +2572,8 @@ with open(os.path.join({probe_dir!r}, "imbalance.json"), "w") as handle:
         "probed_clusters": [int(value) for value in IMBALANCE_PROBE_CLUSTERS],
         "note": REPLICATE_NOTE,
         "wall_s": time.monotonic() - started,
+        "supervision": completed.supervision_receipt(),
+        "io_instruments": completed.io_receipt(),
         "summary": {
             str(rows): {
                 str(clusters): replicate_summary(seeds)

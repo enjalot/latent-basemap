@@ -162,6 +162,10 @@ from basemap.round0236_rung3 import (
 )
 from basemap.round0235_rung2 import rung_derivation
 from basemap import round0113_prompt_contrast as prompt_contract
+from basemap.gpu_child_supervision import (
+    emit_child_abort_preamble,
+    run_gpu_child_cooperative,
+)
 from experiments.round0226_nodes import (
     _child_environment,
     _nvidia_smi_device_bytes,
@@ -1076,6 +1080,7 @@ def _measure_imbalance_grid(
     """
     probe_dir = ensure_data_directory(os.path.join(output, "imbalance"))
     script = os.path.join(probe_dir, "probe.py")
+    flag_path = os.path.join(probe_dir, "abort.flag")
     body = f'''
 import json, os, sys, time
 import numpy as np
@@ -1083,16 +1088,19 @@ sys.path.insert(0, {repo_root!r})
 import cupy as cp
 import cupyx
 from basemap.round0226_cluster_spill_build import _assign, _kmeans
-
+{emit_child_abort_preamble(flag_path)}
 spill = {SPILL}
 substrate = np.load({substrate_path!r}, mmap_mode="r")
 assert isinstance(substrate, np.memmap) and not substrate.flags.writeable
 cells = []
-for rows in {tuple(int(v) for v in IMBALANCE_PROBE_ROWS)!r}:
+aborted = False
+try:
+  for rows in {tuple(int(v) for v in IMBALANCE_PROBE_ROWS)!r}:
     dataset = substrate[:rows]
     assert isinstance(dataset, np.memmap) and not dataset.flags.writeable
     for clusters in {tuple(int(v) for v in IMBALANCE_PROBE_CLUSTERS)!r}:
         for seed in {tuple(int(v) for v in IMBALANCE_REPLICATE_SEEDS)!r}:
+            _check_abort()
             started = time.perf_counter()
             centroids = _kmeans(cp, cupyx, dataset, clusters=clusters, seed=seed)
             assignment = _assign(cp, dataset, centroids, rows=rows, spill=spill)
@@ -1112,16 +1120,20 @@ for rows in {tuple(int(v) for v in IMBALANCE_PROBE_ROWS)!r}:
             }})
             del centroids, assignment, sizes
             cp.get_default_memory_pool().free_all_blocks()
+except _CooperativeAbort:
+    aborted = True
 with open(os.path.join({probe_dir!r}, "imbalance.json"), "w") as handle:
-    json.dump({{"spill": spill, "cells": cells}}, handle, indent=2, sort_keys=True)
+    json.dump({{"spill": spill, "cells": cells,
+               "aborted_cooperatively": aborted}}, handle,
+              indent=2, sort_keys=True)
 '''
     with open(script, "w", encoding="utf-8") as handle:
         handle.write(body)
     started = time.monotonic()
-    completed = subprocess.run(
+    completed = run_gpu_child_cooperative(
         [CUML_LAUNCHER, script], cwd=repo_root,
-        env=_child_environment(cache_root), capture_output=True, text=True,
-        timeout=IMBALANCE_PROBE_TIMEOUT_S,
+        env=_child_environment(cache_root),
+        flag_path=flag_path, deadline_s=IMBALANCE_PROBE_TIMEOUT_S,
     )
     result_path = os.path.join(probe_dir, "imbalance.json")
     if completed.returncode != 0 or not os.path.exists(result_path):
@@ -1131,6 +1143,12 @@ with open(os.path.join({probe_dir!r}, "imbalance.json"), "w") as handle:
         )
     with open(result_path, encoding="utf-8") as handle:
         measured = json.load(handle)
+    if measured.get("aborted_cooperatively"):
+        raise Round0236Error(
+            f"R0236 imbalance grid hit its {completed.deadline_s:.0f} s "
+            "cooperative deadline and unwound its own CUDA context; no signal "
+            "was delivered. Partial cells are sealed in imbalance.json."
+        )
     grid: dict[int, dict[int, dict[int, float]]] = {}
     for cell in measured["cells"]:
         grid.setdefault(int(cell["rows"]), {}).setdefault(
