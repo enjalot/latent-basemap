@@ -145,7 +145,21 @@ def _source_size_manifest(queue_root: str) -> str:
     return path
 
 
-def prepare_round0233(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
+def prepare_round0233(
+    *,
+    release_sha: str,
+    queue_root: str = QUEUE_ROOT,
+    reuse_substrate: str | None = None,
+) -> str:
+    """Build the queue.
+
+    `reuse_substrate` names an already-sealed `substrate.json` from an earlier
+    queue of THIS round. A setup-class re-run must not pay for the substrate
+    twice, and re-deriving it would also produce a second set of bytes for the
+    same registered selection. When it is given the assemble node is dropped and
+    the sealed receipt is declared as a queue input at its full signature, so the
+    lineage is explicit rather than implied.
+    """
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0233 release SHA must be one full commit")
     round_signature, required_reviews = _issued_round(release_sha)
@@ -157,10 +171,27 @@ def prepare_round0233(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
     atomic_write_new_json(smoke_path, _release_cpu_smoke(release_sha), immutable=True)
     manifest_path = _source_size_manifest(queue_root)
 
+    reused: dict[str, Any] | None = None
+    if reuse_substrate:
+        if not os.path.exists(reuse_substrate):
+            raise RuntimeError(f"R0233 reused substrate absent at {reuse_substrate}")
+        with open(reuse_substrate, encoding="utf-8") as handle:
+            sealed = json.load(handle)
+        if sealed.get("round_id") != ROUND_ID or sealed.get("rows") != ROWS:
+            raise RuntimeError("R0233 reused substrate is not this round's")
+        for key in ("substrate", "provenance", "reserve_substrate",
+                    "reserve_provenance", "reserve_query_rows"):
+            declared = dict(sealed[key])
+            path = str(declared["canonical_path"])
+            if expected_input_signature(path) != declared:
+                raise RuntimeError(f"R0233 reused substrate {key} bytes changed")
+        reused = expected_input_signature(reuse_substrate)
+
     expected_inputs = _dedupe([
         round_signature,
         expected_input_signature(smoke_path),
         expected_input_signature(manifest_path),
+        *( [reused] if reused else [] ),
     ])
 
     artifacts = ensure_data_directory(os.path.join(queue_root, "artifacts"))
@@ -168,7 +199,10 @@ def prepare_round0233(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
     scratch_root = os.path.join(ROUND_ROOT, "spill-scratch")
 
     substrate_dir = os.path.join(artifacts, SUBSTRATE_CAPABILITY)
-    substrate_manifest = os.path.join(substrate_dir, "substrate.json")
+    substrate_manifest = (
+        reuse_substrate if reuse_substrate
+        else os.path.join(substrate_dir, "substrate.json")
+    )
     truth_dir = os.path.join(artifacts, TRUTH_CAPABILITY)
     truth_manifest = os.path.join(truth_dir, "exact-k15-truth.json")
     ladder_dir = os.path.join(artifacts, LADDER_CAPABILITY)
@@ -178,8 +212,13 @@ def prepare_round0233(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
     intra = lambda path: {"kind": "file", "canonical_path": path}  # noqa: E731
     policy = {"gpu_required": True, "training_performed": False, "cpu_heavy": False}
 
-    jobs: list[dict[str, Any]] = [
-        {
+    substrate_reference = (
+        expected_input_signature(reuse_substrate) if reuse_substrate
+        else intra(substrate_manifest)
+    )
+    jobs: list[dict[str, Any]] = []
+    if not reuse_substrate:
+        jobs.append({
             "id": "assemble_6250k", "action": ASSEMBLE_ACTION,
             "handler_module": "experiments.round0233_nodes",
             "handler_callable": "run_job", "deps": [],
@@ -190,17 +229,19 @@ def prepare_round0233(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
             "capability": SUBSTRATE_CAPABILITY,
             "source_size_manifest": expected_input_signature(manifest_path),
             "node_policy": {**policy, "cpu_heavy": True},
-        },
+        })
+    jobs.extend([
         {
             "id": "truth_6250k", "action": TRUTH_ACTION,
             "handler_module": "experiments.round0233_nodes",
-            "handler_callable": "run_job", "deps": ["assemble_6250k"],
+            "handler_callable": "run_job",
+            "deps": [] if reuse_substrate else ["assemble_6250k"],
             "outputs": [truth_dir],
             "done_marker": os.path.join(artifacts, "truth_6250k.done.json"),
             "expected_inputs": expected_inputs,
             "p90_wall_s": TRUTH_P90_WALL_S,
             "capability": TRUTH_CAPABILITY,
-            "substrate_manifest": intra(substrate_manifest),
+            "substrate_manifest": substrate_reference,
             "node_policy": dict(policy),
         },
         {
@@ -212,7 +253,7 @@ def prepare_round0233(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
             "expected_inputs": expected_inputs,
             "p90_wall_s": LADDER_P90_WALL_S,
             "capability": LADDER_CAPABILITY,
-            "substrate_manifest": intra(substrate_manifest),
+            "substrate_manifest": substrate_reference,
             "scratch_root": scratch_root,
             "cache_root": cache_root,
             "build_timeout_s": BUILD_TIMEOUT_S,
@@ -227,12 +268,12 @@ def prepare_round0233(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
             "expected_inputs": expected_inputs,
             "p90_wall_s": QUALIFY_P90_WALL_S,
             "capability": GRAPH_CAPABILITY,
-            "substrate_manifest": intra(substrate_manifest),
+            "substrate_manifest": substrate_reference,
             "truth_reference": intra(truth_manifest),
             "ladder_reference": intra(ladder_manifest),
             "node_policy": dict(policy),
         },
-    ]
+    ])
 
     queue = _base_manifest(
         round_id=ROUND_ID, release_sha=release_sha, round_file=ROUND_FILE,
@@ -297,9 +338,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-sha", required=True)
     parser.add_argument("--queue-root", default=QUEUE_ROOT)
+    parser.add_argument(
+        "--reuse-substrate", default=None,
+        help=(
+            "path to an already-sealed substrate.json from an earlier queue of "
+            "this round; drops the assemble node and binds those bytes instead"
+        ),
+    )
     args = parser.parse_args(argv)
     path = prepare_round0233(
-        release_sha=args.release_sha, queue_root=args.queue_root
+        release_sha=args.release_sha, queue_root=args.queue_root,
+        reuse_substrate=args.reuse_substrate,
     )
     print(json.dumps({"queue": path}, indent=2))
     return 0

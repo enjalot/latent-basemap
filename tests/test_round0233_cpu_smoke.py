@@ -178,3 +178,37 @@ def test_watchdog_writes_a_flag_and_never_signals(tmp_path):
 def test_node_actions_are_exhaustive_and_refuse_anything_else():
     with pytest.raises(contract.Round0233Error):
         nodes.run_job({"manifest": {"round_id": "0233"}}, {"action": "train"})
+
+
+def test_intra_queue_reference_resolves_a_path_only_reference(tmp_path):
+    """The defect that failed R0233's first queue, as a regression test.
+
+    An intra-queue reference names a file a PRIOR NODE will write, so it carries
+    only `{kind, canonical_path}` -- it cannot carry a hash the prepare step does
+    not yet know. Passing one to the strict full-signature verifier raises
+    `content changed` on a file that is perfectly intact. The resolver must
+    accept a path-only reference and still bind a hash when one is present.
+    """
+    from basemap.artifact_identity import expected_input_signature
+
+    path = tmp_path / "substrate.json"
+    path.write_text('{"schema": "x"}', encoding="utf-8")
+    reference = {"kind": "file", "canonical_path": str(path)}
+    resolved, observed = nodes._intra_signature(reference, label="probe")
+    assert resolved == str(path)
+    assert observed["sha256"]
+
+    full = expected_input_signature(str(path))
+    resolved_full, _ = nodes._intra_signature(full, label="probe")
+    assert resolved_full == str(path)
+
+    # A hash that no longer matches still fails closed.
+    path.write_text('{"schema": "y"}', encoding="utf-8")
+    with pytest.raises(contract.Round0233Error):
+        nodes._intra_signature(full, label="probe")
+
+    with pytest.raises(contract.Round0233Error):
+        nodes._intra_signature(
+            {"kind": "file", "canonical_path": str(tmp_path / "absent.json")},
+            label="probe",
+        )

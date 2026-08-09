@@ -705,11 +705,11 @@ def run_truth(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     import torch
 
     manifest = active["manifest"]
+    substrate_manifest_path, _ = _intra_signature(
+        dict(job["substrate_manifest"]), label="R0233 substrate manifest"
+    )
     substrate = prompt_contract.read_sealed(
-        prompt_contract.verify_signature(
-            dict(job["substrate_manifest"]), label="R0233 substrate manifest"
-        ),
-        label="R0233 substrate manifest",
+        substrate_manifest_path, label="R0233 substrate manifest"
     )
     substrate_path = prompt_contract.verify_signature(
         dict(substrate["substrate"]), label="R0233 substrate"
@@ -809,11 +809,11 @@ def run_truth(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 def run_ladder(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     manifest = active["manifest"]
     repo_root = str(manifest["repo_root"])
+    substrate_manifest_path, _ = _intra_signature(
+        dict(job["substrate_manifest"]), label="R0233 substrate manifest"
+    )
     substrate = prompt_contract.read_sealed(
-        prompt_contract.verify_signature(
-            dict(job["substrate_manifest"]), label="R0233 substrate manifest"
-        ),
-        label="R0233 substrate manifest",
+        substrate_manifest_path, label="R0233 substrate manifest"
     )
     substrate_path = prompt_contract.verify_signature(
         dict(substrate["substrate"]), label="R0233 substrate"
@@ -1061,11 +1061,11 @@ def run_qualify(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     import torch
 
     manifest = active["manifest"]
+    substrate_manifest_path, _ = _intra_signature(
+        dict(job["substrate_manifest"]), label="R0233 substrate manifest"
+    )
     substrate = prompt_contract.read_sealed(
-        prompt_contract.verify_signature(
-            dict(job["substrate_manifest"]), label="R0233 substrate manifest"
-        ),
-        label="R0233 substrate manifest",
+        substrate_manifest_path, label="R0233 substrate manifest"
     )
     substrate_path = prompt_contract.verify_signature(
         dict(substrate["substrate"]), label="R0233 substrate"
