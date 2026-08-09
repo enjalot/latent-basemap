@@ -274,6 +274,30 @@ def disk_guard(
     }
 
 
+#: Addendum 1 (2026-08-09). Cell `a4`, the first `stream-resident` cell, hung
+#: inside a native call: `VmRSS` byte-identical across 2 minutes, device memory
+#: pinned at the `624 MiB` baseline, GPU utilisation pinned at 100 %, every
+#: `/proc/<pid>/io` counter frozen, and no response to `SIGTERM` for 120 s. Left
+#: alone it would have reached `_terminate_cooperatively`'s `process.kill()` —
+#: `SIGKILL` on a live CUDA context, the operation that deadlocked RCU and forced
+#: a reboot of this box in an earlier round. The controller was stopped instead
+#: and no `SIGKILL` was issued. The streamed modes are therefore refused for the
+#: remainder of this round, on machine-safety grounds and NOT on any measured
+#: property of the design. This is a refusal recorded as data, not a dropped
+#: cell: `a4`, `a5`, `a7`, `a9` and `b2` still appear in every published table.
+STREAMED_MODES_ADMITTED = False
+STREAMED_REFUSAL_REASON = (
+    "refused by round-0232 addendum 1: the first stream-resident cell (a4) hung "
+    "inside a native call with frozen RSS, frozen io counters and 100% GPU "
+    "utilisation, and did not respond to SIGTERM; leaving it to the registered "
+    "3600 s build timeout would have escalated to SIGKILL on a live CUDA "
+    "context, which is the operation that previously forced a reboot of this "
+    "box. Withdrawn on machine-safety grounds, not on a measured property of "
+    "the design. Diagnosing the hang belongs to a later round, on a bounded "
+    "canary with a short per-cell timeout."
+)
+
+
 def cell_guard(cell: Mapping[str, Any], *, free_bytes: int | None = None) -> dict[str, Any]:
     """Device, host and disk, all three, with a refusal on any one of them."""
     rows = int(cell["rows"])
@@ -298,8 +322,19 @@ def cell_guard(cell: Mapping[str, Any], *, free_bytes: int | None = None) -> dic
             f"the streamed residency exceeds the "
             f"{GUARD_HOST_ANON_BUDGET_BYTES / 1024 ** 3:.2f} GiB budget"
         )
+    streamed_refused = (
+        str(cell["mode"]) != MODE_MATERIALISE and not STREAMED_MODES_ADMITTED
+    )
+    if streamed_refused:
+        reasons.append(STREAMED_REFUSAL_REASON)
+    allowed = (
+        bool(device.get("allowed")) and bool(disk.get("allowed"))
+        and not host_over and not streamed_refused
+    )
     return {
         "cell": str(cell["cell"]),
+        "streamed_mode_refused_by_addendum_1": bool(streamed_refused),
+        "machine_safety_refusal": bool(streamed_refused),
         "device_guard": device,
         "disk_guard": disk,
         "predicted_host_anon_bytes_including_residency": host_after,
@@ -308,14 +343,10 @@ def cell_guard(cell: Mapping[str, Any], *, free_bytes: int | None = None) -> dic
         "host_anon_budget_bytes": GUARD_HOST_ANON_BUDGET_BYTES,
         "swap_growth_abort_bytes": GUARD_SWAP_GROWTH_ABORT_BYTES,
         "cluster_capacity_rows": CLUSTER_CAPACITY_ROWS,
-        "allowed": bool(device.get("allowed")) and bool(disk.get("allowed"))
-        and not host_over,
-        "refused_a_priori": not (
-            bool(device.get("allowed")) and bool(disk.get("allowed"))
-            and not host_over
-        ),
+        "allowed": allowed,
+        "refused_a_priori": not allowed,
         "refusal_reasons": reasons,
-        "axes": ["device", "host-anonymous", "disk"],
+        "axes": ["device", "host-anonymous", "disk", "machine-safety"],
     }
 
 

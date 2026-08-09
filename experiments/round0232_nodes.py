@@ -596,7 +596,12 @@ def run_grid(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     reference = next(
         (entry for entry in entries if entry["cell"] == ARM_REFERENCE_CELL), None
     )
-    if arm is None or not arm.get("fit"):
+    # The arm is required only when this queue actually contains the map nodes
+    # that consume it. Addendum 1 withdrew the streamed modes on machine-safety
+    # grounds, so the correction queue declares `arm_required: false` and the
+    # round reports the displacement probe as NOT RUN rather than inferring it.
+    arm_required = bool(job.get("arm_required", True))
+    if arm_required and (arm is None or not arm.get("fit")):
         raise Round0232Error("R0232 arm cell did not fit; the map arm cannot run")
 
     identity = _identity_report(entries)
@@ -640,12 +645,22 @@ def run_grid(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             int((entry["memory"].get("system_swap_growth_bytes") or 0))
             <= GUARD_SWAP_GROWTH_ABORT_BYTES for entry in entries
         ),
-        "arm_clears_its_registered_floors": bool(
-            arm.get("scored")
-            and float(arm["tie_aware_recall_all_rows"]) >= ARM_TIE_AWARE_FLOOR
-            and float(arm["strict_recall_all_rows"]) >= ARM_STRICT_FLOOR
+        "arm_clears_its_registered_floors": (
+            bool(
+                float(arm["tie_aware_recall_all_rows"]) >= ARM_TIE_AWARE_FLOOR
+                and float(arm["strict_recall_all_rows"]) >= ARM_STRICT_FLOOR
+            )
+            if (arm is not None and arm.get("scored")) else None
         ),
-        "arm_has_zero_degree_zero_rows": int(arm.get("zero_degree_rows") or -1) == 0,
+        "arm_has_zero_degree_zero_rows": (
+            int(arm.get("zero_degree_rows") or -1) == 0
+            if (arm is not None and arm.get("scored")) else None
+        ),
+        "arm_not_run_reason": (
+            None if (arm is not None and arm.get("scored"))
+            else "streamed modes withdrawn by round-0232 addendum 1 "
+                 "(machine-safety); P2, P3 and P4 are UNRESOLVED, not failed"
+        ),
         "data_free_never_below_reserve": all(
             int(entry["data_free_bytes_after_cell"]) >= DISK_FREE_RESERVE_BYTES
             for entry in entries

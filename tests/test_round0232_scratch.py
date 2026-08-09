@@ -31,6 +31,8 @@ from basemap.round0232_scratch_contract import (
     ROUND_SCRATCH_BUDGET_BYTES,
     ROWS,
     SPILL_VOLUME_100M_S8_BYTES,
+    STREAMED_MODES_ADMITTED,
+    STREAMED_REFUSAL_REASON,
     Round0232Error,
     capacity_rows_at_device_budget,
     cell_guard,
@@ -211,24 +213,53 @@ def test_disk_guard_refuses_a_cell_over_the_round_scratch_budget():
     assert decision["allowed"] is False
 
 
-def test_every_registered_cell_passes_all_three_guard_axes_at_280_gb_free():
+def test_every_materialise_cell_passes_all_guard_axes_at_280_gb_free():
     for cell in (*GRID_A, *GRID_B):
+        if cell["mode"] != MODE_MATERIALISE:
+            continue
         decision = cell_guard(cell, free_bytes=280 * 10 ** 9)
         assert decision["allowed"] is True, (
             f"{cell['cell']} is refused: {decision['refusal_reasons']}"
         )
-        assert decision["axes"] == ["device", "host-anonymous", "disk"]
+        assert decision["axes"] == [
+            "device", "host-anonymous", "disk", "machine-safety"
+        ]
 
 
-def test_the_guard_would_refuse_the_same_cells_if_the_volume_were_nearly_full():
+def test_addendum_1_refuses_every_streamed_cell_and_says_why():
+    """The streamed modes are REFUSED and published, never silently dropped."""
+    assert STREAMED_MODES_ADMITTED is False
+    streamed = [
+        cell for cell in (*GRID_A, *GRID_B) if cell["mode"] != MODE_MATERIALISE
+    ]
+    assert {cell["cell"] for cell in streamed} == {"a4", "a5", "a7", "a9", "b2"}
+    for cell in streamed:
+        decision = cell_guard(cell, free_bytes=280 * 10 ** 9)
+        assert decision["allowed"] is False
+        assert decision["refused_a_priori"] is True
+        assert decision["streamed_mode_refused_by_addendum_1"] is True
+        assert decision["machine_safety_refusal"] is True
+        assert STREAMED_REFUSAL_REASON in decision["refusal_reasons"]
+        # the refusal is machine-safety, NOT a measured property of the design
+        assert "SIGKILL" in STREAMED_REFUSAL_REASON
+        assert "not on a measured property" in STREAMED_REFUSAL_REASON
+
+
+def test_the_refused_streamed_cells_are_still_registered_cells():
+    """`no_registered_cell_dropped` must survive the addendum."""
+    names = {cell["cell"] for cell in (*GRID_A, *GRID_B)}
+    for name in ("a4", "a5", "a7", "a9", "b2"):
+        assert name in names
+    assert len(GRID_A) == 11 and len(GRID_B) == 2
+
+
+def test_the_guard_would_refuse_materialise_cells_if_the_volume_were_nearly_full():
     refused = [
         cell["cell"] for cell in (*GRID_A, *GRID_B)
-        if not cell_guard(cell, free_bytes=151 * 10 ** 9)["allowed"]
+        if cell["mode"] == MODE_MATERIALISE
+        and not cell_guard(cell, free_bytes=151 * 10 ** 9)["allowed"]
     ]
     assert refused, "a nearly-full volume must refuse the materialising cells"
-    for name in refused:
-        cell = next(item for item in (*GRID_A, *GRID_B) if item["cell"] == name)
-        assert cell["mode"] == MODE_MATERIALISE
 
 
 # --------------------------------------------------------------------------- #

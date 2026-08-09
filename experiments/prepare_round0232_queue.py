@@ -60,6 +60,8 @@ from basemap.round0232_scratch_contract import (
     ROWS,
     SEEDS,
     SPILL_VOLUME_100M_S8_BYTES,
+    STREAMED_MODES_ADMITTED,
+    STREAMED_REFUSAL_REASON,
     SUBSTRATE_16M_PATH,
     cell_guard,
     data_free_bytes,
@@ -349,6 +351,13 @@ def prepare_round0232(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
                 "gpu_required": True, "training_performed": False, "cpu_heavy": False,
             },
         },
+    ]
+    jobs[0]["arm_required"] = bool(STREAMED_MODES_ADMITTED)
+
+    # Addendum 1: with the streamed modes withdrawn on machine-safety grounds the
+    # arm graph cannot be built, so the map arm does not run and the registered
+    # displacement probe is reported as NOT RUN rather than inferred.
+    map_jobs: list[dict[str, Any]] = [
         {
             "id": "fuzzy_streamed_arm", "action": FUZZY_ACTION,
             "handler_module": "experiments.round0232_nodes",
@@ -371,7 +380,7 @@ def prepare_round0232(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
         node = f"train_streamed_seed{seed}"
         train_nodes.append(node)
         output = os.path.join(artifacts, map_capability(seed))
-        jobs.append({
+        map_jobs.append({
             "id": node, "action": TRAIN_ACTION,
             "handler_module": "experiments.round0232_nodes",
             "handler_callable": "run_job",
@@ -391,7 +400,7 @@ def prepare_round0232(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
             },
         })
 
-    jobs.append({
+    map_jobs.append({
         "id": "probe_streamed_geometry", "action": GEOMETRY_ACTION,
         "handler_module": "experiments.round0232_nodes",
         "handler_callable": "run_job", "deps": list(train_nodes),
@@ -426,6 +435,16 @@ def prepare_round0232(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
         },
     })
 
+    if STREAMED_MODES_ADMITTED:
+        jobs.extend(map_jobs)
+        produced = [
+            GRID_CAPABILITY, LARGER_N_CAPABILITY, PROJECTION_CAPABILITY,
+            GRAPH_CAPABILITY, *[map_capability(seed) for seed in SEEDS],
+            GEOMETRY_CAPABILITY,
+        ]
+    else:
+        produced = [GRID_CAPABILITY, LARGER_N_CAPABILITY, PROJECTION_CAPABILITY]
+
     queue = _base_manifest(
         round_id=ROUND_ID, release_sha=release_sha, round_file=ROUND_FILE,
         queue_root=queue_root, gpu_hours_cap=GPU_HOURS_CAP,
@@ -443,23 +462,20 @@ def prepare_round0232(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
             "minilm-mixed-2m-cluster-spill-map-geometry-v1",
             "minilm-mixed-2m-spill-lifted-k15-fuzzy-graph-v1",
         ],
-        "capabilities_produced": [
-            GRID_CAPABILITY, LARGER_N_CAPABILITY, PROJECTION_CAPABILITY,
-            GRAPH_CAPABILITY, *[map_capability(seed) for seed in SEEDS],
-            GEOMETRY_CAPABILITY,
-        ],
-        "training_performed": True,
+        "capabilities_produced": produced,
+        "training_performed": bool(STREAMED_MODES_ADMITTED),
         "jobs": jobs,
         "p90_gpu_seconds": {
             "measure_scratch_law": GRID_P90_WALL_S,
             "calibrate_larger_n": LARGER_N_P90_WALL_S,
             "project_scratch_and_cost": PROJECT_P90_WALL_S,
-            "fuzzy_streamed_arm": FUZZY_P90_WALL_S,
-            "probe_streamed_geometry": GEOMETRY_P90_WALL_S,
             "total": (
                 GRID_P90_WALL_S + LARGER_N_P90_WALL_S + PROJECT_P90_WALL_S
-                + FUZZY_P90_WALL_S + len(SEEDS) * TRAIN_P90_WALL_S
-                + GEOMETRY_P90_WALL_S
+                + (
+                    FUZZY_P90_WALL_S + len(SEEDS) * TRAIN_P90_WALL_S
+                    + GEOMETRY_P90_WALL_S
+                    if STREAMED_MODES_ADMITTED else 0.0
+                )
             ),
         },
         "scientific_contract": {
@@ -558,6 +574,23 @@ def prepare_round0232(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
                 "is a recorded last resort and its use is an execution-check "
                 "failure"
             ),
+            "addendum_1_machine_safety": {
+                "streamed_modes_admitted": bool(STREAMED_MODES_ADMITTED),
+                "reason": STREAMED_REFUSAL_REASON,
+                "cells_refused": [
+                    cell["cell"] for cell in (*GRID_A, *GRID_B)
+                    if not guards[str(cell["cell"])]["allowed"]
+                ],
+                "map_arm_runs": bool(STREAMED_MODES_ADMITTED),
+                "predictions_unresolved": (
+                    ["P2", "P3", "P4"] if not STREAMED_MODES_ADMITTED else []
+                ),
+                "note": (
+                    "these cells are REFUSED and published, not dropped; the "
+                    "registered displacement probe is reported as NOT RUN and no "
+                    "streamed-arm p is published or inferred"
+                ),
+            },
             "no_registered_cell_dropped": (
                 "every cell of both grids appears in the published tables, "
                 "including cells that refuse, abort or complicate the story"
