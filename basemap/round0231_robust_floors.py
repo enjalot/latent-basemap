@@ -718,18 +718,34 @@ def score_cells_against(
                 })
             row["metrics"][metric] = entry
         rows.append(row)
-    failures = [
-        {
-            "cell_id": row["cell_id"],
-            "metric": metric,
-            "direction": row["metrics"][metric].get("band_direction"),
-            "value": row["metrics"][metric]["value"],
-            "floor": row["metrics"][metric]["floor"],
-        }
-        for row in rows
-        for metric in row["metrics"]
-        if not row["metrics"][metric]["passes"]
-    ]
+    failures = []
+    for row in rows:
+        for metric, entry in row["metrics"].items():
+            if entry["passes"]:
+                continue
+            record = {
+                "cell_id": row["cell_id"],
+                "metric": metric,
+                "defines_the_floors": row["defines_the_floors"],
+                "value": entry["value"],
+                "floor": entry["floor"],
+            }
+            if "raw_ratio" in entry:
+                # For a banded metric the decision is made on the raw unfolded
+                # ratio, so the failure record must carry that rather than the
+                # folded fidelity alone.
+                record.update({
+                    "decided_on": "raw unfolded purity ratio, two-sided band",
+                    "raw_ratio": entry["raw_ratio"],
+                    "ratio_lower": entry["ratio_lower"],
+                    "ratio_upper": entry["ratio_upper"],
+                    "direction": entry["band_direction"],
+                    "separation": entry["separation"],
+                })
+            else:
+                record["decided_on"] = "one-sided lower floor"
+                record["direction"] = "below_floor"
+            failures.append(record)
     non_defining = [row for row in rows if not row["defines_the_floors"]]
     clearing = sum(
         1

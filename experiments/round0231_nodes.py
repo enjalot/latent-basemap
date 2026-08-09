@@ -330,7 +330,18 @@ def assess_precedent_exposure() -> dict[str, Any]:
         artifact = _read_json(path, f"R{round_id} precedent gate")
         gates = artifact.get("gates") or {}
         n = int(artifact.get("n", -1))
-        multiplier = float(artifact.get("multiplier", float("nan")))
+        # These artifacts carry the multiplier per metric, not at the top level.
+        multipliers = {float(cell["multiplier"]) for cell in gates.values()}
+        if len(multipliers) != 1:
+            raise Round0231Error(
+                f"R{round_id} gates do not share one multiplier: {multipliers}"
+            )
+        multiplier = multipliers.pop()
+        if multiplier != LEGACY_MULTIPLIER:
+            raise Round0231Error(
+                f"R{round_id} multiplier is {multiplier}, not the "
+                f"{LEGACY_MULTIPLIER} this exposure assessment is about"
+            )
         derived = one_sided_tolerance_factor(n)["k"] if n >= 3 else None
         identity = defining_cell_can_fail(
             n=n, multiplier=multiplier, scale="sample_sd"
