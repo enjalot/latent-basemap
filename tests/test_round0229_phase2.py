@@ -98,3 +98,37 @@ def test_capabilities_are_r0229s_own_names_not_r0228s():
     assert phase2.ADOPTION_CLAIMED is False
     assert phase2.GATE_REGISTERABLE_HERE is False
     assert phase2.EQUIVALENCE_CLAIMED is False
+
+
+def test_phase1_artifacts_are_hash_bound_not_identity_sealed(tmp_path):
+    """Regression: phase 1's artifacts carry no `prompt_contract` identity seal.
+
+    They are written with `atomic_write_new_json` and bound by their
+    {path, bytes, sha256} signature. Demanding `read_sealed` of them failed the
+    phase-2 build node pre-CUDA; the resolver must verify the signature and not
+    require a seal the artifact never claimed.
+    """
+    from basemap.artifact_identity import expected_input_signature
+    from experiments import round0229_phase2_nodes as nodes
+
+    payload = {"cells": [], "note": "not identity sealed"}
+    path = tmp_path / "phase1.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    signature = expected_input_signature(str(path))
+    loaded, echoed = nodes._verified_json(
+        {"phase1": signature}, "phase1", label="phase 1"
+    )
+    assert loaded == payload
+    assert echoed["sha256"] == signature["sha256"]
+
+
+def test_the_real_phase1_artifacts_load_through_the_resolver():
+    from basemap.artifact_identity import expected_input_signature
+    from experiments import round0229_phase2_nodes as nodes
+
+    for path in (SWEEP_PATH, SPILL_PATH):
+        if not os.path.exists(path):
+            pytest.skip("phase-1 artifact absent")
+        signature = expected_input_signature(path)
+        loaded, _ = nodes._verified_json({"a": signature}, "a", label="phase 1")
+        assert "cells" in loaded

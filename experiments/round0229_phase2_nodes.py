@@ -25,6 +25,7 @@ adoption is claimed by any artifact.
 from __future__ import annotations
 
 import gc
+import json
 import os
 import random
 import resource
@@ -133,9 +134,27 @@ QUALITY_BUILD_SCRIPT = "basemap/round0229_quality_build.py"
 def _sealed(job: Mapping[str, Any], key: str, *, label: str) -> tuple[
     dict[str, Any], dict[str, Any]
 ]:
+    """A prior round's identity-sealed artifact, bound by its signature."""
     signature = dict(job[key])
     path = prompt_contract.verify_signature(signature, label=label)
     return prompt_contract.read_sealed(path, label=label), signature
+
+
+def _verified_json(job: Mapping[str, Any], key: str, *, label: str) -> tuple[
+    dict[str, Any], dict[str, Any]
+]:
+    """A hash-bound JSON artifact that carries no `prompt_contract` identity seal.
+
+    R0229's own phase-1 artifacts are written with `atomic_write_new_json` and
+    are therefore bound by their `{path, bytes, sha256}` signature rather than by
+    an identity seal. The signature is the guarantee `roundreport` verifies, so
+    it is verified here and the seal is not demanded of an artifact that never
+    claimed one.
+    """
+    signature = dict(job[key])
+    path = prompt_contract.verify_signature(signature, label=label)
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle), signature
 
 
 def _intra_queue_signature(
@@ -158,8 +177,12 @@ def _intra_queue_signature(
 
 def _verified_arm(job: Mapping[str, Any]) -> dict[str, Any]:
     """Re-run the registered selection rule against phase 1's sealed artifacts."""
-    sweep, sweep_signature = _sealed(job, "sweep_signature", label="R0229 sweep")
-    spill, spill_signature = _sealed(job, "spill_signature", label="R0229 spill grid")
+    sweep, sweep_signature = _verified_json(
+        job, "sweep_signature", label="R0229 sweep"
+    )
+    spill, spill_signature = _verified_json(
+        job, "spill_signature", label="R0229 spill grid"
+    )
     chosen = select_arm(sweep=sweep, spill=spill)
     declared = dict(job["arm"])
     for key in ("cell", "clusters", "spill"):
