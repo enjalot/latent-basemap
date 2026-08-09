@@ -353,3 +353,45 @@ def test_rejects_a_drifted_treatment_invariant(
 
 def test_all_nine_cells_are_distinct_capabilities() -> None:
     assert len({map_capability(c, s) for c, s in CELLS}) == 9
+
+
+def test_geometry_resolves_an_unhashed_intra_queue_comparison_reference(
+    tmp_path,
+) -> None:
+    """The R0228 geometry defect, pinned.
+
+    The comparison artifact is produced earlier in the same queue, so at prepare
+    time its reference carries a path and no hash. `verify_signature` requires a
+    full `{path, bytes, sha256}` triple and rejects a bare path with "content
+    changed" — which is exactly how the first R0228 queue lost its geometry node
+    after all nine train cells had already succeeded. The intra-queue resolver
+    must accept the bare path and hash it, and must still verify a reference that
+    does carry a hash.
+    """
+    import json as _json
+
+    from basemap.artifact_identity import expected_input_signature
+
+    target = tmp_path / "cluster-spill-graph-map-comparison.json"
+    target.write_text(_json.dumps({"schema": "x"}), encoding="utf-8")
+
+    path, signature = round0228_nodes._intra_queue_signature(
+        {"kind": "file", "canonical_path": str(target)},
+        label="R0228 sealed map comparison",
+    )
+    assert path == str(target)
+    assert signature == expected_input_signature(str(target))
+    assert signature["sha256"]
+
+    bound_path, bound = round0228_nodes._intra_queue_signature(
+        expected_input_signature(str(target)),
+        label="R0228 sealed map comparison",
+    )
+    assert bound_path == str(target)
+    assert bound["sha256"] == signature["sha256"]
+
+    with pytest.raises(Round0228Error):
+        round0228_nodes._intra_queue_signature(
+            {"kind": "file", "canonical_path": str(tmp_path / "absent.json")},
+            label="R0228 sealed map comparison",
+        )

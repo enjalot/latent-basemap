@@ -1564,8 +1564,19 @@ def _load_coordinates(signature: Mapping[str, Any], *, label: str) -> np.ndarray
 
 
 def run_geometry(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
-    comparison_artifact, comparison_signature = _sealed_json(
-        job, "comparison_signature", label="R0228 sealed map comparison"
+    # The comparison artifact is produced EARLIER IN THIS QUEUE, so at prepare
+    # time it has a path and no hash — `verify_signature` requires a full
+    # `{path, bytes, sha256}` triple and rejects a bare path with "content
+    # changed". This is the same intra-queue resolution the train and geometry
+    # graph references already use; the original code reached for `_sealed_json`
+    # instead and that is the defect this correction fixes. A reference that DOES
+    # carry a hash (a correction queue binding an already-sealed artifact) is
+    # still verified against it in the ordinary way.
+    comparison_path, comparison_signature = _intra_queue_signature(
+        job["comparison_signature"], label="R0228 sealed map comparison"
+    )
+    comparison_artifact = prompt_contract.read_sealed(
+        comparison_path, label="R0228 sealed map comparison"
     )
     if (
         comparison_artifact.get("schema") != COMPARISON_SCHEMA

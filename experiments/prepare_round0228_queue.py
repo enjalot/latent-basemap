@@ -520,7 +520,73 @@ def _construction_proof(
     }
 
 
-def prepare_round0228(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
+#: The queue whose artifacts a `--geometry-only` correction binds. Its fourteen
+#: completed nodes are sealed on disk; the geometry probe is the only one that
+#: failed, and retraining nine cells to reproduce bytes that already exist would
+#: burn ~1.5 GPU-h for nothing.
+SOURCE_QUEUE_ROOT = QUEUE_ROOT
+CORRECTION_QUEUE_ROOT = os.path.join(ROUND_ROOT, "queue-correction-1")
+
+
+def _sealed_source_artifacts() -> dict[str, Any]:
+    """Bind the already-sealed R0228 comparison and graph receipts by hash."""
+    from basemap.round0228_low_c_map import BUILD_SCHEMA, COMPARISON_SCHEMA
+
+    artifacts = os.path.join(SOURCE_QUEUE_ROOT, "artifacts")
+    comparison_path = os.path.join(
+        artifacts,
+        COMPARISON_CAPABILITY,
+        "cluster-spill-graph-map-comparison.json",
+    )
+    if not os.path.exists(comparison_path):
+        raise RuntimeError(
+            "R0228 geometry correction needs the sealed comparison artifact from "
+            f"the source queue; it is absent at {comparison_path}"
+        )
+    comparison = prompt_contract.read_sealed(
+        comparison_path, label="R0228 sealed map comparison"
+    )
+    if (
+        comparison.get("schema") != COMPARISON_SCHEMA
+        or comparison.get("round_id") != ROUND_ID
+        or len(comparison.get("cells") or {}) != len(CELLS)
+    ):
+        raise RuntimeError("R0228 sealed comparison contract changed")
+    # Every coordinate array the geometry node will open, bound now.
+    for key, cell in comparison["cells"].items():
+        prompt_contract.verify_signature(
+            dict(cell["coordinates"]), label=f"R0228 {key} coordinates"
+        )
+    graph_signatures: dict[str, Any] = {}
+    for clusters in CLUSTER_COUNTS:
+        path = os.path.join(
+            artifacts, graph_capability(clusters), "cluster-spill-graph.json"
+        )
+        manifest = prompt_contract.read_sealed(
+            path, label=f"R0228 sealed c={clusters} graph receipt"
+        )
+        if (
+            manifest.get("schema") != BUILD_SCHEMA
+            or int(manifest.get("clusters", -1)) != clusters
+        ):
+            raise RuntimeError(f"R0228 sealed c={clusters} graph contract changed")
+        prompt_contract.verify_signature(
+            dict(manifest["loss_arrays"]["lost_edges_per_row"]),
+            label=f"R0228 c={clusters} lost-edge counts",
+        )
+        graph_signatures[str(clusters)] = expected_input_signature(path)
+    return {
+        "comparison_signature": expected_input_signature(comparison_path),
+        "graph_signatures": graph_signatures,
+    }
+
+
+def prepare_round0228(
+    *,
+    release_sha: str,
+    queue_root: str = QUEUE_ROOT,
+    geometry_only: bool = False,
+) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0228 release SHA must be one full commit")
     round_signature, required_reviews = _issued_round(release_sha)
@@ -542,6 +608,7 @@ def prepare_round0228(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
     }
     if not all(bool(value.get("allowed")) for value in guards.values()):
         raise RuntimeError(f"R0228 guard refuses a registered build cell: {guards}")
+    source = _sealed_source_artifacts() if geometry_only else None
 
     ensure_data_directory(ROUND_ROOT)
     ensure_data_directory(CUVS_CACHE_ROOT)
@@ -570,6 +637,11 @@ def prepare_round0228(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
         *downstream["coordinate_signatures"].values(),
         expected_input_signature(smoke_path),
         expected_input_signature(proof_path),
+        *(
+            [source["comparison_signature"], *source["graph_signatures"].values()]
+            if geometry_only
+            else []
+        ),
     ])
 
     artifacts = ensure_data_directory(os.path.join(queue_root, "artifacts"))
@@ -577,7 +649,7 @@ def prepare_round0228(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
     p90: dict[str, float] = {}
 
     build_nodes: dict[int, str] = {}
-    for clusters in CLUSTERS_BUILT_HERE:
+    for clusters in [] if geometry_only else CLUSTERS_BUILT_HERE:
         node = f"build_cluster_spill_c{clusters}_2m"
         build_nodes[clusters] = node
         jobs.append({
@@ -605,7 +677,7 @@ def prepare_round0228(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
 
     fuzzy_nodes: dict[int, str] = {}
     graph_manifest_paths: dict[int, str] = {}
-    for clusters in CLUSTER_COUNTS:
+    for clusters in [] if geometry_only else CLUSTER_COUNTS:
         node = f"fuzzy_graph_c{clusters}"
         fuzzy_nodes[clusters] = node
         output = os.path.join(artifacts, graph_capability(clusters))
@@ -668,7 +740,7 @@ def prepare_round0228(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
         p90[node] = FUZZY_NODE_P90_WALL_S
 
     train_nodes: list[str] = []
-    for clusters, seed in CELLS:
+    for clusters, seed in [] if geometry_only else CELLS:
         capability = map_capability(clusters, seed)
         node = f"train_c{clusters}_seed{seed}"
         train_nodes.append(node)
@@ -703,7 +775,7 @@ def prepare_round0228(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
 
     compare_node = "compare_cluster_spill_panel"
     compare_output = os.path.join(artifacts, COMPARISON_CAPABILITY)
-    jobs.append({
+    compare_job = {
         "id": compare_node,
         "action": COMPARE_ACTION,
         "handler_module": "experiments.round0228_nodes",
@@ -738,16 +810,44 @@ def prepare_round0228(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
             "training_performed": False,
             "cpu_heavy": False,
         },
-    })
-    p90[compare_node] = COMPARE_NODE_P90_WALL_S
+    }
+    if not geometry_only:
+        jobs.append(compare_job)
+        p90[compare_node] = COMPARE_NODE_P90_WALL_S
 
+    # A geometry-only correction binds the ALREADY-SEALED comparison and graph
+    # receipts by their real hashes instead of by an intra-queue path, and has no
+    # dependency to wait on. Nothing is retrained: the nine map artifacts, their
+    # coordinates and the panel comparison are sealed on disk and are re-verified
+    # here rather than reproduced.
     geometry_node = "probe_cluster_spill_geometry"
+    if geometry_only:
+        comparison_reference = dict(source["comparison_signature"])
+        graph_manifest_references = {
+            key: dict(value) for key, value in source["graph_signatures"].items()
+        }
+        geometry_deps: list[str] = []
+    else:
+        comparison_reference = {
+            "kind": "file",
+            "canonical_path": os.path.join(
+                compare_output, "cluster-spill-graph-map-comparison.json"
+            ),
+        }
+        graph_manifest_references = {
+            str(clusters): {
+                "kind": "file",
+                "canonical_path": graph_manifest_paths[clusters],
+            }
+            for clusters in CLUSTER_COUNTS
+        }
+        geometry_deps = [compare_node]
     jobs.append({
         "id": geometry_node,
         "action": GEOMETRY_ACTION,
         "handler_module": "experiments.round0228_nodes",
         "handler_callable": "run_job",
-        "deps": [compare_node],
+        "deps": geometry_deps,
         "outputs": [os.path.join(artifacts, GEOMETRY_CAPABILITY)],
         "done_marker": os.path.join(artifacts, f"{geometry_node}.done.json"),
         "expected_inputs": expected_inputs,
@@ -758,19 +858,8 @@ def prepare_round0228(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
         "panel_evidence": R0218_PANEL_EVIDENCE,
         "r0222_gate_signature": downstream["gate_signature"],
         "r0223_comparison_signature": downstream["cuvs_signature"],
-        "comparison_signature": {
-            "kind": "file",
-            "canonical_path": os.path.join(
-                compare_output, "cluster-spill-graph-map-comparison.json"
-            ),
-        },
-        "graph_manifests": {
-            str(clusters): {
-                "kind": "file",
-                "canonical_path": graph_manifest_paths[clusters],
-            }
-            for clusters in CLUSTER_COUNTS
-        },
+        "comparison_signature": comparison_reference,
+        "graph_manifests": graph_manifest_references,
         "node_policy": {
             "gpu_required": True,
             "training_performed": False,
@@ -802,13 +891,17 @@ def prepare_round0228(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
             "minilm-mixed-2m-cuvs-graph-map-comparison-v1",
             R0227_LADDER_CAPABILITY,
         ],
-        "capabilities_produced": [
-            *GRAPH_CAPABILITIES,
-            *MAP_CAPABILITIES,
-            COMPARISON_CAPABILITY,
-            GEOMETRY_CAPABILITY,
-        ],
-        "training_performed": True,
+        "capabilities_produced": (
+            [GEOMETRY_CAPABILITY]
+            if geometry_only
+            else [
+                *GRAPH_CAPABILITIES,
+                *MAP_CAPABILITIES,
+                COMPARISON_CAPABILITY,
+                GEOMETRY_CAPABILITY,
+            ]
+        ),
+        "training_performed": not geometry_only,
         "jobs": jobs,
         "p90_gpu_seconds": p90,
         "scientific_contract": {
@@ -901,11 +994,24 @@ def prepare_round0228(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-sha", required=True)
-    parser.add_argument("--queue-root", default=QUEUE_ROOT)
+    parser.add_argument("--queue-root", default=None)
+    parser.add_argument(
+        "--geometry-only",
+        action="store_true",
+        help=(
+            "rebuild ONLY the geometry probe, bound to the source queue's "
+            "already-sealed comparison and graph receipts; retrains nothing"
+        ),
+    )
     args = parser.parse_args(argv)
+    queue_root = args.queue_root or (
+        CORRECTION_QUEUE_ROOT if args.geometry_only else QUEUE_ROOT
+    )
     print(json.dumps({
         "queue_manifest": prepare_round0228(
-            release_sha=args.release_sha, queue_root=args.queue_root
+            release_sha=args.release_sha,
+            queue_root=queue_root,
+            geometry_only=args.geometry_only,
         )
     }, indent=2, sort_keys=True))
     return 0
