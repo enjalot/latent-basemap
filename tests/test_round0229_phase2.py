@@ -132,3 +132,20 @@ def test_the_real_phase1_artifacts_load_through_the_resolver():
         signature = expected_input_signature(path)
         loaded, _ = nodes._verified_json({"a": signature}, "a", label="phase 1")
         assert "cells" in loaded
+
+
+def test_the_build_artifact_is_identity_sealed_because_fuzzy_reads_it_sealed():
+    """Regression: the phase-2 build artifact is consumed by `read_sealed`.
+
+    Writing it with a bare `atomic_write_new_json` failed the fuzzy node
+    pre-CUDA after the build had already spent its GPU time. An intra-queue
+    artifact a later node reads as a *document* must carry an identity seal.
+    """
+    import inspect
+
+    from experiments import round0229_phase2_nodes as nodes
+
+    build_source = inspect.getsource(nodes.run_build)
+    assert "prompt_contract.seal(" in build_source
+    fuzzy_source = inspect.getsource(nodes.run_fuzzy)
+    assert "read_sealed" in fuzzy_source

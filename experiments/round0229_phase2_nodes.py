@@ -253,9 +253,12 @@ def run_build(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     if not os.path.exists(ids_path):
         raise Round0229Error("R0229 spill-lifted build emitted no graph")
     escalations = list(record.get("watchdog_escalations") or [])
+    # Identity-sealed, because the fuzzy node downstream reads it with
+    # `read_sealed`. An intra-queue artifact that a later node consumes as a
+    # document, rather than as bytes, carries a seal.
     atomic_write_new_json(
         str(job["artifact_path"]),
-        {
+        prompt_contract.seal({
             "schema": "round0229-spill-lifted-build-v1",
             "round_id": ROUND_ID,
             "release_sha": manifest["release_sha"],
@@ -278,7 +281,7 @@ def run_build(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "training_performed": False,
             "gate_registered": False,
             "adoption_claimed": ADOPTION_CLAIMED,
-        },
+        }),
         immutable=True,
     )
 
