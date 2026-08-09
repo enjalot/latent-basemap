@@ -564,15 +564,64 @@ def _train_graph(job: Mapping[str, Any]) -> dict[str, Any]:
     graph_manifest = prompt_contract.read_sealed(
         manifest_path, label="R0229 spill-lifted graph"
     )
+    checks = graph_manifest.get("graph_checks") or {}
+    degrees = graph_manifest.get("degrees") or {}
+    if (
+        graph_manifest.get("schema") != GRAPH_SCHEMA
+        or graph_manifest.get("round_id") != ROUND_ID
+        or graph_manifest.get("capability") != GRAPH_CAPABILITY
+        or int(graph_manifest.get("rows", -1)) != ROWS
+        or int(graph_manifest.get("dimension", -1)) != DIMENSION
+        or int(graph_manifest.get("k", -1)) != GRAPH_K
+        or graph_manifest.get("training_performed") is not False
+        or graph_manifest["recall_against_r0220_exact_truth"]["population"]
+        != RECALL_POPULATION
+    ):
+        raise Round0229Error("R0229 sealed spill-lifted graph contract changed")
+    if (
+        int(checks.get("zero_degree_rows", -1)) != 0
+        or int(degrees.get("zero_degree_rows", -1)) != 0
+        or checks.get("r0215_tripwire_clean") is not True
+        or checks.get("recall_does_not_exceed_its_own_ceiling") is not True
+    ):
+        raise Round0229Error(
+            "R0229 requires the sealed spill-lifted graph to have passed its "
+            "zero-degree and ceiling checks"
+        )
+    edges = int(graph_manifest["directed_edge_count"])
+    if edges <= 0:
+        raise Round0229Error("R0229 sealed spill-lifted graph reports no edges")
     edges_path, graph_signature = _intra_queue_signature(
         dict(graph_manifest["graph"]), label="R0229 spill-lifted fuzzy edges"
     )
+    from basemap.pumap.parametric_umap.datasets.edge_list_dataset import (
+        load_edge_arrays,
+    )
+
+    sources, targets, weights, n_nodes = load_edge_arrays(
+        edges_path, load_weights=True
+    )
+    if (
+        weights is None
+        or int(n_nodes) != ROWS
+        or len(sources) != edges
+        or targets.shape != sources.shape
+        or weights.shape != sources.shape
+        or sources.dtype != np.int32
+        or targets.dtype != np.int32
+        or weights.dtype != np.float32
+    ):
+        raise Round0229Error("R0229 sealed spill-lifted graph arrays changed")
     return {
         "manifest": graph_manifest,
         "manifest_signature": manifest_signature,
         "signature": graph_signature,
         "edges_path": edges_path,
-        "directed_edges": int(graph_manifest["directed_edge_count"]),
+        "sources": sources,
+        "targets": targets,
+        "weights": weights,
+        "n_nodes": int(n_nodes),
+        "directed_edges": edges,
     }
 
 

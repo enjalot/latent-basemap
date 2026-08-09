@@ -135,11 +135,18 @@ def _smoke(monkeypatch: pytest.MonkeyPatch, tmp_path, *, seed: int) -> dict[str,
             "rows_carrying_any_loss_fraction": 0.02,
         },
     }
+    # The bundle MiniLMMixedTrainingInput actually needs: it checks n_nodes
+    # against len(dataset), so a bundle without the edge arrays fails at the
+    # wrapper rather than at the config. R0229's first train attempt did.
     bundle = {
         "manifest": graph_manifest,
         "manifest_signature": dict(MANIFEST_SIGNATURE),
         "signature": dict(GRAPH_SIGNATURE),
         "edges_path": GRAPH_SIGNATURE["canonical_path"],
+        "sources": np.arange(8, dtype=np.int32),
+        "targets": np.roll(np.arange(8, dtype=np.int32), -1),
+        "weights": np.ones(8, dtype=np.float32),
+        "n_nodes": ROWS,
         "directed_edges": edges,
     }
     source = np.random.default_rng(229).normal(size=(64, DIMENSION)).astype(np.float32)
@@ -326,3 +333,18 @@ def test_the_published_exactness_string_describes_this_arm_not_r0226_constants()
     assert "intermediate 256" in text
     assert "max_iterations 40" in text
     assert "c=200" in text
+
+
+def test_the_train_bundle_carries_everything_the_pipeline_wrapper_needs():
+    """Regression: MiniLMMixedTrainingInput checks n_nodes against len(dataset).
+
+    A bundle without `sources` / `targets` / `weights` / `n_nodes` raised
+    "R0217 training input geometry changed" at the wrapper, after the build and
+    fuzzy nodes had already spent their GPU time.
+    """
+    import inspect
+
+    source = inspect.getsource(nodes._train_graph)
+    for key in ("sources", "targets", "weights", "n_nodes"):
+        assert f'"{key}"' in source, key
+    assert "load_edge_arrays" in source
