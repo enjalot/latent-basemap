@@ -404,3 +404,23 @@ def test_the_round_imports_r0228s_geometry_rather_than_reimplementing_it():
     # directly comparable with R0228's.
     assert geometry.SCATTER_SAMPLE_ROWS == 20_000
     assert geometry.SCATTER_SAMPLE_SEED == 228
+
+
+def test_assignment_cache_round_trips_through_its_temporary(tmp_path):
+    # Regression: np.save appends ".npy" to a path that does not end in it, so
+    # writing to "<cache>.partial" produced "<cache>.partial.npy" and the
+    # rename raised FileNotFoundError. This pins the exact failure mode.
+    import numpy as np
+
+    cache = tmp_path / "assignment.i32.npy"
+    payload = np.arange(12, dtype=np.int32).reshape(6, 2)
+    temporary = f"{cache}.partial"
+    with open(temporary, "wb") as handle:
+        np.save(handle, payload)
+    os.replace(temporary, str(cache))
+    assert cache.exists()
+    assert not os.path.exists(f"{temporary}.npy")
+    reloaded = np.load(str(cache))
+    assert reloaded.shape == (6, 2)
+    assert reloaded.dtype == np.int32
+    assert (reloaded == payload).all()

@@ -124,8 +124,13 @@ def _load_or_build_assignment(
     provenance.update({"assignment_source": "computed", "assignment_reused": False})
     if cache_path:
         os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        # np.save appends ".npy" to a path that does not already end in it, so
+        # the temporary is written through an open handle and renamed. Writing
+        # through a temporary keeps a partial file from ever being bound as the
+        # shared partition by a later cell.
         temporary = f"{cache_path}.partial"
-        np.save(temporary, assignment)
+        with open(temporary, "wb") as handle:
+            np.save(handle, assignment)
         os.replace(temporary, cache_path)
         provenance["assignment_cache_bytes"] = int(os.path.getsize(cache_path))
         provenance["assignment_cache_written"] = True
