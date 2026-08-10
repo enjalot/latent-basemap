@@ -128,7 +128,19 @@ WATCHDOG_MAX_CONSECUTIVE_SAMPLE_FAILURES = int(
 #: exactly the state R0243's symmetrisation was in and exactly the state a
 #: `10 h` trainer would be in on the way to swap. A node declares the budget it
 #: designed for; exceeding it is a defect in the node, not in the machine.
-WATCHDOG_DEFAULT_ANON_BUDGET_BYTES = 64 * (1 << 30)
+#:
+#: R0247 (REGISTERED CHANGE, direction: TIGHTER). This was `64 GiB`, which sits
+#: ABOVE R0242's own `60 GiB` anonymous pressure threshold - so a node taking
+#: the default had a budget arm that could never fire before the machine rule
+#: did, i.e. no budget arm at all. The default is now the threshold itself,
+#: which is also `max_declared_anonymous_budget_bytes` in the R0247 registry.
+#: Basis: a node-declared budget above the level at which the machine is in
+#: trouble is not a budget. Nothing that passed before can fail now except a
+#: stage whose anonymous peak is between `60` and `64 GiB`, which on a `123 GiB`
+#: box is already inside R0242's pressure arm.
+WATCHDOG_DEFAULT_ANON_BUDGET_BYTES = int(
+    REGISTERED_SAFETY_PARAMETERS["max_declared_anonymous_budget_bytes"].value
+)
 
 #: The budget for the R0243 symmetrisation stage, re-run here to measure its
 #: true peak. R0243's own architectural accounting is `ids_sorted` (6 GB) +

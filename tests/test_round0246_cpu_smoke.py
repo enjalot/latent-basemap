@@ -260,7 +260,9 @@ def test_tie_entry_path_runs_end_to_end(monkeypatch, scratch, world, armed):
         "probe_query_rows": world.probe_rows,
         "substrate_array": world.substrate,
         "graph_ids": world.graph_ids,
-        "tie_rows": 200,
+        #: R0247 (declared edit): the tie-precision sample floor is registered
+        #: and population-capped, so a 400-row probe must be sampled whole.
+        "tie_rows": TINY_PROBE,
         "tie_seed": 246_005,
     })
     receipt = prompt_contract.read_sealed(
@@ -269,7 +271,7 @@ def test_tie_entry_path_runs_end_to_end(monkeypatch, scratch, world, armed):
     assert receipt["schema"] == nodes.TIE_SCHEMA
     assert receipt["the_tolerance_was_not_raised"] is True
     profile = receipt["tie_precision_profile"]
-    assert profile["candidate_decisions_scored"] == 200 * TINY_K
+    assert profile["candidate_decisions_scored"] == TINY_PROBE * TINY_K
     assert profile["verdict_flips"]["per_candidate_flip_rate"] is not None
     adjudication = receipt["claim_adjudication"]
     assert adjudication["claims_examined"] == len(

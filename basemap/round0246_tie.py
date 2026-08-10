@@ -155,6 +155,7 @@ def tie_aware_precision_profile(
         "tie_precision_min_rows", sample_rows,
         site="tie_aware_precision_profile(sample_rows=)",
         label="R0246 tie precision profile",
+        population=float(np.asarray(probe_query_rows).size),
     )
     overrides = override_records([tolerance_record, rows_record])
     require_no_weakening_overrides(

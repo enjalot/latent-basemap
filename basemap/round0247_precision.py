@@ -54,6 +54,8 @@ from basemap.round0246_tie import (
 )
 from basemap.round0247_registry import (
     TIE_BOUND_CONFIDENCE,
+    clamp,
+    require_no_weakening_overrides,
     TIE_USE_MAX_EXPECTED_FLIPS_OVER_MARGIN,
     Round0247Error,
     registered_bounds,
@@ -366,6 +368,17 @@ def poisson_upper_bound(
     adjudicated at a point estimate, which is review-0246-01 E's objection to
     retracting eight precisions on `0/300,000`.
     """
+    #: R0247: the confidence is a safety parameter - a lower one gives a
+    #: tighter bound and more surviving claims - so it is clamped like any
+    #: other rather than taken from the caller.
+    confidence_effective, confidence_record = clamp(
+        "tie_bound_confidence", confidence,
+        site="poisson_upper_bound(confidence=)", label="R0247 flip-rate bound",
+    )
+    require_no_weakening_overrides(
+        [confidence_record], label="R0247 flip-rate bound"
+    )
+    confidence = float(confidence_effective)
     k = int(events)
     if k < 0:
         raise Round0247Error("R0247 bound needs a non-negative event count")

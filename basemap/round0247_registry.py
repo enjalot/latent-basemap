@@ -761,7 +761,8 @@ def verify_registry(*, label: str = "R0247") -> dict[str, Any]:
 # the clamp
 # --------------------------------------------------------------------------- #
 def clamp(
-    name: str, requested: Any, *, site: str, label: str = ""
+    name: str, requested: Any, *, site: str, label: str = "",
+    population: float | None = None,
 ) -> tuple[float, dict[str, Any] | None]:
     """Return the effective bound and, when the caller asked, the record.
 
@@ -782,6 +783,19 @@ def clamp(
             "decision must be in the registry. " + SAFETY_PARAMETER_CLASS_NOTE
         )
     registered = float(parameter.value)
+    #: A FLOOR on a sample size cannot exceed the population that exists. A
+    #: 400-row probe cannot be sampled 20,000 times, so the effective floor
+    #: there is "the whole probe", which is strictly stricter than the
+    #: registered number and is not an override. The registry value is still
+    #: what the receipt reports as registered.
+    population_capped = False
+    if (
+        population is not None
+        and parameter.direction == FLOOR
+        and float(population) < registered
+    ):
+        registered = float(population)
+        population_capped = True
     if requested is None:
         return registered, None
     asked = float(requested)
@@ -794,7 +808,10 @@ def clamp(
         "module": parameter.module,
         "symbol": parameter.symbol,
         "direction": parameter.direction,
-        "registered_value": registered,
+        "registered_value": float(parameter.value),
+        "effective_floor_after_population_cap": (
+            registered if population_capped else None
+        ),
         "requested_value": asked,
         "effective_value": effective,
         "kind": "weakening" if weakening else "stricter",
@@ -811,9 +828,12 @@ def clamp(
 
 
 def clamp_int(
-    name: str, requested: Any, *, site: str, label: str = ""
+    name: str, requested: Any, *, site: str, label: str = "",
+    population: float | None = None,
 ) -> tuple[int, dict[str, Any] | None]:
-    value, record = clamp(name, requested, site=site, label=label)
+    value, record = clamp(
+        name, requested, site=site, label=label, population=population
+    )
     return int(round(value)), record
 
 

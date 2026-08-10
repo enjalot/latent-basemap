@@ -819,6 +819,15 @@ def run_allocation_slope_positive_control(
     machine has room for the worst case plus a wide margin — a control must
     never be the thing that swaps this box.
     """
+    #: R0247: a control's own bar is a safety parameter - lowering it lets a
+    #: slow synthetic stage certify the guard against a defect gentler than the
+    #: one already measured.
+    min_slope_effective, min_slope_record = clamp(
+        "slope_control_min_bytes_per_s", min_slope_bytes_per_s,
+        site="run_allocation_slope_positive_control(min_slope_bytes_per_s=)",
+        label="R0245 allocation-slope control",
+    )
+    min_slope_bytes_per_s = float(min_slope_effective)
     available = int(_meminfo().get("MemAvailable", 0))
     worst_case = int(trip_at_bytes) + max(
         int(compliant_max_units) * int(compliant_unit_bytes),
@@ -860,6 +869,9 @@ def run_allocation_slope_positive_control(
             "the slope R0244's own sealed trace exhibits"
         ),
         "min_slope_bytes_per_s": float(min_slope_bytes_per_s),
+        "safety_overrides": [
+            dict(record) for record in override_records([min_slope_record])
+        ],
         "fastest_measured_slope_bytes_per_s": fastest,
         "slope_over_the_r0244_measurement": (
             fastest / float(min_slope_bytes_per_s)
