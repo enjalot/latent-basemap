@@ -499,6 +499,51 @@ def test_text_node_fails_closed_when_the_text_is_not_the_row(
         nodes.run_job(ACTIVE, job)
 
 
+def test_chunk_parquet_resolves_by_name_then_by_position(
+    monkeypatch, scratch, world
+) -> None:
+    """`starcoderdata` names its parquets `000_000500000` against
+    `data-00000-of-00020.npy`, with the same count and order; the pile's
+    parquet directory is a superset of its embedded shards, so name matching
+    is the only correct rule there. Both paths are exercised, and a count
+    disagreement is refused rather than guessed."""
+    _patch(monkeypatch, world)
+    shards = nodes._corpus_shards(TINY_CORPUS)
+    by_name = nodes._chunk_parquet(TINY_CORPUS, shards[0], shard_index=0)
+    assert by_name.endswith(f"{TINY_SHARD}.parquet")
+
+    directory = os.path.dirname(by_name)
+    renamed = os.path.join(directory, "000_000500000.parquet")
+    os.rename(by_name, renamed)
+    assert nodes._chunk_parquet(TINY_CORPUS, shards[0], shard_index=0) == renamed
+
+    shutil.copyfile(renamed, os.path.join(directory, "001_001000000.parquet"))
+    with pytest.raises(nodes.Round0244Error):
+        nodes._chunk_parquet(TINY_CORPUS, shards[0], shard_index=0)
+
+
+def test_text_node_refuses_a_parquet_whose_row_count_differs(
+    monkeypatch, scratch, world
+) -> None:
+    """A positional fallback is an assumption; this is what stops it being one."""
+    _patch(monkeypatch, world)
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    directory = os.path.join(
+        world.chunk_root, TINY_CORPUS[: -len(nodes.EMBEDDING_SUFFIX)], "train"
+    )
+    pq.write_table(
+        pa.table({"chunk_text": world.texts[:-1]}),
+        os.path.join(directory, f"{TINY_SHARD}.parquet"),
+        row_group_size=8,
+    )
+    with pytest.raises(nodes.Round0244Error):
+        nodes.run_job(
+            ACTIVE, _text_job(world, os.path.join(scratch, "artifacts-text-rows"))
+        )
+
+
 def test_run_job_refuses_an_unknown_action(scratch) -> None:
     with pytest.raises(nodes.Round0244Error):
         nodes.run_job(ACTIVE, {"action": "not-a-round-0244-node"})

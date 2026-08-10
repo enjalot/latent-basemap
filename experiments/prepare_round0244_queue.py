@@ -311,8 +311,15 @@ def prepare_round0244(
     release_sha: str,
     queue_root: str = QUEUE_ROOT,
     prior_gpu_wall_s: float = 0.0,
+    only: tuple[str, ...] = (),
 ) -> str:
-    """Build the queue. Never launches anything."""
+    """Build the queue. Never launches anything.
+
+    `only` builds a correction queue carrying a subset of the nodes, with the
+    dependencies of the omitted ones dropped. Every earlier attempt's GPU wall
+    is carried in `prior_gpu_wall_s` so the correction is sized against the
+    round's real remaining cap (review-0224: charge every attempt).
+    """
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0244 release SHA must be one full commit")
     round_signature, required_reviews = _issued_round(release_sha)
@@ -438,6 +445,15 @@ def prepare_round0244(
             "node_policy": dict(policy),
         },
     ]
+
+    if only:
+        keep = set(only)
+        unknown = keep - {str(job["id"]) for job in jobs}
+        if unknown:
+            raise RuntimeError(f"R0244 has no such node(s): {sorted(unknown)}")
+        jobs = [job for job in jobs if str(job["id"]) in keep]
+        for job in jobs:
+            job["deps"] = [dep for dep in job["deps"] if dep in keep]
 
     queue = _base_manifest(
         round_id=ROUND_ID, release_sha=release_sha, round_file=ROUND_FILE,
@@ -605,10 +621,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--release-sha", required=True)
     parser.add_argument("--queue-root", default=QUEUE_ROOT)
     parser.add_argument("--prior-gpu-wall-s", type=float, default=0.0)
+    parser.add_argument("--only", nargs="*", default=[])
     args = parser.parse_args(argv)
     path = prepare_round0244(
         release_sha=args.release_sha, queue_root=args.queue_root,
-        prior_gpu_wall_s=args.prior_gpu_wall_s,
+        prior_gpu_wall_s=args.prior_gpu_wall_s, only=tuple(args.only),
     )
     print(json.dumps({"queue": path}, indent=2))
     return 0

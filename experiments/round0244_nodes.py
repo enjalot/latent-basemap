@@ -790,26 +790,70 @@ def _corpus_shards(corpus: str) -> list[str]:
     return out
 
 
-def _chunk_parquet(corpus: str, shard_path: str) -> str:
+def _chunk_parquet(corpus: str, shard_path: str, *, shard_index: int) -> str:
+    """The chunk parquet holding the text behind an embedding shard.
+
+    Three of the four corpora name their parquet exactly as their `.npy`
+    (`data-00000-of-01987`), and the pile's parquet directory is a SUPERSET of
+    its embedded shards, so name matching is the only correct rule there.
+    `starcoderdata-code-chunked-120` uses a different scheme entirely
+    (`000_000500000.parquet` against `data-00000-of-00020.npy`) with the same
+    count and the same order, so the fallback is positional.
+
+    A positional fallback is an assumption, so it is not left as one: the
+    caller checks the parquet's row count against the shard's complete-row
+    count, and every text this node publishes is separately re-embedded and
+    required to reproduce its substrate row.
+    """
     if not corpus.endswith(EMBEDDING_SUFFIX):
         raise Round0244Error(f"R0244 cannot map {corpus} to a chunk corpus")
     chunk_corpus = corpus[: -len(EMBEDDING_SUFFIX)]
     name = os.path.basename(shard_path)
     if not name.endswith(".npy"):
         raise Round0244Error(f"R0244 shard {name} is not a .npy")
-    path = os.path.join(
-        CHUNK_ROOT, chunk_corpus, "train", name[: -len(".npy")] + ".parquet"
+    directory = os.path.join(CHUNK_ROOT, chunk_corpus, "train")
+    by_name = os.path.join(directory, name[: -len(".npy")] + ".parquet")
+    if os.path.exists(by_name):
+        return by_name
+    listing = sorted(glob.glob(os.path.join(directory, "*.parquet")))
+    shards = _corpus_shards(corpus)
+    if len(listing) == len(shards) and 0 <= int(shard_index) < len(listing):
+        return listing[int(shard_index)]
+    raise Round0244Error(
+        f"R0244 cannot resolve a chunk parquet for {name}: no "
+        f"{by_name!r}, and {directory} holds {len(listing)} parquets against "
+        f"{len(shards)} embedded shards, so a positional fallback would be a "
+        "guess"
     )
-    if not os.path.exists(path):
-        raise Round0244Error(f"R0244 chunk parquet absent at {path}")
-    return path
 
 
-def _read_chunk_texts(path: str, rows: list[int]) -> dict[int, dict[str, Any]]:
-    """Read only the row groups the requested rows fall in."""
+def _shard_rows(shard_path: str) -> int:
+    """Complete `384`-float32 rows in an embedding shard, header or not."""
+    with open(shard_path, "rb") as handle:
+        real_npy = handle.read(6) == b"\x93NUMPY"
+    if real_npy:
+        return int(np.load(shard_path, mmap_mode="r").shape[0])
+    return int(os.path.getsize(shard_path) // (DIMENSION * 4))
+
+
+def _read_chunk_texts(
+    path: str, rows: list[int], *, expect_rows: int
+) -> dict[int, dict[str, Any]]:
+    """Read only the row groups the requested rows fall in.
+
+    Fail-closed on the shard-to-parquet correspondence: a parquet whose row
+    count differs from its embedding shard's is not the text behind that
+    shard, whatever its name says.
+    """
     import pyarrow.parquet as pq
 
     handle = pq.ParquetFile(path)
+    if int(handle.metadata.num_rows) != int(expect_rows):
+        raise Round0244Error(
+            f"R0244 chunk parquet {path} has {handle.metadata.num_rows} rows "
+            f"against {expect_rows} in its embedding shard; the row indices in "
+            "R0238's provenance do not address this file"
+        )
     names = set(handle.schema_arrow.names)
     columns = ["chunk_text"] + [
         name for name in ("chunk_index", "id", "url") if name in names
@@ -999,9 +1043,11 @@ def run_text(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 f"R0244 provenance names shard {shard} of {corpus}, which has "
                 f"{len(shards)}"
             )
-        parquet = _chunk_parquet(corpus, shards[shard])
+        parquet = _chunk_parquet(corpus, shards[shard], shard_index=shard)
         local = [int(provenance[row]["row"]) for row in rows]
-        records = _read_chunk_texts(parquet, local)
+        records = _read_chunk_texts(
+            parquet, local, expect_rows=_shard_rows(shards[shard])
+        )
         for row, position in zip(rows, local):
             record = dict(records[position])
             record.update({
