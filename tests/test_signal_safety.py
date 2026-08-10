@@ -13,6 +13,7 @@ import ast
 import importlib
 import json
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -145,6 +146,269 @@ def test_a_shell_signal_binary_is_caught(tmp_path):
     ''')
     findings = detector.scan(planted)
     assert any(f.kind == "DIRECT_SIGNAL" and f.fatal for f in findings), findings
+
+
+# --------------------------------------------------------------------------- #
+# R0240 — the evasions review-0239-01/F1 planted, and the detector missed
+#
+# Every test below was run against the ORIGINAL detector (beaedb8) and FAILS
+# there. A control that passes both before and after proves nothing, so each of
+# these is a control the hardening is *seen* to have earned.
+# --------------------------------------------------------------------------- #
+def _gpu_hazards(findings):
+    return [f for f in findings if f.kind == "SIGNALLING_TIMEOUT" and f.gpu]
+
+
+def test_evasion1_an_aliased_subprocess_module_cannot_hide_a_timeout(tmp_path):
+    """`import subprocess as sp`. The old regex knew one prefix: `subprocess`."""
+    planted = _write(tmp_path, "planted_alias_module.py", '''
+        import subprocess as sp
+        CUML_LAUNCHER = "/data/latent-basemap/cuml-env/cuml_py"
+
+        def probe(script):
+            return sp.run([CUML_LAUNCHER, script], timeout=3_600)
+    ''')
+    hazards = _gpu_hazards(detector.scan(planted))
+    assert len(hazards) == 1, [str(f) for f in detector.scan(planted)]
+    assert hazards[0].fatal is True
+
+
+def test_evasion2_a_from_import_alias_cannot_hide_a_timeout(tmp_path):
+    """`from subprocess import run as _launch`: the callee is not even spelled."""
+    planted = _write(tmp_path, "planted_alias_func.py", '''
+        from subprocess import run as _launch
+        CUML_LAUNCHER = "/data/latent-basemap/cuml-env/cuml_py"
+
+        def probe(script):
+            return _launch([CUML_LAUNCHER, script], timeout=3_600)
+    ''')
+    hazards = _gpu_hazards(detector.scan(planted))
+    assert len(hazards) == 1, [str(f) for f in detector.scan(planted)]
+    assert hazards[0].fatal is True
+
+
+def test_evasion3_a_timeout_smuggled_through_kwargs_unpacking_is_caught(tmp_path):
+    """The word `timeout` never appears inside the call span at all."""
+    planted = _write(tmp_path, "planted_kwargs.py", '''
+        import subprocess
+        CUML_LAUNCHER = "/data/latent-basemap/cuml-env/cuml_py"
+
+        def probe(script, workdir):
+            kwargs = {"cwd": workdir, "timeout": 3_600}
+            return subprocess.run([CUML_LAUNCHER, script], **kwargs)
+    ''')
+    hazards = _gpu_hazards(detector.scan(planted))
+    assert len(hazards) == 1, [str(f) for f in detector.scan(planted)]
+    assert hazards[0].fatal is True
+
+
+def test_evasion4_a_backslash_continuation_before_run_is_caught(tmp_path):
+    """`subprocess\\` newline `.run(...)` — the lookbehind saw only the dot."""
+    planted = _write(tmp_path, "planted_continuation.py", '''
+        import subprocess
+        CUML_LAUNCHER = "/data/latent-basemap/cuml-env/cuml_py"
+
+        def probe(script):
+            return subprocess\\
+                .run([CUML_LAUNCHER, script], timeout=3600)
+    ''')
+    hazards = _gpu_hazards(detector.scan(planted))
+    assert len(hazards) == 1, [str(f) for f in detector.scan(planted)]
+    assert hazards[0].fatal is True
+
+
+@pytest.mark.parametrize("argv", [
+    '["timeout", "-s", "KILL", "3600", CUML_LAUNCHER, script]',
+    '["timeout", "-k", "30", "3600", CUML_LAUNCHER, script]',
+    '["/usr/bin/timeout", "3600", CUML_LAUNCHER, script]',
+])
+def test_evasion5_the_gnu_timeout_binary_in_argv_is_caught(tmp_path, argv):
+    """No `timeout=` kwarg anywhere: coreutils delivers the signal instead.
+
+    This is the one the reviewer flagged as most dangerous — `timeout -s KILL`
+    is a *more* direct route to SIGKILLing a cuML child than `subprocess.run`.
+    """
+    planted = _write(tmp_path, "planted_timeout_binary.py", f'''
+        import subprocess
+        CUML_LAUNCHER = "/data/latent-basemap/cuml-env/cuml_py"
+
+        def probe(script):
+            return subprocess.run({argv}, capture_output=True)
+    ''')
+    hazards = _gpu_hazards(detector.scan(planted))
+    assert len(hazards) == 1, [str(f) for f in detector.scan(planted)]
+    assert hazards[0].fatal is True, "a GPU child under timeout(1) is unwaivable"
+
+
+@pytest.mark.parametrize("source", [
+    '''
+    import functools, subprocess
+    CUML_LAUNCHER = "/data/latent-basemap/cuml-env/cuml_py"
+    launch = functools.partial(subprocess.run, timeout=3_600)
+
+    def probe(script):
+        return launch([CUML_LAUNCHER, script])
+    ''',
+    '''
+    import subprocess
+    from functools import partial as p
+    CUML_LAUNCHER = "/data/latent-basemap/cuml-env/cuml_py"
+    launch = p(subprocess.run, timeout=3_600)
+
+    def probe(script):
+        return launch([CUML_LAUNCHER, script])
+    ''',
+])
+def test_evasion6_functools_partial_cannot_curry_a_signalling_timeout(
+    tmp_path, source,
+):
+    """The bound is armed where the child is never named."""
+    planted = _write(tmp_path, "planted_partial.py", source)
+    findings = detector.scan(planted)
+    hazards = [f for f in findings if f.kind == "SIGNALLING_TIMEOUT"]
+    assert len(hazards) == 1, [str(f) for f in findings]
+    assert hazards[0].fatal is True
+
+
+def test_evasion7_a_signalling_timeout_inside_a_generated_child_script_is_caught(
+    tmp_path,
+):
+    """`blank_noncode()` erases child scripts by design — so they are re-scanned.
+
+    These modules build the GPU child as a string and hand it to the launcher. A
+    `subprocess.run(..., timeout=)` living only in that string is still a
+    SIGKILL aimed at a CUDA context. A *plain* literal is the form the old
+    detector could never see: `blank_noncode()` blanks it entirely.
+    """
+    planted = _write(tmp_path, "planted_child_script.py", """
+        import subprocess
+
+        BODY = '''
+        import subprocess
+        subprocess.run(["/data/latent-basemap/cuml-env/cuml_py", "in.py"], timeout=3_600)
+        '''
+
+        def build(script_path):
+            with open(script_path, "w") as handle:
+                handle.write(BODY)
+            return script_path
+    """)
+    findings = detector.scan(planted)
+    hazards = _gpu_hazards(findings)
+    assert len(hazards) == 1, [str(f) for f in findings]
+    assert hazards[0].fatal is True
+    assert "generated child script" in hazards[0].snippet
+
+
+def test_evasion7b_a_generated_child_script_built_as_an_fstring_is_caught(tmp_path):
+    """The same, interpolated. The launcher arrives through `{CUML_LAUNCHER!r}`."""
+    planted = _write(tmp_path, "planted_child_fstring.py", '''
+        import subprocess
+        CUML_LAUNCHER = "/data/latent-basemap/cuml-env/cuml_py"
+
+        def build(script_path, workdir):
+            body = f"""
+        import subprocess
+        subprocess.run([{CUML_LAUNCHER!r}, "inner.py"], timeout=3_600)
+        """
+            with open(script_path, "w") as handle:
+                handle.write(body)
+            return script_path
+    ''')
+    findings = detector.scan(planted)
+    hazards = _gpu_hazards(findings)
+    assert len(hazards) == 1, [str(f) for f in findings]
+    assert hazards[0].fatal is True
+
+
+@pytest.mark.parametrize("source", [
+    'import os\ndef stop(pid):\n    os.system("kill -9 %d" % pid)\n',
+    'import os\ndef stop():\n    os.system("pkill -f cuml_py")\n',
+    'import os\ndef stop():\n    os.popen("killall -9 cuml_py").read()\n',
+    'import os as _o\ndef stop(pid):\n    _o.system("kill -9 %d" % pid)\n',
+])
+def test_evasion8_a_shell_kill_through_os_system_is_caught(tmp_path, source):
+    """A signal delivered by `/bin/sh` is still a signal."""
+    planted = _write(tmp_path, "planted_os_system.py", source)
+    findings = detector.scan(planted)
+    shellouts = [
+        f for f in findings
+        if f.kind == "DIRECT_SIGNAL" and "shell signal" in f.snippet
+    ]
+    assert len(shellouts) == 1, [str(f) for f in findings]
+    assert shellouts[0].fatal is True
+
+
+def test_evasion9_getattr_with_a_split_literal_signal_method_is_caught(tmp_path):
+    """Python folds `"ki" "ll"` to `kill`, so the AST sees what the text hides."""
+    planted = _write(tmp_path, "planted_getattr_split.py", '''
+        def stop(proc):
+            getattr(proc, "ki" "ll")()
+    ''')
+    findings = detector.scan(planted)
+    hits = [f for f in findings if "getattr" in f.snippet]
+    assert len(hits) == 1, [str(f) for f in findings]
+    assert hits[0].kind == "DIRECT_SIGNAL" and hits[0].fatal is True
+
+
+@pytest.mark.parametrize("attribute", ["kill", "terminate", "send_signal"])
+def test_evasion9b_getattr_with_a_variable_signal_method_is_caught(
+    tmp_path, attribute,
+):
+    """The attribute name held in a local, not written at the call site."""
+    planted = _write(tmp_path, "planted_getattr_var.py", f'''
+        _METHOD = "{attribute}"
+
+        def stop(proc):
+            getattr(proc, _METHOD)()
+    ''')
+    findings = detector.scan(planted)
+    hits = [f for f in findings if "getattr" in f.snippet]
+    assert len(hits) == 1, [str(f) for f in findings]
+    assert hits[0].kind == "DIRECT_SIGNAL" and hits[0].fatal is True
+
+
+# --------------------------------------------------------------------------- #
+# R0240 — the two defects review-0239-01 found in the detector's own verdicts
+# --------------------------------------------------------------------------- #
+def test_defect_timeout_none_arms_nothing_and_is_not_reported(tmp_path):
+    """`timeout=None` is CPython's "wait forever". Reporting it was noise."""
+    planted = _write(tmp_path, "planted_timeout_none.py", '''
+        import subprocess
+        def extents(path):
+            return subprocess.run(["filefrag", path], timeout=None)
+    ''')
+    assert detector.scan(planted) == []
+
+
+def test_defect_a_timeout_variable_that_might_be_none_is_still_reported(tmp_path):
+    """The fix must be literal-only: an unknown name can hold a real bound."""
+    planted = _write(tmp_path, "planted_timeout_var.py", '''
+        import subprocess
+        def extents(path, deadline_s):
+            return subprocess.run(["filefrag", path], timeout=deadline_s)
+    ''')
+    findings = detector.scan(planted)
+    assert len(findings) == 1, [str(f) for f in findings]
+    assert findings[0].kind == "SIGNALLING_TIMEOUT" and findings[0].fatal
+
+
+def test_defect_os_kill_is_counted_once_not_twice(tmp_path):
+    """F2: `os.kill(` matched both the `os.kill` and the generic `.kill(` rule.
+
+    Every `os.kill` site was therefore emitted twice, inflating the
+    `unwaived hazard(s)` tally and the published inventory built from it.
+    """
+    planted = _write(tmp_path, "planted_double_count.py", '''
+        import os, signal
+        def stop(pid):
+            os.kill(pid, signal.SIGKILL)
+    ''')
+    findings = detector.scan(planted)
+    assert len(findings) == 1, [str(f) for f in findings]
+    assert findings[0].kind == "DIRECT_SIGNAL"
+    assert "os.kill" in findings[0].snippet, "the most specific name must survive"
+    assert findings[0].fatal is True
 
 
 # --------------------------------------------------------------------------- #
@@ -552,6 +816,45 @@ def test_every_generated_gpu_child_polls_the_cooperative_flag(relative):
     assert "_check_abort()" in source
     assert "except _CooperativeAbort:" in source
     assert "run_gpu_child_cooperative(" in source
+
+
+# --------------------------------------------------------------------------- #
+# the shared infrastructure that launches every node
+# --------------------------------------------------------------------------- #
+#: The round runner lives in a different (private) repo, so this is a property
+#: check on an absolute path that may not exist on another machine — never a
+#: pinned line number or count, both of which its author would churn.
+ROUND_RUNNER = "/home/enjalot/code/workshop/rounds/runner.py"
+
+
+def test_the_shared_round_runner_never_signal_bounds_a_gpu_node():
+    """The detector is only worth having if it is pointed at what launches us.
+
+    The runner spawns every node in the program, so a signalling bound there
+    reaches a cuML child through its process group. What it *may* have is a
+    guarded escalation that runs only after the node is proven free of any CUDA
+    context: that is a `DIRECT_SIGNAL`, it is fatal by design, and it must
+    classify as non-GPU. What it may not have is anything classified GPU-CHILD,
+    or a bare `proc.kill()` / `proc.terminate()` on the node process.
+    """
+    if not os.path.exists(ROUND_RUNNER):
+        pytest.skip(f"{ROUND_RUNNER} is not present on this machine")
+    findings = detector.scan(ROUND_RUNNER)
+
+    gpu = [str(f) for f in findings if f.gpu]
+    assert not gpu, "the runner must never signal-bound a GPU child:\n" + "\n".join(gpu)
+
+    marked = [
+        str(f) for f in findings
+        if f.kind == "SIGNALLING_TIMEOUT"
+        and any(marker in f.snippet for marker in detector._GPU_MARKERS)
+    ]
+    assert not marked, "\n".join(marked)
+
+    with open(ROUND_RUNNER, encoding="utf-8") as handle:
+        code = detector.blank_noncode(handle.read())
+    bare = re.findall(r"\bproc\s*\.\s*(kill|terminate|send_signal)\s*\(", code)
+    assert not bare, f"bare signal on the node process: {sorted(set(bare))}"
 
 
 def test_the_child_preamble_compiles_and_raises_on_the_flag(tmp_path):
