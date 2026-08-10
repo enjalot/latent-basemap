@@ -96,6 +96,41 @@ R0244_STRIPE_LATENCY_S = 174.2581459750072 / 50.0
 #: one already measured.
 SLOPE_CONTROL_MIN_BYTES_PER_S = float(R0244_MEASURED_SLOPE_BYTES_PER_S)
 
+#: review-0245-01 D. The correction to R0245 bound the gate to the stage's own
+#: measured slope with a `max(slope, 1.0)` B/s floor, and the reviewer replayed
+#: attempt 1's `5.828025072987657` s gap through it at `measured_slope = 0.0`:
+#: the binding slope became `1.0` B/s, the permitted spacing `47,244,640,256` s,
+#: and the gate that had just fired on its author's code passed the same gap.
+#: A floor of `1.0` B/s is a number chosen so that nothing fails.
+#:
+#: The registered minimum binding slope is instead the fastest allocation slope
+#: this program has ever MEASURED — the steepest one-second rise in R0244's
+#: sealed `anonymous_trace_by_second`, `11,767,996,416` B/s. Basis: a stage's
+#: own differentiated trace is a lower bound on what it could allocate (bursts
+#: inside one trace bin are invisible to a one-second difference, which is
+#: exactly why the DiD node measured `0.0`), so the gate must bind on at least
+#: the fastest rate observed on this machine. A stage that really does allocate
+#: faster is scored on its own larger number; nothing is ever scored on less.
+MIN_BINDING_SLOPE_BYTES_PER_S = float(R0244_MEASURED_SLOPE_BYTES_PER_S)
+
+MIN_BINDING_SLOPE_BASIS = (
+    "the minimum binding slope is 11,767,996,416 B/s, the steepest one-second "
+    "rise in R0244's sealed anonymous_trace_by_second (seconds 37 -> 38 of the "
+    "R0243 symmetrisation). It replaces the max(slope, 1.0) B/s floor R0245's "
+    "correction introduced, under which a stage whose differentiated trace is "
+    "flat was permitted 47,244,640,256 s between cooperative-abort reads and "
+    "the gate could not fail. A one-second difference cannot see a burst inside "
+    "a single bin, so a measured 0.0 B/s is not evidence of a slow stage; the "
+    "worst rate this machine has been measured at is the floor."
+)
+
+
+def binding_slope_bytes_per_s(measured_slope_bytes_per_s: float) -> float:
+    """The slope a gate binds on: the stage's own, never below the worst case."""
+    return max(
+        float(measured_slope_bytes_per_s), MIN_BINDING_SLOPE_BYTES_PER_S
+    )
+
 POLL_SPACING_NOTE = (
     "the guard's safety number is enforcement latency times allocation slope, "
     "not the sampling interval. Sampling every 0.25 s bounds how late the trip "
@@ -189,7 +224,12 @@ class AbortPollTracker:
         headroom_bytes: int,
         label: str,
         slope_bytes_per_s: float = SLOPE_CONTROL_MIN_BYTES_PER_S,
+        clock: Any = None,
     ) -> None:
+        #: An injectable clock so a gap can be REPLAYED exactly rather than
+        #: slept through. R0246 replays attempt 1's 5.828025072987657 s gap
+        #: through this class with a scripted clock; the default is the real one.
+        self._clock = clock if clock is not None else time.monotonic
         self.inner = inner
         self.headroom_bytes = int(headroom_bytes)
         self.slope_bytes_per_s = float(slope_bytes_per_s)
@@ -201,7 +241,10 @@ class AbortPollTracker:
         self._last: float | None = None
 
     def __call__(self, where: str) -> None:
-        now = time.monotonic()
+        self._record(float(self._clock()), where)
+
+    def _record(self, now: float, where: str) -> None:
+        """The bookkeeping, separated so a subclass can read the clock once."""
         if self._last is not None:
             gap = now - self._last
             self.total_gap_s += gap
@@ -235,12 +278,16 @@ class AbortPollTracker:
         own = None
         if measured_slope_bytes_per_s is not None:
             own = poll_spacing_requirement(
-                slope_bytes_per_s=max(float(measured_slope_bytes_per_s), 1.0),
+                slope_bytes_per_s=binding_slope_bytes_per_s(
+                    measured_slope_bytes_per_s
+                ),
                 headroom_bytes=self.headroom_bytes,
                 poll_spacing_s=spacing,
             )
         return {
             "label": self.label,
+            "binding_slope_floor_bytes_per_s": MIN_BINDING_SLOPE_BYTES_PER_S,
+            "binding_slope_floor_basis": MIN_BINDING_SLOPE_BASIS,
             "enforcement_polls": self.polls,
             "max_gap_between_enforcement_polls_s": self.max_gap_s,
             "mean_gap_between_enforcement_polls_s": (
@@ -342,6 +389,70 @@ ABORT_FLAG_NOTE = (
 )
 
 
+ABORT_FLAG_PROBE_NOTE = (
+    "review-0245-01 A3-bis: the precondition validated os.path.dirname(path) "
+    "and never the path itself, so ROUNDRUN_ABORT_FLAG pointed at an existing "
+    "writable DIRECTORY passed it, the watchdog armed, the guard tripped, and "
+    "abort_flag_written came back false with '[Errno 21] Is a directory'. "
+    "Existence of a writable directory is not writability of a path. This "
+    "creates and removes a probe file AT THE PATH, and refuses anything that "
+    "already exists and is not a writable regular file - a directory, a FIFO "
+    "(which would also have blocked the trip's open() forever), a device node, "
+    "a dangling symlink, or a read-only file."
+)
+
+
+def probe_abort_flag_path(
+    path: str, *, label: str = "R0245 node"
+) -> dict[str, Any]:
+    """Prove the trip can be WRITTEN here, do not infer it from a directory."""
+    try:
+        if os.path.lexists(path):
+            if not os.path.isfile(path):
+                raise Round0245Error(
+                    f"R0245 REFUSES to start {label}: the cooperative abort "
+                    f"flag path {path!r} already exists and is not a regular "
+                    "file, so a host-guard trip could not be written to it. "
+                    + ABORT_FLAG_PROBE_NOTE
+                )
+            if not os.access(path, os.W_OK):
+                raise Round0245Error(
+                    f"R0245 REFUSES to start {label}: the cooperative abort "
+                    f"flag path {path!r} exists and is not writable, so a "
+                    "host-guard trip could not be written to it. "
+                    + ABORT_FLAG_PROBE_NOTE
+                )
+            return {
+                "abort_flag_path": path,
+                "path_is_writable": True,
+                "probe": "an existing writable regular file was left in place",
+                "probe_file_created_and_removed": False,
+                "an_abort_is_already_pending_at_this_path": True,
+                "note": ABORT_FLAG_PROBE_NOTE,
+            }
+        handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        try:
+            os.write(handle, b"R0246 abort-flag writability probe\n")
+        finally:
+            os.close(handle)
+        os.remove(path)
+    except OSError as error:
+        raise Round0245Error(
+            f"R0245 REFUSES to start {label}: the cooperative abort flag path "
+            f"{path!r} could not be written ({error}), so a host-guard trip "
+            "would land nowhere and the node would run unprotected. "
+            + ABORT_FLAG_PROBE_NOTE
+        ) from error
+    return {
+        "abort_flag_path": path,
+        "path_is_writable": True,
+        "probe": "a probe file was created at the path and removed",
+        "probe_file_created_and_removed": True,
+        "an_abort_is_already_pending_at_this_path": False,
+        "note": ABORT_FLAG_PROBE_NOTE,
+    }
+
+
 def require_enforceable_abort_flag(
     *, env: str = RUNNER_ABORT_FLAG_ENV, label: str = "R0245 node"
 ) -> dict[str, Any]:
@@ -371,12 +482,16 @@ def require_enforceable_abort_flag(
             f"R0245 REFUSES to start {label}: {env} is {path!r} and its "
             f"directory {directory!r} is not writable, so the trip cannot land."
         )
+    probe = probe_abort_flag_path(path, label=label)
     return {
         "env": env,
         "abort_flag_path": path,
         "directory_is_writable": bool(os.access(directory, os.W_OK)),
+        "path_is_writable": bool(probe["path_is_writable"]),
+        "path_writability_probe": probe,
         "an_abort_is_already_pending": bool(runner_abort_reason() is not None),
         "note": ABORT_FLAG_NOTE,
+        "path_probe_note": ABORT_FLAG_PROBE_NOTE,
     }
 
 
@@ -405,6 +520,12 @@ class EnforcedHostWatchdog(ThreadedHostWatchdog):
                 f"R0245 REFUSES to arm a host watchdog for {label}: "
                 f"{directory!r} is not writable, so a trip cannot land."
             )
+        #: review-0245-01 A3-bis: arming is the last moment before the guard is
+        #: relied on, so the path is probed HERE too and not only in the node
+        #: precondition. A directory, FIFO, device node or read-only file at
+        #: this path refuses the arm instead of producing `fired True /
+        #: abort_flag_written False` hours later.
+        self.abort_flag_path_probe = probe_abort_flag_path(resolved, label=label)
         super().__init__(abort_flag_path=resolved, **kwargs)
         self.enforcement_is_a_precondition = True
 
@@ -792,7 +913,7 @@ def _slope_arm(
         if mean_wall not in (0.0, float("inf")) else 0.0
     )
     requirement = poll_spacing_requirement(
-        slope_bytes_per_s=max(measured_slope, 1.0),
+        slope_bytes_per_s=binding_slope_bytes_per_s(measured_slope),
         headroom_bytes=int(headroom_bytes),
         poll_spacing_s=max(spacing, 1e-9),
     )
@@ -861,7 +982,12 @@ def guard_receipt(
 
 __all__ = [
     "ABORT_FLAG_NOTE",
+    "ABORT_FLAG_PROBE_NOTE",
+    "MIN_BINDING_SLOPE_BASIS",
+    "MIN_BINDING_SLOPE_BYTES_PER_S",
     "AbortPollTracker",
+    "binding_slope_bytes_per_s",
+    "probe_abort_flag_path",
     "EnforcedHostWatchdog",
     "GPU_HOURS_CAP",
     "POLL_SPACING_NOTE",

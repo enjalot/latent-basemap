@@ -582,17 +582,16 @@ def test_this_round_adds_only_its_own_files_and_the_one_declared_edit() -> None:
     mandate authorises: the A1 fix inside R0244's watchdog module."""
     import subprocess as _sp  # noqa: PLC0415 - test-side git query only
 
+    #: R0246 note: the endpoint was `HEAD` plus the working tree, so a later
+    #: round adding a file turned this assertion red. Pinned to R0245's own
+    #: release commit - the range it was written to check.
     committed = _sp.run(
         ["git", "-C", REPO, "diff", "--name-only",
-         "8f159e5bcc81dbbd9079b026a5791908e82a4612", "HEAD"],
+         "8f159e5bcc81dbbd9079b026a5791908e82a4612",
+         "c94a1401dc33b71e045925bf28cfde543457f9d9"],
         check=False, capture_output=True, text=True,
     ).stdout.split()
-    worktree = [
-        line[3:] for line in _sp.run(
-            ["git", "-C", REPO, "status", "--porcelain"],
-            check=False, capture_output=True, text=True,
-        ).stdout.splitlines() if line
-    ]
+    worktree: list[str] = []
     allowed = {
         #: the single authorised edit to a reviewed module
         "basemap/round0244_guard.py",

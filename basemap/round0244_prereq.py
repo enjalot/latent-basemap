@@ -207,6 +207,60 @@ def weight_block_profile(
     }
 
 
+#: review-0245-01 section C, the blocker. The widest abort-read gap in R0245's
+#: sampler node was `24.46713631998864` s and it sat inside THIS function: the
+#: `abort_check` fired once per `128` blocks, and the three unbroken bulk
+#: operations after the last one (a `40M` `argsort`, a `40M` random gather from
+#: a `10 GB` memmap, and a `40M` `np.unique`) ran with no cooperative-abort read
+#: at all. Against the `11,767,996,416` B/s worst case that gap permits
+#: `287,929,172,523` B of growth after the guard has decided to stop, on a box
+#: with `123` GiB of RAM. Every loop below now polls once per unit, and the
+#: three unbroken operations are chunked so a unit is bounded work rather than
+#: bounded block count.
+SAMPLER_POLL_CHUNK_DRAWS = 2_000_000
+
+
+def _stable_counting_order(
+    keys: np.ndarray,
+    *,
+    key_count: int,
+    chunk: int,
+    abort_check: Callable[[str], None] | None,
+) -> np.ndarray:
+    """`np.argsort(keys, kind="stable")` for small-integer keys, in polled chunks.
+
+    A stable sort's permutation is unique, so this returns exactly what
+    `argsort(kind="stable")` returns — it is a re-expression of the same
+    operation whose only purpose is that it can be interrupted. The R0246
+    contract test asserts the equality element-by-element, and the R0246
+    sampler node reproduces R0245's sealed `distinct_edges_drawn` and all four
+    sealed fidelity statistics to the digit, which is the same assertion at
+    `40,000,000` draws.
+    """
+    counts = np.bincount(keys, minlength=int(key_count))
+    cursor = np.concatenate([[0], np.cumsum(counts)[:-1]]).astype(np.int64)
+    order = np.empty(keys.size, dtype=np.int64)
+    for lo in range(0, keys.size, int(chunk)):
+        if abort_check is not None:
+            abort_check(f"R0244 stable counting order from draw {lo}")
+        hi = min(lo + int(chunk), keys.size)
+        segment = keys[lo:hi]
+        inside = np.argsort(segment, kind="stable")
+        sorted_segment = segment[inside]
+        local = np.bincount(sorted_segment, minlength=int(key_count))
+        group_start = np.concatenate([[0], np.cumsum(local)[:-1]]).astype(
+            np.int64
+        )
+        within = (
+            np.arange(sorted_segment.size, dtype=np.int64)
+            - group_start[sorted_segment]
+        )
+        order[cursor[sorted_segment] + within] = lo + inside
+        cursor += local
+        del segment, inside, sorted_segment, local, group_start, within
+    return order
+
+
 def two_level_weight_sample(
     weights: np.ndarray,
     *,
@@ -214,6 +268,7 @@ def two_level_weight_sample(
     draws: int = SAMPLER_DRAWS,
     seed: int = SAMPLER_SEED,
     abort_check: Callable[[str], None] | None = None,
+    poll_chunk_draws: int = SAMPLER_POLL_CHUNK_DRAWS,
 ) -> dict[str, Any]:
     """Draw `draws` edges with probability proportional to weight.
 
@@ -221,6 +276,11 @@ def two_level_weight_sample(
     block, from a CDF built on the `4 MiB` the block occupies and discarded.
     This is the scheme a `100M` trainer must use, so it is the scheme that gets
     demonstrated.
+
+    The draw itself is unchanged — the random stream is consumed in exactly the
+    same order and the returned `edge_index` is identical. What changed is that
+    every loop polls the cooperative abort flag once per unit and no unit is
+    larger than `poll_chunk_draws` draws.
     """
     array = np.asarray(weights)
     block = int(profile["block"])
@@ -228,22 +288,48 @@ def two_level_weight_sample(
     total = float(profile["total_weight"])
     if total <= 0.0:
         raise Round0244Error("R0244 sampler needs positive total weight")
+    chunk_draws = max(int(poll_chunk_draws), 1)
     rng = np.random.default_rng(int(seed))
     block_cdf = np.cumsum(block_sums)
     block_cdf[-1] = total
-    chosen_block = np.searchsorted(
-        block_cdf, rng.random(int(draws)) * total, side="right"
-    ).astype(np.int64)
+    if abort_check is not None:
+        abort_check("R0244 two-level sample block CDF")
+    uniforms = rng.random(int(draws))
+    if abort_check is not None:
+        abort_check("R0244 two-level sample block uniforms")
+    chosen_block = np.empty(int(draws), dtype=np.int64)
+    for lo in range(0, int(draws), chunk_draws):
+        if abort_check is not None:
+            abort_check(f"R0244 two-level sample block choice from draw {lo}")
+        hi = min(lo + chunk_draws, int(draws))
+        chosen_block[lo:hi] = np.searchsorted(
+            block_cdf, uniforms[lo:hi] * total, side="right"
+        )
+    del uniforms
     np.clip(chosen_block, 0, block_sums.size - 1, out=chosen_block)
-    order = np.argsort(chosen_block, kind="stable")
+    if abort_check is not None:
+        abort_check("R0244 two-level sample block clip")
+    order = _stable_counting_order(
+        chosen_block, key_count=block_sums.size, chunk=chunk_draws,
+        abort_check=abort_check,
+    )
     sorted_blocks = chosen_block[order]
+    if abort_check is not None:
+        abort_check("R0244 two-level sample sorted blocks")
     boundaries = np.flatnonzero(np.diff(sorted_blocks)) + 1
     starts = np.concatenate([[0], boundaries])
     ends = np.concatenate([boundaries, [sorted_blocks.size]])
+    if abort_check is not None:
+        abort_check("R0244 two-level sample block boundaries")
     edge_index = np.empty(int(draws), dtype=np.int64)
+    #: Distinct edges, accumulated per block group. The groups occupy disjoint
+    #: half-open ranges `[index * block, index * block + block)`, so the sum of
+    #: the per-group distinct counts IS the global distinct count — computed
+    #: inside the polled loop instead of by a `40M` `np.unique` after it.
+    distinct = 0
     for start, end in zip(starts, ends):
         index = int(sorted_blocks[start])
-        if abort_check is not None and index % 128 == 0:
+        if abort_check is not None:
             abort_check(f"R0244 two-level sample block {index}")
         lo = index * block
         hi = min(lo + block, array.size)
@@ -255,16 +341,27 @@ def two_level_weight_sample(
         )
         np.clip(picks, 0, chunk.size - 1, out=picks)
         edge_index[order[start:end]] = lo + picks
+        distinct += int(np.unique(picks).size)
         del chunk, within, picks
-    sampled = np.asarray(array[edge_index], dtype=np.float64)
+    if abort_check is not None:
+        abort_check("R0244 two-level sample within-block draws complete")
+    sampled = np.empty(int(draws), dtype=np.float64)
+    for lo in range(0, int(draws), chunk_draws):
+        if abort_check is not None:
+            abort_check(f"R0244 two-level sample weight gather from draw {lo}")
+        hi = min(lo + chunk_draws, int(draws))
+        sampled[lo:hi] = np.asarray(array[edge_index[lo:hi]], dtype=np.float64)
+    if abort_check is not None:
+        abort_check("R0244 two-level sample weight gather complete")
     return {
         "draws": int(draws),
         "seed": int(seed),
         "edge_index": edge_index,
         "sampled_weights": sampled,
         "chosen_block": chosen_block,
-        "distinct_edges_drawn": int(np.unique(edge_index).size),
+        "distinct_edges_drawn": int(distinct),
         "block_cdf_bytes": int(block_cdf.nbytes),
+        "poll_chunk_draws": chunk_draws,
     }
 
 
@@ -805,6 +902,7 @@ __all__ = [
     "SAMPLER_MIN_CHI_SQUARE_P",
     "SAMPLER_MIN_DRAWS_PER_S",
     "SAMPLER_NOTE",
+    "SAMPLER_POLL_CHUNK_DRAWS",
     "SAMPLER_SEED",
     "SAMPLER_WEIGHT_BINS",
     "TEXT_BINDING_COSINE_FLOOR",

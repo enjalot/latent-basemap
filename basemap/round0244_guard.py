@@ -89,6 +89,22 @@ WATCHDOG_SAMPLE_INTERVAL_S = 0.25
 #: so a `10 h` node's trace stays a receipt rather than a dataset.
 WATCHDOG_TRACE_SECONDS = 4_000
 
+#: review-0245-01 A1-bis. `_loop` caught `OSError` FIRST and `pass`ed, so the
+#: reviewer's planted `OSError` left the thread alive, sampling nothing, with
+#: `sampling_thread_alive: true` and `poll()` quiet. `/proc` reads do not fail
+#: on this box, but a guard must not be unfalsifiable, so the tolerance is a
+#: REGISTERED number rather than "forever".
+#:
+#: Basis — the same inequality the whole poll-spacing argument rests on. `n`
+#: consecutive failures leave the guard blind for `n * WATCHDOG_SAMPLE_INTERVAL_S`
+#: seconds, which at R0244's own measured `11,767,996,416` B/s permits
+#: `n * 0.25 * 11767996416` B of growth. Against R0244's sealed
+#: `budget_headroom_bytes` of `29,548,888,064` B the largest admissible `n` is
+#: `29548888064 / (0.25 * 11767996416) = 10.04`, i.e. `10`. The registered value
+#: is `3`, which is `3.35x` stricter than the derived maximum — it is not a
+#: number chosen to let anything pass.
+WATCHDOG_MAX_CONSECUTIVE_SAMPLE_FAILURES = 3
+
 #: The NEW arm. R0242's rule is conjunctive (swap growth AND pressure) and is
 #: inherited unchanged — it is the machine-level rule and this round does not
 #: touch it. What it cannot express is a stage exceeding the footprint its own
@@ -156,6 +172,15 @@ class ThreadedHostWatchdog(_HostWatchdog):
         #: logged. A dead sampler must never read as "no problem observed", so
         #: the death is recorded here and `poll()` raises on it.
         self.thread_death: str | None = None
+        #: review-0245-01 A1-bis: `samples` counts BOTH the thread's samples and
+        #: the ones `poll()` takes at stage boundaries, so `sample_coverage`
+        #: could be held high by a main thread polling often behind a sampler
+        #: that is doing nothing. These count the thread's work only, and they
+        #: are what the coverage floor is evaluated on.
+        self.thread_samples = 0
+        self.sample_failures = 0
+        self.consecutive_sample_failures = 0
+        self.max_consecutive_sample_failures = 0
         self._trace: dict[int, int] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -187,26 +212,71 @@ class ThreadedHostWatchdog(_HostWatchdog):
         self.stop()
 
     def _loop(self) -> None:
-        while not self._stop.is_set():
-            try:
-                self._sample()
-            except OSError:
-                #: `/proc` is never unavailable on this box, but a sampling
-                #: thread that dies takes the guard with it, which is the
-                #: failure this round exists to remove.
-                pass
-            except BaseException as error:  # noqa: BLE001 - see _record_death
-                self._record_death(error)
-                return
-            self._stop.wait(self.interval_s)
+        """Sample until asked to stop. ANY other exit is a recorded death.
+
+        review-0245-01 A1-bis: the previous form caught `OSError` before the
+        `BaseException` arm and `pass`ed forever, so a `/proc` failure left the
+        thread alive and sampling nothing with the receipt still reading
+        `sampling_thread_alive: true`. Now a bounded number of consecutive
+        failures is tolerated, the tolerance is registered, and the `finally`
+        makes *every* way out of this function visible — including a return that
+        raises nothing at all.
+        """
+        try:
+            while not self._stop.is_set():
+                if not self._sample_once():
+                    return
+                self._stop.wait(self.interval_s)
+            self._sample_once()
+        finally:
+            self._record_exit()
+
+    def _sample_once(self) -> bool:
+        """One thread-side observation. `False` means the guard has died."""
         try:
             self._sample()
-        except OSError:
-            pass
+        except OSError as error:
+            with self._lock:
+                self.sample_failures += 1
+                self.consecutive_sample_failures += 1
+                self.max_consecutive_sample_failures = max(
+                    self.max_consecutive_sample_failures,
+                    self.consecutive_sample_failures,
+                )
+                exhausted = (
+                    self.consecutive_sample_failures
+                    > WATCHDOG_MAX_CONSECUTIVE_SAMPLE_FAILURES
+                )
+            if exhausted:
+                self._record_death(
+                    error,
+                    context=(
+                        f"{WATCHDOG_MAX_CONSECUTIVE_SAMPLE_FAILURES + 1} "
+                        "consecutive sampling failures"
+                    ),
+                )
+                return False
+            return True
         except BaseException as error:  # noqa: BLE001 - see _record_death
             self._record_death(error)
+            return False
+        with self._lock:
+            self.thread_samples += 1
+            self.consecutive_sample_failures = 0
+        return True
 
-    def _record_death(self, error: BaseException) -> None:
+    def _record_exit(self) -> None:
+        """A sampler that returns without being asked to stop is a dead guard."""
+        if self._stop.is_set():
+            return
+        self._record_death(
+            RuntimeError("the sampling thread returned on its own"),
+            context="an unrequested thread exit",
+        )
+
+    def _record_death(
+        self, error: BaseException, *, context: str | None = None
+    ) -> None:
         """A sampler that stops sampling is a guard that stopped guarding.
 
         review-0244-01 A1 killed the thread with a `ValueError` and watched it
@@ -216,10 +286,14 @@ class ThreadedHostWatchdog(_HostWatchdog):
         """
         with self._lock:
             if self.thread_death is None:
+                cause = (
+                    f"{type(error).__name__}: {error}" if context is None
+                    else f"{context} ({type(error).__name__}: {error})"
+                )
                 self.thread_death = (
-                    f"{type(error).__name__}: {error}. The R0244 sampling "
-                    "thread stopped sampling; the host guard is no longer "
-                    "being evaluated between call sites."
+                    f"{cause}. The R0244 sampling thread stopped sampling; the "
+                    "host guard is no longer being evaluated between call "
+                    "sites."
                 )
 
     def _sample(self) -> dict[str, int]:
@@ -355,6 +429,22 @@ class ThreadedHostWatchdog(_HostWatchdog):
                 "expected_samples_at_interval": expected,
                 "sample_coverage": (
                     None if expected <= 0 else float(self.samples) / expected
+                ),
+                #: review-0245-01 A1-bis. `sample_coverage` above counts the
+                #: boundary `poll()` samples too, so it cannot be gated on: a
+                #: main thread polling often keeps it high behind a sampler
+                #: doing nothing. These are the thread's own numbers.
+                "thread_samples": int(self.thread_samples),
+                "thread_sample_coverage": (
+                    None if expected <= 0
+                    else float(self.thread_samples) / expected
+                ),
+                "sample_failures": int(self.sample_failures),
+                "max_consecutive_sample_failures": int(
+                    self.max_consecutive_sample_failures
+                ),
+                "max_consecutive_sample_failures_allowed": int(
+                    WATCHDOG_MAX_CONSECUTIVE_SAMPLE_FAILURES
                 ),
                 #: review-0244-01 A1. `sampling_thread_alive` is the field a
                 #: node gates on; `thread_death` is why. Both are False/None on
@@ -550,6 +640,7 @@ __all__ = [
     "Round0244Error",
     "ThreadedHostWatchdog",
     "WATCHDOG_DEFAULT_ANON_BUDGET_BYTES",
+    "WATCHDOG_MAX_CONSECUTIVE_SAMPLE_FAILURES",
     "WATCHDOG_NOTE",
     "WATCHDOG_SAMPLE_INTERVAL_S",
     "WATCHDOG_TRACE_SECONDS",

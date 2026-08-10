@@ -336,20 +336,20 @@ def test_no_registered_check_is_re_typed_in_this_round():
 
 
 def test_this_round_adds_only_new_files():
-    """R0244 imports rounds 0215-0243 read-only; it edits none of them."""
+    """R0244 imports rounds 0215-0243 read-only; it edits none of them.
+
+    R0246 note: the endpoint was `HEAD` and the working tree, so this assertion
+    changed meaning every time a LATER round added a file - it was red from
+    R0245 onward and nobody ran it. It is now pinned to R0244's own release
+    commit, which is the range it was written to check, and it holds forever.
+    """
     import subprocess as _sp  # noqa: PLC0415 - test-side git query only
 
-    committed = _sp.run(
-        ["git", "-C", REPO, "diff", "--name-only", "370f715", "HEAD"],
+    changed = _sp.run(
+        ["git", "-C", REPO, "diff", "--name-only", "370f715",
+         "8f159e5bcc81dbbd9079b026a5791908e82a4612"],
         check=False, capture_output=True, text=True,
     ).stdout.split()
-    worktree = [
-        line[3:] for line in _sp.run(
-            ["git", "-C", REPO, "status", "--porcelain"],
-            check=False, capture_output=True, text=True,
-        ).stdout.splitlines() if line
-    ]
-    changed = committed + worktree
     allowed = {
         "basemap/round0244_guard.py",
         "basemap/round0244_prereq.py",
