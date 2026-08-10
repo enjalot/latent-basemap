@@ -117,14 +117,26 @@ def test_boundary_polls_cannot_hold_the_coverage_figure_up(tmp_path) -> None:
 
 def test_the_coverage_gate_is_scoped_out_of_a_very_short_stage() -> None:
     """Below the registered expected-sample count the ratio is noise."""
+    #: R0247 (declared edit): the denominator is the REGISTERED 0.25 s
+    #: interval against measured wall time, never the interval the receipt
+    #: declares, so these fixtures carry a wall and the expected count is
+    #: derived from it.
     short = {
         "sampling_thread_alive": True, "thread_death": None, "samples": 2,
         "thread_samples": 1, "sample_coverage": 0.4,
         "thread_sample_coverage": 0.2, "expected_samples_at_interval": 5.0,
-        "boundary_polls": 1,
+        "boundary_polls": 1, "sampled_wall_s": 0.24,
+        "expected_samples_at_the_registered_interval": 0.96,
+        "thread_sample_coverage_at_the_registered_interval": 1.04,
+        "max_thread_sample_gap_s": 0.24, "mean_thread_sample_gap_s": 0.24,
     }
     assert guard.require_live_sampler(short, label="short")["holds"] is True
-    long = dict(short, expected_samples_at_interval=100.0)
+    long = dict(
+        short, sampled_wall_s=25.0,
+        expected_samples_at_the_registered_interval=100.0,
+        thread_sample_coverage_at_the_registered_interval=0.01,
+        max_thread_sample_gap_s=2.0, mean_thread_sample_gap_s=0.4,
+    )
     with pytest.raises(guard.Round0246Error):
         guard.require_live_sampler(long, label="long")
 
@@ -271,8 +283,13 @@ def test_the_binding_slope_floor_is_the_measured_worst_case() -> None:
 
 def _scripted_gate(ticks, **kwargs):
     stream = iter(list(ticks))
+    #: R0247 (declared edit): a scripted clock and a no-op `inner` are now
+    #: construction paths that a node may not use as evidence, so every
+    #: scripted gate in this file declares itself a replay. `require()` then
+    #: waives the clock and reader arms and applies every substantive one, and
+    #: `require_enforcement_evidence()` is what refuses to seal the result.
     return guard.AbortPollGate(
-        inner=lambda _where: None, label="scripted",
+        inner=lambda _where: None, label="scripted", replay=True,
         clock=lambda: next(stream), **kwargs,
     )
 
@@ -309,9 +326,13 @@ def test_an_inflated_headroom_cannot_buy_a_wider_spacing() -> None:
     gate("read 2")
     gate.finish()
     scored = gate.verdict(measured_slope_bytes_per_s=0.0)
-    #: the node's own headroom would permit it ...
-    assert scored["requirement"]["requirement_holds"] is True
-    #: ... and the registered ceiling does not
+    #: R0247 (declared edit): the declared headroom is itself clamped at the
+    #: registered 29,548,888,064 B, so the requirement arm now refuses it too.
+    #: review-0246-01 C combined an inflated headroom with an overridden
+    #: ceiling; both arms are independent now.
+    assert scored["declared_headroom_bytes"] == 1 << 50
+    assert scored["effective_headroom_bytes"] == 29_548_888_064
+    assert scored["requirement"]["requirement_holds"] is False
     assert scored["meets_the_registered_ceiling"] is False
     with pytest.raises(guard.Round0246Error):
         gate.require(measured_slope_bytes_per_s=0.0)
@@ -369,7 +390,7 @@ def test_the_novel_attack_battery_closes_every_attack(tmp_path) -> None:
     battery = guard.run_novel_attack_battery(
         workspace=str(tmp_path / "attacks")
     )
-    assert battery["attacks_run"] >= 12
+    assert battery["attacks_run"] >= 16
     assert battery["attacks_that_still_succeed"] == []
     assert battery["every_novel_attack_is_closed"] is True
 
@@ -609,6 +630,17 @@ def test_this_round_adds_only_its_own_files_and_the_declared_edits() -> None:
         "experiments/prepare_round0246_queue.py",
         "tests/test_round0246_contract.py",
         "tests/test_round0246_cpu_smoke.py",
+        #: R0247's declared edits and its own files. R0247 makes every safety
+        #: parameter in R0244-R0246 non-overridable, which necessarily touches
+        #: the modules that own them; every one is a diff in result-0247.
+        "basemap/round0247_registry.py",
+        "basemap/round0247_guard.py",
+        "basemap/round0247_precision.py",
+        "basemap/round0246_tie.py",
+        "experiments/round0247_nodes.py",
+        "experiments/prepare_round0247_queue.py",
+        "tests/test_round0247_contract.py",
+        "tests/test_round0247_cpu_smoke.py",
     }
     changed = set(committed + worktree)
     assert changed <= allowed, sorted(changed - allowed)
@@ -631,6 +663,10 @@ def test_the_watchdog_edit_moves_no_r0242_threshold_or_rule(tmp_path) -> None:
     )
     guard._run_watchdog_until(watchdog, wall_s=0.2)
     receipt = watchdog.receipt()
-    assert receipt["instrument"] == "round0244-threaded-host-watchdog-v1"
+    #: R0247 (declared edit): the receipt gained the two measured
+    #: observation-gap fields and the registered-interval denominator, so the
+    #: instrument version moved. R0242's three thresholds are asserted above
+    #: and are untouched.
+    assert receipt["instrument"] == "round0244-threaded-host-watchdog-v2"
     assert receipt["sample_interval_s"] == 0.02
     assert threading.active_count() >= 1

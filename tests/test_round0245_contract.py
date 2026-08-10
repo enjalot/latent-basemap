@@ -273,15 +273,25 @@ def test_abort_poll_tracker_measures_and_refuses(monkeypatch) -> None:
     )
     own("a")
     own("b")
-    #: worst-case column set to 1 B/s passes; the stage's own 20 GB/s does not
-    assert own.verdict(measured_slope_bytes_per_s=1.0)[
-        "worst_case_requirement"
-    ]["requirement_holds"] is True
+    #: R0247 (declared edit): the worst-case column was a CONSTRUCTOR keyword,
+    #: so a caller could declare a harmless 1 B/s worst case and the receipt
+    #: would publish it. It is now clamped at the registered floor and the
+    #: attempt is recorded, so the column can no longer be set to 1 B/s at all.
+    scored = own.verdict(measured_slope_bytes_per_s=1.0)
+    assert scored["declared_worst_case_slope_bytes_per_s"] == 1.0
+    assert scored["effective_worst_case_slope_bytes_per_s"] == (
+        guard.MIN_BINDING_SLOPE_BYTES_PER_S
+    )
+    assert scored["worst_case_requirement"]["slope_bytes_per_s"] == (
+        guard.MIN_BINDING_SLOPE_BYTES_PER_S
+    )
+    assert [
+        record["parameter"] for record in scored["safety_overrides"]
+        if record["kind"] == "weakening"
+    ] == ["min_binding_slope_bytes_per_s"]
     with pytest.raises(guard.Round0245Error):
         own.require(measured_slope_bytes_per_s=2.0e10)
-    scored = own.verdict(measured_slope_bytes_per_s=1.0)
     assert scored["own_slope_requirement"] is not None
-    assert scored["worst_case_requirement"]["slope_bytes_per_s"] == 1.0
 
 
 # --------------------------------------------------------------------------- #

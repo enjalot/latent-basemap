@@ -56,6 +56,20 @@ from basemap.round0245_guard import (
     require_enforceable_abort_flag,
     slope_from_trace,
 )
+from basemap.round0247_registry import (
+    REGISTERED_SAFETY_PARAMETERS,
+    WATCHDOG_MAX_MEAN_OBSERVATION_GAP_S,
+    WATCHDOG_MAX_OBSERVATION_GAP_S,
+    Round0247Error,
+    clamp,
+    clamp_int,
+    override_records,
+    registered_bounds,
+    registry_fingerprint,
+    require_no_weakening_overrides,
+    weakening_overrides,
+    verify_registry,
+)
 
 ROUND_ID = "0246"
 ROWS = 100_000_000
@@ -95,6 +109,17 @@ MIN_THREAD_SAMPLE_COVERAGE = 0.50
 #: below that the ratio is noise and the gate would be theatre.
 COVERAGE_GATE_MIN_EXPECTED_SAMPLES = 20.0
 
+SAFETY_PARAMETER_NOTE = (
+    "REGISTERED 2026-08-10 (R0247). Every bound in this verdict named "
+    "registered_* is produced by round0247_registry.registered_bounds() and "
+    "therefore comes from the registry, never from a caller. What the caller "
+    "asked for appears as declared_*, what the gate bound on appears as "
+    "effective_*, and any attempt to weaken a registered bound appears in "
+    "safety_overrides and fails the gate. review-0246-01 C defeated R0246 by "
+    "passing max_poll_spacing_s = 1e6 and watching the receipt publish it as "
+    "registered_max_poll_spacing_s."
+)
+
 SAMPLER_LIVENESS_NOTE = (
     "review-0245-01 A1-bis: a sampler that raises OSError on every sample stays "
     "alive, reports sampling_thread_alive true, keeps poll() quiet and lets the "
@@ -125,7 +150,24 @@ def require_live_sampler(
     registered floor once the stage is long enough for coverage to be a
     measurement.
     """
-    expected = float(receipt.get("expected_samples_at_interval") or 0.0)
+    verify_registry(label=f"R0246 sampler liveness for {label}")
+    #: review-0246-01 A and H2. BOTH of these were keywords with registered
+    #: defaults and no bound. `min_thread_sample_coverage` is the obvious one;
+    #: `min_expected_samples` is the one no review found - passing `1e9` makes
+    #: `coverage_gate_applies` false for every stage this program will ever run
+    #: and disables the arm without touching the floor.
+    min_coverage_effective, coverage_record = clamp(
+        "min_thread_sample_coverage", min_thread_sample_coverage,
+        site="require_live_sampler(min_thread_sample_coverage=)", label=label,
+    )
+    min_expected_effective, expected_record = clamp(
+        "coverage_gate_min_expected_samples", min_expected_samples,
+        site="require_live_sampler(min_expected_samples=)", label=label,
+    )
+    overrides = override_records([coverage_record, expected_record])
+    min_thread_sample_coverage = float(min_coverage_effective)
+    min_expected_samples = float(min_expected_effective)
+
     thread_samples = receipt.get("thread_samples")
     coverage = receipt.get("thread_sample_coverage")
     if thread_samples is None or coverage is None:
@@ -134,9 +176,72 @@ def require_live_sampler(
             "thread_samples / thread_sample_coverage. A receipt that cannot "
             "report how often its sampler actually sampled cannot be gated on."
         )
+    #: THE DENOMINATOR FIX. review-0246-01 A: "thread coverage is a ratio to a
+    #: self-declared sampling interval. Nothing anywhere gates
+    #: sample_interval_s." R0246 read `expected_samples_at_interval`, which is
+    #: `wall / interval_s` with the node's own `interval_s`, so a node declaring
+    #: `5.0` reported a coverage of `0.9994` while its observation gap bought
+    #: `1.99x` the sealed headroom. The gate now reads
+    #: `expected_samples_at_the_registered_interval`, which is `wall / 0.25`,
+    #: and it reads two arms that are not ratios at all: the widest and the mean
+    #: MEASURED interval between two thread samples, in seconds.
+    registered_interval = float(
+        REGISTERED_SAFETY_PARAMETERS["watchdog_sample_interval_s"].value
+    )
+    expected = receipt.get("expected_samples_at_the_registered_interval")
+    if expected is None:
+        wall = float(receipt.get("sampled_wall_s") or 0.0)
+        expected = wall / registered_interval if registered_interval > 0 else 0.0
+    expected = float(expected)
+    coverage_at_registered = receipt.get(
+        "thread_sample_coverage_at_the_registered_interval"
+    )
+    if coverage_at_registered is None:
+        coverage_at_registered = (
+            float(thread_samples) / expected if expected > 0 else 0.0
+        )
+    coverage_at_registered = float(coverage_at_registered)
+    wall_s = float(receipt.get("sampled_wall_s") or 0.0)
+    max_gap = receipt.get("max_thread_sample_gap_s")
+    mean_gap = receipt.get("mean_thread_sample_gap_s")
+    if mean_gap is None:
+        mean_gap = (
+            wall_s / float(thread_samples) if int(thread_samples) > 0
+            else float("inf")
+        )
+    mean_gap = float(mean_gap)
+    if max_gap is None:
+        #: A receipt from before R0247 cannot report a measured gap. It is not
+        #: read as "no gap"; it is read as "unmeasured", which fails.
+        max_gap = float("inf")
+    max_gap = float(max_gap)
+    #: The two second-valued arms apply once the stage is long enough for one
+    #: registered interval to have elapsed at all. Below that a single sample
+    #: spans the whole stage and the gap is the stage, not a defect.
+    gap_gate_applies = bool(wall_s >= registered_interval)
     coverage_gate_applies = bool(expected >= float(min_expected_samples))
     state = {
         "label": label,
+        "declared_sample_interval_s": receipt.get("declared_sample_interval_s"),
+        "sampled_wall_s": wall_s,
+        "max_thread_sample_gap_s": max_gap,
+        "mean_thread_sample_gap_s": mean_gap,
+        "gap_gate_applies": gap_gate_applies,
+        "thread_sample_coverage_at_the_registered_interval": (
+            coverage_at_registered
+        ),
+        "expected_samples_at_the_registered_interval": expected,
+        "safety_overrides": [dict(record) for record in overrides],
+        "receipt_safety_overrides": [
+            dict(record) for record in (receipt.get("safety_overrides") or ())
+        ],
+        **registered_bounds([
+            "watchdog_sample_interval_s",
+            "watchdog_max_observation_gap_s",
+            "watchdog_max_mean_observation_gap_s",
+            "min_thread_sample_coverage",
+            "coverage_gate_min_expected_samples",
+        ]),
         "sampling_thread_alive": bool(receipt["sampling_thread_alive"]),
         "thread_death": receipt["thread_death"],
         "samples": int(receipt["samples"]),
@@ -154,22 +259,53 @@ def require_live_sampler(
         "coverage_gate_min_expected_samples": float(min_expected_samples),
         "note": SAMPLER_LIVENESS_NOTE,
     }
+    #: An override attempt is a recorded violation that FAILS the gate, whether
+    #: it was made here or by the watchdog that wrote the receipt.
+    try:
+        require_no_weakening_overrides(
+            list(overrides) + list(receipt.get("safety_overrides") or ()),
+            label=f"{label}'s host guard",
+        )
+    except Round0247Error as error:
+        #: R0246 owns this gate's error contract; R0247 registered the bound.
+        raise Round0246Error(str(error)) from error
     if not state["sampling_thread_alive"]:
         raise Round0246Error(
             f"R0246 STOP: {label} ran behind a host guard whose sampling thread "
             f"died ({receipt['thread_death']}). Its memory receipt is not "
             "evidence and the node must not publish it."
         )
-    if coverage_gate_applies and float(coverage) < float(
+    if gap_gate_applies and max_gap > WATCHDOG_MAX_OBSERVATION_GAP_S:
+        raise Round0246Error(
+            f"R0247 STOP: {label}'s host guard left {max_gap} s between two "
+            "successful observations, against a registered ceiling of "
+            f"{WATCHDOG_MAX_OBSERVATION_GAP_S} s (29,548,888,064 B of sealed "
+            "headroom over 11,767,996,416 B/s of sealed measured slope). This "
+            "arm is measured in seconds by the sampling thread itself and is "
+            "not a ratio to any interval the node declares, which is how "
+            "review-0246-01 defeated the coverage floor. "
+            + SAMPLER_LIVENESS_NOTE
+        )
+    if gap_gate_applies and mean_gap > WATCHDOG_MAX_MEAN_OBSERVATION_GAP_S:
+        raise Round0246Error(
+            f"R0247 STOP: {label}'s host guard averaged {mean_gap} s between "
+            f"observations over a {wall_s} s stage, against a registered "
+            f"ceiling of {WATCHDOG_MAX_MEAN_OBSERVATION_GAP_S} s - the "
+            "registered 0.25 s interval divided by the registered 0.50 "
+            "coverage floor, expressed in seconds so that it cannot be "
+            "satisfied by moving the denominator. " + SAMPLER_LIVENESS_NOTE
+        )
+    if coverage_gate_applies and coverage_at_registered < float(
         min_thread_sample_coverage
     ):
         raise Round0246Error(
             f"R0246 STOP: {label}'s host guard took {int(thread_samples)} "
-            f"thread samples against {expected} expected at its declared "
-            f"interval — a thread coverage of {float(coverage)} against a "
-            f"registered floor of {float(min_thread_sample_coverage)}. A "
-            "sampler that is alive and not sampling is the same blind spot as "
-            "a dead one. " + SAMPLER_LIVENESS_NOTE
+            f"thread samples against {expected} expected at the REGISTERED "
+            f"{registered_interval} s interval — a thread coverage of "
+            f"{coverage_at_registered} against a registered floor of "
+            f"{float(min_thread_sample_coverage)}. A sampler that is alive and "
+            "not sampling is the same blind spot as a dead one. "
+            + SAMPLER_LIVENESS_NOTE
         )
     state["holds"] = True
     return state
@@ -257,18 +393,52 @@ class AbortPollGate(AbortPollTracker):
         min_polls: int = MIN_ENFORCEMENT_POLLS,
         slope_bytes_per_s: float = MIN_BINDING_SLOPE_BYTES_PER_S,
         clock: Any = None,
+        replay: bool = False,
     ) -> None:
         super().__init__(
             inner=inner, headroom_bytes=headroom_bytes, label=label,
-            slope_bytes_per_s=slope_bytes_per_s, clock=clock,
+            slope_bytes_per_s=slope_bytes_per_s, clock=clock, replay=replay,
         )
         self.training_performed = bool(training_performed)
-        self.max_poll_spacing_s = float(max_poll_spacing_s)
-        self.min_polls = int(min_polls)
+        #: review-0246-01 C, the sixteenth attack, and the reason R0247 exists.
+        #: This was a constructor keyword with a registered DEFAULT and no
+        #: FLOOR, and the receipt then published the caller's value under
+        #: `registered_max_poll_spacing_s`. It is clamped at the registry, the
+        #: attempt is recorded, the attribute is read-only so it cannot be
+        #: reassigned after construction, and `registered_max_poll_spacing_s`
+        #: is now produced by `registered_bounds()` and can only be the
+        #: registry's number.
+        spacing_effective, spacing_record = clamp(
+            "r0246_max_poll_spacing_s", max_poll_spacing_s,
+            site="AbortPollGate(max_poll_spacing_s=)", label=str(label),
+        )
+        polls_effective, polls_record = clamp_int(
+            "min_enforcement_polls", min_polls,
+            site="AbortPollGate(min_polls=)", label=str(label),
+        )
+        self.safety_overrides = tuple(self.safety_overrides) + override_records(
+            [spacing_record, polls_record]
+        )
+        self._max_poll_spacing_s = float(spacing_effective)
+        self.declared_max_poll_spacing_s = float(max_poll_spacing_s)
+        self._min_polls = int(polls_effective)
+        self.declared_min_polls = int(min_polls)
         self.started_at_s: float | None = None
         self.finished_at_s: float | None = None
         self.gap_before_the_first_poll_s: float | None = None
         self.gap_after_the_last_poll_s: float | None = None
+
+    #: Read-only. R0247 attack a2-r0247-3: clamping the CONSTRUCTOR still left
+    #: `gate.max_poll_spacing_s = 1e6` working on a built gate, which is the
+    #: same defeat one statement later. There is no setter, so the assignment
+    #: raises `AttributeError` instead of widening the ceiling.
+    @property
+    def max_poll_spacing_s(self) -> float:
+        return self._max_poll_spacing_s
+
+    @property
+    def min_polls(self) -> int:
+        return self._min_polls
 
     def start(self) -> "AbortPollGate":
         """Anchor at stage start, so the pre-first-poll interval is a gap."""
@@ -347,11 +517,32 @@ class AbortPollGate(AbortPollTracker):
             "stage_wall_s": wall,
             "gap_before_the_first_poll_s": self.gap_before_the_first_poll_s,
             "gap_after_the_last_poll_s": self.gap_after_the_last_poll_s,
-            "registered_max_poll_spacing_s": self.max_poll_spacing_s,
+            #: review-0246-01 C: "A field named `registered_` that reports
+            #: whatever the node passed is worse than no field." These come
+            #: from `registered_bounds()`, which reads the registry and can
+            #: never read a caller. What the caller asked for is published
+            #: beside them under `declared_*` and `effective_*`.
+            **registered_bounds([
+                "r0246_max_poll_spacing_s",
+                "min_enforcement_polls",
+                "min_binding_slope_bytes_per_s",
+                "max_declared_headroom_bytes",
+            ]),
+            "declared_max_poll_spacing_s": self.declared_max_poll_spacing_s,
+            "effective_max_poll_spacing_s": self.max_poll_spacing_s,
+            "declared_min_polls": self.declared_min_polls,
+            "effective_min_polls": self.min_polls,
             "registered_max_poll_spacing_basis": (
                 "R0244 sealed budget_headroom_bytes 29548888064 / R0244 sealed "
                 "measured slope 11767996416 B/s"
             ),
+            "no_weakening_safety_override_was_attempted": not
+            weakening_overrides(self.safety_overrides),
+            "envelope_declarations_clamped_to_the_registry": [
+                dict(record) for record in self.safety_overrides
+                if record.get("kind") == "weakening"
+                and record.get("enforcement") == "clamped"
+            ],
             "spacing_over_the_registered_ceiling": (
                 self.max_gap_s / self.max_poll_spacing_s
                 if self.max_poll_spacing_s > 0 else None
@@ -368,13 +559,16 @@ class AbortPollGate(AbortPollTracker):
             ),
             "binding_slope_floor_bytes_per_s": MIN_BINDING_SLOPE_BYTES_PER_S,
             "binding_slope_floor_basis": MIN_BINDING_SLOPE_BASIS,
+            "registry_fingerprint": registry_fingerprint(),
             "gate_note": POLL_GATE_NOTE,
+            "safety_parameter_note": SAFETY_PARAMETER_NOTE,
         })
         return base
 
     def require(
         self, *, measured_slope_bytes_per_s: float | None = None
     ) -> dict[str, Any]:
+        verify_registry(label=f"R0246 poll gate {self.label}")
         verdict = self.verdict(
             measured_slope_bytes_per_s=measured_slope_bytes_per_s
         )
@@ -392,11 +586,30 @@ class AbortPollGate(AbortPollTracker):
                  verdict["meets_the_registered_ceiling"]),
                 ("meets_the_binding_slope_requirement",
                  bool(verdict["requirement"]["requirement_holds"])),
-                ("a_training_node_meets_the_worst_case_slope",
+                #: R0247: `training_performed` was a self-declared bool that
+                #: switched off this arm. It is now unconditional, so the
+                #: declaration no longer participates in a safety decision at
+                #: all. Direction: strictly tighter - the arm applies to every
+                #: node, and no node that passed it before can fail it now.
+                ("every_node_meets_the_worst_case_slope",
+                 bool(verdict["meets_the_r0244_worst_case_slope"])),
+                #: R0247 attack a2-r0247-1: a scripted clock replaces the
+                #: measurement itself.
+                ("the_clock_is_the_registered_monotonic_clock",
                  bool(
-                     verdict["meets_the_r0244_worst_case_slope"]
-                     or not self.training_performed
+                     verdict["clock_is_the_registered_monotonic_clock"]
+                     or self.replay
                  )),
+                #: R0247 attack a2-r0247-2: the gate times calls to itself, so
+                #: a gate wrapping a no-op scores a stage that never reads the
+                #: cooperative abort flag.
+                ("the_gate_wraps_a_registered_abort_reader",
+                 bool(
+                     verdict["inner_is_a_registered_abort_reader"]
+                     or self.replay
+                 )),
+                ("no_weakening_safety_override_was_attempted",
+                 bool(verdict["no_weakening_safety_override_was_attempted"])),
             ) if not ok
         ]
         verdict["failures"] = failures
@@ -412,6 +625,55 @@ class AbortPollGate(AbortPollTracker):
                 f"{verdict['stage_wall_s']} s stage. " + POLL_GATE_NOTE
             )
         return verdict
+
+
+def require_enforcement_evidence(
+    verdict: Mapping[str, Any], *, label: str
+) -> dict[str, Any]:
+    """A replayed verdict is a demonstration, never a node's own evidence.
+
+    R0247 attack a2-r0247-1 in its sealing form: a node could build its gate
+    with a scripted clock, declare `replay=True` so the clock arm is waived, and
+    seal the resulting verdict as its enforcement measurement. This is the gate
+    on that: anything a node publishes as `enforcement_poll_spacing` must have
+    been measured on the registered monotonic clock, through a registered abort
+    reader, with no weakening override attempted.
+    """
+    state = {
+        "label": label,
+        "replay_only": bool(verdict.get("replay_only")),
+        "clock_is_the_registered_monotonic_clock": bool(
+            verdict.get("clock_is_the_registered_monotonic_clock")
+        ),
+        "inner_is_a_registered_abort_reader": bool(
+            verdict.get("inner_is_a_registered_abort_reader")
+        ),
+        "no_weakening_safety_override_was_attempted": bool(
+            verdict.get("no_weakening_safety_override_was_attempted")
+        ),
+    }
+    failures = [
+        name for name, ok in (
+            ("not_a_replay", not state["replay_only"]),
+            ("clock_is_the_registered_monotonic_clock",
+             state["clock_is_the_registered_monotonic_clock"]),
+            ("inner_is_a_registered_abort_reader",
+             state["inner_is_a_registered_abort_reader"]),
+            ("no_weakening_safety_override_was_attempted",
+             state["no_weakening_safety_override_was_attempted"]),
+        ) if not ok
+    ]
+    state["failures"] = failures
+    state["holds"] = not failures
+    if failures:
+        raise Round0247Error(
+            f"R0247 STOP: {label} tried to seal a poll-spacing verdict that is "
+            f"not enforcement evidence {failures}. A replayed gate, a scripted "
+            "clock, a gate wrapping something that does not read the "
+            "cooperative abort flag, and a gate whose bound was overridden are "
+            "each a measurement of nothing. " + SAFETY_PARAMETER_NOTE
+        )
+    return state
 
 
 def measured_slope_from_trace(trace: Any) -> float:
@@ -441,7 +703,7 @@ def replay_gap_through_the_gate(
     ticks = iter([0.0, 0.0, float(gap_s), float(gap_s)])
     gate = AbortPollGate(
         inner=lambda _where: None, headroom_bytes=int(headroom_bytes),
-        label=label, clock=lambda: next(ticks),
+        label=label, clock=lambda: next(ticks), replay=True,
     )
     gate.start()
     gate("replayed read 1")
@@ -519,9 +781,14 @@ class _IntermittentWatchdog(EnforcedHostWatchdog):
     """Fails `fail_of` - 1 of every `fail_of` samples, never enough consecutive
     failures to trip the registered tolerance. The residual-shaped attack."""
 
-    def __init__(self, *, fail_of: int = 3, **kwargs: Any) -> None:
+    def __init__(
+        self, *, fail_of: int = 3, stall_s: float = 0.0, **kwargs: Any
+    ) -> None:
         super().__init__(**kwargs)
         self.fail_of = int(fail_of)
+        #: R0247: with a stall the same failure pattern becomes genuinely
+        #: blind, which is what `a1-r0247-4` plants.
+        self.stall_s = float(stall_s)
         self._sample_calls = 0
 
     def _sample(self) -> dict[str, int]:
@@ -530,6 +797,8 @@ class _IntermittentWatchdog(EnforcedHostWatchdog):
         self._sample_calls += 1
         if self._sample_calls % self.fail_of != 0:
             raise OSError("planted intermittent /proc read failure")
+        if self.stall_s > 0.0:
+            time.sleep(self.stall_s)
         return super()._sample()
 
 
@@ -594,6 +863,15 @@ def _liveness_attack(
         "max_consecutive_sample_failures": int(
             receipt["max_consecutive_sample_failures"]
         ),
+        #: R0247: the two denominator-free arms, so an attack row can be scored
+        #: on what the sampler MEASURED rather than on a ratio to what it
+        #: declared.
+        "sampled_wall_s": receipt["sampled_wall_s"],
+        "max_thread_sample_gap_s": receipt["max_thread_sample_gap_s"],
+        "mean_thread_sample_gap_s": receipt["mean_thread_sample_gap_s"],
+        "thread_sample_coverage_at_the_registered_interval": receipt[
+            "thread_sample_coverage_at_the_registered_interval"
+        ],
         "gate_refused_the_receipt": refused,
         "message": message,
     }
@@ -729,6 +1007,7 @@ def run_reviewer_gap_replay_control(
         gate = AbortPollGate(
             inner=lambda _where: None, headroom_bytes=int(headroom_bytes),
             label=f"R0246 {polls}-poll stage", clock=lambda: next(ticks),
+            replay=True,
         )
         gate.start()
         for index in range(polls):
@@ -917,9 +1196,65 @@ def run_novel_attack_battery(*, workspace: str) -> dict[str, Any]:
             "if at all, only by the coverage floor, which is the point of "
             "having two arms."
         ),
-        "closed": bool(intermittent["gate_refused_the_receipt"]),
+        #: RECLASSIFIED BY R0247, and the reclassification is the finding.
+        #: Under R0246 this row was "closed" because the coverage floor read a
+        #: ratio to the sampler's OWN declared 0.05 s interval, so a sampler
+        #: that missed two of every three samples scored 0.324 and was refused.
+        #: Under the registered denominator it observes every ~0.15 s, which is
+        #: FASTER than the registered 0.25 s interval requires - so it was
+        #: never blind, and R0246's floor was punishing a node for declaring a
+        #: stricter interval than it achieved rather than for being unsafe.
+        #: The arm that matters is the measured observation gap, and this
+        #: sampler meets it. What must still be true is that the degradation is
+        #: RECORDED. R0247 adds `a1-r0247-4`, which makes the same sampler
+        #: genuinely blind, and that one is refused.
+        "reclassified_by_r0247": (
+            "not an attack once the coverage denominator is the REGISTERED "
+            "interval: this sampler observes more often than the registered "
+            "0.25 s and is inside both measured observation-gap bounds. It is "
+            "scored on those bounds plus the requirement that its failures are "
+            "recorded, not on a ratio to its own declaration."
+        ),
+        "closed": bool(
+            intermittent["gate_refused_the_receipt"]
+            or (
+                intermittent["sample_failures"] > 0
+                and float(intermittent["max_thread_sample_gap_s"])
+                <= WATCHDOG_MAX_OBSERVATION_GAP_S
+                and float(intermittent["mean_thread_sample_gap_s"])
+                <= WATCHDOG_MAX_MEAN_OBSERVATION_GAP_S
+            )
+        ),
     })
     attacks.append(intermittent)
+
+    #: a1-r0247-4 — the version of a1-novel-4 that IS an attack: the same
+    #: never-four-in-a-row failure pattern, stalled so the sampler is genuinely
+    #: blind for longer than the registered observation ceiling.
+    blind = _liveness_attack(
+        watchdog=_IntermittentWatchdog(
+            fail_of=3, stall_s=1.4, anonymous_budget_bytes=1 << 30,
+            interval_s=0.05,
+            abort_flag_path=os.path.join(workspace, "blind.abort"),
+            label="R0247 blind intermittent sampler",
+        ),
+        wall_s=6.0,
+    )
+    blind.update({
+        "attack": (
+            "a1-r0247-4: fail 2 of every 3 samples AND stall the successful "
+            "one past the registered observation ceiling"
+        ),
+        "why_it_is_novel": (
+            "it is a1-novel-4 made real. The consecutive-failure arm still "
+            "cannot see it by construction, the registered-denominator "
+            "coverage arm cannot see it either because the sampler declares a "
+            "stricter interval than it keeps, and only a bound measured in "
+            "SECONDS between two successful observations refuses it."
+        ),
+        "closed": bool(blind["gate_refused_the_receipt"]),
+    })
+    attacks.append(blind)
 
     # ---- guard 2: the abort flag path ------------------------------------ #
     fifo = os.path.join(workspace, "fifo.abort")
@@ -1004,6 +1339,7 @@ def run_novel_attack_battery(*, workspace: str) -> dict[str, Any]:
     late = AbortPollGate(
         inner=lambda _where: None, headroom_bytes=R0245_NODE_HEADROOM_BYTES,
         label="R0246 late first read", clock=lambda: next(ticks),
+        replay=True,
     )
     late.start()
     late("the only read, taken 3 s in")
@@ -1030,6 +1366,7 @@ def run_novel_attack_battery(*, workspace: str) -> dict[str, Any]:
     trailing = AbortPollGate(
         inner=lambda _where: None, headroom_bytes=R0245_NODE_HEADROOM_BYTES,
         label="R0246 trailing allocation", clock=lambda: next(ticks),
+        replay=True,
     )
     trailing.start()
     trailing("read 1")
@@ -1057,6 +1394,7 @@ def run_novel_attack_battery(*, workspace: str) -> dict[str, Any]:
     inflated_headroom = AbortPollGate(
         inner=lambda _where: None, headroom_bytes=1 << 50,
         label="R0246 inflated headroom", clock=lambda: next(ticks),
+        replay=True,
     )
     inflated_headroom.start()
     inflated_headroom("read 1")
@@ -1084,7 +1422,7 @@ def run_novel_attack_battery(*, workspace: str) -> dict[str, Any]:
     weak_slope = AbortPollGate(
         inner=lambda _where: None, headroom_bytes=R0245_NODE_HEADROOM_BYTES,
         label="R0246 weak worst-case slope", slope_bytes_per_s=1.0,
-        clock=lambda: next(ticks),
+        clock=lambda: next(ticks), replay=True,
     )
     weak_slope.start()
     weak_slope("read 1")
@@ -1110,6 +1448,7 @@ def run_novel_attack_battery(*, workspace: str) -> dict[str, Any]:
     unfinished = AbortPollGate(
         inner=lambda _where: None, headroom_bytes=R0245_NODE_HEADROOM_BYTES,
         label="R0246 unfinished gate", clock=lambda: next(ticks),
+        replay=True,
     )
     unfinished.start()
     unfinished("read 1")
@@ -1347,6 +1686,7 @@ def registered_thresholds() -> dict[str, Any]:
 
 __all__ = [
     "ATTEMPT_1_GAP_S",
+    "SAFETY_PARAMETER_NOTE",
     "COVERAGE_GATE_MIN_EXPECTED_SAMPLES",
     "GPU_HOURS_CAP",
     "MIN_ENFORCEMENT_POLLS",
@@ -1363,6 +1703,7 @@ __all__ = [
     "measured_slope_from_trace",
     "registered_thresholds",
     "replay_gap_through_the_gate",
+    "require_enforcement_evidence",
     "require_abort_flag_landed",
     "require_live_sampler",
     "run_novel_attack_battery",

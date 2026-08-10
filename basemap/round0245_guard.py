@@ -62,6 +62,12 @@ from basemap.round0244_guard import (
     ThreadedHostWatchdog,
     WATCHDOG_SAMPLE_INTERVAL_S,
 )
+from basemap.round0247_registry import (
+    clamp,
+    is_registered_abort_reader,
+    override_records,
+    verify_registry,
+)
 from experiments.round0242_nodes import _meminfo
 
 ROUND_ID = "0245"
@@ -225,14 +231,46 @@ class AbortPollTracker:
         label: str,
         slope_bytes_per_s: float = SLOPE_CONTROL_MIN_BYTES_PER_S,
         clock: Any = None,
+        replay: bool = False,
     ) -> None:
+        verify_registry(label=f"R0245 poll tracker for {label}")
         #: An injectable clock so a gap can be REPLAYED exactly rather than
         #: slept through. R0246 replays attempt 1's 5.828025072987657 s gap
         #: through this class with a scripted clock; the default is the real one.
+        #:
+        #: R0247 attack a2-r0247-1: a scripted clock is a construction path that
+        #: replaces the measurement itself. `clock=lambda: 0.0` scores every gap
+        #: at zero and the gate reports a perfect spacing for a stage that
+        #: allocated for hours. A scripted clock is now permitted only on a gate
+        #: explicitly declared `replay=True`, whose verdict is marked
+        #: `replay_only` and which a node may not seal as enforcement evidence.
+        self.replay = bool(replay)
+        self.clock_is_the_registered_monotonic_clock = bool(clock is None)
         self._clock = clock if clock is not None else time.monotonic
         self.inner = inner
-        self.headroom_bytes = int(headroom_bytes)
-        self.slope_bytes_per_s = float(slope_bytes_per_s)
+        #: R0247 attack a2-r0247-2: the gate times calls to ITSELF, so a gate
+        #: wrapping a no-op publishes a flawless spacing for a stage that never
+        #: reads the cooperative abort flag. `inner` must be a registered abort
+        #: reader on any gate that is not a replay.
+        self.inner_is_a_registered_abort_reader = bool(
+            is_registered_abort_reader(inner)
+        )
+        #: review-0246-01 C and D3. Both of these were keywords with registered
+        #: defaults and no bound, and the reviewer combined them: a `1 << 50`
+        #: headroom with an overridden ceiling passed R0245's own blocker gap.
+        headroom_effective, headroom_record = clamp(
+            "max_declared_headroom_bytes", headroom_bytes,
+            site="AbortPollTracker(headroom_bytes=)", label=str(label),
+        )
+        slope_effective, slope_record = clamp(
+            "min_binding_slope_bytes_per_s", slope_bytes_per_s,
+            site="AbortPollTracker(slope_bytes_per_s=)", label=str(label),
+        )
+        self.safety_overrides = override_records([headroom_record, slope_record])
+        self.declared_headroom_bytes = int(headroom_bytes)
+        self.declared_slope_bytes_per_s = float(slope_bytes_per_s)
+        self.headroom_bytes = int(headroom_effective)
+        self.slope_bytes_per_s = float(slope_effective)
         self.label = str(label)
         self.polls = 0
         self.max_gap_s = 0.0
@@ -286,6 +324,27 @@ class AbortPollTracker:
             )
         return {
             "label": self.label,
+            #: R0247: what the caller ASKED for is published beside what the
+            #: gate actually bound on, so an override is visible in the receipt
+            #: instead of being echoed under a `registered_*` name.
+            "declared_headroom_bytes": int(self.declared_headroom_bytes),
+            "effective_headroom_bytes": int(self.headroom_bytes),
+            "declared_worst_case_slope_bytes_per_s": float(
+                self.declared_slope_bytes_per_s
+            ),
+            "effective_worst_case_slope_bytes_per_s": float(
+                self.slope_bytes_per_s
+            ),
+            "safety_overrides": [
+                dict(record) for record in self.safety_overrides
+            ],
+            "clock_is_the_registered_monotonic_clock": bool(
+                self.clock_is_the_registered_monotonic_clock
+            ),
+            "inner_is_a_registered_abort_reader": bool(
+                self.inner_is_a_registered_abort_reader
+            ),
+            "replay_only": bool(self.replay),
             "binding_slope_floor_bytes_per_s": MIN_BINDING_SLOPE_BYTES_PER_S,
             "binding_slope_floor_basis": MIN_BINDING_SLOPE_BASIS,
             "enforcement_polls": self.polls,

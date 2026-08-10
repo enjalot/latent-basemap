@@ -62,6 +62,14 @@ from basemap.gpu_child_supervision import (
     runner_abort_reason,
 )
 from basemap.round0242_locality import host_anonymous_bytes
+from basemap.round0247_registry import (
+    REGISTERED_SAFETY_PARAMETERS,
+    clamp,
+    override_records,
+    registered_bounds,
+    registry_fingerprint,
+    verify_registry,
+)
 from experiments.round0242_nodes import (
     WATCHDOG_ANON_BYTES,
     WATCHDOG_MEM_AVAILABLE_BYTES,
@@ -103,7 +111,15 @@ WATCHDOG_TRACE_SECONDS = 4_000
 #: `29548888064 / (0.25 * 11767996416) = 10.04`, i.e. `10`. The registered value
 #: is `3`, which is `3.35x` stricter than the derived maximum — it is not a
 #: number chosen to let anything pass.
-WATCHDOG_MAX_CONSECUTIVE_SAMPLE_FAILURES = 3
+#:
+#: R0247: this is now a *mirror* of the registry entry, not the authority.
+#: `_sample_once` reads `REGISTERED_SAFETY_PARAMETERS` directly, so assigning
+#: `round0244_guard.WATCHDOG_MAX_CONSECUTIVE_SAMPLE_FAILURES = 10**9` from an
+#: importer - the module-global form of the override class - no longer moves the
+#: tolerance. `tests/test_round0247_contract.py` plants exactly that.
+WATCHDOG_MAX_CONSECUTIVE_SAMPLE_FAILURES = int(
+    REGISTERED_SAFETY_PARAMETERS["watchdog_max_consecutive_sample_failures"].value
+)
 
 #: The NEW arm. R0242's rule is conjunctive (swap growth AND pressure) and is
 #: inherited unchanged — it is the machine-level rule and this round does not
@@ -149,8 +165,30 @@ class ThreadedHostWatchdog(_HostWatchdog):
         label: str = "R0244 node",
     ) -> None:
         super().__init__()
-        self.anonymous_budget_bytes = int(anonymous_budget_bytes)
-        self.interval_s = float(interval_s)
+        verify_registry(label=f"R0244 watchdog for {label}")
+        #: review-0246-01 A: `interval_s` was a keyword nothing gated on, and a
+        #: node declaring `5.0` reported `thread_sample_coverage 0.9994` while
+        #: buying `1.99x` the sealed headroom. It is clamped at the registered
+        #: `0.25` s and the attempt is recorded; the receipt reports the
+        #: REGISTERED interval under `registered_*` and the declared one under
+        #: `declared_*`, and the coverage denominator is derived from the
+        #: registered value and measured wall time, never from this argument.
+        interval_effective, interval_record = clamp(
+            "watchdog_sample_interval_s", interval_s,
+            site="ThreadedHostWatchdog(interval_s=)", label=str(label),
+        )
+        budget_effective, budget_record = clamp(
+            "max_declared_anonymous_budget_bytes", anonymous_budget_bytes,
+            site="ThreadedHostWatchdog(anonymous_budget_bytes=)",
+            label=str(label),
+        )
+        self.safety_overrides = override_records(
+            [interval_record, budget_record]
+        )
+        self.anonymous_budget_bytes = int(budget_effective)
+        self.declared_anonymous_budget_bytes = int(anonymous_budget_bytes)
+        self.interval_s = float(interval_effective)
+        self.declared_interval_s = float(interval_s)
         self.abort_flag_path = abort_flag_path
         self.label = str(label)
         #: What a boundary-only instrument — R0242's — would have reported from
@@ -181,6 +219,14 @@ class ThreadedHostWatchdog(_HostWatchdog):
         self.sample_failures = 0
         self.consecutive_sample_failures = 0
         self.max_consecutive_sample_failures = 0
+        #: review-0246-01 A, the denominator defect. Coverage is a RATIO to an
+        #: interval the caller declares, so it is not a bound. These are the
+        #: same quantity in seconds of measured wall clock: the widest and the
+        #: mean interval between two successful THREAD samples, timestamped by
+        #: the sampling thread itself. Nothing a caller declares enters them.
+        self.max_thread_sample_gap_s = 0.0
+        self.gap_after_the_last_thread_sample_s: float | None = None
+        self._last_thread_sample_s: float | None = None
         self._trace: dict[int, int] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -191,6 +237,9 @@ class ThreadedHostWatchdog(_HostWatchdog):
         if self._thread is not None:
             raise Round0244Error("R0244 watchdog is already sampling")
         self.started_at_s = _now()
+        #: The first observation gap runs from stage start, not from the first
+        #: sample - the same anchoring the poll gate uses, for the same reason.
+        self._last_thread_sample_s = self.started_at_s
         self._thread = threading.Thread(
             target=self._loop, name="r0244-host-watchdog", daemon=True
         )
@@ -203,6 +252,15 @@ class ThreadedHostWatchdog(_HostWatchdog):
         if thread is not None:
             thread.join(timeout=5.0 + self.interval_s)
         self.stopped_at_s = _now()
+        #: And the last observation gap runs to stage end, so a sampler that
+        #: stops early cannot hide the tail interval.
+        with self._lock:
+            if self._last_thread_sample_s is not None:
+                tail = float(self.stopped_at_s - self._last_thread_sample_s)
+                self.gap_after_the_last_thread_sample_s = tail
+                self.max_thread_sample_gap_s = max(
+                    self.max_thread_sample_gap_s, tail
+                )
         self._thread = None
 
     def __enter__(self) -> "ThreadedHostWatchdog":
@@ -233,6 +291,14 @@ class ThreadedHostWatchdog(_HostWatchdog):
 
     def _sample_once(self) -> bool:
         """One thread-side observation. `False` means the guard has died."""
+        #: R0247: read the tolerance from the REGISTRY, not from this module's
+        #: global. Assigning the global was the module-global form of the
+        #: override class and it no longer reaches the decision.
+        tolerance = int(
+            REGISTERED_SAFETY_PARAMETERS[
+                "watchdog_max_consecutive_sample_failures"
+            ].value
+        )
         try:
             self._sample()
         except OSError as error:
@@ -243,16 +309,12 @@ class ThreadedHostWatchdog(_HostWatchdog):
                     self.max_consecutive_sample_failures,
                     self.consecutive_sample_failures,
                 )
-                exhausted = (
-                    self.consecutive_sample_failures
-                    > WATCHDOG_MAX_CONSECUTIVE_SAMPLE_FAILURES
-                )
+                exhausted = self.consecutive_sample_failures > tolerance
             if exhausted:
                 self._record_death(
                     error,
                     context=(
-                        f"{WATCHDOG_MAX_CONSECUTIVE_SAMPLE_FAILURES + 1} "
-                        "consecutive sampling failures"
+                        f"{tolerance + 1} consecutive sampling failures"
                     ),
                 )
                 return False
@@ -260,9 +322,15 @@ class ThreadedHostWatchdog(_HostWatchdog):
         except BaseException as error:  # noqa: BLE001 - see _record_death
             self._record_death(error)
             return False
+        now = _now()
         with self._lock:
             self.thread_samples += 1
             self.consecutive_sample_failures = 0
+            if self._last_thread_sample_s is not None:
+                gap = float(now - self._last_thread_sample_s)
+                if gap > self.max_thread_sample_gap_s:
+                    self.max_thread_sample_gap_s = gap
+            self._last_thread_sample_s = now
         return True
 
     def _record_exit(self) -> None:
@@ -418,12 +486,61 @@ class ThreadedHostWatchdog(_HostWatchdog):
                 else float((self.stopped_at_s or _now()) - self.started_at_s)
             )
             expected = elapsed / self.interval_s if self.interval_s > 0 else 0.0
+            #: review-0246-01 A. THE denominator fix: the expected sample count
+            #: is derived from measured wall time and the REGISTERED interval,
+            #: so a node declaring a wider interval no longer buys itself a
+            #: coverage of 0.9994. `expected_samples_at_interval` above is kept
+            #: for continuity with R0244/R0245/R0246 receipts and is NOT what
+            #: any gate reads.
+            registered_interval = float(
+                REGISTERED_SAFETY_PARAMETERS[
+                    "watchdog_sample_interval_s"
+                ].value
+            )
+            expected_registered = (
+                elapsed / registered_interval if registered_interval > 0
+                else 0.0
+            )
+            mean_gap = (
+                elapsed / float(self.thread_samples)
+                if self.thread_samples > 0 else None
+            )
             base.update({
-                "instrument": "round0244-threaded-host-watchdog-v1",
+                "instrument": "round0244-threaded-host-watchdog-v2",
                 "note": WATCHDOG_NOTE,
                 "label": self.label,
                 "sampling_thread": True,
                 "sample_interval_s": self.interval_s,
+                "declared_sample_interval_s": self.declared_interval_s,
+                "declared_anonymous_budget_bytes": int(
+                    self.declared_anonymous_budget_bytes
+                ),
+                #: The two denominator-free arms. Both are measured in seconds
+                #: of wall clock by the sampling thread itself; neither is a
+                #: ratio to anything the node declares.
+                "max_thread_sample_gap_s": float(self.max_thread_sample_gap_s),
+                "mean_thread_sample_gap_s": mean_gap,
+                "gap_after_the_last_thread_sample_s": (
+                    self.gap_after_the_last_thread_sample_s
+                ),
+                "expected_samples_at_the_registered_interval": (
+                    expected_registered
+                ),
+                "thread_sample_coverage_at_the_registered_interval": (
+                    None if expected_registered <= 0
+                    else float(self.thread_samples) / expected_registered
+                ),
+                "safety_overrides": [
+                    dict(record) for record in self.safety_overrides
+                ],
+                "registry_fingerprint": registry_fingerprint(),
+                **registered_bounds([
+                    "watchdog_sample_interval_s",
+                    "watchdog_max_consecutive_sample_failures",
+                    "watchdog_max_observation_gap_s",
+                    "watchdog_max_mean_observation_gap_s",
+                    "max_declared_anonymous_budget_bytes",
+                ]),
                 "samples": int(self.samples),
                 "sampled_wall_s": elapsed,
                 "expected_samples_at_interval": expected,
@@ -444,7 +561,9 @@ class ThreadedHostWatchdog(_HostWatchdog):
                     self.max_consecutive_sample_failures
                 ),
                 "max_consecutive_sample_failures_allowed": int(
-                    WATCHDOG_MAX_CONSECUTIVE_SAMPLE_FAILURES
+                    REGISTERED_SAFETY_PARAMETERS[
+                        "watchdog_max_consecutive_sample_failures"
+                    ].value
                 ),
                 #: review-0244-01 A1. `sampling_thread_alive` is the field a
                 #: node gates on; `thread_death` is why. Both are False/None on
@@ -492,7 +611,12 @@ def boundary_only_understatement(receipt: dict[str, Any]) -> dict[str, Any]:
             None if boundary_peak <= 0 else thread_peak / float(boundary_peak)
         ),
         "boundary_polls": int(receipt["boundary_polls"]),
-        "thread_samples": int(receipt["samples"]),
+        #: review-0246-01 G: this emitted `receipt["samples"]` - the
+        #: BOUNDARY-INCLUSIVE count - under the name of the thread-only field,
+        #: so two different quantities shared a key across two receipts. Both
+        #: are now named for what they are.
+        "samples_including_boundary_polls": int(receipt["samples"]),
+        "thread_samples": int(receipt["thread_samples"]),
         "note": (
             "both columns come from ONE run of the same stage. The boundary "
             "column is updated only inside poll(), which is what R0242's "
