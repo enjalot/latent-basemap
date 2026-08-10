@@ -92,12 +92,32 @@ def _anon_bytes() -> int:
     return -1
 
 
+#: The round runner publishes its own cooperative abort flag to every node under
+#: this environment variable, and a node's environment is inherited by this
+#: child. Polling it here is what makes the runner's request — the operator's
+#: only supported way to stop a running GPU round — actually reach the process
+#: that holds the CUDA context (review-0239-02/F4).
+RUNNER_ABORT_FLAG_ENV = "ROUNDRUN_ABORT_FLAG"
+
+
 def _check_abort(flag_path: str | None, *, where: str) -> None:
-    """Poll the parent's cooperative flag. In-band only; no signal is involved."""
+    """Poll the cooperative flags. In-band only; no signal is involved.
+
+    Two flags, both cooperative and both fail-safe if absent: the cell's own
+    flag written by the parent watchdog, and the round runner's flag inherited
+    through the environment.
+    """
     if flag_path and os.path.exists(flag_path):
         raise CooperativeAbort(
             f"parent set the cooperative abort flag (observed at {where}); "
             "unwinding in-band so this process tears its own CUDA context down"
+        )
+    runner_flag = os.environ.get(RUNNER_ABORT_FLAG_ENV)
+    if runner_flag and os.path.exists(runner_flag):
+        raise CooperativeAbort(
+            f"the round runner set its cooperative abort flag {runner_flag} "
+            f"(observed at {where}); unwinding in-band so this process tears "
+            "its own CUDA context down"
         )
 
 

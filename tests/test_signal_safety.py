@@ -867,3 +867,132 @@ def test_the_child_preamble_compiles_and_raises_on_the_flag(tmp_path):
     flag.write_text("stop", encoding="utf-8")
     with pytest.raises(abort):
         check()
+
+
+# --------------------------------------------------------------------------- #
+# review-0239-02/F4 — the runner's cooperative flag must actually be polled
+# --------------------------------------------------------------------------- #
+def test_the_runners_abort_flag_reaches_a_supervised_gpu_child(tmp_path,
+                                                               monkeypatch):
+    """The runner wrote a flag and nothing read it, so the bound was one-phase.
+
+    The runner publishes `ROUNDRUN_ABORT_FLAG` to every node. Here the parent
+    watchdog observes it well before the cell's own deadline and relays it onto
+    the cell flag; the child sees it, unwinds, and exits cleanly — the exit
+    status is the proof that no signal was delivered.
+    """
+    runner_flag = tmp_path / "node.abort"
+    monkeypatch.setenv("ROUNDRUN_ABORT_FLAG", str(runner_flag))
+    script = tmp_path / "child.py"
+    out = tmp_path / "out.json"
+    script.write_text(
+        "import json, os, time\n"
+        + emit_child_abort_preamble(str(tmp_path / "abort.flag"))
+        + "cells = []\naborted = False\n"
+          "try:\n"
+          "  for i in range(200):\n"
+          "    _check_abort()\n"
+          "    time.sleep(0.05)\n"
+          "    cells.append(i)\n"
+          "except _CooperativeAbort:\n"
+          "    aborted = True\n"
+          f"with open({str(out)!r}, 'w') as h:\n"
+          "    json.dump({'cells': cells, 'aborted_cooperatively': aborted}, h)\n",
+        encoding="utf-8",
+    )
+    runner_flag.write_text('{"reason":"operator abort"}', encoding="utf-8")
+    started = time.monotonic()
+    result = run_gpu_child_cooperative(
+        [sys.executable, str(script)], cwd=str(tmp_path),
+        env={k: v for k, v in os.environ.items()
+             if k != "ROUNDRUN_ABORT_FLAG"},   # parent-side relay only
+        flag_path=str(tmp_path / "abort.flag"),
+        deadline_s=600.0,                      # nowhere near expiring
+        poll_s=0.05,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.runner_abort_observed is True, (
+        "the runner's abort flag was never polled by the supervisor")
+    assert result.flag_written is True
+    assert result.escalations == ["cooperative-flag"]
+    assert result.returncode == 0, result.stderr
+    assert elapsed < 30.0, "the runner's request did not bound the child"
+    payload = json.loads(out.read_text())
+    assert payload["aborted_cooperatively"] is True
+    assert len(payload["cells"]) < 200
+    assert result.supervision_receipt()["runner_abort_observed"] is True
+    assert result.supervision_receipt()["signal_delivered"] is False
+
+
+def test_the_generated_child_polls_the_runners_flag_itself(tmp_path,
+                                                           monkeypatch):
+    """Belt and braces: the child does not depend on its parent's watchdog."""
+    runner_flag = tmp_path / "node.abort"
+    namespace: dict = {"os": os}
+    exec(compile(emit_child_abort_preamble(str(tmp_path / "abort.flag")),
+                 "<preamble>", "exec"), namespace)
+    check = namespace["_check_abort"]
+    abort = namespace["_CooperativeAbort"]
+    monkeypatch.setenv("ROUNDRUN_ABORT_FLAG", str(runner_flag))
+    check()  # the runner has asked for nothing yet
+    runner_flag.write_text("stop", encoding="utf-8")
+    with pytest.raises(abort):
+        check()
+
+
+def test_the_real_build_child_polls_the_runners_flag(tmp_path, monkeypatch):
+    """`basemap/round0233_build.py` is the child every rung's build delegates to.
+
+    R0235 → R0236 → R0237 → R0238 all bottom out in this module's `_check_abort`,
+    so this one call site covers the 100M build child.
+    """
+    build = importlib.import_module("basemap.round0233_build")
+    runner_flag = tmp_path / "node.abort"
+    monkeypatch.setenv("ROUNDRUN_ABORT_FLAG", str(runner_flag))
+    build._check_abort(None, where="start")   # nothing set: no abort
+    runner_flag.write_text("stop", encoding="utf-8")
+    with pytest.raises(build.CooperativeAbort):
+        build._check_abort(None, where="start")
+
+
+def test_a_node_parent_loop_observes_the_runners_flag(tmp_path, monkeypatch):
+    """`run_truth` holds a torch CUDA context in the NODE process itself."""
+    nodes = importlib.import_module("experiments.round0238_nodes")
+    runner_flag = tmp_path / "node.abort"
+    monkeypatch.setenv("ROUNDRUN_ABORT_FLAG", str(runner_flag))
+    nodes._check_runner_abort("exact-truth database chunk")
+    runner_flag.write_text("stop", encoding="utf-8")
+    with pytest.raises(nodes.Round0238Error):
+        nodes._check_runner_abort("exact-truth database chunk")
+
+
+def test_the_build_watchdog_relays_the_runners_flag_without_a_signal(
+    tmp_path, monkeypatch,
+):
+    """The 100M build child is supervised by `MemAwareFlagWatchdog`, not by
+    `run_gpu_child_cooperative`, so it needs its own poll."""
+    nodes = importlib.import_module("experiments.round0238_nodes")
+    # No GPU, no /proc reads: this test is about the flag, nothing else.
+    monkeypatch.setattr(nodes, "_nvidia_smi_device_bytes", lambda: 0)
+    monkeypatch.setattr(nodes, "_nvidia_smi_per_process_bytes", lambda _pid: 0)
+    monkeypatch.setattr(nodes, "_proc_memory_bytes", lambda _pid: (0, 0))
+    monkeypatch.setattr(nodes, "_swap_used_bytes", lambda: 0)
+    monkeypatch.setattr(nodes, "_mem_available_bytes", lambda: 1 << 40)
+    cell_flag = tmp_path / "abort.flag"
+    runner_flag = tmp_path / "node.abort"
+    monkeypatch.setenv("ROUNDRUN_ABORT_FLAG", str(runner_flag))
+    watchdog = nodes.MemAwareFlagWatchdog(
+        flag_path=str(cell_flag), pid=os.getpid(), poll_s=0.05,
+        host_anon_budget_bytes=1 << 60, swap_growth_abort_bytes=1 << 60,
+        device_baseline_bytes=0, swap_baseline_bytes=0,
+    )
+    watchdog.sample_once()
+    assert not cell_flag.exists() and watchdog.aborted is False
+
+    runner_flag.write_text("stop", encoding="utf-8")
+    watchdog.sample_once()
+    assert cell_flag.exists(), "the runner's request never reached the cell"
+    assert watchdog.aborted is True
+    assert watchdog.escalations == ["cooperative-flag"]
+    assert watchdog.readings()["runner_abort_observed"] is True

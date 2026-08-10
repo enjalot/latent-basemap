@@ -25,6 +25,10 @@ The contract
   or `os.killpg()`, and never attaches `ptrace`/`py-spy` to the child.
 - A child that ignores the flag is **left running**. That is deliberate: on this
   driver a hung CUDA child is recoverable and a `SIGKILL`ed one may not be.
+- The **round runner's** own cooperative flag (`ROUNDRUN_ABORT_FLAG`) is polled
+  by the watchdog and relayed onto the cell's flag, and is polled again by the
+  child itself through the preamble. It is the operator's only supported way to
+  stop a running GPU round, so something has to read it (review-0239-02/F4).
 
 `emit_child_abort_preamble()` generates the child half of the contract: the
 polling helper the generated probe scripts call between cells.
@@ -40,9 +44,53 @@ from typing import Any, Callable, Sequence
 
 __all__ = [
     "CooperativeChildResult",
+    "RUNNER_ABORT_FLAG_ENV",
     "emit_child_abort_preamble",
     "run_gpu_child_cooperative",
+    "runner_abort_reason",
+    "runner_abort_requested",
 ]
+
+
+#: The round runner (`workshop/rounds/runner.py`) publishes the path of a
+#: cooperative abort flag to every node it launches under this name, removes any
+#: stale one at node start, and writes the file when the node passes its soft
+#: deadline — or when an operator asks the node to stop, which is now the only
+#: supported way to stop a running GPU round.
+#:
+#: review-0239-02/F4: nothing in the release read it. The runner wrote a file
+#: nobody polled, so the "two-phase" bound (ask, then wait) was one-phase in
+#: fact. Everything a GPU child is supervised by in this repo now polls it.
+RUNNER_ABORT_FLAG_ENV = "ROUNDRUN_ABORT_FLAG"
+
+
+def runner_abort_reason() -> str | None:
+    """The runner's abort request, if it has made one, else None.
+
+    Returns the flag file's contents (or a plain marker when it is empty or
+    unreadable) so the reason can be recorded in a receipt. Never raises: an
+    unreadable flag still means "the runner asked us to stop".
+    """
+    flag = os.environ.get(RUNNER_ABORT_FLAG_ENV)
+    if not flag or not os.path.exists(flag):
+        return None
+    try:
+        with open(flag, encoding="utf-8") as handle:
+            body = handle.read().strip()
+    except OSError:
+        body = ""
+    return body or f"the round runner set {flag}"
+
+
+def runner_abort_requested() -> bool:
+    """Has the round runner asked this node to stop?
+
+    Parent-side helper for a node's own long-running loops. Poll it between
+    units of work; on True, stop launching new work, write the partial evidence
+    you have, and return or raise so the interpreter unwinds any CUDA context
+    through the normal path.
+    """
+    return runner_abort_reason() is not None
 
 
 class CooperativeChildResult:
@@ -64,6 +112,7 @@ class CooperativeChildResult:
         flag_written: bool,
         flag_written_at_s: float | None,
         escalations: list[str],
+        runner_abort_observed: bool = False,
         io_readings: dict[str, Any] | None = None,
         snapshot_before: dict[str, Any] | None = None,
         snapshot_after: dict[str, Any] | None = None,
@@ -76,6 +125,7 @@ class CooperativeChildResult:
         self.flag_written = flag_written
         self.flag_written_at_s = flag_written_at_s
         self.escalations = escalations
+        self.runner_abort_observed = runner_abort_observed
         self.io_readings = io_readings
         self.snapshot_before = snapshot_before
         self.snapshot_after = snapshot_after
@@ -91,6 +141,7 @@ class CooperativeChildResult:
             "elapsed_s": self.elapsed_s,
             "cooperative_flag_written": self.flag_written,
             "cooperative_flag_written_at_s": self.flag_written_at_s,
+            "runner_abort_observed": self.runner_abort_observed,
             "watchdog_escalations": list(self.escalations),
             "signal_delivered": False,
         }
@@ -141,6 +192,7 @@ class _CooperativeDeadline(threading.Thread):
         self._halt = threading.Event()
         self.flag_written = False
         self.flag_written_at_s: float | None = None
+        self.runner_abort_observed = False
         self.escalations: list[str] = []
 
     def _trip(self, reason: str) -> None:
@@ -168,6 +220,18 @@ class _CooperativeDeadline(threading.Thread):
                     f"cell exceeded its {self._deadline_s:.0f} s deadline; "
                     "cooperative flag set, no signal sent"
                 )
+            elif not self.flag_written:
+                # The runner's own cooperative abort, relayed to this child.
+                # Without this the runner's flag was written and never read
+                # (review-0239-02/F4) and its second phase never happened.
+                runner_reason = runner_abort_reason()
+                if runner_reason is not None:
+                    self.flag_written_at_s = elapsed
+                    self.runner_abort_observed = True
+                    self._trip(
+                        "the round runner requested a cooperative abort "
+                        f"({runner_reason}); cooperative flag set, no signal sent"
+                    )
             self._halt.wait(self._poll)
 
     def halt(self) -> None:
@@ -185,6 +249,7 @@ def emit_child_abort_preamble(flag_path: str) -> str:
     """
     return f'''
 _ABORT_FLAG = {flag_path!r}
+_RUNNER_ABORT_FLAG_ENV = {RUNNER_ABORT_FLAG_ENV!r}
 
 
 class _CooperativeAbort(Exception):
@@ -192,11 +257,24 @@ class _CooperativeAbort(Exception):
 
 
 def _check_abort():
-    """Poll the cooperative flag. The parent never signals; this is the bound."""
+    """Poll the cooperative flags. The parent never signals; this is the bound.
+
+    Two flags, both cooperative. The cell's own flag is written by this child's
+    parent watchdog. The runner's flag is written by the round runner (or by an
+    operator stopping the round by hand) and reaches us through the inherited
+    environment, so this child observes it even if its parent's watchdog thread
+    is starved (review-0239-02/F4).
+    """
     if os.path.exists(_ABORT_FLAG):
         raise _CooperativeAbort(
             "cooperative abort flag observed; unwinding this child's CUDA "
             "context through the normal path"
+        )
+    _runner_flag = os.environ.get(_RUNNER_ABORT_FLAG_ENV)
+    if _runner_flag and os.path.exists(_runner_flag):
+        raise _CooperativeAbort(
+            "the round runner's cooperative abort flag was observed; unwinding "
+            "this child's CUDA context through the normal path"
         )
 '''
 
@@ -262,6 +340,7 @@ def run_gpu_child_cooperative(
         elapsed_s=time.monotonic() - started,
         deadline_s=float(deadline_s),
         flag_written=watchdog.flag_written,
+        runner_abort_observed=watchdog.runner_abort_observed,
         flag_written_at_s=watchdog.flag_written_at_s,
         escalations=list(watchdog.escalations),
         io_readings=sampler.readings() if sampler is not None else None,

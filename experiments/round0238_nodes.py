@@ -225,6 +225,7 @@ from basemap import round0113_prompt_contrast as prompt_contract
 from basemap.gpu_child_supervision import (
     emit_child_abort_preamble,
     run_gpu_child_cooperative,
+    runner_abort_reason,
 )
 from experiments.round0226_nodes import (
     _child_environment,
@@ -570,6 +571,7 @@ class MemAwareFlagWatchdog(FlagWatchdog):
         super().__init__(**kwargs)
         self._conjunction_anon = int(swap_conjunction_anon_bytes)
         self._conjunction_mem = int(swap_conjunction_mem_available_bytes)
+        self.runner_abort_observed = False
         self.mem_available_min_bytes: int | None = None
         self.swap_only_rule_would_have_fired = False
         self.conjunction_samples = 0
@@ -582,6 +584,18 @@ class MemAwareFlagWatchdog(FlagWatchdog):
     def sample_once(self) -> None:
         """One pass of the loop. Split out so a CPU test can drive it exactly."""
         self.samples += 1
+        runner_reason = runner_abort_reason()
+        if runner_reason is not None and not self.aborted:
+            # review-0239-02/F4: the round runner writes its cooperative abort
+            # flag and, before this, nothing in the release read it. Relaying it
+            # onto the cell's flag is what makes the runner's request reach the
+            # process holding the CUDA context. `_trip` writes a file; it has no
+            # signal path.
+            self.runner_abort_observed = True
+            self._trip(
+                "the round runner requested a cooperative abort "
+                f"({runner_reason})"
+            )
         self.device_peak_bytes = max(
             self.device_peak_bytes, _nvidia_smi_device_bytes()
         )
@@ -636,6 +650,7 @@ class MemAwareFlagWatchdog(FlagWatchdog):
             "swap_conjunction_anon_bytes": int(self._conjunction_anon),
             "swap_conjunction_mem_available_bytes": int(self._conjunction_mem),
             "swap_conjunction_note": GUARD_SWAP_CONJUNCTION_NOTE,
+            "runner_abort_observed": bool(self.runner_abort_observed),
         }
 
 
@@ -918,6 +933,27 @@ FUZZY_STRIPE_ROWS = 2_000_000
 GRAPH_SCAN_BLOCK = 5_000_000
 
 
+def _check_runner_abort(where: str) -> None:
+    """Poll the round runner's cooperative abort flag in a parent-side loop.
+
+    review-0239-02/F4: the runner writes `ROUNDRUN_ABORT_FLAG` and, before this,
+    nothing in the release read it, so the "ask, then wait" bound was one-phase.
+    A node's own long-running loops are the other half: `run_truth` holds a live
+    torch CUDA context in *this* process, and the assembly/graph stages run for
+    many minutes with no child to relay the request through.
+
+    Raising unwinds this node in-band, so the interpreter tears down whatever
+    CUDA context it holds through the normal path. No signal is involved.
+    """
+    reason = runner_abort_reason()
+    if reason is not None:
+        raise Round0238Error(
+            f"the round runner requested a cooperative abort (observed at "
+            f"{where}): {reason}. Unwinding this node in-band; no signal was "
+            "delivered and no CUDA context was killed."
+        )
+
+
 def _draw_streaming(
     *,
     shards: Sequence[tuple[str, int, bool]],
@@ -971,6 +1007,7 @@ def _draw_streaming(
             picked[draw] = True
             shard_of = np.searchsorted(offsets, draw, side="right") - 1
             for index, (path, rows, real_npy) in enumerate(shards):
+                _check_runner_abort(f"{corpus} shard draw")
                 here = draw[shard_of == index]
                 local = here - offsets[index]
                 if local.size == 0:
@@ -1034,6 +1071,7 @@ def _graph_validity_blocked(
     width: int | None = None
     scanned = 0
     for begin in range(0, int(rows), int(block)):
+        _check_runner_abort("graph validity stripe")
         end = min(begin + int(block), int(rows))
         piece = _graph_validity_stripe(ids, begin, end, rows)
         scanned += int(piece["rows"])
@@ -1183,6 +1221,7 @@ def _fuzzy_symmetrise_blocked(
     written = 0
     stripes = 0
     for lo in range(0, int(rows), int(stripe_rows)):
+        _check_runner_abort("fuzzy symmetrise stripe")
         hi = min(lo + int(stripe_rows), int(rows))
         stripes += 1
         height = hi - lo
@@ -1266,6 +1305,7 @@ def _blocked_descending_sort(
     ids_sorted = np.empty((int(rows), GRAPH_K), dtype=np.int32)
     cos_sorted = np.empty((int(rows), GRAPH_K), dtype=np.float32)
     for begin in range(0, int(rows), int(block)):
+        _check_runner_abort("descending sort block")
         end = min(begin + int(block), int(rows))
         piece = np.asarray(cosines[begin:end])
         order = np.argsort(-piece, axis=1, kind="stable")
@@ -1852,6 +1892,7 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     increment_vectors: dict[str, dict[str, Any]] = {}
     staging = ensure_data_directory(os.path.join(output, ".staging"))
     for index, (corpus, want_total) in enumerate(COMPOSITION):
+        _check_runner_abort(f"assembly draw for {corpus}")
         shards = _shards(corpus)
         total = int(sum(rows for _p, rows, _n in shards))
         sealed_source = (parent_sealed.get("sources") or {}).get(corpus) or {}
@@ -1965,6 +2006,7 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 f"R0237 substrate geometry is not ({PARENT_ROWS}, {DIMENSION})"
             )
         for begin in range(0, PARENT_ROWS, COPY_BLOCK):
+            _check_runner_abort("parent substrate copy")
             end = min(begin + COPY_BLOCK, PARENT_ROWS)
             block = np.asarray(source[begin:end])
             norms = np.linalg.norm(block, axis=1)
@@ -2355,6 +2397,7 @@ def run_truth(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     )
     search_started = time.monotonic()
     for chunk_start in range(0, ROWS, TRUTH_DB_CHUNK):
+        _check_runner_abort("exact-truth database chunk")
         chunk_end = min(chunk_start + TRUTH_DB_CHUNK, ROWS)
         database = torch.empty(
             (chunk_end - chunk_start, DIMENSION), dtype=torch.float32, device=device
@@ -2365,6 +2408,7 @@ def run_truth(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 np.ascontiguousarray(host[begin:end])
             ).to(device)
         for qs in range(0, TRUTH_PROBE_ROWS, TRUTH_QUERY_BLOCK):
+            _check_runner_abort("exact-truth query block")
             qe = min(qs + TRUTH_QUERY_BLOCK, TRUTH_PROBE_ROWS)
             query = queries[qs:qe]
             block_s = best_s[qs:qe]
