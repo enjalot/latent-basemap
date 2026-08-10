@@ -45,6 +45,8 @@ from basemap.round0229_quality_contract import (  # noqa: F401
 )
 from basemap.round0238_rung5 import GRAPH_K
 from basemap.round0244_guard import ROUND_ID, ROWS, Round0244Error
+from basemap.round0247_registry import clamp as _clamp_r0247
+from basemap.round0247_registry import override_records as _override_records
 
 # --------------------------------------------------------------------------- #
 # D. the edge list as a sampling distribution
@@ -288,7 +290,18 @@ def two_level_weight_sample(
     total = float(profile["total_weight"])
     if total <= 0.0:
         raise Round0244Error("R0244 sampler needs positive total weight")
-    chunk_draws = max(int(poll_chunk_draws), 1)
+    #: R0247: `poll_chunk_draws` sets how many draws pass between two
+    #: cooperative-abort reads, so it is a safety parameter in exactly the
+    #: sense R0247 registers. A caller passing 40,000,000 restores R0245's
+    #: single-chunk behaviour and with it the 24.46713631998864 s gap this
+    #: family of rounds exists to close. It is clamped at the registry and the
+    #: attempt is recorded on the returned evidence.
+    chunk_effective, chunk_record = _clamp_r0247(
+        "sampler_poll_chunk_draws", poll_chunk_draws,
+        site="two_level_weight_sample(poll_chunk_draws=)",
+        label="R0244 two-level weight sample",
+    )
+    chunk_draws = max(int(chunk_effective), 1)
     rng = np.random.default_rng(int(seed))
     block_cdf = np.cumsum(block_sums)
     block_cdf[-1] = total
@@ -362,6 +375,10 @@ def two_level_weight_sample(
         "distinct_edges_drawn": int(distinct),
         "block_cdf_bytes": int(block_cdf.nbytes),
         "poll_chunk_draws": chunk_draws,
+        "declared_poll_chunk_draws": int(poll_chunk_draws),
+        "safety_overrides": [
+            dict(record) for record in _override_records([chunk_record])
+        ],
     }
 
 

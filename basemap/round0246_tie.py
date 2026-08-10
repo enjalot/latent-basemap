@@ -43,6 +43,15 @@ import numpy as np
 
 from basemap.round0227_low_c_contract import TIE_TOLERANCE
 from basemap.round0246_guard import Round0246Error
+from basemap.round0247_registry import (
+    TIE_USE_MAX_EXPECTED_FLIPS_OVER_MARGIN,
+    clamp,
+    clamp_int,
+    override_records,
+    registered_bounds,
+    require_no_weakening_overrides,
+    verify_registry,
+)
 
 #: A fresh seed, neither R0245's `245001` nor review-0245-01's `918273`, so the
 #: replication is a third independent draw.
@@ -55,7 +64,14 @@ TIE_AGGREGATE_ONLY_RULE = (
     "5e-07 and a measured maximum that exceeds the tolerance. It is therefore "
     "an AGGREGATE estimator only. A published claim may consume it where the "
     "expected number of flipped per-candidate decisions behind the claim is "
-    "below 1% of the margin that would have to be crossed to change the claim; "
+    "below 1% of the margin that would have to be crossed to change the claim "
+    "(TIE_USE_MAX_EXPECTED_FLIPS_OVER_MARGIN = 0.01, the criterion for "
+    "ADMITTING a new consumption); a claim ALREADY PUBLISHED is adjudicated "
+    "instead at TIE_CLAIM_MAX_EXPECTED_FLIPS_OVER_MARGIN = 1.0, which asks "
+    "the different question of whether the published number is expected to be "
+    "wrong. review-0246-01 H5 found this text and the code disagreeing by "
+    "100x; the reconciliation is that the two functions were always asking "
+    "different questions and only one rule text had been written. And "
     "no claim may rest on the tie-aware verdict of an individual row, or on an "
     "exact small integer count of rows selected by the tie-aware threshold "
     "test. The strict estimator is a set test over truth ids, is immune to "
@@ -71,16 +87,23 @@ TIE_AGGREGATE_ONLY_RULE = (
 #: defined per claim as the number of candidate verdicts that would have to
 #: change for the claim to read differently AT THE PRECISION IT IS PUBLISHED
 #: TO. The precision is already inside the margin, so the ratio's threshold is
-#: `1.0` and not some second fudge factor on top of it.
+#: `1.0` and not some second fudge factor on top of it. R0247 keeps this as the
+#: RETROSPECTIVE criterion and registers the sealed rule text's 1% as the
+#: PROSPECTIVE one; see `TIE_USE_MAX_EXPECTED_FLIPS_OVER_MARGIN`.
 TIE_CLAIM_MAX_EXPECTED_FLIPS_OVER_MARGIN = 1.0
 
-#: A PLANTED rate for the routing control, not a measurement. At `1e-06` an
-#: aggregate consumption of R0243's `2,915` count expects `7.5` flipped
-#: verdicts against a `29.15` margin and is permitted, while a claim whose
-#: margin is one verdict expects the same `7.5` and is refused. The control
-#: exists to show the gate routes the two differently at the SAME rate; the
-#: measured rate is what the adjudication uses.
-TIE_CONTROL_PLANTED_FLIP_RATE = 1e-06
+#: A PLANTED rate for the routing control, not a measurement. R0247 moved it
+#: from `1e-06` to `1e-08` because the admission criterion moved from `1.0` to
+#: the sealed `0.01`: at `1e-08` an aggregate consumption of R0243's `2,915`
+#: count expects `0.075` flipped verdicts against a `29.15` margin
+#: (`0.00257` of it, permitted) while a claim whose margin is one verdict
+#: expects the same `0.075` (`0.075` of it, refused). The control exists to
+#: show the gate routes the two differently at the SAME rate, and the rate has
+#: to sit inside the window where they differ or the control tests nothing.
+#: The measured rate is what the adjudication uses; this number is registered
+#: as free to move for exactly that reason (round0247_registry
+#: EXAMINED_NOT_SAFETY).
+TIE_CONTROL_PLANTED_FLIP_RATE = 1e-08
 
 #: The population at risk behind any claim computed from the probe's tie-aware
 #: vector. A flip anywhere in the probe can move a probe-wide count, and - the
@@ -118,11 +141,31 @@ def tie_aware_precision_profile(
     `float32`, so the irreducible floor is that quantisation. Both floors are
     reported.
     """
+    verify_registry(label="R0246 tie precision profile")
+    #: R0247 attack tie-r0247-1: raising the tolerance widens the band, so
+    #: fewer verdicts differ between float32 and float64, so the MEASURED flip
+    #: rate falls and more published claims survive. The measurement that
+    #: adjudicates the claims was scored at a threshold the caller supplied.
+    tolerance_effective, tolerance_record = clamp(
+        "tie_tolerance", tolerance,
+        site="tie_aware_precision_profile(tolerance=)",
+        label="R0246 tie precision profile",
+    )
+    rows_effective, rows_record = clamp_int(
+        "tie_precision_min_rows", sample_rows,
+        site="tie_aware_precision_profile(sample_rows=)",
+        label="R0246 tie precision profile",
+    )
+    overrides = override_records([tolerance_record, rows_record])
+    require_no_weakening_overrides(
+        overrides, label="R0246 tie precision profile"
+    )
+    sample_rows = int(rows_effective)
     rng = np.random.default_rng(int(seed))
     total = int(np.asarray(probe_query_rows).size)
     take = min(int(sample_rows), total)
     picked = np.sort(rng.choice(total, size=take, replace=False))
-    tolerance = float(tolerance)
+    tolerance = float(tolerance_effective)
 
     f32_deltas: list[np.ndarray] = []
     f64_deltas: list[np.ndarray] = []
@@ -266,6 +309,12 @@ def tie_aware_precision_profile(
                 "float64 instead of float32."
             ),
         },
+        "safety_overrides": [dict(record) for record in overrides],
+        **registered_bounds([
+            "tie_tolerance", "tie_precision_min_rows",
+            "tie_claim_max_expected_flips_over_margin",
+            "tie_use_max_expected_flips_over_margin",
+        ]),
         "rule": TIE_AGGREGATE_ONLY_RULE,
     }
 
@@ -485,6 +534,17 @@ def adjudicate_tie_aware_claims(
     margin_fraction: float = TIE_CLAIM_MAX_EXPECTED_FLIPS_OVER_MARGIN,
 ) -> dict[str, Any]:
     """Propagate the measured flip rate through every ledger entry."""
+    verify_registry(label="R0246 tie claim adjudication")
+    fraction_effective, fraction_record = clamp(
+        "tie_claim_max_expected_flips_over_margin", margin_fraction,
+        site="adjudicate_tie_aware_claims(margin_fraction=)",
+        label="R0246 tie claim adjudication",
+    )
+    overrides = override_records([fraction_record])
+    require_no_weakening_overrides(
+        overrides, label="R0246 tie claim adjudication"
+    )
+    margin_fraction = float(fraction_effective)
     rate = profile["verdict_flips"]["per_candidate_flip_rate"]
     if rate is None:
         raise Round0246Error("R0246 cannot adjudicate without a flip rate")
@@ -508,6 +568,8 @@ def adjudicate_tie_aware_claims(
         "instrument": "round0246-tie-claim-adjudication-v1",
         "measured_per_candidate_flip_rate": rate,
         "margin_fraction": float(margin_fraction),
+        "safety_overrides": [dict(record) for record in overrides],
+        **registered_bounds(["tie_claim_max_expected_flips_over_margin"]),
         "claims": rows,
         "claims_examined": len(rows),
         "claims_that_survive": sum(1 for row in rows if row["survives"]),
@@ -528,9 +590,23 @@ def require_aggregate_tie_aware_use(
     margin: float,
     flip_rate: float,
     label: str,
-    margin_fraction: float = TIE_CLAIM_MAX_EXPECTED_FLIPS_OVER_MARGIN,
+    margin_fraction: float = TIE_USE_MAX_EXPECTED_FLIPS_OVER_MARGIN,
 ) -> dict[str, Any]:
-    """The registered gate: refuse a tie-aware consumption that is too fine."""
+    """The registered gate: refuse a tie-aware consumption that is too fine.
+
+    R0247 reconciles this with `TIE_AGGREGATE_ONLY_RULE`: the sealed text says
+    "below 1% of the margin" and R0246 applied `1.0`. The 1% is now what this
+    function applies, and it is clamped at the registry so a caller cannot
+    restore the looser number.
+    """
+    verify_registry(label=f"R0246 tie use gate {label}")
+    fraction_effective, fraction_record = clamp(
+        "tie_use_max_expected_flips_over_margin", margin_fraction,
+        site="require_aggregate_tie_aware_use(margin_fraction=)", label=label,
+    )
+    overrides = override_records([fraction_record])
+    require_no_weakening_overrides(overrides, label=f"tie-aware use {label}")
+    margin_fraction = float(fraction_effective)
     expected = float(decisions) * float(flip_rate)
     ratio = expected / float(margin) if float(margin) > 0 else float("inf")
     verdict = {
@@ -542,6 +618,8 @@ def require_aggregate_tie_aware_use(
         "expected_flips_over_margin": ratio,
         "margin_fraction": float(margin_fraction),
         "use_is_permitted": bool(ratio <= float(margin_fraction)),
+        "safety_overrides": [dict(record) for record in overrides],
+        **registered_bounds(["tie_use_max_expected_flips_over_margin"]),
         "rule": TIE_AGGREGATE_ONLY_RULE,
     }
     if not verdict["use_is_permitted"]:
@@ -606,6 +684,7 @@ def tie_use_positive_control(
 
 __all__ = [
     "TIE_AGGREGATE_ONLY_RULE",
+    "TIE_USE_MAX_EXPECTED_FLIPS_OVER_MARGIN",
     "TIE_AWARE_CLAIM_LEDGER",
     "PROBE_CANDIDATE_DECISIONS",
     "TIE_CLAIM_MAX_EXPECTED_FLIPS_OVER_MARGIN",

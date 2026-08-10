@@ -423,6 +423,7 @@ class AbortPollGate(AbortPollTracker):
         self.declared_max_poll_spacing_s = float(max_poll_spacing_s)
         self._min_polls = int(polls_effective)
         self.declared_min_polls = int(min_polls)
+        self.last_verdict: dict[str, Any] | None = None
         self.started_at_s: float | None = None
         self.finished_at_s: float | None = None
         self.gap_before_the_first_poll_s: float | None = None
@@ -614,6 +615,9 @@ class AbortPollGate(AbortPollTracker):
         ]
         verdict["failures"] = failures
         verdict["holds"] = not failures
+        #: R0247: the scored verdict is kept on the gate so a control can read
+        #: WHICH arms fired on a refusal instead of parsing the message.
+        self.last_verdict = verdict
         if failures:
             raise Round0246Error(
                 f"R0246 STOP: {self.label} does not meet the poll-spacing gate "
