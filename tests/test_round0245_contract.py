@@ -264,6 +264,25 @@ def test_abort_poll_tracker_measures_and_refuses(monkeypatch) -> None:
     generous("b")
     assert generous.require()["requirement"]["requirement_holds"] is True
 
+    #: the gate binds on the stage's OWN measured slope: a stage that really
+    #: did allocate at 20 GB/s between two reads must be refused even when the
+    #: worst-case column would have passed it.
+    own = guard.AbortPollTracker(
+        inner=seen.append, headroom_bytes=1, label="own slope",
+        slope_bytes_per_s=1.0,
+    )
+    own("a")
+    own("b")
+    #: worst-case column set to 1 B/s passes; the stage's own 20 GB/s does not
+    assert own.verdict(measured_slope_bytes_per_s=1.0)[
+        "worst_case_requirement"
+    ]["requirement_holds"] is True
+    with pytest.raises(guard.Round0245Error):
+        own.require(measured_slope_bytes_per_s=2.0e10)
+    scored = own.verdict(measured_slope_bytes_per_s=1.0)
+    assert scored["own_slope_requirement"] is not None
+    assert scored["worst_case_requirement"]["slope_bytes_per_s"] == 1.0
+
 
 # --------------------------------------------------------------------------- #
 # fix 4 — the decision map is a gate

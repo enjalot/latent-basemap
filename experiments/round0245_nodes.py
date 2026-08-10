@@ -465,10 +465,15 @@ def run_did(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         guard.poll("R0245 measured the cosine agreement floor")
 
         #: 6. What the unrestricted permutation costs.
-        permutation = permutation_design_cost()
+        permutation = permutation_design_cost(abort_check=tracker)
         tracker("R0245 priced the permutation design")
         guard.poll("R0245 priced the permutation design")
-    enforcement = tracker.require()
+    did_guard_receipt = guard.receipt()
+    enforcement = tracker.require(
+        measured_slope_bytes_per_s=slope_from_trace(
+            did_guard_receipt["anonymous_trace_by_second"]
+        )["max_rise_bytes_per_s"]
+    )
 
     vector_dir = create_fresh_directory(
         os.path.join(output, "vectors"), label="R0245 DiD vectors"
@@ -562,9 +567,9 @@ def run_did(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "enforcement_poll_spacing": enforcement,
         "sealed_vectors": saved,
         "sampler_liveness": _require_live_sampler(
-            guard.receipt(), label="R0245 DiD decision gate"
+            did_guard_receipt, label="R0245 DiD decision gate"
         ),
-        "host_watchdog": guard.receipt(),
+        "host_watchdog": did_guard_receipt,
         "bulk_input_memmap_attestation": _memmap_attestation({
             "strict_builder_missing": strict_builder,
             "tie_aware_builder_missing": tie_builder,
@@ -640,7 +645,12 @@ def run_sampler(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             battery=battery, draw_floor=floor, blind_spot=blind_spot,
             dispersion=dispersion,
         )
-    enforcement = tracker.require()
+    sampler_guard_receipt = guard.receipt()
+    enforcement = tracker.require(
+        measured_slope_bytes_per_s=slope_from_trace(
+            sampler_guard_receipt["anonymous_trace_by_second"]
+        )["max_rise_bytes_per_s"]
+    )
     io_after = io_counters()
 
     profile_public = {
@@ -677,7 +687,7 @@ def run_sampler(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "limits": limits,
         "enforcement_poll_spacing": enforcement,
         "sampler_liveness": _require_live_sampler(
-            guard.receipt(), label="R0245 sampler power"
+            sampler_guard_receipt, label="R0245 sampler power"
         ),
         "verdict_arms": {
             "correct_sampler_passes_at_a_fresh_seed": bool(reference["holds"]),
@@ -686,11 +696,11 @@ def run_sampler(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 floor["registered_draws_clear_the_floor"]
             ),
             "anonymous_peak_within_budget": bool(
-                int(guard.receipt()["thread_peak_anonymous_bytes"])
+                int(sampler_guard_receipt["thread_peak_anonymous_bytes"])
                 <= int(SAMPLER_MAX_ANONYMOUS_BYTES)
             ),
         },
-        "host_watchdog": guard.receipt(),
+        "host_watchdog": sampler_guard_receipt,
         "walls": {"profile_s": profile_wall},
         "io": {
             "read_bytes": int(io_after["read_bytes"] - io_before["read_bytes"]),

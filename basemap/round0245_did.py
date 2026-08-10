@@ -690,6 +690,8 @@ def permutation_design_cost(
     seed: int = PERMUTATION_TYPEI_SEED,
     map_sd: float = 1.0,
     within_sd: float = 1.0,
+    abort_check: Any = None,
+    poll_every: int = 200,
 ) -> dict[str, Any]:
     """What the unrestricted permutation buys and what it costs.
 
@@ -717,7 +719,9 @@ def permutation_design_cost(
     rng = np.random.default_rng(int(seed))
     rejected = 0
     p_values: list[float] = []
-    for _trial in range(int(trials)):
+    for trial in range(int(trials)):
+        if abort_check is not None and trial % int(poll_every) == 0:
+            abort_check(f"R0245 permutation type-I trial {trial}")
         level = rng.normal(0.0, float(map_sd), size=n)
         c1 = level + rng.normal(0.0, float(within_sd), size=n)
         c2 = level + rng.normal(0.0, float(within_sd), size=n)

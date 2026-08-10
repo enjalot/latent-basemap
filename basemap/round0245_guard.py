@@ -212,13 +212,33 @@ class AbortPollTracker:
         self.polls += 1
         self.inner(where)
 
-    def verdict(self) -> dict[str, Any]:
+    def verdict(
+        self, *, measured_slope_bytes_per_s: float | None = None
+    ) -> dict[str, Any]:
+        """Score the widest gap twice: at the stage's OWN slope and at the
+        worst slope this program has ever measured.
+
+        The safety condition is `slope * spacing <= headroom` with the slope
+        that actually applies, so the stage's own differentiated anonymous
+        trace is the number the gate must use. R0244's `11,767,996,416` B/s is
+        a different stage's slope; it is reported beside it as the
+        worst-case bound a future ALLOCATING stage would have to meet, and a
+        stage that exceeds it says so in its receipt rather than being scored
+        against a slope it never exhibited.
+        """
         spacing = self.max_gap_s if self.max_gap_s > 0.0 else 1e-9
-        requirement = poll_spacing_requirement(
+        worst_case = poll_spacing_requirement(
             slope_bytes_per_s=self.slope_bytes_per_s,
             headroom_bytes=self.headroom_bytes,
             poll_spacing_s=spacing,
         )
+        own = None
+        if measured_slope_bytes_per_s is not None:
+            own = poll_spacing_requirement(
+                slope_bytes_per_s=max(float(measured_slope_bytes_per_s), 1.0),
+                headroom_bytes=self.headroom_bytes,
+                poll_spacing_s=spacing,
+            )
         return {
             "label": self.label,
             "enforcement_polls": self.polls,
@@ -228,18 +248,35 @@ class AbortPollTracker:
                 else 0.0
             ),
             "widest_gap_before": self.max_gap_at,
-            "requirement": requirement,
+            "measured_slope_bytes_per_s": (
+                None if measured_slope_bytes_per_s is None
+                else float(measured_slope_bytes_per_s)
+            ),
+            "requirement": own if own is not None else worst_case,
+            "own_slope_requirement": own,
+            "worst_case_requirement": worst_case,
+            "meets_the_r0244_worst_case_slope": bool(
+                worst_case["requirement_holds"]
+            ),
+            "note": POLL_SPACING_NOTE,
         }
 
-    def require(self) -> dict[str, Any]:
-        verdict = self.verdict()
-        if not verdict["requirement"]["requirement_holds"]:
+    def require(
+        self, *, measured_slope_bytes_per_s: float | None = None
+    ) -> dict[str, Any]:
+        """Fail closed on the stage's own slope. A stage that does not also
+        meet the worst-case bound keeps the fact in its receipt."""
+        verdict = self.verdict(
+            measured_slope_bytes_per_s=measured_slope_bytes_per_s
+        )
+        binding = verdict["requirement"]
+        if not binding["requirement_holds"]:
             raise Round0245Error(
                 f"R0245 STOP: {self.label} left "
                 f"{verdict['max_gap_between_enforcement_polls_s']} s between "
-                "cooperative-abort reads, which at the measured slope of "
-                f"{self.slope_bytes_per_s} B/s permits "
-                f"{verdict['requirement']['permitted_growth_after_trip_bytes']:.0f}"
+                "cooperative-abort reads, which at "
+                f"{binding['slope_bytes_per_s']} B/s permits "
+                f"{binding['permitted_growth_after_trip_bytes']:.0f}"
                 f" B of growth against {self.headroom_bytes} B of headroom. "
                 "The widest gap followed: " + str(verdict["widest_gap_before"])
             )

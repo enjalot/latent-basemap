@@ -286,13 +286,13 @@ def certified_weight_floor(
 # --------------------------------------------------------------------------- #
 # the mis-sampler family, drawn for real and scored by the imported check
 # --------------------------------------------------------------------------- #
-def _uniform_positions(weights, *, profile, draws, rng):
+def _uniform_positions(weights, *, profile, draws, rng, abort_check=None):
     array = np.asarray(weights)
     edge_index = rng.integers(0, array.size, size=int(draws), dtype=np.int64)
     return edge_index
 
 
-def _block_by_weight_uniform_within(weights, *, profile, draws, rng):
+def _block_by_weight_uniform_within(weights, *, profile, draws, rng, abort_check=None):
     array = np.asarray(weights)
     block = int(profile["block"])
     sums = np.asarray(profile["block_sums"], dtype=np.float64)
@@ -306,7 +306,7 @@ def _block_by_weight_uniform_within(weights, *, profile, draws, rng):
     return lo + (rng.random(int(draws)) * span).astype(np.int64)
 
 
-def _uniform_block_weight_within(weights, *, profile, draws, rng):
+def _uniform_block_weight_within(weights, *, profile, draws, rng, abort_check=None):
     array = np.asarray(weights)
     block = int(profile["block"])
     blocks = int(profile["blocks"])
@@ -319,6 +319,8 @@ def _uniform_block_weight_within(weights, *, profile, draws, rng):
     out = np.empty(int(draws), dtype=np.int64)
     for start, end in zip(starts, ends):
         index = int(ordered[start])
+        if abort_check is not None:
+            abort_check(f"R0245 mis-sampler block {index}")
         lo = index * block
         hi = min(lo + block, array.size)
         chunk = np.asarray(array[lo:hi], dtype=np.float64)
@@ -331,7 +333,7 @@ def _uniform_block_weight_within(weights, *, profile, draws, rng):
     return out
 
 
-def _float32_within_block_cdf(weights, *, profile, draws, rng):
+def _float32_within_block_cdf(weights, *, profile, draws, rng, abort_check=None):
     array = np.asarray(weights)
     block = int(profile["block"])
     sums = np.asarray(profile["block_sums"], dtype=np.float64)
@@ -348,6 +350,8 @@ def _float32_within_block_cdf(weights, *, profile, draws, rng):
     out = np.empty(int(draws), dtype=np.int64)
     for start, end in zip(starts, ends):
         index = int(ordered[start])
+        if abort_check is not None:
+            abort_check(f"R0245 mis-sampler block {index}")
         lo = index * block
         hi = min(lo + block, array.size)
         chunk = np.asarray(array[lo:hi], dtype=np.float32)
@@ -362,13 +366,15 @@ def _float32_within_block_cdf(weights, *, profile, draws, rng):
     return out
 
 
-def _drop_tail_below_epoch_floor(weights, *, profile, draws, rng):
+def _drop_tail_below_epoch_floor(weights, *, profile, draws, rng, abort_check=None):
     array = np.asarray(weights)
     floor = float(profile["epoch_weight_floor"])
     block = int(profile["block"])
     blocks = int(profile["blocks"])
     kept_sums = np.zeros(blocks, dtype=np.float64)
     for index in range(blocks):
+        if abort_check is not None:
+            abort_check(f"R0245 epoch-floor block sum {index}")
         lo = index * block
         chunk = np.asarray(array[lo:min(lo + block, array.size)], dtype=np.float64)
         kept_sums[index] = float(chunk[chunk >= floor].sum())
@@ -385,6 +391,8 @@ def _drop_tail_below_epoch_floor(weights, *, profile, draws, rng):
     out = np.empty(int(draws), dtype=np.int64)
     for start, end in zip(starts, ends):
         index = int(ordered[start])
+        if abort_check is not None:
+            abort_check(f"R0245 mis-sampler block {index}")
         lo = index * block
         hi = min(lo + block, array.size)
         chunk = np.asarray(array[lo:hi], dtype=np.float64)
@@ -429,8 +437,11 @@ def mis_sampler_battery(
             abort_check(f"R0245 mis-sampler {name}")
         rng = np.random.default_rng(int(seed) + offset)
         edge_index = _IMPLEMENTATIONS[name](
-            array, profile=profile, draws=int(draws), rng=rng
+            array, profile=profile, draws=int(draws), rng=rng,
+            abort_check=abort_check,
         )
+        if abort_check is not None:
+            abort_check(f"R0245 mis-sampler {name} drawn")
         sample = {
             "draws": int(draws),
             "seed": int(seed) + offset,
@@ -439,6 +450,8 @@ def mis_sampler_battery(
             "chosen_block": (edge_index // block).astype(np.int64),
         }
         verdict = sampling_fidelity(profile=profile, sample=sample)
+        if abort_check is not None:
+            abort_check(f"R0245 mis-sampler {name} scored")
         arms = verdict["arms"]
         rejecting = [
             arm for arm, holds in arms.items() if not holds
@@ -579,6 +592,8 @@ def true_sampler_reference(
         weights, profile=profile, draws=int(draws), seed=int(seed),
         abort_check=abort_check,
     )
+    if abort_check is not None:
+        abort_check("R0245 correct sampler drawn")
     verdict = sampling_fidelity(profile=profile, sample=sample)
     out = {
         "seed": int(seed),

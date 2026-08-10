@@ -26,6 +26,7 @@ from basemap import round0113_prompt_contrast as prompt_contract
 from basemap.artifact_identity import expected_input_signature
 from basemap.output_safety import atomic_save_new_npy, atomic_write_new_json
 from basemap.round0238_rung5 import json_safe
+from basemap import round0245_guard as guard_module
 from experiments import round0245_nodes as nodes
 
 TINY_ROWS = 400
@@ -280,9 +281,13 @@ def test_did_entry_path_runs_end_to_end(monkeypatch, scratch, world, armed):
     ] >= 1
     assert receipt["cosine_agreement_profile"]["matched_candidate_truth_pairs"] > 0
     assert receipt["permutation_design_cost"]["unrestricted_labellings"] == 252
-    assert receipt["enforcement_poll_spacing"]["requirement"][
-        "requirement_holds"
-    ] is True
+    enforcement = receipt["enforcement_poll_spacing"]
+    assert enforcement["requirement"]["requirement_holds"] is True
+    assert enforcement["own_slope_requirement"] is not None
+    assert enforcement["measured_slope_bytes_per_s"] is not None
+    assert enforcement["worst_case_requirement"]["slope_bytes_per_s"] == float(
+        guard_module.R0244_MEASURED_SLOPE_BYTES_PER_S
+    )
     assert os.path.exists(
         os.path.join(output, "vectors", "did-v2-placebo-a-rows.i64.npy")
     )
