@@ -245,8 +245,29 @@ def test_block_device_and_meminfo_instruments_answer_on_this_box():
     assert nodes._mem_available_bytes() > 0
 
 
+def _r0237_substrate_array_present() -> bool:
+    """The manifest can outlive the array it describes.
+
+    The 50M substrate's data region is byte-identical to the first
+    76,800,000,000 bytes of the 100M substrate (verified by a full `cmp`), so on
+    2026-08-09 the duplicate array was reclaimed while `substrate.json` and the
+    rest of the capability were kept. Regeneration is documented beside it in
+    `RECOVERY-substrate.f32.npy.md`. This test size-checks the array, so it must
+    skip on the array's absence and not merely the manifest's.
+    """
+    if not os.path.exists(R0237_SUBSTRATE_MANIFEST):
+        return False
+    try:
+        with open(R0237_SUBSTRATE_MANIFEST) as fh:
+            sealed = json.load(fh)
+        return os.path.exists(sealed["substrate"]["canonical_path"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 @pytest.mark.skipif(
-    not os.path.exists(R0237_SUBSTRATE_MANIFEST), reason="R0237 substrate absent"
+    not _r0237_substrate_array_present(),
+    reason="R0237 substrate manifest or array absent",
 )
 def test_parent_manifest_verifies_and_carries_what_nesting_needs():
     sealed = prompt_contract.read_sealed(
