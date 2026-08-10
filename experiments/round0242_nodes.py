@@ -87,6 +87,9 @@ from basemap.round0242_locality import (
     LOCALITY_FILE,
     LOCALITY_NOTE,
     LOCALITY_SCHEMA,  # noqa: F401  (Part B asserts Part A's schema)
+    MEASUREMENT_EARLY_FILE,
+    MEASUREMENT_EARLY_SCHEMA,
+    PARTITION_BACKEND_NOTE,
     PARTITION_REALISATION_NOTE,
     PARTITION_SEED,
     PERMUTATIONS,
@@ -105,7 +108,9 @@ from basemap.round0242_locality import (
     host_anonymous_bytes,
     in_degree_bin_table,
     io_counters,
+    assign_torch,
     json_scrub,
+    kmeans_torch,
     locality_verdict,
     loss_decomposition,
     partition_agreement,
@@ -402,29 +407,52 @@ def _builder_agreement_strata(
 def _cluster_assignment(
     *, substrate: np.ndarray, clusters: int, seed: int, spill: int
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """R0226's `_kmeans` and `_assign`, imported unmodified at the registered seed.
+    """The registered `c = 400, s = 8, seed 226` partition, re-realised in torch.
 
-    This is the only stage in the round that touches the card, and it is the
-    same call R0238's sealed reachability probe made. cuVS is not involved: the
-    device sees explicit `cupy` copies of contiguous host blocks, never a
-    managed-memory handle to an anonymous buffer, which is the construct that
-    wedged this box at R0232.
+    Attempt 1 of this round died here: R0226's `_kmeans`/`_assign` are `cupy`
+    functions, `cupy` lives only in the cuml-env, and reaching it needs the
+    child process R0238 used and this round's safety contract forbids. The
+    algorithm is transcribed instead - identical registered constants, identical
+    seeded `numpy` draws, identical Lloyd step - and the realisation is
+    VALIDATED against R0238's sealed reachability vector rather than assumed.
+    See `PARTITION_BACKEND_NOTE`.
+
+    This is the only stage that touches the card. cuVS is not involved and
+    nothing is mapped: the device sees explicit copies of contiguous host
+    blocks, never a managed-memory handle to an anonymous buffer, which is the
+    construct that wedged this box at R0232.
     """
-    import cupy as cp
-    import cupyx
+    import torch
 
-    from basemap.round0226_cluster_spill_build import _assign, _kmeans
+    from basemap.round0226_graph_builders import (
+        A_ASSIGN_BLOCK,
+        A_KMEANS_ITERATIONS,
+        A_KMEANS_SUBSAMPLE_ROWS,
+    )
 
+    if not torch.cuda.is_available():
+        raise Round0242Error(
+            "R0242 partition re-realisation needs the card; torch reports no "
+            "CUDA device"
+        )
+    device = torch.device("cuda")
     started = time.perf_counter()
-    centroids = _kmeans(cp, cupyx, substrate, clusters=int(clusters), seed=int(seed))
+    centroids = kmeans_torch(
+        torch, substrate, clusters=int(clusters), seed=int(seed),
+        subsample_rows=A_KMEANS_SUBSAMPLE_ROWS,
+        iterations=A_KMEANS_ITERATIONS, device=device,
+    )
     kmeans_s = time.perf_counter() - started
     started = time.perf_counter()
-    assignment = _assign(
-        cp, substrate, centroids, rows=int(substrate.shape[0]), spill=int(spill)
+    assignment = assign_torch(
+        torch, substrate, centroids, rows=int(substrate.shape[0]),
+        spill=int(spill), block=A_ASSIGN_BLOCK, device=device,
+        poll=_check_runner_abort,
     )
     assign_s = time.perf_counter() - started
+    device_peak = int(torch.cuda.max_memory_allocated(device))
     del centroids
-    cp.get_default_memory_pool().free_all_blocks()
+    torch.cuda.empty_cache()
     sizes = np.bincount(
         assignment.ravel(), minlength=int(clusters)
     ).astype(np.int64)
@@ -435,6 +463,14 @@ def _cluster_assignment(
         "clusters": int(clusters),
         "spill": int(spill),
         "seed": int(seed),
+        "backend": "torch-cuda",
+        "backend_note": PARTITION_BACKEND_NOTE,
+        "registered_constants": {
+            "kmeans_subsample_rows": int(A_KMEANS_SUBSAMPLE_ROWS),
+            "kmeans_iterations": int(A_KMEANS_ITERATIONS),
+            "assign_block_rows": int(A_ASSIGN_BLOCK),
+        },
+        "device_peak_allocated_bytes": device_peak,
         "kmeans_seconds": float(kmeans_s),
         "assign_seconds": float(assign_s),
         "spill_cluster_sizes": {
@@ -617,6 +653,40 @@ def run_locality(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     )
     agreement_guard.stop()
     watchdog.poll("after the adversarial agreement gather")
+
+    # ---- EARLY WRITE 1: everything measured so far, before the card is used -- #
+    # Attempt 1 of this round reached exactly this point - recall reproduced,
+    # in-degree reproduced, agreement measured - and then lost all `565.89 s` of
+    # it to a `ModuleNotFoundError` in the next stage. That is review-0240-01/F2
+    # happening again inside the round written to avoid it. Nothing measured is
+    # held in memory across a stage boundary any more.
+    measurement_path = os.path.join(output, MEASUREMENT_EARLY_FILE)
+    atomic_write_new_json(measurement_path, prompt_contract.seal(json_safe(json_scrub({
+        "schema": MEASUREMENT_EARLY_SCHEMA,
+        "round_id": ROUND_ID,
+        "release_sha": str(manifest["release_sha"]),
+        "rows": ROWS,
+        "k": GRAPH_K,
+        "cell": REGISTERED_SELECTED_CELL,
+        "recall": measured_recall,
+        "recall_reproduction_of_r0241": recall_reproduction,
+        "in_degree_distribution": in_degree_summary,
+        "in_degree_reproduction_of_r0241": in_degree_reproduction,
+        "builder_cosine_agreement_adversarial": agreement,
+        "gather_cost": gather_cost,
+        "wall_guards": {
+            "probe_gather": gather_guard.receipt(),
+            "in_degree_pass": degree_guard.receipt(),
+            "adversarial_agreement": agreement_guard.receipt(),
+        },
+        "is_complete": False,
+        "completed_by": LOCALITY_FILE,
+        "why_this_file_exists": (
+            "every stage that produces a result persists it before the next "
+            "stage can fail; attempt 1 lost 565.89 s of exactly these "
+            "measurements to a failure three stages later"
+        ),
+    }))), immutable=True)
 
     # ---- stage 5: the partition, re-realised and validated ------------------- #
     assignment, partition = _cluster_assignment(
@@ -815,6 +885,7 @@ def run_locality(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "vectors_saved": {
             name: expected_input_signature(path) for name, path in saved.items()
         },
+        "measurement_first_write": expected_input_signature(measurement_path),
         "locality_first_write": expected_input_signature(early_path),
         "bulk_input_memmap_attestation": _memmap_attestation({
             "substrate": host, "graph_ids": ids, "builder_cosines": builder_cos,

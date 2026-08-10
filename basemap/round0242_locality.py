@@ -71,6 +71,15 @@ CANONICAL_CAPABILITY = "minilm-mixed-100000k-k15-post-canonical-tripwire-v1"
 
 LOCALITY_FILE = "loss-locality.json"
 LOCALITY_EARLY_FILE = "loss-locality-first-write.json"
+#: The FIRST of two early writes. Attempt 1 of this round lost `565.89 s` of
+#: completed recall, in-degree and agreement work to a `ModuleNotFoundError`
+#: three stages later, which is R0240's failure mode in miniature and inside a
+#: round written to avoid it. Every stage that produces a result now persists it
+#: before the next stage can fail.
+MEASUREMENT_EARLY_FILE = "recall-and-degree-first-write.json"
+MEASUREMENT_EARLY_SCHEMA = (
+    "round0242-minilm-mixed-100000k-k15-recall-and-degree-first-write-v1"
+)
 FUZZY_FILE = "fuzzy-graph.json"
 LOCALITY_SCHEMA = "round0242-minilm-mixed-100000k-k15-loss-locality-v1"
 LOCALITY_EARLY_SCHEMA = "round0242-minilm-mixed-100000k-k15-loss-locality-first-write-v1"
@@ -824,6 +833,120 @@ def partition_agreement(
     }
 
 
+PARTITION_BACKEND_NOTE = (
+    "R0226's _kmeans and _assign are cupy functions and cupy exists only in the "
+    "cuml-env, not in the release venv the runner runs nodes from. R0238 "
+    "reached them by launching a CHILD process through CUML_LAUNCHER; this "
+    "round's registered safety contract forbids a child on the node path, and "
+    "attempt 1 discovered the conflict as a ModuleNotFoundError. Rather than "
+    "weaken the safety property, the partition is re-realised by a TORCH "
+    "transcription of the identical algorithm - same registered constants "
+    "(A_KMEANS_SUBSAMPLE_ROWS, A_KMEANS_ITERATIONS, A_ASSIGN_BLOCK, seed 226), "
+    "same seeded numpy draws for the subsample and the initial centroids, same "
+    "Lloyd step (argmax inner product, scatter-add means, empty centroids held "
+    "in place, L2 renormalisation), same spill assignment by descending inner "
+    "product. It is NOT claimed to be bit-identical: it is VALIDATED against "
+    "R0238's sealed strict-c400.f64.npy by recomputing the per-row partition "
+    "reachability from these labels, and the round STOPS if the mean misses "
+    "the registered 0.9983062666666668 by more than 1e-4. That is a stronger "
+    "warrant than calling the same function would have been, because it is "
+    "measured rather than assumed - and review-0241-01/F3 already established "
+    "that the build's partition, R0238's and the imbalance grid's are three "
+    "different realisations of this same procedure."
+)
+
+
+def kmeans_torch(
+    torch: Any,
+    dataset: np.ndarray,
+    *,
+    clusters: int,
+    seed: int,
+    subsample_rows: int,
+    iterations: int,
+    device: Any,
+    block: int = 100_000,
+) -> Any:
+    """Lloyd's algorithm on a seeded uniform subsample — R0226's, transcribed.
+
+    Line for line the same algorithm as `basemap.round0226_cluster_spill_build.
+    _kmeans`, with `cupy` replaced by `torch` and `cupyx.scatter_add` by
+    `Tensor.index_add_`. The two seeded `numpy` draws that fix the subsample and
+    the initial centroids are unchanged, so the starting state is identical; the
+    iteration is float arithmetic on the device and its accumulation order is
+    non-deterministic in both libraries alike.
+    """
+    rows = int(dataset.shape[0])
+    take = min(rows, int(subsample_rows))
+    rng = np.random.default_rng(int(seed))
+    sample_rows = np.sort(rng.choice(rows, size=take, replace=False))
+    sample = torch.as_tensor(
+        np.ascontiguousarray(dataset[sample_rows], dtype=np.float32)
+    ).to(device)
+    start = np.sort(rng.choice(take, size=int(clusters), replace=False))
+    centroids = sample[torch.as_tensor(start.astype(np.int64)).to(device)].clone()
+    one = torch.tensor(1.0, dtype=torch.float32, device=device)
+    for _ in range(int(iterations)):
+        sums = torch.zeros(
+            (int(clusters), sample.shape[1]), dtype=torch.float32, device=device
+        )
+        counts = torch.zeros(int(clusters), dtype=torch.float32, device=device)
+        for begin in range(0, take, int(block)):
+            end = min(begin + int(block), take)
+            chunk = sample[begin:end]
+            # Unit rows, so max inner product is min squared euclidean.
+            nearest = torch.argmax(chunk @ centroids.T, dim=1)
+            sums.index_add_(0, nearest, chunk)
+            counts.index_add_(
+                0, nearest,
+                torch.ones(end - begin, dtype=torch.float32, device=device),
+            )
+            del chunk, nearest
+        empty = counts == 0
+        safe = torch.where(empty, one, counts)
+        updated = sums / safe[:, None]
+        # An emptied centroid keeps its old position rather than collapsing.
+        centroids = torch.where(empty[:, None], centroids, updated)
+        norms = torch.linalg.norm(centroids, dim=1, keepdim=True)
+        centroids = centroids / torch.clamp(norms, min=1e-12)
+        del sums, counts, safe, updated, empty, norms
+    del sample
+    return centroids
+
+
+def assign_torch(
+    torch: Any,
+    dataset: np.ndarray,
+    centroids: Any,
+    *,
+    rows: int,
+    spill: int,
+    block: int,
+    device: Any,
+    poll: Callable[[str], None] | None = None,
+) -> np.ndarray:
+    """Every row's `spill` nearest centroids, off the memmap in blocks.
+
+    R0226's `_assign`, transcribed to `torch`. The device only ever sees an
+    explicit copy of a contiguous host block; nothing is mapped, nothing is
+    handed to a GPU library that allocates through managed memory, and the
+    cooperative abort flag is polled once per block.
+    """
+    out = np.empty((int(rows), int(spill)), dtype=np.int32)
+    for begin in range(0, int(rows), int(block)):
+        end = min(begin + int(block), int(rows))
+        chunk = torch.as_tensor(
+            np.ascontiguousarray(dataset[begin:end], dtype=np.float32)
+        ).to(device)
+        scores = chunk @ centroids.T
+        order = torch.argsort(-scores, dim=1)[:, : int(spill)]
+        out[begin:end] = order.to("cpu").numpy().astype(np.int32, copy=False)
+        del chunk, scores, order
+        if poll is not None:
+            poll(f"cluster assignment rows [{begin}, {end})")
+    return out
+
+
 def partition_reachability(
     *,
     assignment: np.ndarray,
@@ -1281,6 +1404,9 @@ __all__ = [
     "LOCALITY_NOTE",
     "LOCALITY_SCHEMA",
     "LOCALITY_STAGE_BUDGET_S",
+    "MEASUREMENT_EARLY_FILE",
+    "MEASUREMENT_EARLY_SCHEMA",
+    "PARTITION_BACKEND_NOTE",
     "PARTITION_REALISATION_NOTE",
     "PARTITION_SEED",
     "PERMUTATIONS",
@@ -1294,6 +1420,7 @@ __all__ = [
     "SCOPE_NOTE",
     "SYMMETRISED_DEGREE_ONCE_NOTE",
     "StageGuard0242",
+    "assign_torch",
     "canonical_undirected_degrees",
     "cluster_locality_test",
     "cluster_rate_table",
@@ -1303,6 +1430,7 @@ __all__ = [
     "in_degree_bin_table",
     "io_counters",
     "json_scrub",
+    "kmeans_torch",
     "locality_verdict",
     "loss_decomposition",
     "partition_agreement",

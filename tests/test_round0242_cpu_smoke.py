@@ -19,7 +19,9 @@ from basemap.round0242_locality import (
     CLUSTERS,
     Round0242Error,
     StageGuard0242,
+    assign_torch,
     canonical_undirected_degrees,
+    kmeans_torch,
     cluster_locality_test,
     cluster_rate_table,
     in_degree_bin_table,
@@ -458,3 +460,88 @@ def test_weight_distribution_flags_a_planted_out_of_range_weight() -> None:
     scan = weight_distribution(weights, block=64, quantile_sample=100, seed=1)
     assert scan["valid"] is False
     assert scan["max"] == pytest.approx(1.5)
+
+
+# --------------------------------------------------------------------------- #
+# the partition backend — the torch transcription against a numpy reference
+# --------------------------------------------------------------------------- #
+def _reference_kmeans(
+    dataset: np.ndarray, *, clusters: int, seed: int, subsample_rows: int,
+    iterations: int, block: int = 100_000,
+) -> np.ndarray:
+    """R0226's `_kmeans`, transcribed to plain numpy from its own source.
+
+    Written independently of `kmeans_torch` so that the two agreeing is
+    evidence the torch path is the registered algorithm rather than evidence
+    that one file was copied twice.
+    """
+    rows = int(dataset.shape[0])
+    take = min(rows, int(subsample_rows))
+    rng = np.random.default_rng(int(seed))
+    sample_rows = np.sort(rng.choice(rows, size=take, replace=False))
+    sample = np.ascontiguousarray(dataset[sample_rows], dtype=np.float32)
+    start = np.sort(rng.choice(take, size=int(clusters), replace=False))
+    centroids = sample[start].copy()
+    for _ in range(int(iterations)):
+        sums = np.zeros((int(clusters), sample.shape[1]), dtype=np.float32)
+        counts = np.zeros(int(clusters), dtype=np.float32)
+        for begin in range(0, take, int(block)):
+            end = min(begin + int(block), take)
+            chunk = sample[begin:end]
+            nearest = np.argmax(chunk @ centroids.T, axis=1)
+            np.add.at(sums, nearest, chunk)
+            np.add.at(counts, nearest, np.ones(end - begin, dtype=np.float32))
+        empty = counts == 0
+        safe = np.where(empty, np.float32(1.0), counts)
+        updated = sums / safe[:, None]
+        centroids = np.where(empty[:, None], centroids, updated)
+        norms = np.linalg.norm(centroids, axis=1, keepdims=True)
+        centroids = centroids / np.maximum(norms, np.float32(1e-12))
+    return centroids
+
+
+def _unit_rows(rows: int, dimension: int, seed: int) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    raw = rng.standard_normal((rows, dimension)).astype(np.float32)
+    return (raw / np.linalg.norm(raw, axis=1, keepdims=True)).astype(np.float32)
+
+
+def test_torch_kmeans_reproduces_the_numpy_reference_of_r0226() -> None:
+    torch = pytest.importorskip("torch")
+    data = _unit_rows(4_000, 16, seed=9)
+    reference = _reference_kmeans(
+        data, clusters=12, seed=226, subsample_rows=2_000, iterations=25,
+        block=512,
+    )
+    produced = kmeans_torch(
+        torch, data, clusters=12, seed=226, subsample_rows=2_000,
+        iterations=25, device=torch.device("cpu"), block=512,
+    ).numpy()
+    assert produced.shape == reference.shape
+    assert np.abs(produced - reference).max() < 1e-4
+
+
+def test_torch_assign_reproduces_a_numpy_argsort_assignment() -> None:
+    torch = pytest.importorskip("torch")
+    data = _unit_rows(500, 16, seed=11)
+    centroids = torch.as_tensor(_unit_rows(12, 16, seed=12))
+    produced = assign_torch(
+        torch, data, centroids, rows=500, spill=4, block=64,
+        device=torch.device("cpu"),
+    )
+    scores = data @ centroids.numpy().T
+    reference = np.argsort(-scores, axis=1)[:, :4]
+    assert produced.shape == (500, 4)
+    assert np.array_equal(produced, reference)
+
+
+def test_torch_assign_polls_the_cooperative_flag_every_block() -> None:
+    torch = pytest.importorskip("torch")
+    data = _unit_rows(500, 8, seed=13)
+    centroids = torch.as_tensor(_unit_rows(5, 8, seed=14))
+    seen: list[str] = []
+    assign_torch(
+        torch, data, centroids, rows=500, spill=2, block=100,
+        device=torch.device("cpu"), poll=seen.append,
+    )
+    assert len(seen) == 5
