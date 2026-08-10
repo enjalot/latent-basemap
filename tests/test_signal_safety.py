@@ -576,15 +576,32 @@ def test_the_remediated_modules_carry_no_unwaived_hazard(relative):
 
 
 def test_no_cuml_launch_anywhere_in_the_release_is_signal_bounded():
-    """The rule with no escape hatch, asserted across every node module."""
+    """The rule with no escape hatch, asserted across every node module.
+
+    review-0239-02/F3: this filters on `finding.gpu`, so a construct the
+    detector misclassified as non-GPU would not fire it either. That is why the
+    classification is now binding-aware. `basemap/*.py` is scanned too — the
+    build children live there and the gate used to stop at `experiments/`.
+    """
     offenders = []
+    scanned = 0
     experiments = os.path.join(REPO, "experiments")
     for name in sorted(os.listdir(experiments)):
         if not name.endswith("_nodes.py"):
             continue
+        scanned += 1
         for finding in detector.scan(os.path.join(experiments, name)):
             if finding.gpu and finding.kind == "SIGNALLING_TIMEOUT":
                 offenders.append(str(finding))
+    library = os.path.join(REPO, "basemap")
+    for name in sorted(os.listdir(library)):
+        if not name.endswith(".py"):
+            continue
+        scanned += 1
+        for finding in detector.scan(os.path.join(library, name)):
+            if finding.gpu and finding.kind == "SIGNALLING_TIMEOUT":
+                offenders.append(str(finding))
+    assert scanned > 100, f"the gate scanned only {scanned} files"
     assert not offenders, "\n".join(offenders)
 
 
@@ -996,3 +1013,152 @@ def test_the_build_watchdog_relays_the_runners_flag_without_a_signal(
     assert watchdog.aborted is True
     assert watchdog.escalations == ["cooperative-flag"]
     assert watchdog.readings()["runner_abort_observed"] is True
+
+
+# --------------------------------------------------------------------------- #
+# review-0239-02/F3 — the waiver hole, and nine more planted evasions
+# --------------------------------------------------------------------------- #
+_EVASION_HEADER = (
+    "import subprocess, os, sys, types, importlib, functools\n"
+    "CUML_LAUNCHER = '/usr/local/bin/cuml_py'\n"
+    "script = 'child.py'\n"
+)
+
+
+def _plant(tmp_path, name, body):
+    path = tmp_path / name
+    path.write_text(_EVASION_HEADER + body, encoding="utf-8")
+    return detector.scan(str(path))
+
+
+def test_hoisting_argv_into_a_variable_cannot_flip_a_cuml_launch_to_non_gpu(
+    tmp_path,
+):
+    """The worst hole in the hardened detector was not an evasion but a
+    misclassification. `finding.gpu` came from the *text* of the call span, so
+
+        argv = [CUML_LAUNCHER, script]
+        subprocess.run(argv, timeout=3600)
+
+    classified as a non-GPU child — which made a real cuML SIGKILL WAIVABLE with
+    a comment, and invisible to the gate test, which filters on `finding.gpu`.
+    One variable assignment wide, and it produced a green gate.
+    """
+    inline = _plant(tmp_path, "inline.py",
+                    "subprocess.run([CUML_LAUNCHER, script], timeout=3600)\n")
+    hoisted = _plant(tmp_path, "hoisted.py",
+                     "argv = [CUML_LAUNCHER, script]\n"
+                     "subprocess.run(argv, timeout=3600)\n")
+    assert [f.gpu for f in inline] == [True], [str(f) for f in inline]
+    assert [f.gpu for f in hoisted] == [True], [str(f) for f in hoisted]
+    assert all(f.fatal for f in hoisted)
+
+
+def test_a_waiver_cannot_rescue_a_hoisted_cuml_launch(tmp_path):
+    """The same launch with a waiver inside the span must stay fatal."""
+    findings = _plant(
+        tmp_path, "waived.py",
+        "argv = [CUML_LAUNCHER, script]\n"
+        "subprocess.run(argv,  # signal-safe: trust me\n"
+        "               timeout=3600)\n",
+    )
+    assert findings and all(f.gpu and f.fatal for f in findings), (
+        "\n".join(str(f) for f in findings))
+
+
+def test_the_indirection_through_a_local_binding_is_still_gpu_classified(
+    tmp_path,
+):
+    """Two hops: the launcher name itself is behind another binding."""
+    findings = _plant(
+        tmp_path, "twohop.py",
+        "launcher = CUML_LAUNCHER\n"
+        "argv = [launcher, script]\n"
+        "subprocess.run(argv, timeout=3600)\n",
+    )
+    assert findings and all(f.gpu and f.fatal for f in findings)
+
+
+@pytest.mark.parametrize("name,body", [
+    ("dict_callee",
+     "_L = {'go': subprocess.run}\nargv = [CUML_LAUNCHER, script]\n"
+     "_L['go'](argv, timeout=3600)\n"),
+    ("list_callee",
+     "_L = [subprocess.run]\nargv = [CUML_LAUNCHER, script]\n"
+     "_L[0](argv, timeout=3600)\n"),
+    ("importlib",
+     "argv = [CUML_LAUNCHER, script]\n"
+     "importlib.import_module('subprocess').run(argv, timeout=3600)\n"),
+    ("lambda_wrapper",
+     "_go = lambda *a, **k: subprocess.run(*a, **k)\n"
+     "argv = [CUML_LAUNCHER, script]\n_go(argv, timeout=3600)\n"),
+    ("class_attribute",
+     "class L:\n    go = staticmethod(subprocess.run)\n"
+     "argv = [CUML_LAUNCHER, script]\nL.go(argv, timeout=3600)\n"),
+    ("getattr_concatenated_name",
+     "argv = [CUML_LAUNCHER, script]\n"
+     "getattr(subprocess, 'r' + 'un')(argv, timeout=3600)\n"),
+    ("kwargs_by_item_assignment",
+     "k = {}\nk['timeout'] = 3600\nargv = [CUML_LAUNCHER, script]\n"
+     "subprocess.run(argv, **k)\n"),
+    ("simple_namespace",
+     "m = types.SimpleNamespace(go=subprocess.run)\n"
+     "argv = [CUML_LAUNCHER, script]\nm.go(argv, timeout=3600)\n"),
+])
+def test_evasion10_the_container_and_indirection_family_is_caught(
+    tmp_path, name, body,
+):
+    """review-0239-02/F3 rows 1, 2, 3, 5, 6, 7, 12 and 17, as positive controls.
+
+    Every one is a cuML launch under a signalling bound, so every one must be
+    both caught AND classified GPU-CHILD — a catch that classifies non-GPU is
+    still waivable and still passes the gate test.
+    """
+    findings = _plant(tmp_path, f"{name}.py", body)
+    assert findings, f"{name}: not detected at all"
+    assert any(f.kind == "SIGNALLING_TIMEOUT" for f in findings), (
+        "\n".join(str(f) for f in findings))
+    assert all(f.fatal for f in findings), "\n".join(str(f) for f in findings)
+    assert any(f.gpu for f in findings), (
+        f"{name}: caught but waivable — "
+        + "\n".join(str(f) for f in findings))
+
+
+def test_evasion11_a_name_built_by_a_format_string_is_reassembled(tmp_path):
+    """`eval(f"subprocess.{_n}(argv, timeout=3600)")` — row 9."""
+    findings = _plant(
+        tmp_path, "fstring.py",
+        "_n = 'run'\nargv = [CUML_LAUNCHER, script]\n"
+        "eval(f'subprocess.{_n}(argv, timeout=3600)')\n",
+    )
+    assert findings and all(f.fatal for f in findings), (
+        "\n".join(str(f) for f in findings))
+
+
+def test_the_evasions_the_detector_still_cannot_see_are_documented(tmp_path):
+    """A known hole named in the docs is evidence; an implied one is not.
+
+    `communicate(timeout=)` is deliberately not a hazard: it raises and leaves
+    the child running. A wrapper in ANOTHER module is a real hole, is not closed
+    here, and must therefore be stated in the detector's own docstring.
+    """
+    unclosed = _plant(
+        tmp_path, "cross_module.py",
+        "from helpers import launch_cuml\nargv = [CUML_LAUNCHER, script]\n"
+        "launch_cuml(argv, timeout=3600)\n",
+    )
+    assert unclosed == [], "the cross-module hole closed; update the docs"
+
+    benign = _plant(
+        tmp_path, "communicate.py",
+        "p = subprocess.Popen([CUML_LAUNCHER, script])\n"
+        "p.communicate(timeout=3600)\n",
+    )
+    assert benign == []
+
+    assert "Known holes" in detector.__doc__
+    for phrase in (
+        "a wrapper defined in another module",
+        "generated child script",
+    ):
+        assert phrase in detector.__doc__, phrase

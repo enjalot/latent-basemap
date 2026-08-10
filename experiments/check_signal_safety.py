@@ -55,6 +55,50 @@ The AST pass resolves the callee through the module's own bindings and closes:
   erases them by design, so any literal that parses as Python and contains a
   call is re-scanned as code, reported at the literal's own line.
 
+R0240 second pass (review-0239-02/F3) adds, all through the same bindings:
+
+* a callee parked in a container — `_L = {"go": subprocess.run}` then
+  `_L["go"](…)`, and the list form `_L[0](…)`;
+* `importlib.import_module("subprocess").run(…)` and `__import__("subprocess")`;
+* a lambda wrapper — `_go = lambda *a, **k: subprocess.run(*a, **k)`;
+* a class attribute or namespace field — `class L: go = staticmethod(...)`,
+  `types.SimpleNamespace(go=subprocess.run)`;
+* `getattr(subprocess, "r" + "un")` and any name built from folded literals;
+* a `timeout` smuggled through a dict built by **item assignment**
+  (`k = {}` … `k["timeout"] = 3600` … `run(argv, **k)`), not only a literal;
+* an f-string whose interpolations are names bound to literals, so
+  `eval(f"subprocess.{_n}(argv, timeout=…)")` reconstructs as scannable code.
+
+Classifying GPU-ness (the R0240 second-pass fix that matters most)
+-----------------------------------------------------------------
+`finding.gpu` used to be decided from the *text* of the call span alone, so
+hoisting the argv one line up — `argv = [CUML_LAUNCHER, script]` — flipped a
+real cuML launch to `gpu=False`. That made it **waivable** by a comment and
+invisible to the release gate test, which filters on `finding.gpu`. A detector
+that a local variable can silence is worse than none, because it produces a
+green gate. Names used in a call are now resolved through the same bindings
+before classification (`_binding_expansion`), up to `_MAX_BINDING_DEPTH` hops.
+
+Known holes (stated, not implied)
+---------------------------------
+These are NOT closed. Do not read a clean report as covering them:
+
+* **a wrapper defined in another module** — `from helpers import launch_cuml`
+  then `launch_cuml(argv, timeout=…)`. Closing it needs cross-file analysis;
+  the detector is deliberately single-file.
+* **argv built by a call** — `argv = _build_argv()` classifies as non-GPU
+  because the launcher never appears statically. Only bindings to literal
+  expressions are followed.
+* **a construct reached only through `exec`/`eval` or living inside a
+  generated child script** is scanned without the enclosing module's bindings,
+  so it is caught but classifies as non-GPU — fatal unless waived, where a
+  direct cuML launch would be unwaivable.
+* **a callee assembled at runtime** from non-constant parts, or fetched through
+  a dict whose key is not statically known.
+* the detector reads one file at a time and has **no scope analysis**: a name
+  assigned anywhere in a module is treated as that name everywhere in it. That
+  errs towards reporting, never towards silence.
+
 `timeout=None` arms nothing and is **not** reported (only the literal `None`; a
 variable that might be `None` is still a hit). Findings are deduplicated per
 `(path, kind, call site)`, keeping the most specific name — `os.kill(` used to
@@ -364,6 +408,69 @@ class _Bindings:
         self.funcs: dict[str, str] = {}     # local name -> "subprocess.run"
         self.dicts: dict[str, ast.Dict] = {}  # local name -> dict literal
         self.strings: dict[str, str] = {}   # local name -> str literal
+        #: local name -> list/tuple literal, for a callee held in a container
+        self.lists: dict[str, ast.List | ast.Tuple] = {}
+        #: local name -> {constant key: value node}, accumulated from a dict
+        #: literal AND from later `d[key] = value` item assignments
+        self.items: dict[str, dict[str, ast.AST]] = {}
+        #: local name -> the expression it was last assigned. Used only to
+        #: classify GPU-ness, never to resolve a callee (review-0239-02/F3).
+        self.values: dict[str, ast.AST] = {}
+
+
+#: Callables that turn a string into a module: their result is that module.
+_IMPORT_FUNCS = frozenset({"importlib.import_module", "__import__"})
+
+#: Wrappers that pass a function through unchanged for our purposes.
+_PASSTHROUGH_FUNCS = frozenset({"staticmethod", "classmethod"})
+
+#: How far to follow a name through the values bound to other names when
+#: deciding whether a call span references a GPU launcher.
+_MAX_BINDING_DEPTH = 3
+
+
+def _const_str(node: ast.AST | None, binds: _Bindings) -> str | None:
+    """A string this expression is statically known to be, or None.
+
+    Adjacent literals are folded by the parser, but `"r" + "un"` is not, and
+    neither is a name bound to a literal. Both are constant-foldable here, which
+    is exactly why this is an AST rule and not a textual one.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        return binds.strings.get(node.id)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _const_str(node.left, binds)
+        right = _const_str(node.right, binds)
+        return None if left is None or right is None else left + right
+    if isinstance(node, ast.JoinedStr):
+        pieces = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                pieces.append(value.value)
+            elif isinstance(value, ast.FormattedValue):
+                inner = _const_str(value.value, binds)
+                if inner is None:
+                    return None
+                pieces.append(inner)
+            else:
+                return None
+        return "".join(pieces)
+    return None
+
+
+def _const_int(node: ast.AST | None) -> int | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, int):
+        return node.value
+    return None
+
+
+def _record_items(binds: _Bindings, name: str, mapping: ast.Dict) -> None:
+    for key, value in zip(mapping.keys, mapping.values):
+        text = _const_str(key, binds)
+        if text is not None:
+            binds.items.setdefault(name, {})[text] = value
 
 
 def _collect_bindings(tree: ast.AST) -> _Bindings:
@@ -379,27 +486,77 @@ def _collect_bindings(tree: ast.AST) -> _Bindings:
                 binds.funcs[local] = f"{node.module}.{alias.name}"
     # A second pass, so plain assignments can lean on the imports above.
     for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            # `class L: go = staticmethod(subprocess.run)` — the callee is
+            # reachable as `L.go`, so bind it under that dotted name.
+            for statement in node.body:
+                if not isinstance(statement, ast.Assign):
+                    continue
+                for attribute in statement.targets:
+                    if not isinstance(attribute, ast.Name):
+                        continue
+                    resolved = _resolve(statement.value, binds)
+                    if resolved and "." in resolved:
+                        binds.funcs[f"{node.name}.{attribute.id}"] = resolved
+            continue
         if not isinstance(node, ast.Assign) or len(node.targets) != 1:
             continue
         target = node.targets[0]
+        value = node.value
+        if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
+            # `k = {}` … `k["timeout"] = 3600`: the round closed the dict
+            # LITERAL form only, and item assignment is what anyone would
+            # actually write (review-0239-02/F3 row 12).
+            key = _const_str(target.slice, binds)
+            if key is not None:
+                binds.items.setdefault(target.value.id, {})[key] = value
+            continue
         if not isinstance(target, ast.Name):
             continue
-        value = node.value
+        binds.values[target.id] = value
         if isinstance(value, ast.Dict):
             binds.dicts[target.id] = value
+            _record_items(binds, target.id, value)
+        elif isinstance(value, (ast.List, ast.Tuple)):
+            binds.lists[target.id] = value
         elif isinstance(value, ast.Constant) and isinstance(value.value, str):
             binds.strings[target.id] = value.value
         elif isinstance(value, ast.Name) and value.id in binds.modules:
             binds.modules[target.id] = binds.modules[value.id]
-        elif isinstance(value, (ast.Name, ast.Attribute)):
+        elif isinstance(value, ast.Lambda) and isinstance(value.body, ast.Call):
+            # `_go = lambda *a, **k: subprocess.run(*a, **k)`
+            resolved = _resolve(value.body.func, binds)
+            if resolved and "." in resolved:
+                binds.funcs[target.id] = resolved
+        elif isinstance(value, ast.Call):
+            callee = _resolve(value.func, binds)
+            if callee in _IMPORT_FUNCS:
+                module = _const_str(value.args[0] if value.args else None, binds)
+                if module:
+                    binds.modules[target.id] = module
+            elif callee in ("types.SimpleNamespace", "argparse.Namespace"):
+                # `m = types.SimpleNamespace(go=subprocess.run)`
+                for keyword in value.keywords:
+                    if keyword.arg is None:
+                        continue
+                    resolved = _resolve(keyword.value, binds)
+                    if resolved and "." in resolved:
+                        binds.funcs[f"{target.id}.{keyword.arg}"] = resolved
+            else:
+                resolved = _resolve(value, binds)
+                if resolved and "." in resolved:
+                    binds.funcs[target.id] = resolved
+        elif isinstance(value, (ast.Name, ast.Attribute, ast.Subscript)):
             resolved = _resolve(value, binds)
             if resolved and "." in resolved:
                 binds.funcs[target.id] = resolved
     return binds
 
 
-def _resolve(node: ast.AST, binds: _Bindings) -> str | None:
+def _resolve(node: ast.AST, binds: _Bindings, depth: int = 0) -> str | None:
     """Canonical dotted name for a callee expression, or None."""
+    if depth > _MAX_BINDING_DEPTH:
+        return None
     if isinstance(node, ast.Name):
         return binds.funcs.get(node.id, node.id)
     if isinstance(node, ast.Attribute):
@@ -409,10 +566,69 @@ def _resolve(node: ast.AST, binds: _Bindings) -> str | None:
             if module:
                 return f"{module}.{node.attr}"
             qualified = binds.funcs.get(base.id, base.id)
-            return f"{qualified}.{node.attr}"
-        inner = _resolve(base, binds)
-        return f"{inner}.{node.attr}" if inner else None
+            candidate = f"{qualified}.{node.attr}"
+            # A class attribute or a namespace field bound to a real callee.
+            return binds.funcs.get(candidate, candidate)
+        inner = _resolve(base, binds, depth + 1)
+        if not inner:
+            return None
+        candidate = f"{inner}.{node.attr}"
+        return binds.funcs.get(candidate, candidate)
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+        # A callee parked in a container: `_L["go"](…)` / `_L[0](…)`.
+        key = _const_str(node.slice, binds)
+        if key is not None:
+            item = binds.items.get(node.value.id, {}).get(key)
+            if item is not None:
+                return _resolve(item, binds, depth + 1)
+        index = _const_int(node.slice)
+        sequence = binds.lists.get(node.value.id)
+        if index is not None and sequence is not None:
+            if -len(sequence.elts) <= index < len(sequence.elts):
+                return _resolve(sequence.elts[index], binds, depth + 1)
+        return None
+    if isinstance(node, ast.Call):
+        callee = _resolve(node.func, binds, depth + 1)
+        if callee == "getattr" and len(node.args) >= 2:
+            base = _resolve(node.args[0], binds, depth + 1)
+            attribute = _const_str(node.args[1], binds)
+            if base and attribute:
+                return binds.funcs.get(f"{base}.{attribute}", f"{base}.{attribute}")
+        if callee in _IMPORT_FUNCS and node.args:
+            # `importlib.import_module("subprocess").run(…)`
+            return _const_str(node.args[0], binds)
+        if callee in _PASSTHROUGH_FUNCS and node.args:
+            return _resolve(node.args[0], binds, depth + 1)
+        return None
     return None
+
+
+def _binding_expansion(node: ast.AST, binds: _Bindings, depth: int = 0) -> str:
+    """Source of the values bound to every plain name this expression uses.
+
+    review-0239-02/F3, the finding that mattered most: GPU-ness was decided
+    from the *text* of the call span, so hoisting `argv = [CUML_LAUNCHER, …]`
+    one line up flipped a real cuML launch to `gpu=False` — which made it
+    waivable with a comment and invisible to the gate test that filters on
+    `finding.gpu`. A detector that a local variable can silence is worse than
+    none, because it produces a green gate. The binding machinery that already
+    resolves callees is used here to resolve arguments too.
+    """
+    if depth > _MAX_BINDING_DEPTH:
+        return ""
+    pieces: list[str] = []
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Name):
+            continue
+        value = binds.values.get(sub.id)
+        if value is None:
+            continue
+        try:
+            pieces.append(ast.unparse(value))
+        except Exception:      # pragma: no cover - defensive
+            continue
+        pieces.append(_binding_expansion(value, binds, depth + 1))
+    return " ".join(pieces)
 
 
 def _line_starts(source: str) -> list[int]:
@@ -460,14 +676,19 @@ def _timeout_arming(call: ast.Call, binds: _Bindings) -> str | None:
             return "timeout="
         if keyword.arg is None:
             mapping = keyword.value
+            items: list[tuple[str | None, ast.AST]] = []
             if isinstance(mapping, ast.Name):
+                # Item assignment (`k["timeout"] = 3600`) as well as a literal:
+                # the round closed the literal form only (review-0239-02/F3).
+                items.extend(binds.items.get(mapping.id, {}).items())
                 mapping = binds.dicts.get(mapping.id)
-            if not isinstance(mapping, ast.Dict):
-                continue
-            for key, value in zip(mapping.keys, mapping.values):
-                if not (isinstance(key, ast.Constant) and key.value == "timeout"):
-                    continue
-                if _is_literal_none(value):
+            if isinstance(mapping, ast.Dict):
+                items.extend(
+                    (_const_str(key, binds), value)
+                    for key, value in zip(mapping.keys, mapping.values)
+                )
+            for key, value in items:
+                if key != "timeout" or _is_literal_none(value):
                     continue
                 return "**{'timeout': ...}"
     return None
@@ -533,7 +754,7 @@ def _ast_findings(
             getattr(node, "end_col_offset", 0) or 0,
         )
         span = source[start:max(end, start)]
-        gpu = _is_gpu(span)
+        gpu = _is_gpu(span) or _is_gpu(_binding_expansion(node, binds))
         if kind == "DIRECT_SIGNAL" and not gpu:
             gpu = _is_gpu_context(_enclosing_function_source(source, node.lineno))
         findings.append(Finding(
@@ -594,14 +815,14 @@ def _ast_findings(
                      f'getattr(..., "{attribute}")', _PRIORITY_AST_QUALIFIED)
 
     if depth < _MAX_EMBED_DEPTH:
-        findings.extend(_embedded_findings(path, tree, depth))
+        findings.extend(_embedded_findings(path, tree, depth, binds))
     return findings
 
 
 # --------------------------------------------------------------------------- #
 # generated child scripts: code that only exists inside a string literal
 # --------------------------------------------------------------------------- #
-def _string_literals(tree: ast.AST) -> list[tuple[ast.AST, str]]:
+def _string_literals(tree: ast.AST, binds: _Bindings) -> list[tuple[ast.AST, str]]:
     """Every string literal in the module, f-strings reconstructed.
 
     A `FormattedValue` is replaced by its own source (`{script!r}` becomes
@@ -618,6 +839,14 @@ def _string_literals(tree: ast.AST) -> list[tuple[ast.AST, str]]:
             if isinstance(value, ast.Constant):
                 pieces.append(str(value.value))
             else:
+                # A name bound to a string literal is substituted verbatim, so
+                # `f"subprocess.{_n}(...)"` reconstructs as real code; anything
+                # else keeps its own source, which preserves any GPU marker the
+                # interpolation carries (review-0239-02/F3 row 9).
+                literal = _const_str(getattr(value, "value", None), binds)
+                if literal is not None:
+                    pieces.append(literal)
+                    continue
                 try:
                     pieces.append(f"({ast.unparse(value.value)})")
                 except Exception:      # pragma: no cover - defensive
@@ -635,9 +864,11 @@ def _string_literals(tree: ast.AST) -> list[tuple[ast.AST, str]]:
     return literals
 
 
-def _embedded_findings(path: str, tree: ast.AST, depth: int) -> list[Finding]:
+def _embedded_findings(
+    path: str, tree: ast.AST, depth: int, binds: _Bindings,
+) -> list[Finding]:
     findings: list[Finding] = []
-    for node, text in _string_literals(tree):
+    for node, text in _string_literals(tree, binds):
         if "(" not in text or len(text) < 12:
             continue
         for candidate in (text, textwrap.dedent(text)):
