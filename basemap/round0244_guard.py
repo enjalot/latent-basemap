@@ -150,6 +150,12 @@ class ThreadedHostWatchdog(_HostWatchdog):
         self.trip_observed_after_s: float | None = None
         self.abort_flag_written = False
         self.abort_flag_error: str | None = None
+        #: review-0244-01 A1: `_loop` caught only `OSError`, so any other
+        #: exception killed the sampler silently and the guard degraded to
+        #: R0242's boundary-only behaviour with nothing raised and nothing
+        #: logged. A dead sampler must never read as "no problem observed", so
+        #: the death is recorded here and `poll()` raises on it.
+        self.thread_death: str | None = None
         self._trace: dict[int, int] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -189,11 +195,32 @@ class ThreadedHostWatchdog(_HostWatchdog):
                 #: thread that dies takes the guard with it, which is the
                 #: failure this round exists to remove.
                 pass
+            except BaseException as error:  # noqa: BLE001 - see _record_death
+                self._record_death(error)
+                return
             self._stop.wait(self.interval_s)
         try:
             self._sample()
         except OSError:
             pass
+        except BaseException as error:  # noqa: BLE001 - see _record_death
+            self._record_death(error)
+
+    def _record_death(self, error: BaseException) -> None:
+        """A sampler that stops sampling is a guard that stopped guarding.
+
+        review-0244-01 A1 killed the thread with a `ValueError` and watched it
+        vanish: `thread_alive_after_death False`, `samples_recorded 1`, nothing
+        raised, nothing logged. The record is written under the lock so
+        `poll()` and `receipt()` both see it, and `poll()` raises on it.
+        """
+        with self._lock:
+            if self.thread_death is None:
+                self.thread_death = (
+                    f"{type(error).__name__}: {error}. The R0244 sampling "
+                    "thread stopped sampling; the host guard is no longer "
+                    "being evaluated between call sites."
+                )
 
     def _sample(self) -> dict[str, int]:
         """One observation. Never raises into the main thread."""
@@ -276,6 +303,14 @@ class ThreadedHostWatchdog(_HostWatchdog):
             )
             fired = self.fired
             reason = self.trip_reason
+            death = self.thread_death
+        if death is not None:
+            raise Round0244Error(
+                f"R0244 host watchdog SAMPLING THREAD DIED: {death} Observed "
+                f"at {where}. A dead sampler does not mean 'no problem "
+                "observed'; the node must stop rather than continue behind a "
+                "guard that is no longer running."
+            )
         if fired:
             raise Round0244Error(
                 f"{reason} Observed at {where}. Unwinding in band; no signal "
@@ -288,6 +323,16 @@ class ThreadedHostWatchdog(_HostWatchdog):
             reason = self.trip_reason
         if fired:
             raise Round0244Error(f"{reason} Observed at {where}.")
+
+    def raise_if_thread_died(self, where: str) -> None:
+        """The visible-failure half of the A1 fix, callable without sampling."""
+        with self._lock:
+            death = self.thread_death
+        if death is not None:
+            raise Round0244Error(
+                f"R0244 host watchdog SAMPLING THREAD DIED: {death} Observed "
+                f"at {where}."
+            )
 
     # -- evidence ---------------------------------------------------------- #
     def receipt(self) -> dict[str, Any]:
@@ -311,6 +356,12 @@ class ThreadedHostWatchdog(_HostWatchdog):
                 "sample_coverage": (
                     None if expected <= 0 else float(self.samples) / expected
                 ),
+                #: review-0244-01 A1. `sampling_thread_alive` is the field a
+                #: node gates on; `thread_death` is why. Both are False/None on
+                #: a healthy run, so a receipt that carries a death cannot be
+                #: read as a clean one.
+                "sampling_thread_alive": bool(self.thread_death is None),
+                "thread_death": self.thread_death,
                 "boundary_polls": int(self.boundary_polls),
                 "boundary_peak_anonymous_bytes": int(
                     self.boundary_peak_anonymous_bytes
