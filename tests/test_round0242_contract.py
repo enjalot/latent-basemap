@@ -199,3 +199,68 @@ def test_memory_watchdog_is_conjunctive() -> None:
         "the watchdog must fire only on the CONJUNCTION of swap growth with "
         "real pressure"
     )
+
+
+def test_every_deferred_import_on_the_node_path_actually_resolves() -> None:
+    """The blind spot that cost attempt 1: a module that does not exist.
+
+    `check_undefined_names.py` is an AST guard and cannot see a missing
+    third-party package; neither can the signal detector. Attempt 1 of this
+    round reached the card-adjacent stage and died on `import cupy`, which lives
+    only in the cuml-env. Function-local imports are exactly where that hides,
+    because nothing exercises them until the stage runs. This test walks the AST
+    of every node-path file, collects every `import` and `from ... import`
+    wherever it appears - module level or inside a function - and resolves each
+    one in THIS interpreter.
+
+    This is the same blind-guard pattern as the R0216 NameError and the R0236
+    arity mismatch: a guard that cannot fail on the input that actually broke
+    the round.
+    """
+    import importlib.util
+
+    for name in NODE_PATH_FILES:
+        tree = ast.parse(_source(name))
+        modules: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                modules.add(node.module)
+        for module in sorted(modules):
+            assert importlib.util.find_spec(module) is not None, (
+                f"{name} imports {module!r}, which does not resolve in the "
+                "release venv this round's nodes run from"
+            )
+
+
+def test_cluster_assignment_resolves_its_own_deferred_imports() -> None:
+    """`_cluster_assignment` specifically — the function attempt 1 died inside."""
+    import importlib.util
+    import inspect
+
+    from experiments import round0242_nodes
+
+    tree = ast.parse(inspect.getsource(round0242_nodes._cluster_assignment))
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            modules.add(node.module)
+    assert modules, "_cluster_assignment defers at least one import"
+    for module in sorted(modules):
+        assert importlib.util.find_spec(module) is not None, module
+    # And the registered constants it reads must be the ones R0226 defines.
+    from basemap.round0226_graph_builders import (
+        A_ASSIGN_BLOCK,
+        A_KMEANS_ITERATIONS,
+        A_KMEANS_SUBSAMPLE_ROWS,
+        A_SEED,
+    )
+    from basemap.round0242_locality import PARTITION_SEED
+
+    assert (A_KMEANS_SUBSAMPLE_ROWS, A_KMEANS_ITERATIONS, A_ASSIGN_BLOCK) == (
+        1_000_000, 25, 200_000
+    )
+    assert PARTITION_SEED == A_SEED == 226
