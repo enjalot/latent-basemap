@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import glob
+import inspect
 import os
 import subprocess
 
@@ -268,6 +269,7 @@ def test_every_triage_entry_matches_a_real_symbol_or_is_declared_unused(
         "REGISTRY_READERS", "REGISTRY_REGIME_MARKER", "LOCALITY_ACTION",
         "FUZZY_ACTION", "LOCALITY_SCHEMA", "KNOWN_EXTERNAL_MEMORY_MODES",
         "CONTROL_MAX_THROTTLED_RATE_RATIO", "DEFAULT_EXTERNAL_MEMORY_MODE",
+        "_ESCAPE_ATTEMPTS",
     ):
         assert name in NOT_A_BOUND, name
         assert name in seen, name
@@ -305,6 +307,29 @@ def test_an_unplaceable_mode_refuses_and_never_downgrades() -> None:
         )
     with pytest.raises(external.Round0249Error):
         external.require_external_memory_mode("best-effort")
+
+
+def test_an_escape_battery_that_did_not_run_cannot_report_a_clean_mode() -> None:
+    """R0249 self-attack, found on the round's own first queue attempt.
+
+    `external_0249` runs under a root-owned scope whose environment carries no
+    session bus, so the `user-scope` half of the battery died with `Failed to
+    connect to bus: No medium found`, published `attempts: []`, and still
+    reported `the_node_can_defeat_this_mode: false` — a claim that user-scope
+    is safe, from a run that made no attempt. Two things fixed it: the
+    `user-scope` child now gets the derived session-bus addresses, and a
+    battery with fewer than five attempts is `ran: False` with
+    `the_node_can_defeat_this_mode: None` rather than `False`.
+    """
+    environment = external._user_scope_environment()
+    assert environment["XDG_RUNTIME_DIR"]
+    assert environment["DBUS_SESSION_BUS_ADDRESS"].startswith("unix:path=")
+    #: and the arms are computed from the attempt COUNT, not from a flag the
+    #: caller sets
+    source = inspect.getsource(external.run_escape_battery)
+    assert 'other_mode["attempts_run"] >= _ESCAPE_ATTEMPTS' in source
+    assert 'bool(succeeded) if ran else None' in inspect.getsource(
+        external.run_escape_battery)
 
 
 def test_the_fail_closed_control_fires() -> None:

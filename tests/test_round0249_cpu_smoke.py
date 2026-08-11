@@ -164,9 +164,15 @@ def test_external_entry_path_runs_end_to_end(scratch, armed) -> None:
     escapes = body["escape_battery"]
     assert escapes["holds"] is True
     assert escapes["default_mode"]["mode"] == "root-scope"
+    assert escapes["default_mode"]["attempts_run"] == 5
     assert escapes["default_mode"]["the_node_can_defeat_this_mode"] is False
-    #: the losing mode is published too
-    assert escapes["the_other_mode"]["attempts"]
+    #: the LOSING mode is published too, and it must actually have run — the
+    #: round's first attempt published `attempts: []` here with
+    #: `the_node_can_defeat_this_mode: false` beside it
+    other = escapes["the_other_mode"]
+    assert other["mode"] == "user-scope"
+    assert other["attempts_run"] == 5
+    assert other["the_node_can_defeat_this_mode"] is True
 
     assert body["fail_closed_control"]["holds"] is True
     assert body["production_limit_declaration"]["swap_max_bytes"] == 0

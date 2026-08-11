@@ -250,6 +250,13 @@ NOT_A_BOUND: dict[str, str] = {
         "written. Removing an entry makes MORE modes refuse, never fewer; it "
         "bounds no resource"
     ),
+    "_ESCAPE_ATTEMPTS": (
+        "how many attempts the escape script makes, compared as "
+        "`attempts_run >= _ESCAPE_ATTEMPTS` to decide whether a battery "
+        "actually RAN. Lowering it would let a partial battery count as "
+        "complete - which is a weakening of R0249's own reporting, caught by "
+        "the same self-attack that added it - and it bounds no resource"
+    ),
     "CONTROL_MAX_THROTTLED_RATE_RATIO": (
         "an acceptance threshold on R0249's OWN positive control - how far the "
         "measured allocation rate must collapse for the throttle arm to hold. "

@@ -102,6 +102,9 @@ CONTROL_MAX_THROTTLED_RATE_RATIO = 0.01
 #: What the untripped arm allocates: a quarter of the limit. Without this the
 #: `high` counter proves only that the counter exists.
 CONTROL_SAFE_BYTES = CONTROL_MEMORY_HIGH_BYTES // 4
+#: How many attempts `_ESCAPES` makes. A battery reporting fewer than this has
+#: not run, whatever its return code says.
+_ESCAPE_ATTEMPTS = 5
 
 MEMORY_HIGH_NOTE = (
     "REGISTERED 2026-08-11 (R0249). The node's external memory bound is a "
@@ -458,13 +461,39 @@ def _journal_oom_lines(unit: str, since: float) -> dict[str, Any]:
     }
 
 
-def _run_child(argv: list[str]) -> subprocess.CompletedProcess:
+def _user_scope_environment() -> dict[str, str]:
+    """`systemd-run --user` needs the session bus, and a root-scope node has none.
+
+    R0249, found by attacking the round's own first run. `external_0249` runs
+    under a ROOT-owned scope, whose environment carries neither
+    `XDG_RUNTIME_DIR` nor `DBUS_SESSION_BUS_ADDRESS`, so the `user-scope` half
+    of the escape battery died with `Failed to connect to bus: No medium found`
+    and published **zero attempts** while its `the_node_can_defeat_this_mode`
+    field read `false` — a receipt saying user-scope is safe, which it is not.
+    That is the "report only the mode that wins" shape three reviews have
+    punished, arrived at by accident. The addresses are derived here the same
+    way `roundrun` derives them, and never invented.
+    """
+    environment = dict(os.environ)
+    runtime_dir = environment.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    environment.setdefault("XDG_RUNTIME_DIR", runtime_dir)
+    environment.setdefault(
+        "DBUS_SESSION_BUS_ADDRESS", f"unix:path={runtime_dir}/bus"
+    )
+    return environment
+
+
+def _run_child(
+    argv: list[str], *, env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
     #: NO `timeout=`. `subprocess.run(timeout=)` delivers SIGKILL, and the
     #: release's signal-safety detector rightly refuses that for any child it
     #: cannot prove GPU-free. The allocator loop is finite by construction, the
     #: escape battery makes five bounded attempts, and the runner's cooperative
     #: soft deadline bounds the node above all of them.
-    return subprocess.run(argv, check=False, capture_output=True, text=True)
+    return subprocess.run(
+        argv, check=False, capture_output=True, text=True, env=env
+    )
 
 
 def _load(path: str) -> dict[str, Any]:
@@ -729,19 +758,28 @@ def run_escape_battery(
                 unit=f"{stem}-{this_mode}",
                 properties=_high_properties(high_bytes), mode=this_mode,
             )
-            + [sys.executable, "-c", _ESCAPES, receipt]
+            + [sys.executable, "-c", _ESCAPES, receipt],
+            #: a `user-scope` scope needs the session bus, which a root-scope
+            #: node's environment does not carry. Derived, never invented.
+            env=_user_scope_environment() if this_mode != "root-scope" else None,
         )
         rows = _load(receipt)
         attempts = rows.get("attempts") or []
         succeeded = [row for row in attempts if row.get("succeeded")]
+        ran = len(attempts) >= _ESCAPE_ATTEMPTS
         return {
             "mode": this_mode,
+            "ran": ran,
             "returncode": completed.returncode,
             "stderr_tail": completed.stderr[-300:],
             "attempts": attempts,
             "attempts_run": len(attempts),
             "successful_escapes": succeeded,
-            "the_node_can_defeat_this_mode": bool(succeeded),
+            #: `None`, not `False`, when nothing ran. A battery that produced
+            #: no attempts says NOTHING about whether the mode is defeatable,
+            #: and publishing `false` there is a claim of safety the run did
+            #: not earn.
+            "the_node_can_defeat_this_mode": bool(succeeded) if ran else None,
             "memory_high_after_the_attempts": rows.get(
                 "memory_high_after_the_attempts"
             ),
@@ -755,15 +793,19 @@ def run_escape_battery(
 
     default_mode = _battery(mode)
     other = "user-scope" if mode == "root-scope" else "root-scope"
-    other_mode: dict[str, Any] = {"mode": other, "ran": False}
+    other_mode: dict[str, Any] = {
+        "mode": other, "ran": False, "attempts": [], "attempts_run": 0,
+        "the_node_can_defeat_this_mode": None,
+        "why_it_did_not_run": "this box cannot place a scope in that mode",
+    }
     if also_run_the_other_mode and external_memory_mode_availability(
         other
     )["available"]:
-        other_mode = dict(_battery(other), ran=True)
+        other_mode = _battery(other)
 
     arms = {
         "the_battery_ran_in_the_default_mode": bool(
-            default_mode["attempts_run"] >= 5
+            default_mode["attempts_run"] >= _ESCAPE_ATTEMPTS
         ),
         "no_escape_succeeds_in_the_default_mode": bool(
             not default_mode["successful_escapes"]
@@ -772,8 +814,18 @@ def run_escape_battery(
             default_mode["memory_high_after_the_attempts"]
             not in (None, "max")
         ),
+        #: R0249 self-attack: this arm used to read `bool(other_mode["ran"])`
+        #: and `ran` was set by the CALLER, so a battery that died on
+        #: "Failed to connect to bus" published `attempts: []` and still passed
+        #: — with `the_node_can_defeat_this_mode: false` beside it. It now
+        #: requires the full battery to have actually executed.
         "the_other_mode_was_measured_and_published": bool(
-            other_mode.get("ran")
+            other_mode["attempts_run"] >= _ESCAPE_ATTEMPTS
+        ),
+        #: and the losing mode must LOSE. `user-scope` is defeatable; a run
+        #: that says otherwise has not run the battery.
+        "the_other_mode_result_is_not_a_silent_empty": bool(
+            other_mode["the_node_can_defeat_this_mode"] is not None
         ),
     }
     evidence = {
