@@ -445,8 +445,37 @@ def test_no_hidden_sigkill_in_any_round0253_file():
         if not os.path.exists(path):
             continue
         with open(path, "r", encoding="utf-8") as handle:
-            source = handle.read()
-        assert "timeout=" not in source, f"{name} carries a timeout= construct"
+            tree = ast.parse(handle.read(), filename=path)
+        offenders = [
+            int(node.lineno)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and any(kw.arg == "timeout" for kw in node.keywords)
+        ]
+        assert not offenders, f"{name} passes timeout= at line(s) {offenders}"
+
+
+def test_positive_control_a_planted_timeout_call_is_caught(tmp_path):
+    """Plant the hidden SIGKILL and prove the check sees it — and that a comment
+    mentioning `timeout=` does not trip it, which a textual grep would."""
+    planted = tmp_path / "planted.py"
+    planted.write_text(textwrap.dedent(
+        '''
+        import subprocess
+        # deliberately mentions timeout= in prose only
+        def safe():
+            return subprocess.run(["true"], check=False)
+        def unsafe():
+            return subprocess.run(["true"], check=False, timeout=5)
+        '''
+    ))
+    tree = ast.parse(planted.read_text())
+    offenders = [
+        int(node.lineno) for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and any(kw.arg == "timeout" for kw in node.keywords)
+    ]
+    assert len(offenders) == 1
 
 
 def test_the_round0253_nodes_never_write_the_runners_abort_flag():

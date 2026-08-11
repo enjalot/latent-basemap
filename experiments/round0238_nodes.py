@@ -243,7 +243,6 @@ from experiments.round0233_nodes import (
     _open,
     _shards,
 )
-from basemap.round0253_stop_hooks import install_stop_hooks
 
 EMB = "/data/embeddings"
 BUILD_SCRIPT = "basemap/round0238_build.py"
@@ -1341,7 +1340,6 @@ def run_reachability(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     It hands cuVS nothing. The dataset it hands k-means is a read-only memmap and
     the child asserts that before any work.
     """
-    install_stop_hooks(label="R0253 round0238_nodes.run_reachability")
     manifest = active["manifest"]
     if str(manifest.get("round_id")) != ROUND_ID:
         raise Round0238Error("R0238 handler received another queue")
@@ -1856,7 +1854,6 @@ def _pool_uniformity(*, corpus: str, live_rows: int) -> dict[str, Any]:
 
 
 def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
-    install_stop_hooks(label="R0253 round0238_nodes.run_assemble")
     manifest = active["manifest"]
     if str(manifest.get("round_id")) != ROUND_ID:
         raise Round0238Error("R0238 handler received another queue")
@@ -2358,7 +2355,6 @@ def _host_substrate(path: str) -> np.ndarray:
 
 
 def run_truth(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
-    install_stop_hooks(label="R0253 round0238_nodes.run_truth")
     import torch
 
     manifest = active["manifest"]
@@ -2827,7 +2823,6 @@ def _inherited_io_points(job: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def run_ladder(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
-    install_stop_hooks(label="R0253 round0238_nodes.run_ladder")
     manifest = active["manifest"]
     repo_root = str(manifest["repo_root"])
     substrate_path, _sealed = _substrate_from_manifest(job)
@@ -3246,7 +3241,6 @@ def _score_probe(
 
 
 def run_qualify(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
-    install_stop_hooks(label="R0253 round0238_nodes.run_qualify")
     import torch
 
     manifest = active["manifest"]

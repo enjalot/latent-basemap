@@ -64,7 +64,6 @@ from basemap.round0218_minilm_2m_panel import (
     panel_metric_view,
 )
 from basemap import round0113_prompt_contrast as prompt_contract
-from basemap.round0253_stop_hooks import install_stop_hooks
 
 
 ACTION = "score_minilm_mixed_2m_seed_family_panel"
@@ -232,7 +231,6 @@ def _anchor_corpus_labels(
 
 
 def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
-    install_stop_hooks(label="R0253 round0218_nodes.run_panel")
     import torch
     from basemap.panel_v2 import (
         build_hiD_reference,

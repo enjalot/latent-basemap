@@ -125,7 +125,6 @@ from basemap.round0230_minilm_2m_panel_n13 import (
 from basemap import round0113_prompt_contrast as prompt_contract
 from experiments import round0113_nodes as prompt_nodes
 from experiments import round0218_nodes
-from basemap.round0253_stop_hooks import install_stop_hooks
 
 
 TRAIN_ACTION = "train_minilm_mixed_2m_seed_extension_n13"
@@ -377,7 +376,6 @@ def _weighted_rejection_accounting_mismatch(
 
 
 def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
-    install_stop_hooks(label="R0253 round0230_nodes.run_train")
     import torch
 
     if active.get("manifest", {}).get("round_id") != ROUND_ID:
@@ -814,7 +812,6 @@ def _authenticate_r0230_map(
 
 
 def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
-    install_stop_hooks(label="R0253 round0230_nodes.run_panel")
     import torch
     from basemap.panel_v2 import reset_process_cuda_peak, sample_anchors, score_panel
     from basemap.pumap.parametric_umap import ParametricUMAP

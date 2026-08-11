@@ -238,7 +238,6 @@ from experiments.round0113_nodes import _new_model
 from experiments.round0238_nodes import _check_runner_abort
 from experiments.round0241_nodes import _readonly_memmap
 from experiments.round0242_nodes import _memmap_attestation
-from basemap.round0253_stop_hooks import install_stop_hooks
 
 
 TRAINLOOP_ACTION = "trainloop_0250"
@@ -918,7 +917,6 @@ def _seed(job: Mapping[str, Any]) -> int:
 
 
 def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
-    install_stop_hooks(label="R0253 round0250_nodes.run_train")
     import torch
 
     if active.get("manifest", {}).get("round_id") != ROUND_ID:
@@ -1399,7 +1397,6 @@ def _authenticate_map(
 
 
 def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
-    install_stop_hooks(label="R0253 round0250_nodes.run_panel")
     import torch
     from basemap.panel_v2 import (
         hiD_reference_key,
