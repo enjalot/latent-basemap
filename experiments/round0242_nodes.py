@@ -64,7 +64,6 @@ from basemap.round0238_rung5 import (
     truth_probe_query_rows,
 )
 from basemap.round0240_rung5 import REGISTERED_REACHABILITY_CEILING_C400
-from basemap.round0247_registry import registered_value
 from basemap.round0241_qualify import (
     DIMENSION,
     GPU_HOURS_CAP_NOTE,
@@ -123,6 +122,7 @@ from basemap.round0242_locality import (
     symmetrised_degree_once,
     weight_distribution,
 )
+from basemap.round0247_registry import registered_value
 from experiments.round0238_nodes import (
     FUZZY_STRIPE_ROWS,
     _blocked_descending_sort,

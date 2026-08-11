@@ -74,17 +74,21 @@ ROUND_ID = "0248"
 #: questions:
 #:
 #: * `discover_round_modules()` — **every** `round0*.py` under `basemap/` and
-#:   `experiments/` in the release, `380` files at R0249. Over this scope the
-#:   derivation enforces the one thing it can decide with no human input at
-#:   all: a comparison whose operand is a **registered** symbol read as a bare
-#:   name is a defect. The registry supplies the symbol set, so this needs no
-#:   list of any kind.
+#:   `experiments/` in the release. Over this scope the derivation enforces the
+#:   one thing it can decide with no human input at all: a comparison whose
+#:   operand is a **registered** symbol read as a bare name is a defect. The
+#:   registry supplies the symbol set, so this needs no list of any kind.
 #: * `discover_registry_regime_modules()` — the modules whose source names
 #:   `round0247_registry`, i.e. those that have opted into the registry regime,
-#:   `17` files at R0249 against the thirteen hand-written before. Over this
-#:   narrower scope the derivation additionally requires every constant a
-#:   comparison reads to be triaged, which is the part that does need a human
-#:   sentence per symbol (`NOT_A_BOUND`).
+#:   against the thirteen that were hand-written before. Over this narrower
+#:   scope the derivation additionally requires every constant a comparison
+#:   reads to be triaged, which is the part that does need a human sentence per
+#:   symbol (`NOT_A_BOUND`).
+#:
+#: Both counts are MEASURED at each derivation and published as
+#: `discovery.round_modules_scanned` and `discovery.registry_regime_modules`;
+#: no count is written here, because a count written here is the same kind of
+#: hand-maintained claim the list was.
 #:
 #: The rule is mechanical in both directions: a new guard module that imports
 #: the registry joins the triage scope automatically, and a module that does
