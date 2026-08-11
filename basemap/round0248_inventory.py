@@ -145,7 +145,7 @@ NOT_A_BOUND: dict[str, str] = {
     "TIE_ACTION": "an action name, compared for handler dispatch",
     "PARAMGUARD_ACTION": "an action name, compared for handler dispatch",
     "TRUTHCOS_ACTION": "an action name, compared for handler dispatch",
-    "INVENTORY_ACTION": "an action name, compared for handler dispatch",
+    "GAPGUARD_ACTION": "an action name, compared for handler dispatch",
     "EXTERNAL_ACTION": "an action name, compared for handler dispatch",
     # -- the registry's own vocabulary
     "CEILING": (
