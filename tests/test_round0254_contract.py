@@ -584,6 +584,45 @@ def test_the_dirty_page_settings_are_read_and_never_written():
 # --------------------------------------------------------------------------- #
 
 
+def test_the_dispatch_node_polls_between_its_audit_stages_not_after_them():
+    """Coverage has to be earned by the layout, not by the field being present.
+
+    A first cut of `run_dispatch` did every audit and then polled three times in
+    a row, and sealed `observed_span_s = 1.1240976164117455e-05` against a
+    `1.5769093580020126` s node -- `0.0007%`. The gate and the window are now
+    constructed before the work, and this asserts the layout by AST: the gate
+    must be built before the first census call, and there must be more than two
+    reads inside the window.
+    """
+    path = os.path.join(REPO_ROOT, "experiments", "round0254_nodes.py")
+    tree = ast.parse(open(path, encoding="utf-8").read(), filename=path)
+    node = next(item for item in tree.body
+                if isinstance(item, ast.FunctionDef) and item.name == "run_dispatch")
+    gate_line = census_line = None
+    reads = 0
+    for inner in ast.walk(node):
+        if not isinstance(inner, ast.Call):
+            continue
+        name = (inner.func.id if isinstance(inner.func, ast.Name)
+                else inner.func.attr if isinstance(inner.func, ast.Attribute) else "")
+        if name == "_node_gate" and gate_line is None:
+            gate_line = inner.lineno
+        if name == "dispatch_census" and census_line is None:
+            census_line = inner.lineno
+        if name == "wrapped":
+            reads += 1
+    assert gate_line is not None and census_line is not None
+    assert gate_line < census_line, "the gate is built after the work again"
+    assert reads >= 8, f"only {reads} abort reads inside the audit window"
+
+
+def test_the_writeback_stop_control_is_instrumented():
+    """Its 49 GB write must contribute a covered span, not silence."""
+    path = os.path.join(REPO_ROOT, "experiments", "round0254_nodes.py")
+    source = open(path, encoding="utf-8").read()
+    assert "inner=stop_window.observe" in source
+
+
 def test_both_nodes_emit_a_covered_span_key_roundreport_reads():
     source = open(
         os.path.join(REPO_ROOT, "experiments", "round0254_nodes.py"),

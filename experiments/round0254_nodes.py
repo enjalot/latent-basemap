@@ -352,47 +352,61 @@ def run_dispatch(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     scratch = create_fresh_directory(SCRATCH_ROOT, label="R0254 dispatch scratch")
     cuda = _no_cuda_here()
 
+    # The gate and the coverage window are constructed BEFORE any of the work,
+    # not after it. R0252's severe defect (review-0252-01 §H) was that its
+    # expensive stage ran before a gate existed, so no census could see it, and a
+    # first cut of this node reproduced that shape in miniature: it did every
+    # audit first and then polled three times in a row, which sealed
+    # `observed_span_s = 1.12e-05` against a `1.577` s node -- a coverage of
+    # `0.0007%`, quantitative and useless. Each stage below is followed by a real
+    # abort read, so the span the ledger reports is the audit itself.
+    window = ledger.window("R0254 dispatch audit stage")
+    guard_ctx = _node_guard(label)
+    gate = _node_gate(label, training_performed=False)
     try:
-        census = dispatch_census()
-        derived = derived_entries(SCOPE_MODULES, census)
-        entries = entry_tuples(derived)
-        audit = entry_install_audit(entries)
-        guard = assert_derived_entries_install(SCOPE_MODULES, census)
-        gates = gate_census(entries)
-        residual = scope_residual(census, SCOPE_MODULES)
-        planted = _plant_and_audit(scratch)
-        if not planted["every_planted_defect_was_caught"]:
-            raise Round0254NodeError(
-                "R0254: the shipped install auditor did not catch every planted "
-                f"defect: {planted['controls']}"
-            )
-        if not planted["the_honest_install_still_passes"]:
-            raise Round0254NodeError(
-                "R0254: the shipped install auditor rejects an honest install, so "
-                "its five refusals prove nothing"
-            )
-
-        # How many of the entries the runner has ACTUALLY dispatched now carry an
-        # effective install -- the number review-0253-01 §A.2 reported as 0 of 206.
-        in_scope_dispatched = [
-            (str(row["module"]), str(row["callable"]))
-            for row in census["handlers"]
-            if str(row["module"]) in set(SCOPE_MODULES)
-        ]
-        dispatched_audit = entry_install_audit(in_scope_dispatched)
-
-        state = stop_hooks_state()
-        window = ledger.window("R0254 dispatch audit stage")
-        guard_ctx = _node_guard(label)
-        gate = _node_gate(label, training_performed=False)
         with guard_ctx:
             gate.start()
             recorder = PollRecorder(gate=gate, clock=time.monotonic)
             recorder.anchor("R0254 dispatch stage entered")
             wrapped = window.wrap(recorder)
-            wrapped("R0254 dispatch census complete")
+
+            census = dispatch_census()
+            wrapped("R0254 queue-manifest dispatch census complete")
+            derived = derived_entries(SCOPE_MODULES, census)
+            wrapped("R0254 entry list derived from the dispatch path")
+            entries = entry_tuples(derived)
+            audit = entry_install_audit(entries)
+            wrapped("R0254 effective-install audit complete")
+            guard = assert_derived_entries_install(SCOPE_MODULES, census)
+            wrapped("R0254 derived-entry install guard complete")
+            gates = gate_census(entries)
+            wrapped("R0254 install-and-gate census complete")
+            residual = scope_residual(census, SCOPE_MODULES)
+            wrapped("R0254 scope residual complete")
+            planted = _plant_and_audit(scratch)
             wrapped("R0254 planted-defect controls complete")
-            wrapped("R0254 gate census complete")
+            if not planted["every_planted_defect_was_caught"]:
+                raise Round0254NodeError(
+                    "R0254: the shipped install auditor did not catch every "
+                    f"planted defect: {planted['controls']}"
+                )
+            if not planted["the_honest_install_still_passes"]:
+                raise Round0254NodeError(
+                    "R0254: the shipped install auditor rejects an honest "
+                    "install, so its five refusals prove nothing"
+                )
+
+            # How many of the entries the runner has ACTUALLY dispatched now
+            # carry an effective install -- review-0253-01 §A.2's `0 of 206`.
+            in_scope_dispatched = [
+                (str(row["module"]), str(row["callable"]))
+                for row in census["handlers"]
+                if str(row["module"]) in set(SCOPE_MODULES)
+            ]
+            dispatched_audit = entry_install_audit(in_scope_dispatched)
+            wrapped("R0254 dispatched-handler audit complete")
+            state = stop_hooks_state()
+            wrapped("R0254 stop-hook state read")
             gate.finish("R0254 dispatch stage end")
         window.close()
         tail = _guard_tail_reported(guard_ctx, label=label)
@@ -568,12 +582,18 @@ def run_writeback(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 if os.path.exists(_path):
                     os.unlink(_path)
 
+        # The stop control writes another 49 GB and it is instrumented too:
+        # `FlagFileAbortPoll` forwards every read to `inner`, so the control's
+        # own window records the same span the census would otherwise miss.
+        stop_window = ledger.window(f"{label} stop control under {best_arm}")
         outcome = measure_stop_latency(
             label=f"write of the {STALL_SIZE_BYTES} B rung under {best_arm}",
             flag_path=os.path.join(scratch, "stall-stop.abort"),
             delay_s=STOP_CONTROL_DELAY_S,
             run=run_under_poll,
+            inner=stop_window.observe,
         )
+        stop_window.close()
         if not outcome["the_work_stopped_cooperatively"]:
             raise Round0254NodeError(
                 "R0254 write stop control did not stop: the polled write path ran "
