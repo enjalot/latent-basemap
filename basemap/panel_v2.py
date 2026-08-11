@@ -46,6 +46,68 @@ D_K_DENSITY = 15
 D_K_HIT = 10
 
 
+# --------------------------------------------------------------------------- #
+# cooperative-abort reads inside the scorer (R0252, additive)
+# --------------------------------------------------------------------------- #
+#
+# `roundreport`'s abort-poll gap census made one `score_panel` call the widest
+# abort-read gap of R0251 -- 1.980511222005589 s, 0.7887487648242341x the
+# registered 2.5109531834854018 s ceiling -- larger than anything in the trainer
+# node R0251 led with.  The call has no internal abort read at all, so the whole
+# scorer is one interval.
+#
+# The hook is a module-level callable, None by default, read once per bounded
+# unit of work.  With no hook installed each site is one global load and one
+# comparison.  **No metric, neighbour set, ordering or rounding changes**: the
+# sites sit between existing loop iterations and between existing phases, they
+# take no arguments derived from the data, and they return nothing.  A poll may
+# raise, which propagates out of `score_panel` with no partial result.
+
+ABORT_POLL_SITE_KNN_CORPUS_CHUNK = "panel_v2._self_knn corpus chunk"
+ABORT_POLL_SITE_KNN_TILE = "panel_v2._self_knn distance tile"
+ABORT_POLL_SITE_KNN_EMIT_TILE = "panel_v2._self_knn rerank/emit tile"
+ABORT_POLL_SITE_PANEL_ALIGNED = "panel_v2.score_panel aligned"
+ABORT_POLL_SITE_PANEL_REFERENCE = "panel_v2.score_panel high-D reference resolved"
+ABORT_POLL_SITE_PANEL_LOW_DIM = "panel_v2.score_panel low-D k_frac pass complete"
+ABORT_POLL_SITE_PANEL_FFR = "panel_v2.score_panel ffr scored"
+ABORT_POLL_SITE_PANEL_PURITY = "panel_v2.score_panel purity scored"
+ABORT_POLL_SITE_PANEL_DENSITY = "panel_v2.score_panel density scored"
+ABORT_POLL_SITE_PANEL_COMPLETE = "panel_v2.score_panel complete"
+
+#: Asserted by a contract test against this module's AST, so a deleted call site
+#: is a test failure rather than a silently widened interval.
+ABORT_POLL_SITES: tuple[str, ...] = (
+    ABORT_POLL_SITE_KNN_CORPUS_CHUNK,
+    ABORT_POLL_SITE_KNN_TILE,
+    ABORT_POLL_SITE_KNN_EMIT_TILE,
+    ABORT_POLL_SITE_PANEL_ALIGNED,
+    ABORT_POLL_SITE_PANEL_REFERENCE,
+    ABORT_POLL_SITE_PANEL_LOW_DIM,
+    ABORT_POLL_SITE_PANEL_FFR,
+    ABORT_POLL_SITE_PANEL_PURITY,
+    ABORT_POLL_SITE_PANEL_DENSITY,
+    ABORT_POLL_SITE_PANEL_COMPLETE,
+)
+
+abort_poll = None
+
+
+def set_abort_poll(poll):
+    """Install (or clear, with None) the scorer's abort read; return the old one."""
+    global abort_poll
+    if poll is not None and not callable(poll):
+        raise TypeError("panel_v2 abort poll must be callable or None")
+    previous = abort_poll
+    abort_poll = poll
+    return previous
+
+
+def _poll_abort(where: str) -> None:
+    poll = abort_poll
+    if poll is not None:
+        poll(where)
+
+
 def _require_cuda_scoring_admission() -> dict:
     """Slim-protocol seam: CUDA scoring needs no controller capability.
 
@@ -449,12 +511,14 @@ def _self_knn(F, anchor_idx, k, cfg: PanelV2Config, hi_dim=True, want_dist=False
             (group_rows, cand), -1, dtype=torch.long, device=dev
         )
         for j in range(0, N, cchunk):
+            _poll_abort(ABORT_POLL_SITE_KNN_CORPUS_CHUNK)
             Xc = torch.from_numpy(
                 np.asarray(F[j:j + cchunk], dtype=np.float32)
             ).to(dev)
             xnorm = (Xc * Xc).sum(1) if hi_dim else None
             kloc = min(cand, len(Xc))
             for tile_start in range(0, group_rows, achunk):
+                _poll_abort(ABORT_POLL_SITE_KNN_TILE)
                 tile_stop = min(tile_start + achunk, group_rows)
                 Q = group_q[tile_start:tile_stop]
                 ma, D = Q.shape
@@ -497,6 +561,7 @@ def _self_knn(F, anchor_idx, k, cfg: PanelV2Config, hi_dim=True, want_dist=False
 
         # Exact rerank and host emission remain bounded to the original achunk.
         for tile_start in range(0, group_rows, achunk):
+            _poll_abort(ABORT_POLL_SITE_KNN_EMIT_TILE)
             tile_stop = min(tile_start + achunk, group_rows)
             aids = group_aids[tile_start:tile_stop]
             Q = group_q[tile_start:tile_stop]
@@ -1774,6 +1839,7 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
     if len(Xa) != n:
         raise ValueError(f"post-align len(Xa)={len(Xa)} != len(Z)={n} (P0-C).")
 
+    _poll_abort(ABORT_POLL_SITE_PANEL_ALIGNED)
     aidx = sample_anchors(n, cfg)
     m = len(aidx)
     masks = anchor_masks or {}
@@ -1795,7 +1861,9 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
     ref, ref_reused = _resolve_reference(Xa, aidx, cfg, centroids_by_k, hiD_reference,
                                          reference_identity=reference_identity)
     hi_hit, hi_frac, guard_hit = ref["hi_hit"], ref["hi_frac"], ref["guard_hit"]
+    _poll_abort(ABORT_POLL_SITE_PANEL_REFERENCE)
     lo_kf, _, _ = _self_knn(Z, aidx, kf, cfg, hi_dim=False)
+    _poll_abort(ABORT_POLL_SITE_PANEL_LOW_DIM)
 
     res = {"schema": PANEL_SCHEMA, "formula_version": cfg.formula_version,
            "n": int(n), "n_dims_hi": int(np.asarray(Xa[:1]).shape[1]),
@@ -1830,6 +1898,7 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
                 ),
             }
         res["ffr_by_group"] = groups
+    _poll_abort(ABORT_POLL_SITE_PANEL_FFR)
 
     # purity per centroid granularity — uses the APPROXIMATE high-D k_frac membership
     if centroids_by_k:
@@ -1851,6 +1920,7 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
             res["centroid_hashes"][f"k{kc}"] = _ids_hash(
                 np.round(np.asarray(centroids_by_k[kc], np.float32), 4))
         res["n_purity_anchors"] = int(len(sel_pur))
+    _poll_abort(ABORT_POLL_SITE_PANEL_PURITY)
 
     # density: exact-radius pass (k_density), hiD vs loD. hi-D radii are cached
     # for ALL anchors (per-anchor independent); index the density mask here.
@@ -1886,6 +1956,7 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
                 "mean_log_low_d_radius": round(float(group_lo.mean()), 6),
             }
         res["density_by_group"] = groups
+    _poll_abort(ABORT_POLL_SITE_PANEL_DENSITY)
 
     # projection (out-of-sample) — kept in its own labelled keys, never merged
     # into the transductive ffr column (P0-C).
@@ -1929,6 +2000,7 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
         "hiD_reference_key": ref["key"], "hiD_reference_reused": bool(ref_reused),
     }
     res["guards"] = {**_data_guards(Xa, Z), "hit_guard": guard_hit, "density_guard": guard_den}
+    _poll_abort(ABORT_POLL_SITE_PANEL_COMPLETE)
     return res
 
 

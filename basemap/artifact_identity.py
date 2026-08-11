@@ -16,6 +16,57 @@ from pathlib import Path
 from typing import Iterable
 
 
+# --------------------------------------------------------------------------- #
+# cooperative-abort reads between hash chunks (R0252, additive)
+# --------------------------------------------------------------------------- #
+#
+# Every loop below already streams in bounded chunks.  Until R0252 none of them
+# looked at anything between chunks, so one `sha256` over a large substrate was a
+# single interval in which a node could not observe an abort request: R0251
+# measured 1.3006 s over 3,072,000,128 B and projected 65.03 s at a 100M
+# substrate, i.e. ~26x the registered 2.5109531834854018 s ceiling.
+#
+# The hook is a module-level callable, None by default.  With no hook installed
+# each site costs one global load and one comparison per chunk (~366 of them on
+# the 3 GB substrate, ~18,750 at 100M), which is not measurable against an 8 MiB
+# read.  **Nothing about the digest changes**: every byte is still read in order
+# and fed to the same `hashlib.sha256`, the no-follow open and the before/after
+# `fstat` identity comparison are untouched, and there is no cached, partial or
+# short-circuited digest anywhere.  The only new outcome is that a poll may raise,
+# in which case the caller gets an exception and *no* digest at all.
+
+ABORT_POLL_SITE_FILE_CHUNK = "artifact_identity.sha256_file chunk"
+ABORT_POLL_SITE_IDENTITY_CHUNK = "artifact_identity.regular_file_identity chunk"
+ABORT_POLL_SITE_ARRAY_CHUNK = "artifact_identity.ordered_array_sha256 chunk"
+
+#: The five-tuple a test asserts against, so a removed call site is a failure.
+ABORT_POLL_SITES: tuple[str, ...] = (
+    ABORT_POLL_SITE_FILE_CHUNK,
+    ABORT_POLL_SITE_IDENTITY_CHUNK,
+    ABORT_POLL_SITE_ARRAY_CHUNK,
+)
+
+#: Installed by node code for the duration of a stage; None everywhere else.
+abort_poll = None
+
+
+def set_abort_poll(poll):
+    """Install (or clear, with None) the between-chunk abort read; return the old."""
+    global abort_poll
+    if poll is not None and not callable(poll):
+        raise TypeError("artifact_identity abort poll must be callable or None")
+    previous = abort_poll
+    abort_poll = poll
+    return previous
+
+
+def _poll_abort(where: str) -> None:
+    """Read the installed abort hook, if any. Allocates nothing, returns nothing."""
+    poll = abort_poll
+    if poll is not None:
+        poll(where)
+
+
 def canonical_json(value) -> bytes:
     """Return the one JSON encoding used for content-bound controller fields."""
     return json.dumps(value, sort_keys=True, separators=(",", ":"),
@@ -30,6 +81,7 @@ def sha256_file(path: str | os.PathLike, chunk_size: int = 8 << 20) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as handle:
         for chunk in iter(lambda: handle.read(chunk_size), b""):
+            _poll_abort(ABORT_POLL_SITE_FILE_CHUNK)
             h.update(chunk)
     return h.hexdigest()
 
@@ -52,6 +104,7 @@ def _regular_file_identity(path: str | os.PathLike,
             raise RuntimeError(f"input identity changed while opening: {raw}")
         digest = hashlib.sha256()
         while True:
+            _poll_abort(ABORT_POLL_SITE_IDENTITY_CHUNK)
             chunk = os.read(fd, chunk_size)
             if not chunk:
                 break
@@ -132,6 +185,7 @@ def ordered_array_sha256(array, row_chunk: int = 65536) -> str:
     h.update(canonical_json({"shape": shape, "dtype": dtype.str}))
     n = len(array)
     for start in range(0, n, row_chunk):
+        _poll_abort(ABORT_POLL_SITE_ARRAY_CHUNK)
         rows = np.ascontiguousarray(np.asarray(array[start:start + row_chunk]))
         h.update(rows.tobytes(order="C"))
     return h.hexdigest()
