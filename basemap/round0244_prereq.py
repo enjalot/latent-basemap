@@ -47,6 +47,7 @@ from basemap.round0238_rung5 import GRAPH_K
 from basemap.round0244_guard import ROUND_ID, ROWS, Round0244Error
 from basemap.round0247_registry import clamp as _clamp_r0247
 from basemap.round0247_registry import override_records as _override_records
+from basemap.round0247_registry import registered_value as _registered_value
 
 # --------------------------------------------------------------------------- #
 # D. the edge list as a sampling distribution
@@ -109,7 +110,20 @@ SAMPLER_WEIGHT_BINS = 20
 #: Registered acceptance for the fidelity check, stated before it is computed.
 SAMPLER_MAX_ABS_Z = 5.0
 SAMPLER_MIN_CHI_SQUARE_P = 1e-4
-SAMPLER_MAX_ANONYMOUS_BYTES = 4 * (1 << 30)
+#: R0248 gap 2, review-0247-01 A.3: `sampler_max_anonymous_bytes` was
+#: registered as parameter 14 with the override path "a module global compared
+#: in the node's verdict arms" - and that is exactly how it stayed enforced.
+#: The literal below is now a MIRROR of the registry; every verdict arm that
+#: compares against it calls `sampler_max_anonymous_bytes()`, which resolves
+#: the registry at the comparison site, so an assignment to this name no longer
+#: moves any decision. `basemap.round0248_inventory` fails closed if a gate
+#: comparison reads it as a bare name again.
+SAMPLER_MAX_ANONYMOUS_BYTES = _registered_value("sampler_max_anonymous_bytes")
+
+
+def sampler_max_anonymous_bytes() -> float:
+    """The registered anonymous ceiling for the sampler, read at the site."""
+    return _registered_value("sampler_max_anonymous_bytes")
 SAMPLER_MIN_DRAWS_PER_S = 100_000.0
 
 #: UMAP's edge schedule is `n_epochs * w / w.max()`; an edge whose weight falls
@@ -916,6 +930,7 @@ __all__ = [
     "SAMPLER_EPOCHS",
     "SAMPLER_MAX_ABS_Z",
     "SAMPLER_MAX_ANONYMOUS_BYTES",
+    "sampler_max_anonymous_bytes",
     "SAMPLER_MIN_CHI_SQUARE_P",
     "SAMPLER_MIN_DRAWS_PER_S",
     "SAMPLER_NOTE",

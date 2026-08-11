@@ -607,6 +607,47 @@ _PARAMETERS: tuple[SafetyParameter, ...] = (
             "not a larger sample"
         ),
     ),
+    # ---- R0248: the declarations that waive gate arms -------------------- #
+    _p(
+        name="replay",
+        module="basemap.round0245_guard",
+        symbol="AbortPollTracker.replay",
+        value=0.0,
+        direction=CEILING,
+        role=(
+            "whether a poll-spacing gate's verdict is a REPLAY - a "
+            "demonstration scored on a scripted clock through a callable that "
+            "need not read the cooperative abort flag - rather than a "
+            "measurement of a stage that actually ran. 0.0 is False"
+        ),
+        basis=(
+            "review-0247-01 A.6: replay=True waives BOTH "
+            "the_clock_is_the_registered_monotonic_clock and "
+            "the_gate_wraps_a_registered_abort_reader inside require() itself. "
+            "R0247 retired training_performed on the stated principle that a "
+            "self-declared bool which switches off an arm is a safety "
+            "parameter, and then shipped a self-declared bool that switches "
+            "off two. The registered value is False: no gate is a replay "
+            "unless it says so, and saying so is published"
+        ),
+        override_path=(
+            "AbortPollTracker(replay=True) / AbortPollGate(replay=True). It is "
+            "not clamped to False, because the reviewer-shaped replays are "
+            "legitimate demonstrations and forcing them to False would make "
+            "every replay control unrunnable. It is REGISTERED, so the "
+            "declaration is recorded in safety_overrides, published as "
+            "declared_replay beside registered_replay, listed in "
+            "gate_arms_waived_by_declaration, and refused at the sealing "
+            "boundary by require_enforcement_evidence"
+        ),
+        what_it_does_not_catch=(
+            "a node that declares replay=True and never calls "
+            "require_enforcement_evidence. Nothing in-process closes that; "
+            "what closes it is that the node module is the diff a reviewer "
+            "reads, and that the arms it waived are now named in the receipt"
+        ),
+        enforcement="clamped",
+    ),
     _p(
         name="tie_bound_confidence",
         module="basemap.round0247_precision",
@@ -664,9 +705,37 @@ TIE_BOUND_CONFIDENCE = REGISTERED_SAFETY_PARAMETERS[
 REGISTERED_ABORT_READERS: frozenset[str] = frozenset({
     "experiments.round0238_nodes._check_runner_abort",
     "basemap.gpu_child_supervision.runner_abort_reason",
+    #: R0248 gap 3: the two control readers that were previously sanctioned by
+    #: the runtime marker are now sanctioned BY NAME, in source, in this set.
+    "basemap.round0247_guard._sanctioned_reader",
+    "basemap.round0248_guard._sanctioned_reader",
 })
 
 REGISTERED_ABORT_READER_ATTRIBUTE = "_r0247_registered_abort_reader"
+
+#: R0248 gap 3, review-0247-01 A.4. `registered_abort_reader` was an exported
+#: one-call decorator that set the attribute below on ANY callable, and
+#: `is_registered_abort_reader` honoured it — so one function call made a no-op
+#: pass both `require()` and `require_enforcement_evidence()`. An allowlist a
+#: caller can extend at runtime is not an allowlist. The attribute no longer
+#: sanctions anything: sanction is by qualified name against
+#: `REGISTERED_ABORT_READERS`, which is source. Applying the retired marker is
+#: still possible (the function is still importable, and pretending otherwise
+#: would only push the attack to `setattr`), but it is now a RECORDED
+#: VIOLATION: every application is appended here and published, and a reader
+#: carrying the marker without a registered name is reported as
+#: `unsanctioned`.
+MARKER_APPLICATIONS: list[dict[str, Any]] = []
+
+RETIRED_MARKER_NOTE = (
+    "RETIRED 2026-08-11 (R0248, review-0247-01 A.4). The "
+    "_r0247_registered_abort_reader attribute no longer sanctions a "
+    "cooperative-abort reader. Sanction is by qualified name against the "
+    "source-level REGISTERED_ABORT_READERS set. Every application of the "
+    "retired marker is recorded in MARKER_APPLICATIONS and published in the "
+    "gate's verdict under abort_reader_sanction, so a reader that was marked "
+    "at runtime is visible as marked-and-unsanctioned rather than passing."
+)
 
 CONSTRUCTION_PATH_NOTE = (
     "Three of the escape hatches R0247 closes are not numbers. (1) `clock` - an "
@@ -683,27 +752,108 @@ CONSTRUCTION_PATH_NOTE = (
 )
 
 
-def is_registered_abort_reader(inner: Any) -> bool:
-    """Is this callable one of the sanctioned cooperative-abort readers?"""
-    if inner is None:
-        return False
-    if getattr(inner, REGISTERED_ABORT_READER_ATTRIBUTE, False):
-        return True
+def abort_reader_qualified_name(inner: Any) -> str:
     module = getattr(inner, "__module__", "") or ""
-    qualname = getattr(inner, "__qualname__", "") or getattr(inner, "__name__", "")
-    return f"{module}.{qualname}" in REGISTERED_ABORT_READERS
+    qualname = (
+        getattr(inner, "__qualname__", "")
+        or getattr(inner, "__name__", "")
+    )
+    return f"{module}.{qualname}"
+
+
+def abort_reader_sanction(inner: Any) -> dict[str, Any]:
+    """WHICH mechanism sanctioned this reader — published in every verdict.
+
+    review-0247-01 H5: "an allowlist that a caller can extend at runtime is not
+    an allowlist. If the marker must stay, publish *which* mechanism sanctioned
+    the reader (name match vs. marker) in the verdict, so a reviewer can see
+    it." R0248 does both: the marker no longer sanctions, and the mechanism is
+    published either way.
+    """
+    if inner is None:
+        return {
+            "qualified_name": None,
+            "sanctioned": False,
+            "mechanism": "no_reader",
+            "carries_the_retired_marker": False,
+            "note": RETIRED_MARKER_NOTE,
+        }
+    name = abort_reader_qualified_name(inner)
+    marked = bool(getattr(inner, REGISTERED_ABORT_READER_ATTRIBUTE, False))
+    sanctioned = name in REGISTERED_ABORT_READERS
+    return {
+        "qualified_name": name,
+        "sanctioned": sanctioned,
+        "mechanism": "registered_name" if sanctioned else (
+            "retired_marker_only" if marked else "unsanctioned"
+        ),
+        "carries_the_retired_marker": marked,
+        "marked_and_unsanctioned": bool(marked and not sanctioned),
+        "note": RETIRED_MARKER_NOTE,
+    }
+
+
+def is_registered_abort_reader(inner: Any) -> bool:
+    """Is this callable one of the sanctioned cooperative-abort readers?
+
+    R0248 gap 3: BY NAME ONLY. The runtime marker is ignored.
+    """
+    return bool(abort_reader_sanction(inner)["sanctioned"])
 
 
 def registered_abort_reader(function: Any) -> Any:
-    """Mark a callable as a sanctioned cooperative-abort reader."""
+    """RETIRED. Marking a callable no longer sanctions it; it records it.
+
+    Kept importable so that (a) the retired-marker attack has a call site to be
+    controlled through and (b) an old caller fails visibly rather than
+    silently. The returned callable is unchanged and is NOT sanctioned unless
+    its qualified name is in `REGISTERED_ABORT_READERS`.
+    """
+    MARKER_APPLICATIONS.append({
+        "qualified_name": abort_reader_qualified_name(function),
+        "sanctioned_by_name": (
+            abort_reader_qualified_name(function) in REGISTERED_ABORT_READERS
+        ),
+        "note": RETIRED_MARKER_NOTE,
+    })
     setattr(function, REGISTERED_ABORT_READER_ATTRIBUTE, True)
     return function
+
+
+def marker_applications() -> tuple[dict[str, Any], ...]:
+    """Every application of the retired marker in this process."""
+    return tuple(dict(row) for row in MARKER_APPLICATIONS)
+
+
+def unsanctioned_marker_applications() -> tuple[dict[str, Any], ...]:
+    """Marker applications that did NOT correspond to a registered name."""
+    return tuple(
+        dict(row) for row in MARKER_APPLICATIONS
+        if not row.get("sanctioned_by_name")
+    )
 
 
 # --------------------------------------------------------------------------- #
 # the fingerprint — mutating the registry is the next door over
 # --------------------------------------------------------------------------- #
 def registry_rows() -> tuple[dict[str, Any], ...]:
+    """The rows the fingerprint covers.
+
+    R0248, review-0247-01 H1. This used to iterate `_PARAMETERS`, the
+    module-level TUPLE, while `clamp()`, `registered_bounds()` and every guard
+    resolved `REGISTERED_SAFETY_PARAMETERS`, a DIFFERENT module-level name.
+    Rebinding the mapping moved every bound at once and `verify_registry()`
+    still returned `holds: true` under the pinned digest, because the
+    fingerprint was looking at the other object. It now hashes **the object the
+    decisions read**, sorted by name so the digest does not depend on
+    insertion order.
+
+    This is a correctness fix to the fingerprint's own claim; it is **not** a
+    defence. `gc.get_referents()` still hands out the dict behind the
+    `MappingProxyType`, and mutating it moves the bound with the digest intact.
+    No in-process Python guard can constrain the process it runs in. The
+    external bound R0248 adds is `basemap.round0248_external`.
+    """
     return tuple(
         {
             "name": parameter.name,
@@ -713,7 +863,9 @@ def registry_rows() -> tuple[dict[str, Any], ...]:
             "direction": parameter.direction,
             "enforcement": parameter.enforcement,
         }
-        for parameter in _PARAMETERS
+        for parameter in sorted(
+            REGISTERED_SAFETY_PARAMETERS.values(), key=lambda row: row.name
+        )
     )
 
 
@@ -723,6 +875,7 @@ def registry_fingerprint() -> str:
         {
             "rows": list(registry_rows()),
             "abort_readers": sorted(REGISTERED_ABORT_READERS),
+            "retired_marker": RETIRED_MARKER_NOTE,
         },
         sort_keys=True, separators=(",", ":"),
     ).encode("utf-8")
@@ -734,8 +887,14 @@ def registry_fingerprint() -> str:
 #: obvious next attack after the keywords are clamped - cannot succeed quietly.
 #: Changing a registered bound therefore requires changing this digest in the
 #: same commit, which is exactly the "register the change and its basis" rule.
+#: Re-pinned 2026-08-11 by R0248. R0247's digest was
+#: `35128f85e10ccf74387391b403bd1f18f33732863fc893b7b087db37c826d23f` over
+#: `_PARAMETERS`; this one is over `REGISTERED_SAFETY_PARAMETERS` — the object
+#: the decisions read — with `replay` registered as the twentieth parameter and
+#: the retired-marker note folded in. Changing a registered bound still
+#: requires changing this digest in the same commit.
 REGISTERED_REGISTRY_SHA256 = (
-    "35128f85e10ccf74387391b403bd1f18f33732863fc893b7b087db37c826d23f"
+    "bb8f7b395f06d19db062e1698ad8a332858028dab56eff005baf535771fc253b"
 )
 
 
@@ -752,7 +911,13 @@ def verify_registry(*, label: str = "R0247") -> dict[str, Any]:
     return {
         "registry_fingerprint": observed,
         "registered_registry_sha256": REGISTERED_REGISTRY_SHA256,
-        "parameters": len(_PARAMETERS),
+        "parameters": len(REGISTERED_SAFETY_PARAMETERS),
+        "the_fingerprint_covers_the_object_the_decisions_read": True,
+        "what_it_does_not_catch": (
+            "gc.get_referents() on the MappingProxyType, and any other "
+            "deliberate in-process mutation. See basemap.round0248_external "
+            "for the bound that does not live in this process."
+        ),
         "holds": True,
     }
 
@@ -823,6 +988,81 @@ def clamp(
             "the registered value was used and the attempt is recorded"
             if weakening
             else "the caller asked to be stricter than the registry"
+        ),
+    }
+
+
+def registered_value(name: str) -> float:
+    """Read a registered bound **at the comparison site**.
+
+    R0248 gaps 1 and 2, review-0247-01 A.3. Three bounds were *registered* and
+    then *enforced* against a module-level name: `WATCHDOG_MAX_OBSERVATION_GAP_S`
+    and `WATCHDOG_MAX_MEAN_OBSERVATION_GAP_S` at `round0246_guard:278,289`, and
+    `SAMPLER_MAX_ANONYMOUS_BYTES` at `round0244_prereq:112`. Registering a
+    number changes nothing if the `if` statement reads a mirror of it: two
+    assignments passed review-0246-01 A's `5.0` s attack while the receipt still
+    published `2.5109531834854018`.
+
+    So every gate comparison now calls this, which resolves the name in the
+    registry at the moment of the comparison. A module-global assignment is no
+    longer a decision surface. `basemap.round0248_inventory` derives the set of
+    module-level constants any gate compares against **mechanically** and fails
+    if one of them is a registered symbol read as a bare name.
+    """
+    verify_registry(label=f"R0248 comparison site for {name}")
+    parameter = REGISTERED_SAFETY_PARAMETERS.get(name)
+    if parameter is None:
+        raise Round0247Error(
+            f"R0247 STOP: no registered safety parameter {name!r} to read at a "
+            "comparison site. " + SAFETY_PARAMETER_CLASS_NOTE
+        )
+    return float(parameter.value)
+
+
+def record_declaration(
+    name: str, declared: Any, *, site: str, label: str = ""
+) -> tuple[float, dict[str, Any] | None]:
+    """Record a self-declared flag against its registered value.
+
+    Unlike `clamp()`, this does **not** substitute the registered value. A
+    replay gate really is a replay gate, and a receipt that reported otherwise
+    would be the `registered_*`-echoes-the-caller defect with the sign flipped.
+    What it does is make the declaration *visible*: the record lands in
+    `safety_overrides`, the verdict names the arms the declaration waived, and
+    the sealing gate refuses it.
+    """
+    parameter = REGISTERED_SAFETY_PARAMETERS.get(name)
+    if parameter is None:
+        raise Round0247Error(
+            f"R0247 STOP: {site} declared an unregistered safety parameter "
+            f"{name!r}. " + SAFETY_PARAMETER_CLASS_NOTE
+        )
+    asked = float(declared)
+    registered = float(parameter.value)
+    if asked == registered:
+        return asked, None
+    weakening = parameter.weaker_than_registered(asked)
+    return asked, {
+        "parameter": parameter.name,
+        "module": parameter.module,
+        "symbol": parameter.symbol,
+        "direction": parameter.direction,
+        "registered_value": registered,
+        "effective_floor_after_population_cap": None,
+        "requested_value": asked,
+        #: the declaration STANDS. That is the difference from clamp().
+        "effective_value": asked,
+        "kind": "weakening" if weakening else "stricter",
+        "enforcement": parameter.enforcement,
+        "site": str(site),
+        "label": str(label),
+        "basis": parameter.basis,
+        "note": (
+            "a self-declared flag that waives a gate arm. It is not clamped - "
+            "the declaration stands and is published - and it is refused at "
+            "the sealing boundary by require_enforcement_evidence()"
+            if weakening
+            else "the caller declared something stricter than the registry"
         ),
     }
 
@@ -918,6 +1158,11 @@ def safety_parameter_inventory() -> dict[str, Any]:
         ],
         "parameter_count": len(_PARAMETERS),
         "registered_abort_readers": sorted(REGISTERED_ABORT_READERS),
+        "retired_marker_note": RETIRED_MARKER_NOTE,
+        "retired_marker_applications": list(marker_applications()),
+        "unsanctioned_marker_applications": list(
+            unsanctioned_marker_applications()
+        ),
         "examined_and_not_safety_parameters": EXAMINED_NOT_SAFETY,
         "registry_fingerprint": registry_fingerprint(),
         "registered_registry_sha256": REGISTERED_REGISTRY_SHA256,
@@ -985,6 +1230,14 @@ EXAMINED_NOT_SAFETY: tuple[dict[str, str], ...] = (
 __all__ = [
     "CEILING",
     "CONSTRUCTION_PATH_NOTE",
+    "MARKER_APPLICATIONS",
+    "RETIRED_MARKER_NOTE",
+    "abort_reader_qualified_name",
+    "abort_reader_sanction",
+    "marker_applications",
+    "record_declaration",
+    "registered_value",
+    "unsanctioned_marker_applications",
     "DERIVED_MAX_OBSERVATION_GAP_S",
     "EXAMINED_NOT_SAFETY",
     "FLOOR",

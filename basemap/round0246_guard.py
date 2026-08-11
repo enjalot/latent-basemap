@@ -58,17 +58,29 @@ from basemap.round0245_guard import (
 )
 from basemap.round0247_registry import (
     REGISTERED_SAFETY_PARAMETERS,
-    WATCHDOG_MAX_MEAN_OBSERVATION_GAP_S,
-    WATCHDOG_MAX_OBSERVATION_GAP_S,
     Round0247Error,
+    abort_reader_sanction,
     clamp,
     clamp_int,
     override_records,
     registered_bounds,
+    registered_value,
     registry_fingerprint,
     require_no_weakening_overrides,
     weakening_overrides,
     verify_registry,
+)
+
+#: R0248 gap 1, review-0247-01 A.3. These two names are the round's own new
+#: bounds and they were compared as MODULE GLOBALS at :278 and :289, so two
+#: assignments passed review-0246-01 A's 5.0 s attack while the receipt kept
+#: printing 2.5109531834854018. They are now read from the registry at the
+#: comparison site by `registered_value()`; what remains here is a MIRROR, kept
+#: only for receipts and prose, and `basemap.round0248_inventory` fails closed
+#: if any gate comparison reads it as a bare name again.
+WATCHDOG_MAX_OBSERVATION_GAP_S = registered_value("watchdog_max_observation_gap_s")
+WATCHDOG_MAX_MEAN_OBSERVATION_GAP_S = registered_value(
+    "watchdog_max_mean_observation_gap_s"
 )
 
 ROUND_ID = "0246"
@@ -275,22 +287,31 @@ def require_live_sampler(
             f"died ({receipt['thread_death']}). Its memory receipt is not "
             "evidence and the node must not publish it."
         )
-    if gap_gate_applies and max_gap > WATCHDOG_MAX_OBSERVATION_GAP_S:
+    #: R0248 gap 1: read at the comparison site, never from the module global.
+    registered_max_gap = registered_value("watchdog_max_observation_gap_s")
+    registered_mean_gap = registered_value("watchdog_max_mean_observation_gap_s")
+    state["registered_max_observation_gap_s_at_the_comparison_site"] = (
+        registered_max_gap
+    )
+    state["registered_mean_observation_gap_s_at_the_comparison_site"] = (
+        registered_mean_gap
+    )
+    if gap_gate_applies and max_gap > registered_max_gap:
         raise Round0246Error(
             f"R0247 STOP: {label}'s host guard left {max_gap} s between two "
             "successful observations, against a registered ceiling of "
-            f"{WATCHDOG_MAX_OBSERVATION_GAP_S} s (29,548,888,064 B of sealed "
+            f"{registered_max_gap} s (29,548,888,064 B of sealed "
             "headroom over 11,767,996,416 B/s of sealed measured slope). This "
             "arm is measured in seconds by the sampling thread itself and is "
             "not a ratio to any interval the node declares, which is how "
             "review-0246-01 defeated the coverage floor. "
             + SAMPLER_LIVENESS_NOTE
         )
-    if gap_gate_applies and mean_gap > WATCHDOG_MAX_MEAN_OBSERVATION_GAP_S:
+    if gap_gate_applies and mean_gap > registered_mean_gap:
         raise Round0246Error(
             f"R0247 STOP: {label}'s host guard averaged {mean_gap} s between "
             f"observations over a {wall_s} s stage, against a registered "
-            f"ceiling of {WATCHDOG_MAX_MEAN_OBSERVATION_GAP_S} s - the "
+            f"ceiling of {registered_mean_gap} s - the "
             "registered 0.25 s interval divided by the registered 0.50 "
             "coverage floor, expressed in seconds so that it cannot be "
             "satisfied by moving the denominator. " + SAMPLER_LIVENESS_NOTE
@@ -643,6 +664,8 @@ def require_enforcement_evidence(
     been measured on the registered monotonic clock, through a registered abort
     reader, with no weakening override attempted.
     """
+    waived = list(verdict.get("gate_arms_waived_by_declaration") or [])
+    sanction = dict(verdict.get("abort_reader_sanction") or {})
     state = {
         "label": label,
         "replay_only": bool(verdict.get("replay_only")),
@@ -655,6 +678,15 @@ def require_enforcement_evidence(
         "no_weakening_safety_override_was_attempted": bool(
             verdict.get("no_weakening_safety_override_was_attempted")
         ),
+        #: R0248 gap 4: a declaration that waived an arm is named here rather
+        #: than reachable only by inference from `replay_only`.
+        "gate_arms_waived_by_declaration": waived,
+        #: R0248 gap 3: sealing must know WHICH mechanism sanctioned the
+        #: reader, because the retired marker sanctions nothing.
+        "abort_reader_sanction": sanction,
+        "abort_reader_sanctioned_by_registered_name": bool(
+            sanction.get("mechanism") == "registered_name"
+        ),
     }
     failures = [
         name for name, ok in (
@@ -665,6 +697,9 @@ def require_enforcement_evidence(
              state["inner_is_a_registered_abort_reader"]),
             ("no_weakening_safety_override_was_attempted",
              state["no_weakening_safety_override_was_attempted"]),
+            ("no_gate_arm_was_waived_by_a_declaration", not waived),
+            ("the_abort_reader_is_sanctioned_by_registered_name",
+             state["abort_reader_sanctioned_by_registered_name"]),
         ) if not ok
     ]
     state["failures"] = failures
@@ -1224,9 +1259,9 @@ def run_novel_attack_battery(*, workspace: str) -> dict[str, Any]:
             or (
                 intermittent["sample_failures"] > 0
                 and float(intermittent["max_thread_sample_gap_s"])
-                <= WATCHDOG_MAX_OBSERVATION_GAP_S
+                <= registered_value("watchdog_max_observation_gap_s")
                 and float(intermittent["mean_thread_sample_gap_s"])
-                <= WATCHDOG_MAX_MEAN_OBSERVATION_GAP_S
+                <= registered_value("watchdog_max_mean_observation_gap_s")
             )
         ),
     })

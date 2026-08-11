@@ -641,6 +641,21 @@ def test_this_round_adds_only_its_own_files_and_the_declared_edits() -> None:
         "experiments/prepare_round0247_queue.py",
         "tests/test_round0247_contract.py",
         "tests/test_round0247_cpu_smoke.py",
+        #: R0248's declared edits and its own files. R0248 routes the two
+        #: observation-gap bounds and SAMPLER_MAX_ANONYMOUS_BYTES through the
+        #: registry AT THE COMPARISON SITE, retires the runtime abort-reader
+        #: marker, registers `replay`, and derives the inventory mechanically;
+        #: every one is a diff in result-0248.
+        "basemap/round0248_inventory.py",
+        "basemap/round0248_guard.py",
+        "basemap/round0248_external.py",
+        "experiments/round0248_nodes.py",
+        "experiments/prepare_round0248_queue.py",
+        "experiments/round0244_nodes.py",
+        "experiments/round0245_nodes.py",
+        "experiments/round0246_nodes.py",
+        "tests/test_round0248_contract.py",
+        "tests/test_round0248_cpu_smoke.py",
     }
     changed = set(committed + worktree)
     assert changed <= allowed, sorted(changed - allowed)

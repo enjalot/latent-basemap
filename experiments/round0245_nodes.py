@@ -59,6 +59,7 @@ from basemap.round0242_locality import io_counters, json_scrub
 from basemap.round0244_prereq import (
     SAMPLER_BLOCK_EDGES,
     SAMPLER_MAX_ANONYMOUS_BYTES,
+    sampler_max_anonymous_bytes,
     did_registration,
     did_requirement,
     weight_block_profile,
@@ -697,7 +698,7 @@ def run_sampler(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             ),
             "anonymous_peak_within_budget": bool(
                 int(sampler_guard_receipt["thread_peak_anonymous_bytes"])
-                <= int(SAMPLER_MAX_ANONYMOUS_BYTES)
+                <= int(sampler_max_anonymous_bytes())
             ),
         },
         "host_watchdog": sampler_guard_receipt,

@@ -51,7 +51,6 @@ from basemap.round0247_registry import (
     WATCHDOG_MAX_OBSERVATION_GAP_S,
     Round0247Error,
     clamp,
-    registered_abort_reader,
     registered_bounds,
     registry_fingerprint,
     safety_parameter_inventory,
@@ -67,9 +66,14 @@ _REGISTERED_HEADROOM_BYTES = int(
 )
 
 
-@registered_abort_reader
 def _sanctioned_reader(_where: str) -> None:
-    """A registered cooperative-abort reader, for controls that need one."""
+    """A registered cooperative-abort reader, for controls that need one.
+
+    R0248 gap 3: this used to carry `@registered_abort_reader`. The runtime
+    marker no longer sanctions anything, so this function is sanctioned the
+    only way a reader can be — by its qualified name, in source, in
+    `REGISTERED_ABORT_READERS`.
+    """
     return None
 
 
@@ -103,6 +107,18 @@ WEAKER_THAN_REGISTERED: dict[str, float] = {
     "tie_use_max_expected_flips_over_margin": 1e6,
     "tie_precision_min_rows": 1.0,
     "tie_bound_confidence": 0.0,
+    "replay": 1.0,
+}
+
+#: A boolean bound at its strictest value has no strictly-stricter neighbour:
+#: `replay` is registered at False and False is already the strictest thing a
+#: gate can declare. The mechanical stricter-value arm is skipped for these,
+#: with the reason published, rather than asserting a vacuous `0.0 < 0.0`.
+NO_STRICTER_VALUE_EXISTS: dict[str, str] = {
+    "replay": (
+        "registered at False, which is the strictest declaration a gate can "
+        "make; there is no value strictly stricter than 'this is not a replay'"
+    ),
 }
 
 
@@ -126,13 +142,27 @@ def run_clamp_controls() -> dict[str, Any]:
         effective, record = clamp(
             name, weaker, site="R0247 clamp control", label=name
         )
-        stricter_value = (
-            float(parameter.value) * 0.5 if parameter.direction == "ceiling"
-            else float(parameter.value) * 2.0
-        )
-        stricter_effective, stricter_record = clamp(
-            name, stricter_value, site="R0247 clamp control", label=name
-        )
+        no_stricter = NO_STRICTER_VALUE_EXISTS.get(name)
+        if no_stricter is None:
+            stricter_value = (
+                float(parameter.value) * 0.5 if parameter.direction == "ceiling"
+                else float(parameter.value) * 2.0
+            )
+            stricter_effective, stricter_record = clamp(
+                name, stricter_value, site="R0247 clamp control", label=name
+            )
+            stricter_honoured = bool(
+                float(stricter_effective) == float(stricter_value)
+            )
+            stricter_recorded = bool(
+                stricter_record is not None
+                and stricter_record["kind"] == "stricter"
+            )
+        else:
+            stricter_value = float(parameter.value)
+            stricter_record = None
+            stricter_honoured = True
+            stricter_recorded = True
         rows.append({
             "parameter": name,
             "direction": parameter.direction,
@@ -147,13 +177,9 @@ def run_clamp_controls() -> dict[str, Any]:
                 record is not None and record["kind"] == "weakening"
             ),
             "record": record,
-            "a_stricter_value_is_honoured": bool(
-                float(stricter_effective) == float(stricter_value)
-            ),
-            "stricter_attempt_is_recorded_as_stricter": bool(
-                stricter_record is not None
-                and stricter_record["kind"] == "stricter"
-            ),
+            "a_stricter_value_is_honoured": stricter_honoured,
+            "stricter_attempt_is_recorded_as_stricter": stricter_recorded,
+            "no_stricter_value_exists_because": no_stricter,
         })
     failures = [
         row["parameter"] for row in rows

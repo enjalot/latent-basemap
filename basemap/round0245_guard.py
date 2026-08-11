@@ -63,9 +63,12 @@ from basemap.round0244_guard import (
     WATCHDOG_SAMPLE_INTERVAL_S,
 )
 from basemap.round0247_registry import (
+    abort_reader_sanction,
     clamp,
     is_registered_abort_reader,
     override_records,
+    record_declaration,
+    registered_bounds,
     verify_registry,
 )
 from experiments.round0242_nodes import _meminfo
@@ -245,6 +248,19 @@ class AbortPollTracker:
         #: explicitly declared `replay=True`, whose verdict is marked
         #: `replay_only` and which a node may not seal as enforcement evidence.
         self.replay = bool(replay)
+        #: R0248 gap 4, review-0247-01 A.6. `replay` is a self-declared bool
+        #: that waives TWO arms of `require()`, which is the exact shape R0247
+        #: retired `training_performed` for. It is registered now, so the
+        #: declaration is recorded rather than silent. It is NOT clamped to
+        #: False: the reviewer-shaped replays are legitimate demonstrations and
+        #: clamping would make every replay control unrunnable. What changes is
+        #: that the declaration is published, the waived arms are named, and
+        #: `require_enforcement_evidence()` refuses the verdict.
+        _, replay_record = record_declaration(
+            "replay", 1.0 if replay else 0.0,
+            site="AbortPollTracker(replay=)", label=str(label),
+        )
+        self.replay_declaration = replay_record
         self.clock_is_the_registered_monotonic_clock = bool(clock is None)
         self._clock = clock if clock is not None else time.monotonic
         self.inner = inner
@@ -266,7 +282,9 @@ class AbortPollTracker:
             "min_binding_slope_bytes_per_s", slope_bytes_per_s,
             site="AbortPollTracker(slope_bytes_per_s=)", label=str(label),
         )
-        self.safety_overrides = override_records([headroom_record, slope_record])
+        self.safety_overrides = override_records(
+            [headroom_record, slope_record, replay_record]
+        )
         self.declared_headroom_bytes = int(headroom_bytes)
         self.declared_slope_bytes_per_s = float(slope_bytes_per_s)
         self.headroom_bytes = int(headroom_effective)
@@ -344,7 +362,24 @@ class AbortPollTracker:
             "inner_is_a_registered_abort_reader": bool(
                 self.inner_is_a_registered_abort_reader
             ),
+            #: R0248 gap 3: WHICH mechanism sanctioned the reader, so a
+            #: reviewer can see a runtime-marked reader for what it is.
+            "abort_reader_sanction": abort_reader_sanction(self.inner),
             "replay_only": bool(self.replay),
+            #: R0248 gap 4: the declaration, its registered value, and the
+            #: arms it waives - named, in the receipt, not implied.
+            "declared_replay": bool(self.replay),
+            "gate_arms_waived_by_declaration": (
+                [
+                    "the_clock_is_the_registered_monotonic_clock",
+                    "the_gate_wraps_a_registered_abort_reader",
+                ] if self.replay else []
+            ),
+            "replay_declaration": (
+                dict(self.replay_declaration)
+                if self.replay_declaration is not None else None
+            ),
+            **registered_bounds(["replay"]),
             "binding_slope_floor_bytes_per_s": MIN_BINDING_SLOPE_BYTES_PER_S,
             "binding_slope_floor_basis": MIN_BINDING_SLOPE_BASIS,
             "enforcement_polls": self.polls,

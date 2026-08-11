@@ -97,6 +97,7 @@ from basemap.round0244_prereq import (
     SAMPLER_DRAWS,
     SAMPLER_EPOCHS,
     SAMPLER_MAX_ANONYMOUS_BYTES,
+    sampler_max_anonymous_bytes,
     SAMPLER_MIN_DRAWS_PER_S,
     SAMPLER_NOTE,
     SAMPLER_SEED,
@@ -694,7 +695,7 @@ def run_sampler(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "endpoints_in_range": in_range,
         "no_self_loops": bool(self_loops == 0),
         "anonymous_peak_within_budget": bool(
-            peak <= SAMPLER_MAX_ANONYMOUS_BYTES
+            peak <= sampler_max_anonymous_bytes()
         ),
         "throughput_above_floor": bool(draws_per_s >= SAMPLER_MIN_DRAWS_PER_S),
     }
