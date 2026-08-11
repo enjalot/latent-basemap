@@ -577,7 +577,8 @@ class AbortPollGate(AbortPollTracker):
             "measured_spacing_is_non_zero": bool(self.max_gap_s > 0.0),
             "training_performed": self.training_performed,
             "worst_case_slope_is_at_least_the_registered_floor": bool(
-                float(self.slope_bytes_per_s) >= MIN_BINDING_SLOPE_BYTES_PER_S
+                float(self.slope_bytes_per_s)
+                >= registered_value("min_binding_slope_bytes_per_s")
             ),
             "binding_slope_floor_bytes_per_s": MIN_BINDING_SLOPE_BYTES_PER_S,
             "binding_slope_floor_basis": MIN_BINDING_SLOPE_BASIS,

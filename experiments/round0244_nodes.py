@@ -86,6 +86,7 @@ from basemap.round0244_guard import (
     boundary_only_understatement,
     run_watchdog_positive_control,
 )
+from basemap.round0247_registry import registered_value
 from basemap.round0244_prereq import (
     NEAR_DUPLICATE_CATEGORIES,
     R0243_DIRECTED_EDGES,
@@ -999,7 +1000,9 @@ def run_text(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             gaps = np.abs(built_c[extra] - truth_c[position])
             local = int(np.argmin(gaps))
             gap = float(gaps[local])
-            if gap <= TIE_TOLERANCE and (best is None or gap < best[0]):
+            if gap <= registered_value("tie_tolerance") and (
+                best is None or gap < best[0]
+            ):
                 best = (gap, int(truth[position]), int(built[extra][local]))
         if best is None:
             continue

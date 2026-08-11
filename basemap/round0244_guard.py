@@ -67,6 +67,7 @@ from basemap.round0247_registry import (
     clamp,
     override_records,
     registered_bounds,
+    registered_value,
     registry_fingerprint,
     verify_registry,
 )
@@ -400,8 +401,15 @@ class ThreadedHostWatchdog(_HostWatchdog):
                     self._trace[second] = max(
                         self._trace.get(second, 0), anonymous
                     )
+            #: R0248: read the registered anonymous pressure threshold at the
+            #: comparison site. `WATCHDOG_ANON_BYTES` is registered as
+            #: `max_declared_anonymous_budget_bytes` and was compared here as a
+            #: bare imported module global - the mechanically derived inventory
+            #: found this one; no review had.
             pressure = (
-                anonymous > WATCHDOG_ANON_BYTES
+                anonymous > registered_value(
+                    "max_declared_anonymous_budget_bytes"
+                )
                 or available < WATCHDOG_MEM_AVAILABLE_BYTES
             )
             conjunctive = swap_growth > WATCHDOG_SWAP_GROWTH_BYTES and pressure

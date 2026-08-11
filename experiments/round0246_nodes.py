@@ -86,6 +86,7 @@ from basemap.round0246_guard import (
     run_reviewer_gap_replay_control,
     run_reviewer_oserror_control,
 )
+from basemap.round0247_registry import registered_value
 from basemap.round0246_tie import (
     TIE_AGGREGATE_ONLY_RULE,
     TIE_PRECISION_ROWS,
@@ -486,7 +487,7 @@ def run_sampler(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     training_unblocked = bool(
         enforcement["holds"]
         and against_both["worst_case"]["meets_the_r0244_worst_case_slope"]
-        and widest <= R0246_MAX_POLL_SPACING_S
+        and widest <= registered_value("r0246_max_poll_spacing_s")
         and reproduction["distinct_agrees"]
     )
 
@@ -527,7 +528,7 @@ def run_sampler(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "the_draw_is_unchanged": bool(reproduction["distinct_agrees"]),
             "the_correct_sampler_still_passes": bool(verdict["holds"]),
             "the_gap_meets_the_registered_ceiling": bool(
-                widest <= R0246_MAX_POLL_SPACING_S
+                widest <= registered_value("r0246_max_poll_spacing_s")
             ),
             "the_gap_meets_the_worst_case_slope": bool(
                 against_both["worst_case"]["meets_the_r0244_worst_case_slope"]

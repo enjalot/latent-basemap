@@ -64,6 +64,7 @@ from basemap.round0244_prereq import (
     did_requirement,
     weight_block_profile,
 )
+from basemap.round0247_registry import registered_value
 from basemap.round0245_did import (
     DECISION_NOTE,
     TIE_EFFECTIVE_RULE,
@@ -276,7 +277,7 @@ def run_guard(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "registered_headroom_bytes": R0244_BUDGET_HEADROOM_BYTES,
         "headroom_agrees": bool(
             int(watchdog_receipt["budget_headroom_bytes"])
-            == R0244_BUDGET_HEADROOM_BYTES
+            == int(registered_value("max_declared_headroom_bytes"))
         ),
         "stripe_latency_s": R0244_STRIPE_LATENCY_S,
         "sealed_stripes": int(sealed["fuzzy"]["stripes"]),
