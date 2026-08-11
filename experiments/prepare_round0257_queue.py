@@ -534,11 +534,26 @@ def prepare_round0257(
             raise RuntimeError(f"R0257 correction queue names unknown nodes: {unknown}")
         jobs = [job for job in jobs if job["id"] in wanted]
         for job in jobs:
-            if set(job["deps"]) - wanted:
+            dropped = sorted(set(job["deps"]) - wanted)
+            if not dropped:
+                continue
+            if not completed_train_root:
                 raise RuntimeError(
                     f"R0257 correction node {job['id']} depends on a node the "
                     "correction queue does not carry"
                 )
+            # The dependency is satisfied by a SEALED artifact from the earlier
+            # queue rather than by an in-queue edge. Assert the bytes are there,
+            # so a dropped edge can never mean a missing input.
+            for cell in job.get("cells") or []:
+                receipt = str(cell["train_receipt"]["canonical_path"])
+                if not os.path.exists(receipt):
+                    raise RuntimeError(
+                        f"R0257 correction node {job['id']} drops dep on "
+                        f"{dropped} but its sealed receipt is absent at {receipt}"
+                    )
+            job["deps"] = [dep for dep in job["deps"] if dep in wanted]
+            job["deps_satisfied_by_sealed_artifacts"] = dropped
         p90 = {key: value for key, value in p90.items() if key in wanted}
 
     p90["total"] = sum(value for key, value in p90.items() if key != "total")
