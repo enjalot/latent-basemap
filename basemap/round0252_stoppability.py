@@ -95,12 +95,46 @@ PANEL_SCHEMA = "round0252-score-panel-abort-poll-and-rescore-v1"
 TAIL_CAPABILITY = "round0252-long-rung-batch-tail-v1"
 TAIL_SCHEMA = "round0252-long-rung-batch-tail-v1"
 
+#: How many epochs the release's own model constructor runs
+#: (`experiments/round0113_nodes.py: _new_model(..., n_epochs=2)`). It is a
+#: property of the release, not of this round; a contract test asserts it
+#: against that file so a change there fails the suite instead of failing a
+#: queue after setup.
+EPOCHS_PER_FIT = 2
+
+
+def max_single_fit_batches(*, directed_edges: int, n_epochs: int = EPOCHS_PER_FIT) -> int:
+    """The largest number of batches ONE `fit()` on this treatment can supply.
+
+    `ParametricUMAP.fit`'s P0-3 check refuses when
+    `len(loader) * n_epochs < successful_positive_lr_updates`. At the sealed
+    `48,344,648` directed edges and `409` positive rows per update that is
+    `118,203` batches an epoch and `236,406` in a fit — a hard ceiling on how
+    long a single-fit tail observation can be **at this rung**, discovered when
+    R0252's first `600,000`-update attempt was refused by that check. Raising it
+    would mean changing `n_epochs`, which is outside
+    `SHORT_RUNG_CHANGED_PATHS` and would make the rung a different treatment, so
+    the round takes the ceiling as given and reports it as a finding.
+    """
+    from .round0107_training import POSITIVE_ROWS_PER_UPDATE
+
+    edges = int(directed_edges)
+    if edges <= 0 or int(n_epochs) <= 0:
+        raise Round0252Error(
+            f"R0252 batch capacity needs positive edges and epochs: {edges!r} / {n_epochs!r}"
+        )
+    per_epoch = -(-edges // int(POSITIVE_ROWS_PER_UPDATE))
+    return per_epoch * int(n_epochs)
+
+
 #: The rung that answers review-0251-01 §E.3. R0251 fitted a tail to `10,000`
 #: batches and refused to publish a return level because the pre-registered
 #: threshold ladder moved it `86.69863492594678x` against an identification
-#: limit of `10.0`. This is `60x` more batches, chosen so the whole queue stays
-#: inside the round's 3.0 GPU-h cap with room for one retry.
-TAIL_RUNG_UPDATES = 600_000
+#: limit of `10.0`. This is `23x` more batches and sits just under the
+#: `236,406`-batch single-fit ceiling above -- which is the most this treatment
+#: can observe in one run, and therefore the most any rung on the 2M substrate
+#: could ever have given.
+TAIL_RUNG_UPDATES = 230_000
 #: The short fits the stop-latency controls interrupt. Long enough to be past
 #: setup and into steady state, short enough to cost seconds.
 STOP_CONTROL_UPDATES = 3_000
@@ -626,6 +660,7 @@ def declared_sites_match_the_release() -> dict[str, Any]:
 
 
 __all__ = [
+    "EPOCHS_PER_FIT",
     "FlagFileAbortPoll",
     "HASH_CAPABILITY",
     "HASH_SCHEMA",
@@ -650,6 +685,7 @@ __all__ = [
     "declared_sites_match_the_release",
     "gap_reduction",
     "gap_report",
+    "max_single_fit_batches",
     "measure_stop_latency",
     "prior_rung_from_artifact",
     "size_law",

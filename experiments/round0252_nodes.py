@@ -11,9 +11,10 @@
   node rescores R0218's archived seed-42 checkpoint with and without the new
   `basemap/panel_v2` hook, requires the two arms to agree byte-for-byte with each
   other and with R0218's sealed values, and times a stop mid-score.
-* `tail_0252` (GPU) — §C. The per-batch tail at `600,000` updates, sixty times
-  R0251's rung, fitted with R0251's unchanged estimator and its pre-registered
-  `10.0` identification limit; plus a stop-latency control on the training loop.
+* `tail_0252` (GPU) — §C. The per-batch tail at `230,000` updates, 23x R0251's
+  rung and just under the `236,406` batches one fit on this treatment can supply,
+  fitted with R0251's unchanged estimator and its pre-registered `10.0`
+  identification limit; plus a stop-latency control on the training loop.
 
 Every node scores a real `AbortPollGate` and publishes the score whether it
 holds or refuses, on R0250's reporting path: a refusal here IS the measurement.
@@ -59,6 +60,7 @@ from basemap.round0250_panel_n16 import (
     panel_metric_view,
     raw_purity_ratios,
 )
+from basemap.round0250_seed_extension_n16 import SEALED_DIRECTED_EDGES
 from basemap.round0250_trainer_loops import short_rung_config
 from basemap.round0251_rescore import (
     RESCORED_SEED,
@@ -74,6 +76,7 @@ from basemap.round0252_stoppability import (
     NOT_A_FAMILY_CELL,
     PANEL_CAPABILITY,
     PANEL_SCHEMA,
+    EPOCHS_PER_FIT,
     STOP_CONTROL_DELAY_S,
     STOP_CONTROL_UPDATES,
     TAIL_CAPABILITY,
@@ -87,6 +90,7 @@ from basemap.round0252_stoppability import (
     declared_sites_match_the_release,
     gap_reduction,
     gap_report,
+    max_single_fit_batches,
     measure_stop_latency,
     prior_rung_from_artifact,
     size_law,
@@ -826,6 +830,18 @@ def run_tail(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 
     tail_updates = int(job.get("tail_rung_updates", TAIL_RUNG_UPDATES))
     control_updates = int(job.get("stop_control_updates", STOP_CONTROL_UPDATES))
+    # `fit()`'s P0-3 check refuses a horizon its loader plan cannot supply, and
+    # it refuses AFTER setup. R0252's first attempt asked for 600,000 updates
+    # against a 236,406-batch plan and lost 14 s of GPU to that. The same
+    # arithmetic is done here first, so an over-long rung is a refusal before any
+    # model is built, and the capacity lands in the receipt either way.
+    capacity = max_single_fit_batches(directed_edges=SEALED_DIRECTED_EDGES)
+    if tail_updates > capacity:
+        raise Round0252NodeError(
+            f"R0252 tail rung of {tail_updates} updates exceeds the {capacity} "
+            "batches one fit on this treatment can supply; raising it would mean "
+            "changing n_epochs, which is outside SHORT_RUNG_CHANGED_PATHS"
+        )
     tail_config, tail_sha, tail_identity = short_rung_config(template, updates=tail_updates)
     control_config, control_sha, control_identity = short_rung_config(
         template, updates=control_updates
@@ -913,6 +929,18 @@ def run_tail(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "capabilities": [TAIL_CAPABILITY],
         "abort_flag_precondition": abort_flag,
         "declared_poll_sites": sites,
+        "single_fit_batch_capacity": {
+            "batches": capacity,
+            "directed_edges": SEALED_DIRECTED_EDGES,
+            "epochs_per_fit": EPOCHS_PER_FIT,
+            "rung_updates": tail_updates,
+            "the_rung_is_inside_the_capacity": True,
+            "note": (
+                "one fit on this treatment cannot exceed this many batches. It "
+                "is the ceiling on any single-fit tail observation at the 2M "
+                "rung, and R0252 discovered it by being refused at 600,000."
+            ),
+        },
         "long_rungs": {"tail": tail_identity, "stop_control": control_identity},
         "long_rung_config_sha256": {"tail": tail_sha, "stop_control": control_sha},
         "arm": {key: value for key, value in arm.items() if key != "batch_gaps"},

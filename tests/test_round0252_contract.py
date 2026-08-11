@@ -30,6 +30,7 @@ from basemap.round0252_stoppability import (
     INTEGRITY_GUARANTEE,
     Round0252CooperativeAbort,
     Round0252Error,
+    EPOCHS_PER_FIT,
     STOP_CONTROL_UPDATES,
     TAIL_RUNG_UPDATES,
     TARGET_DIMENSION,
@@ -38,6 +39,7 @@ from basemap.round0252_stoppability import (
     declared_sites_match_the_release,
     gap_reduction,
     gap_report,
+    max_single_fit_batches,
     measure_stop_latency,
     prior_rung_from_artifact,
     size_law,
@@ -457,10 +459,42 @@ def test_the_target_size_is_the_100m_substrate_not_a_round_number():
     assert TARGET_SUBSTRATE_BYTES == 153_600_000_000
 
 
-def test_the_rung_is_sixty_times_r0251s():
-    assert TAIL_RUNG_UPDATES == 600_000
-    assert TAIL_RUNG_UPDATES == 60 * 10_000
+def test_the_rung_fits_inside_what_one_fit_can_supply():
+    """R0252's first attempt asked for 600,000 updates and `fit()`'s P0-3 check
+    refused it after setup. The capacity is arithmetic on sealed quantities, so
+    it is asserted here rather than rediscovered on the GPU."""
+    from basemap.round0107_training import POSITIVE_ROWS_PER_UPDATE
+    from basemap.round0250_seed_extension_n16 import SEALED_DIRECTED_EDGES
+
+    capacity = max_single_fit_batches(directed_edges=SEALED_DIRECTED_EDGES)
+    assert POSITIVE_ROWS_PER_UPDATE == 409
+    assert SEALED_DIRECTED_EDGES == 48_344_648
+    assert capacity == 118_203 * EPOCHS_PER_FIT == 236_406
+    assert TAIL_RUNG_UPDATES == 230_000
+    assert TAIL_RUNG_UPDATES < capacity
+    assert TAIL_RUNG_UPDATES == 23 * 10_000
     assert STOP_CONTROL_UPDATES == 3_000
+    with pytest.raises(Round0252Error):
+        max_single_fit_batches(directed_edges=0)
+
+
+def test_the_release_still_builds_two_epoch_fits():
+    """POSITIVE CONTROL: EPOCHS_PER_FIT is a property of the RELEASE, not of this
+    round, so it is checked against the release rather than asserted."""
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "experiments/round0113_nodes.py"
+    )
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    epochs = {
+        keyword.value.value
+        for node in ast.walk(tree) if isinstance(node, ast.Call)
+        for keyword in node.keywords
+        if keyword.arg == "n_epochs" and isinstance(keyword.value, ast.Constant)
+    }
+    assert epochs == {EPOCHS_PER_FIT}, (
+        f"the release builds fits with n_epochs={epochs}, R0252 assumes "
+        f"{EPOCHS_PER_FIT}; the single-fit batch capacity changed"
+    )
 
 
 def test_no_hidden_sigkill_in_the_prepare_path():
