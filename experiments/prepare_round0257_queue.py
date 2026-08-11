@@ -149,7 +149,7 @@ def _issued_round(release_sha: str) -> tuple[dict[str, Any], list[str]]:
         raise RuntimeError(
             "R0257 queue cap does not match the issued round's gpu_hours_cap"
         )
-    return frontmatter, _frontmatter_list(ROUND_FILE, "required_reviews")
+    return frontmatter, _frontmatter_list(frontmatter, "required_reviews")
 
 
 def _review_state(required: list[str]) -> dict[str, Any]:
