@@ -500,3 +500,15 @@ def test_the_nodes_declare_no_registration():
     assert '"gate_registered": False' in source
     assert '"published_a_map": False' in source
     assert '"is_a_family_cell": False' in source
+
+
+def test_gap_report_publishes_the_per_unit_distribution_not_just_its_maximum():
+    """A maximum over m draws grows with m; the quantiles are what separate that
+    from a per-chunk cost that actually rose."""
+    report = gap_report([("a", value) for value in (0.01, 0.02, 0.03, 0.9)], arm="x")
+    distribution = report["gap_distribution"]
+    assert distribution["max_s"] == 0.9
+    assert distribution["min_s"] == 0.01
+    assert distribution["median_s"] == pytest.approx(0.025)
+    assert distribution["p99_s"] <= distribution["max_s"]
+    assert distribution["mean_s"] == pytest.approx((0.01 + 0.02 + 0.03 + 0.9) / 4)

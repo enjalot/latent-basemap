@@ -192,6 +192,20 @@ class Round0252CooperativeAbort(RuntimeError):
 # --------------------------------------------------------------------------- #
 
 
+def _quantile(sorted_values: Sequence[float], q: float) -> float:
+    """Type-7 quantile on an already-sorted sequence (R0251's, re-derived here)."""
+    count = len(sorted_values)
+    if count == 0:
+        raise Round0252Error("R0252 cannot take a quantile of nothing")
+    if count == 1:
+        return float(sorted_values[0])
+    position = (count - 1) * float(q)
+    low = int(math.floor(position))
+    high = min(low + 1, count - 1)
+    frac = position - low
+    return float(sorted_values[low]) * (1.0 - frac) + float(sorted_values[high]) * frac
+
+
 def _widest(entries: Sequence[tuple[str, float]]) -> tuple[str, float]:
     if not entries:
         return ("", 0.0)
@@ -224,15 +238,27 @@ def gap_report(records: Sequence[tuple[str, float]], *, arm: str) -> dict[str, A
     for entry in by_site.values():
         entry["widest_gap_over_the_ceiling"] = entry["widest_gap_s"] / ceiling
     site, gap = _widest(entries)
+    values = sorted(value for _site, value in entries)
     return {
         "arm": arm,
         "registered_ceiling_s": ceiling,
         "reads": len(entries),
-        "wall_s": sum(value for _site, value in entries),
+        "wall_s": sum(values),
         "widest_gap_s": gap,
         "widest_gap_over_the_ceiling": gap / ceiling,
         "widest_gap_after": site,
         "meets_the_registered_ceiling": bool(gap <= ceiling),
+        # The per-unit DISTRIBUTION, not just its maximum. A maximum over `m`
+        # draws grows with `m` even when the per-unit cost does not, so a widest
+        # gap that rises with file size does not by itself mean the per-chunk
+        # cost rose. These quantiles let a reader tell the two apart.
+        "gap_distribution": {
+            "median_s": _quantile(values, 0.5),
+            "p99_s": _quantile(values, 0.99),
+            "max_s": values[-1],
+            "min_s": values[0],
+            "mean_s": sum(values) / len(values),
+        },
         "gaps_by_site": by_site,
     }
 
@@ -326,9 +352,14 @@ def size_law(points: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "target_substrate_bytes": TARGET_SUBSTRATE_BYTES,
         "note": (
             "a fit is not needed to answer this round's question -- the 100M-scale "
-            "point is MEASURED, not extrapolated. The fit is published so the "
-            "shape of the dependence is visible: a per-chunk gap should have a "
-            "slope near zero and a whole-file gap should have slope 1/throughput."
+            "point is MEASURED, not extrapolated -- and the polled fit must not be "
+            "read as a per-chunk cost law. An UNPOLLED gap is one whole-file read, "
+            "so its slope is genuinely 1/throughput. A POLLED gap is the MAXIMUM "
+            "over m chunk reads, and a maximum over m draws grows with m even when "
+            "the per-chunk cost is flat, so a positive polled slope is expected "
+            "and is a property of the tail quantile rather than of the chunk. The "
+            "per-chunk distribution (`gap_distribution` in each arm) is where that "
+            "question is actually answered."
         ),
     }
 

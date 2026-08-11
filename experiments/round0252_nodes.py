@@ -133,7 +133,7 @@ HASH_CHUNK_BYTES = 8 << 20
 
 #: Written in blocks of this size so host anonymous memory stays flat while a
 #: 143 GiB file is created.
-WRITE_BLOCK_BYTES = 256 << 20
+WRITE_BLOCK_BYTES = 64 << 20
 #: `fsync` + `POSIX_FADV_DONTNEED` after this much, so the page cache does not
 #: absorb the file being written and make the later "cold" read a lie.
 WRITE_FLUSH_EVERY_BYTES = 2 << 30
