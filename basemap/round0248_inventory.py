@@ -153,6 +153,12 @@ NOT_A_BOUND: dict[str, str] = {
         "decide which way 'weaker' points. It is a string, not a bound"
     ),
     "FLOOR": "the other direction tag; same reason as CEILING",
+    "REGISTERED_SAFETY_PARAMETERS": (
+        "the registry mapping itself. The comparison is a MEMBERSHIP test "
+        "(`'replay' in REGISTERED_SAFETY_PARAMETERS`) asking whether a "
+        "parameter is registered at all - it reads no value and bounds "
+        "nothing. Its integrity is the fingerprint's job"
+    ),
     "REGISTERED_ABORT_READERS": (
         "the source-level allowlist itself. The comparison `name in "
         "REGISTERED_ABORT_READERS` IS the sanction mechanism R0248 gap 3 "

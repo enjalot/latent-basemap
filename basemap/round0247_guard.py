@@ -108,6 +108,7 @@ WEAKER_THAN_REGISTERED: dict[str, float] = {
     "tie_precision_min_rows": 1.0,
     "tie_bound_confidence": 0.0,
     "replay": 1.0,
+    "external_memory_limit_margin_bytes": float(1 << 50),
 }
 
 #: A boolean bound at its strictest value has no strictly-stricter neighbour:

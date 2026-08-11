@@ -607,6 +607,44 @@ _PARAMETERS: tuple[SafetyParameter, ...] = (
             "not a larger sample"
         ),
     ),
+    # ---- R0248: the bound that does not live in this process ------------- #
+    _p(
+        name="external_memory_limit_margin_bytes",
+        module="basemap.round0248_external",
+        symbol="EXTERNAL_MEMORY_LIMIT_MARGIN_BYTES",
+        value=float(8 * (1 << 30)),
+        direction=CEILING,
+        role=(
+            "how far ABOVE the registered in-process anonymous budget the "
+            "kernel's cgroup memory.max is set, so the cooperative in-process "
+            "trip fires and unwinds a CUDA context before the OOM killer acts"
+        ),
+        basis=(
+            "the registered anonymous budget is 64,424,509,440 B (60 GiB) on a "
+            "132,537,552,896 B box. 8 GiB of margin puts memory.max at "
+            "73,014,444,032 B (68 GiB), which is 0.551 of RAM: high enough "
+            "that the in-process trip is always first, low enough that 55 GiB "
+            "remains for page cache and everything else on the machine"
+        ),
+        override_path=(
+            "new in R0248. The limit is placed by the RUNNER from the queue "
+            "manifest, so a node cannot pass it at all; this entry exists so "
+            "the number that goes into the manifest is derived from the "
+            "registry rather than typed"
+        ),
+        what_it_does_not_catch=(
+            "its own two-sided risk. A LARGER margin weakens the external "
+            "bound and a SMALLER one risks the kernel killing a CUDA holder "
+            "before the cooperative trip - the wedge this box was rebooted for "
+            "twice - so the direction registered here (ceiling) captures only "
+            "half of it. The other half is asserted in "
+            "external_memory_max_bytes(), which refuses a limit at or below "
+            "the in-process budget and a limit at or above MemTotal. This is "
+            "the non-monotone-risk case review-0247-01 A.7 flagged, stated "
+            "rather than hidden"
+        ),
+        enforcement="clamped",
+    ),
     # ---- R0248: the declarations that waive gate arms -------------------- #
     _p(
         name="replay",
@@ -894,7 +932,7 @@ def registry_fingerprint() -> str:
 #: the retired-marker note folded in. Changing a registered bound still
 #: requires changing this digest in the same commit.
 REGISTERED_REGISTRY_SHA256 = (
-    "bb8f7b395f06d19db062e1698ad8a332858028dab56eff005baf535771fc253b"
+    "239e9a480b6229b1730cc2c0f72c03cfaf6c25abbb3ec67a2eac5164c6553431"
 )
 
 
