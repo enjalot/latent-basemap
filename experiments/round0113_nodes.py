@@ -86,7 +86,35 @@ from basemap.round0113_prompt_contrast import (
     train_config,
     verify_signature,
 )
+from basemap.round0246_guard import AbortPollGate
+from basemap.round0247_registry import registered_bounds
+from basemap.round0251_trainer_setup import PollRecorder
+from basemap.round0252_stoppability import gap_report
+from basemap.round0253_coverage import CoverageLedger
 from basemap.round0253_stop_hooks import install_stop_hooks
+from experiments.round0238_nodes import _check_runner_abort
+
+
+#: R0258 closes review-0254-01 §F's install-without-gate gap on this entry.
+#:
+#: `run_train` installed the stop hooks and constructed no gate, so it could be
+#: stopped inside `artifact_identity` and `panel_v2` and nowhere else, and — the
+#: part that mattered — it emitted **no gap series at all**. Its stop latency was
+#: silence rather than a measured zero, and it is one of the two entries that
+#: will hold the card for hours. The gate below is constructed before the work,
+#: scored without raising, and published; it changes no numeric result and no
+#: acceptance rule.
+def _node_gate(label: str, *, training_performed: bool) -> AbortPollGate:
+    return AbortPollGate(
+        inner=_check_runner_abort,
+        headroom_bytes=int(
+            registered_bounds(["max_declared_headroom_bytes"])[
+                "registered_max_declared_headroom_bytes"
+            ]
+        ),
+        label=label,
+        training_performed=bool(training_performed),
+    )
 
 def _schema(stem: str) -> str:
     return f"round0113-{stem}-v1"
@@ -1931,9 +1959,25 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     install_stop_hooks(label="R0253 round0113_nodes.run_train")
     import torch
 
+    # The gate and the coverage window are constructed BEFORE the graph load,
+    # not around the fit: at 100M the load and the edge preparation are the
+    # stages this round measured, and a window opened after them would seal a
+    # truthful-looking span over the part that was never at risk (the R0254
+    # near-miss, 0.0007% coverage).
+    node_id = str(active.get("node_id") or "train_0113")
+    gate_label = f"R0113 {job.get('action') or 'train'} {node_id}"
+    ledger = CoverageLedger(node=node_id)
+    window = ledger.window(f"{gate_label} load, prepare and fit")
+    gate = _node_gate(gate_label, training_performed=True)
+    gate.start()
+    recorder = PollRecorder(gate=gate, clock=time.monotonic)
+    recorder.anchor(f"{gate_label} entered")
+    wrapped = window.wrap(recorder)
+
     arm = _arm(job)
     training_seed = _training_seed(active, job)
     assembly, assembly_signature = _load_assembly(job)
+    wrapped("R0113 assembly manifest read")
     graph_manifest_path = str(job["graph_manifest"])
     graph_manifest_signature = expected_input_signature(graph_manifest_path)
     graph = load_graph(
@@ -1942,6 +1986,7 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         arm=arm,
         execution_round_id=_graph_execution_round_id(active, job),
     )
+    wrapped("R0113 graph loaded and edge arrays resolved")
     config, config_sha = train_config(
         arm,
         graph_signature=graph["signature"],
@@ -1950,6 +1995,7 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         retained_rows=graph["n_nodes"],
         seed=training_seed,
     )
+    wrapped("R0113 treatment config resolved")
     source = _open_compact(assembly, arm)
     dataset = HostFp16EndpointArray(
         source,
@@ -1959,6 +2005,7 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         buffer_rows=BATCH_SIZE,
     )
     wrapper = PromptTrainingInput(dataset, graph, arm=arm)
+    wrapped("R0113 sampler wrapper constructed")
     output = create_fresh_directory(
         job["outputs"][0], label=f"R0113 {arm} train output"
     )
@@ -1990,17 +2037,22 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     model._abort_on_first_nonfinite = True
     model._admission_artifact_path = os.path.join(output, "admission.json")
     started = time.monotonic()
-    model.fit(
-        wrapper,
-        low_memory=True,
-        verbose=False,
-        n_processes=6,
-        random_state=training_seed,
-        resample_negatives=False,
-        precomputed_edges_path=graph["signature"]["canonical_path"],
-        use_wandb=False,
-    )
+    model.abort_poll = wrapped
+    try:
+        model.fit(
+            wrapper,
+            low_memory=True,
+            verbose=False,
+            n_processes=6,
+            random_state=training_seed,
+            resample_negatives=False,
+            precomputed_edges_path=graph["signature"]["canonical_path"],
+            use_wandb=False,
+        )
+    finally:
+        model.abort_poll = None
     wall = time.monotonic() - started
+    wrapped("R0113 fit() returned")
     accounting = dict(model._train_stats)
     runtime = wrapper.runtime_stamp()
     expected_stamp = config["execution"]["expected_pipeline_stamp"]
@@ -2069,9 +2121,23 @@ def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
         raise Round0113Error(f"R0113 {arm} performance admission failed")
     model_path = os.path.join(output, "model.pt")
     atomic_build_new_file(model_path, model.save, immutable=True)
+    wrapped("R0113 checkpoint published")
+    gate.finish(f"{gate_label} stage end")
+    window.close()
+    # Scored, never raised on. A ceiling breach in a training node is a
+    # MEASUREMENT, not this node's error, and raising here would turn a stop
+    # instrument into a new abort rule the round never registered.
+    poll_spacing = gate.verdict()
+    gaps = gap_report(recorder.records, arm=f"r0113_{arm}_train")
+    coverage = ledger.receipt()
     free_bytes, total_bytes = torch.cuda.mem_get_info("cuda")
     body = {
         "schema": _schema("train-receipt"),
+        "node": node_id,
+        "gap_report": gaps,
+        "enforcement_poll_spacing": poll_spacing,
+        "poll_coverage": coverage,
+        "observed_span_s": coverage["observed_span_s"],
         "round_id": _execution_round_id(active),
         "arm": arm,
         "training_seed": training_seed,

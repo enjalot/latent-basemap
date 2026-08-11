@@ -245,6 +245,35 @@ from experiments.round0233_nodes import (
 )
 from basemap.round0253_stop_hooks import install_stop_hooks
 
+
+#: R0258 closes review-0254-01 §F's install-without-gate gap on this entry.
+#:
+#: `run_assemble` is the entry that materialises the 153.6 GB 100M substrate.
+#: It installed the stop hooks and constructed no gate, so it emitted no gap
+#: series at all and its stop latency was SILENCE rather than a measured zero.
+#: The gate is constructed before the first read, scored without raising, and
+#: published beside the receipt it already seals. It changes no numeric result.
+#:
+#: The guard imports are function-local ON PURPOSE and not as a style choice:
+#: `basemap.round0244_guard` imports `experiments.round0242_nodes`, which imports
+#: THIS module, so a module-level `from basemap.round0246_guard import
+#: AbortPollGate` here is a hard circular import. It was tried and it failed at
+#: import time, which is the right place for it to fail.
+def _node_gate(label: str, *, training_performed: bool) -> Any:
+    from basemap.round0246_guard import AbortPollGate
+    from basemap.round0247_registry import registered_bounds
+
+    return AbortPollGate(
+        inner=_check_runner_abort,
+        headroom_bytes=int(
+            registered_bounds(["max_declared_headroom_bytes"])[
+                "registered_max_declared_headroom_bytes"
+            ]
+        ),
+        label=label,
+        training_performed=bool(training_performed),
+    )
+
 EMB = "/data/embeddings"
 BUILD_SCRIPT = "basemap/round0238_build.py"
 
@@ -1865,6 +1894,23 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     parent_sealed = parent["sealed"]
     output = create_fresh_directory(str(job["outputs"][0]), label="R0238 substrate")
     started = time.monotonic()
+    # R0258: the gate and the coverage window open BEFORE the first read, so the
+    # 153.6 GB write and the prefix-hash ladder are inside the window rather than
+    # after it. A window opened later would seal a truthful-looking span over the
+    # part of the node that was never at risk.
+    from basemap.round0251_trainer_setup import PollRecorder
+    from basemap.round0252_stoppability import gap_report
+    from basemap.round0253_coverage import CoverageLedger
+
+    node_id = str(active.get("node_id") or "assemble_0238")
+    gate_label = f"R0238 assemble {node_id}"
+    ledger = CoverageLedger(node=node_id)
+    window = ledger.window(f"{gate_label} substrate assembly")
+    gate = _node_gate(gate_label, training_performed=False)
+    gate.start()
+    recorder = PollRecorder(gate=gate, clock=time.monotonic)
+    recorder.anchor(f"{gate_label} entered")
+    wrapped = window.wrap(recorder)
     # At 100,000,000 rows the assembly draws 50,000,000 new vectors and writes a
     # 153.6 GB file. R0237 never instrumented this node; at this rung it is
     # worth a host sampler, reported and never used to abort.
@@ -2050,14 +2096,17 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         train.flush()
         del train
 
+    wrapped("R0238 increment drawn and staged")
     atomic_build_new_file(substrate_path, _write, immutable=True)
     write_seconds = time.monotonic() - write_started
+    wrapped("R0238 substrate written")
     write_io_after = _proc_io(os.getpid())
     write_disk_after = _data_block_device_stat()
     shutil.rmtree(staging, ignore_errors=True)
 
     written = np.load(substrate_path, mmap_mode="r", allow_pickle=False)
     prefix_sha = ordered_array_sha256(written[:PARENT_ROWS])
+    wrapped("R0238 parent prefix hashed")
     parent_ordered = str(parent_sealed["ordered_substrate_sha256"])
     if prefix_sha != parent_ordered:
         raise Round0238Error(
@@ -2239,10 +2288,23 @@ def run_assemble(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "benchmark."
         ),
     }
+    wrapped("R0238 provenance and reserves written")
+    gate.finish(f"{gate_label} stage end")
+    window.close()
+    # Scored, never raised on: a ceiling breach in this node is a MEASUREMENT,
+    # and raising here would add an abort rule the round never registered.
+    assemble_poll_spacing = gate.verdict()
+    assemble_gaps = gap_report(recorder.records, arm="r0238_assemble")
+    assemble_coverage = ledger.receipt()
     receipt = prompt_contract.seal(json_safe({
         "schema": SUBSTRATE_SCHEMA,
         "round_id": ROUND_ID,
         "release_sha": manifest["release_sha"],
+        "node": node_id,
+        "gap_report": assemble_gaps,
+        "enforcement_poll_spacing": assemble_poll_spacing,
+        "poll_coverage": assemble_coverage,
+        "observed_span_s": assemble_coverage["observed_span_s"],
         "capability": SUBSTRATE_CAPABILITY,
         "capabilities": [SUBSTRATE_CAPABILITY],
         "rows": ROWS,
