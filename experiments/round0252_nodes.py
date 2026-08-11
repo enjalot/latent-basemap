@@ -292,16 +292,24 @@ def run_hash(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     stop_controls: list[dict[str, Any]] = []
     try:
         # rung 0: the real sealed R0216 substrate, whose declared digest is the
-        # ground truth this node's polled arm has to reproduce exactly.
-        rungs: list[tuple[str, str, dict[str, Any] | None]] = [
+        # ground truth this node's polled arm has to reproduce exactly. Then one
+        # synthetic file at a time: created, measured, and deleted before the
+        # next is written, so peak transient `/data` use is the LARGEST rung and
+        # not their sum. Writing them all up front put 215 GB on a volume whose
+        # prepare-time headroom check had been told to expect 153.6 GB.
+        plan: list[tuple[str, str, int | None]] = [
             ("r0216_substrate_3g", substrate_path, None)
         ]
-        for size in synthetic_sizes:
-            path = os.path.join(scratch, f"synthetic-{size}.bin")
-            creation = _write_sized_file(path, size, seed=20260811 + (size % 9973))
-            rungs.append((f"synthetic_{size}", path, creation))
+        plan.extend(
+            (f"synthetic_{size}", os.path.join(scratch, f"synthetic-{size}.bin"), size)
+            for size in synthetic_sizes
+        )
 
-        for rung_id, path, creation in rungs:
+        for rung_id, path, size in plan:
+            creation = (
+                None if size is None
+                else _write_sized_file(path, size, seed=20260811 + (size % 9973))
+            )
             unpolled = _hash_arm(arm=ARM_UNPOLLED, path=path, label=label, evict=True)
             polled = _hash_arm(arm=ARM_POLLED, path=path, label=label, evict=True)
             if unpolled["sha256"] != polled["sha256"]:

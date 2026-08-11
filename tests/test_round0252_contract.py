@@ -512,3 +512,79 @@ def test_gap_report_publishes_the_per_unit_distribution_not_just_its_maximum():
     assert distribution["median_s"] == pytest.approx(0.025)
     assert distribution["p99_s"] <= distribution["max_s"]
     assert distribution["mean_s"] == pytest.approx((0.01 + 0.02 + 0.03 + 0.9) / 4)
+
+
+# --------------------------------------------------------------------------- #
+# the disk contract -- one synthetic file at a time
+# --------------------------------------------------------------------------- #
+
+
+def _run_hash_source():
+    path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "experiments/round0252_nodes.py"
+    )
+    tree = ast.parse(open(path, encoding="utf-8").read())
+    return next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "run_hash"
+    )
+
+
+def _writes_outside_the_measuring_loop(function):
+    """Every `_write_sized_file` call that is NOT inside a loop that also measures.
+
+    The round registers, and its prepare-time headroom check enforces, a peak
+    transient `/data` use of ONE synthetic file. A first version of `run_hash`
+    built every file in a preceding loop and then measured them, which put the
+    SUM on the volume instead -- 215 GB against a registered 153.6 GB. This
+    finds that shape structurally rather than trusting the disk to have room.
+    """
+    measuring = [
+        node for node in ast.walk(function)
+        if isinstance(node, (ast.For, ast.While))
+        and any(
+            isinstance(call.func, ast.Name) and call.func.id == "_hash_arm"
+            for call in ast.walk(node) if isinstance(call, ast.Call)
+        )
+    ]
+    inside = {
+        id(call)
+        for loop in measuring
+        for call in ast.walk(loop)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "_write_sized_file"
+    }
+    return [
+        call for call in ast.walk(function)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "_write_sized_file"
+        and id(call) not in inside
+    ]
+
+
+def test_the_hash_node_writes_one_synthetic_file_at_a_time():
+    assert _writes_outside_the_measuring_loop(_run_hash_source()) == []
+
+
+def test_a_write_all_then_measure_shape_is_caught():
+    """POSITIVE CONTROL: plant the defect that actually shipped and re-run the check."""
+    planted = ast.parse(
+        "def run_hash(active, job):\n"
+        "    plan = []\n"
+        "    for size in sizes:\n"
+        "        plan.append(_write_sized_file(path, size, seed=1))\n"
+        "    for rung, path, creation in plan:\n"
+        "        unpolled = _hash_arm(arm='unpolled', path=path, label='l', evict=True)\n"
+    ).body[0]
+    assert len(_writes_outside_the_measuring_loop(planted)) == 1
+
+
+def test_the_declared_peak_scratch_is_the_largest_rung_not_their_sum():
+    from experiments.prepare_round0252_queue import (
+        PEAK_SCRATCH_BYTES, SYNTHETIC_SIZES_BYTES,
+    )
+    assert PEAK_SCRATCH_BYTES == max(SYNTHETIC_SIZES_BYTES)
+    assert PEAK_SCRATCH_BYTES == TARGET_SUBSTRATE_BYTES
+    assert PEAK_SCRATCH_BYTES < sum(SYNTHETIC_SIZES_BYTES)
