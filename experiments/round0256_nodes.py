@@ -108,12 +108,19 @@ REPAIR_ACTION = "repair_calibrated_madn_gate_evidence_n29"
 
 #: What review-0255 recorded, so the artifact carries the before as well as the
 #: after and a reader does not have to hold two documents open.
+#:
+#: NOTE the key names. `roundreport`'s gap census walks a node artifact for any
+#: field whose terminal key is `widest_gap_s` and ranks what it finds as that
+#: NODE's own measurement. Carrying R0255's number under that key made the
+#: census headline this round with R0255's 160.83 s. These are another round's
+#: figures for comparison and are named so they cannot be read as measurements
+#: of this node.
 R0255_PUBLISHED = {
     "arm_3_ffr_floor": 0.3078402410358946,
     "one_sided_power_published_beside_both_bands": 0.30035090040737566,
-    "widest_gap_s": 160.8313321210153,
-    "widest_gap_multiple_of_the_ceiling": 64.05190394580303,
-    "gate_node_wall_s": 162.464,
+    "widest_uninterruptible_stretch_seconds": 160.8313321210153,
+    "uninterruptible_stretch_multiple_of_the_registered_ceiling": 64.05190394580303,
+    "gate_node_wall_seconds": 162.464,
     "density_v2_floor_left_readable": 0.41643957035196294,
 }
 
@@ -630,9 +637,12 @@ def run_repair(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "one_sided_multiplier": k_one,
             "two_sided_multiplier": k_two,
             "wall_s": calibration_wall_s,
-            "r0255_wall_s_for_the_same_numbers": R0255_PUBLISHED["widest_gap_s"],
+            "r0255_wall_s_for_the_same_numbers": R0255_PUBLISHED[
+                "widest_uninterruptible_stretch_seconds"
+            ],
             "speedup_versus_r0255": (
-                R0255_PUBLISHED["widest_gap_s"] / calibration_wall_s
+                R0255_PUBLISHED["widest_uninterruptible_stretch_seconds"]
+                / calibration_wall_s
                 if calibration_wall_s
                 else None
             ),
