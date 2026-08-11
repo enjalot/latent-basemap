@@ -438,6 +438,26 @@ def test_a_real_write_records_every_syscall_interval(tmp_path):
     assert writeback.ABORT_POLL_SITE_FINAL in reads
 
 
+def test_a_partial_tail_block_does_not_leave_the_mmap_exported(tmp_path):
+    """Regression: `writeback_0254` attempt 2 crashed after a full 49 GB write.
+
+    `BufferError: cannot close exported pointers exist` — the tail block's
+    `view[:take]` slice is an export of the `mmap` and survived the loop, so
+    `buffer.close()` raised. Every earlier test used a size that was an exact
+    multiple of the 64 MiB block and structurally could not reach the branch.
+    `49,152,000,000` has a `28,311,552` B tail; this reproduces it in miniature.
+    """
+    path = str(tmp_path / "tail.bin")
+    size = writeback.WRITE_BLOCK_BYTES + 4096
+    created = writeback.write_arm(
+        path, arm=writeback.ARM_FSYNC_2GIB, total_bytes=size, seed=5,
+        poll=lambda _where: None,
+    )
+    assert created["bytes"] == size
+    assert created["blocks_written"] == 2
+    assert size % writeback.WRITE_BLOCK_BYTES != 0
+
+
 def test_o_direct_and_sync_file_range_write_the_same_bytes(tmp_path):
     size = 2 * writeback.WRITE_BLOCK_BYTES
     digests = {}

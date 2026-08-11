@@ -356,10 +356,21 @@ def write_arm(
             chunk = view if take == WRITE_BLOCK_BYTES else view[:take]
             offset = 0
             while offset < take:
+                piece = chunk if offset == 0 else chunk[offset:]
                 at = time.monotonic()
-                sent = os.write(fd, chunk[offset:])
+                sent = os.write(fd, piece)
                 write_intervals.append(time.monotonic() - at)
+                # Every derived memoryview is an EXPORT of the mmap, and an mmap
+                # with a live export cannot be closed: the tail block's
+                # `view[:take]` slice survived the loop and `buffer.close()`
+                # raised `BufferError: cannot close exported pointers exist`
+                # after a full 49 GB write. Release each derived view as soon as
+                # it is done rather than relying on refcount timing.
+                if piece is not chunk:
+                    piece.release()
                 offset += sent
+            if chunk is not view:
+                chunk.release()
             start_of_block = written
             written += take
             blocks += 1
