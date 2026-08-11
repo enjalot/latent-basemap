@@ -64,6 +64,7 @@ from basemap.round0238_rung5 import (
     truth_probe_query_rows,
 )
 from basemap.round0240_rung5 import REGISTERED_REACHABILITY_CEILING_C400
+from basemap.round0247_registry import registered_value
 from basemap.round0241_qualify import (
     DIMENSION,
     GPU_HOURS_CAP_NOTE,
@@ -242,8 +243,19 @@ class _HostWatchdog:
         self.minimum_mem_available_bytes = min(
             self.minimum_mem_available_bytes, available
         )
+        #: R0249, review-0248-01 §D.3. This was the SEVENTH bare registered
+        #: symbol and the one the R0248 inventory could not see, because it sat
+        #: one file outside a hand-written `GUARDED_MODULES` list. It is
+        #: byte-for-byte the rule R0248 fixed at `round0244_guard:404`, against
+        #: a second local literal copy (`WATCHDOG_ANON_BYTES = 60 * (1 << 30)`)
+        #: of the registered `max_declared_anonymous_budget_bytes`. The
+        #: comparison now resolves the registry at the moment of the
+        #: comparison; the module constant stays as a receipt mirror only.
+        registered_anon_bytes = registered_value(
+            "max_declared_anonymous_budget_bytes"
+        )
         pressure = (
-            int(host["anonymous_bytes"]) > WATCHDOG_ANON_BYTES
+            int(host["anonymous_bytes"]) > registered_anon_bytes
             or available < WATCHDOG_MEM_AVAILABLE_BYTES
         )
         if swap_growth > WATCHDOG_SWAP_GROWTH_BYTES and pressure:
@@ -271,7 +283,13 @@ class _HostWatchdog:
             "peak_host_rss_bytes": int(self.peak_rss_bytes),
             "minimum_mem_available_bytes": int(self.minimum_mem_available_bytes),
             "swap_growth_threshold_bytes": WATCHDOG_SWAP_GROWTH_BYTES,
+            #: R0249: the number the `if` actually applied, read from the
+            #: registry at the comparison site, beside the module mirror it
+            #: used to be compared against.
             "anonymous_threshold_bytes": WATCHDOG_ANON_BYTES,
+            "registered_anonymous_threshold_bytes_at_the_comparison_site": (
+                registered_value("max_declared_anonymous_budget_bytes")
+            ),
             "mem_available_threshold_bytes": WATCHDOG_MEM_AVAILABLE_BYTES,
             "guard_axis": "anonymous, never RSS",
         }

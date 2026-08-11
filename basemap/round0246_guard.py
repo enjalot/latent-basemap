@@ -57,6 +57,7 @@ from basemap.round0245_guard import (
     slope_from_trace,
 )
 from basemap.round0247_registry import (
+    ENFORCEMENT_CLAMPED,
     REGISTERED_SAFETY_PARAMETERS,
     Round0247Error,
     abort_reader_sanction,
@@ -67,6 +68,7 @@ from basemap.round0247_registry import (
     registered_value,
     registry_fingerprint,
     require_no_weakening_overrides,
+    sealing_refused_overrides,
     weakening_overrides,
     verify_registry,
 )
@@ -437,9 +439,12 @@ class AbortPollGate(AbortPollTracker):
             "min_enforcement_polls", min_polls,
             site="AbortPollGate(min_polls=)", label=str(label),
         )
-        self.safety_overrides = tuple(self.safety_overrides) + override_records(
-            [spacing_record, polls_record]
-        )
+        #: R0249: `safety_overrides` is a read-only property on the base class,
+        #: so the subclass extends the backing tuple rather than rebinding the
+        #: name (which would now raise).
+        self._safety_overrides = tuple(
+            self._safety_overrides
+        ) + override_records([spacing_record, polls_record])
         self._max_poll_spacing_s = float(spacing_effective)
         self.declared_max_poll_spacing_s = float(max_poll_spacing_s)
         self._min_polls = int(polls_effective)
@@ -560,10 +565,24 @@ class AbortPollGate(AbortPollTracker):
             ),
             "no_weakening_safety_override_was_attempted": not
             weakening_overrides(self.safety_overrides),
+            #: R0249, review-0248-01 §B. The arm that catches a replayed gate
+            #: WITHOUT reading any disclosure attribute. `replay` is registered
+            #: `declared`, so its weakening record is in
+            #: `sealing_refused_overrides()` even though it is (correctly) not
+            #: in `weakening_overrides()`; `require_enforcement_evidence()`
+            #: refuses on this field. The records are built at construction and
+            #: `safety_overrides` is read-only, so flipping `replay_only` or
+            #: emptying `gate_arms_waived_by_declaration` does not reach it.
+            "no_sealing_blocking_override_was_attempted": not
+            sealing_refused_overrides(self.safety_overrides),
+            "sealing_blocking_overrides": [
+                dict(record)
+                for record in sealing_refused_overrides(self.safety_overrides)
+            ],
             "envelope_declarations_clamped_to_the_registry": [
                 dict(record) for record in self.safety_overrides
                 if record.get("kind") == "weakening"
-                and record.get("enforcement") == "clamped"
+                and record.get("enforcement") == ENFORCEMENT_CLAMPED
             ],
             "spacing_over_the_registered_ceiling": (
                 self.max_gap_s / self.max_poll_spacing_s
@@ -679,6 +698,15 @@ def require_enforcement_evidence(
         "no_weakening_safety_override_was_attempted": bool(
             verdict.get("no_weakening_safety_override_was_attempted")
         ),
+        #: R0249, review-0248-01 §B: the arm that fires on a replayed gate
+        #: without consulting a single disclosure attribute.
+        "no_sealing_blocking_override_was_attempted": bool(
+            verdict.get("no_sealing_blocking_override_was_attempted")
+        ),
+        "sealing_blocking_overrides": [
+            dict(record)
+            for record in (verdict.get("sealing_blocking_overrides") or [])
+        ],
         #: R0248 gap 4: a declaration that waived an arm is named here rather
         #: than reachable only by inference from `replay_only`.
         "gate_arms_waived_by_declaration": waived,
@@ -698,6 +726,8 @@ def require_enforcement_evidence(
              state["inner_is_a_registered_abort_reader"]),
             ("no_weakening_safety_override_was_attempted",
              state["no_weakening_safety_override_was_attempted"]),
+            ("no_sealing_blocking_override_was_attempted",
+             state["no_sealing_blocking_override_was_attempted"]),
             ("no_gate_arm_was_waived_by_a_declaration", not waived),
             ("the_abort_reader_is_sanctioned_by_registered_name",
              state["abort_reader_sanctioned_by_registered_name"]),

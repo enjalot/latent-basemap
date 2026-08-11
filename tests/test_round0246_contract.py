@@ -605,17 +605,17 @@ def test_this_round_adds_only_its_own_files_and_the_declared_edits() -> None:
     import subprocess as _sp  # noqa: PLC0415 - test-side git query only
 
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    #: R0249: pinned to R0246's OWN commit range. Reading `..HEAD` plus the
+    #: worktree made this assertion about whatever the newest round happens to
+    #: be touching, so every later round re-failed a test that had nothing to
+    #: say about it. R0246's release is `f636769`, which is R0247's base.
     committed = _sp.run(
         ["git", "-C", repo, "diff", "--name-only",
-         "c94a1401dc33b71e045925bf28cfde543457f9d9", "HEAD"],
+         "c94a1401dc33b71e045925bf28cfde543457f9d9",
+         "f636769370e254e5883ec69a37eb5e49502d9381"],
         check=False, capture_output=True, text=True,
     ).stdout.split()
-    worktree = [
-        line[3:] for line in _sp.run(
-            ["git", "-C", repo, "status", "--porcelain"],
-            check=False, capture_output=True, text=True,
-        ).stdout.splitlines() if line
-    ]
+    worktree: list[str] = []
     allowed = {
         #: the declared edits to reviewed modules, each named in the round file
         "basemap/round0244_guard.py",

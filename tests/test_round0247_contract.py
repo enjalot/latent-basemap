@@ -58,7 +58,13 @@ def test_every_registered_parameter_carries_a_basis_and_a_blind_spot() -> None:
         assert parameter.what_it_does_not_catch, name
         assert parameter.role, name
         assert parameter.direction in (registry.CEILING, registry.FLOOR), name
-        assert parameter.enforcement in ("refused", "clamped"), name
+        #: R0249 adds the third class, `declared` — see
+        #: `SafetyParameter.enforcement` and review-0248-01 §B finding 3.
+        assert parameter.enforcement in (
+            registry.ENFORCEMENT_REFUSED,
+            registry.ENFORCEMENT_CLAMPED,
+            registry.ENFORCEMENT_DECLARED,
+        ), name
 
 
 def test_every_registered_parameter_has_a_planted_weaker_value() -> None:
@@ -106,8 +112,18 @@ def test_the_clamp_control_fires_for_every_registered_parameter() -> None:
         registry.REGISTERED_SAFETY_PARAMETERS
     )
     for row in evidence["rows"]:
-        assert row["the_registered_value_was_used"] is True
         assert row["the_attempt_is_recorded"] is True
+        if row["enforcement"] == registry.ENFORCEMENT_DECLARED:
+            #: R0249: a `declared` flag is NOT substituted — clamping it would
+            #: make a replay receipt report `replay: false`. What is asserted
+            #: instead is what `record_declaration()` really does.
+            assert row["controlled_through"] == "record_declaration"
+            assert row["the_registered_value_was_used"] is False
+            assert row["the_declaration_stands"] is True
+            assert row["the_weakening_record_reaches_the_sealing_gate"] is True
+        else:
+            assert row["controlled_through"] == "clamp"
+            assert row["the_registered_value_was_used"] is True
 
 
 def test_the_call_site_controls_fire(tmp_path) -> None:
@@ -592,17 +608,16 @@ def test_no_r0247_file_contains_a_signalling_construct() -> None:
 def test_this_round_adds_only_its_own_files_and_the_declared_edits() -> None:
     """R0247 imports rounds 0215-0246 read-only except the declared edits."""
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    #: R0249: pinned to R0247's OWN commit range, for the reason given in the
+    #: same test in `test_round0246_contract.py`. R0247's release is
+    #: `0941b37`, which is R0248's base.
     committed = subprocess.run(
         ["git", "-C", repo, "diff", "--name-only",
-         "f636769370e254e5883ec69a37eb5e49502d9381", "HEAD"],
+         "f636769370e254e5883ec69a37eb5e49502d9381",
+         "0941b3776442cfdf00575f84c2688d63d28a5611"],
         check=False, capture_output=True, text=True,
     ).stdout.split()
-    worktree = [
-        line[3:] for line in subprocess.run(
-            ["git", "-C", repo, "status", "--porcelain"],
-            check=False, capture_output=True, text=True,
-        ).stdout.splitlines() if line
-    ]
+    worktree: list[str] = []
     allowed = {
         #: the declared edits to reviewed modules - every one is where the
         #: class fix belongs, and every one is a diff in result-0247

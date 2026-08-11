@@ -46,15 +46,19 @@ from basemap.round0246_tie import (
     require_aggregate_tie_aware_use,
 )
 from basemap.round0247_registry import (
+    ENFORCEMENT_DECLARED,
     REGISTERED_SAFETY_PARAMETERS,
     WATCHDOG_MAX_MEAN_OBSERVATION_GAP_S,
     WATCHDOG_MAX_OBSERVATION_GAP_S,
     Round0247Error,
     clamp,
+    record_declaration,
     registered_bounds,
     registry_fingerprint,
     safety_parameter_inventory,
+    sealing_refused_overrides,
     verify_registry,
+    weakening_overrides,
 )
 
 ROUND_ID = "0247"
@@ -111,25 +115,86 @@ WEAKER_THAN_REGISTERED: dict[str, float] = {
     "external_memory_limit_margin_bytes": float(1 << 50),
 }
 
-#: A boolean bound at its strictest value has no strictly-stricter neighbour:
-#: `replay` is registered at False and False is already the strictest thing a
-#: gate can declare. The mechanical stricter-value arm is skipped for these,
-#: with the reason published, rather than asserting a vacuous `0.0 < 0.0`.
-NO_STRICTER_VALUE_EXISTS: dict[str, str] = {
-    "replay": (
-        "registered at False, which is the strictest declaration a gate can "
-        "make; there is no value strictly stricter than 'this is not a replay'"
-    ),
-}
+def _declared_control_row(
+    name: str, parameter: Any, weaker: float
+) -> dict[str, Any]:
+    """The control for a `declared` parameter, through its real call site.
+
+    Three things are asserted, and all three are properties `record_declaration`
+    actually has: the declaration is returned unchanged (clamping it would make
+    a replay receipt say it was not a replay); the weakening is recorded; and
+    the record is in `sealing_refused_overrides()`, which is the set
+    `require_enforcement_evidence()` refuses on. A fourth arm checks the
+    no-op case: declaring the registered value itself records nothing.
+    """
+    effective, record = record_declaration(
+        name, weaker, site="R0249 declaration control", label=name
+    )
+    at_registered, no_record = record_declaration(
+        name, float(parameter.value),
+        site="R0249 declaration control", label=name,
+    )
+    return {
+        "parameter": name,
+        "direction": parameter.direction,
+        "enforcement": parameter.enforcement,
+        "controlled_through": "record_declaration",
+        "registered_value": float(parameter.value),
+        "attempted_weaker_value": float(weaker),
+        "effective_value": float(effective),
+        #: FALSE by design, and published as false. A `declared` flag is not
+        #: substituted; that is what distinguishes the class.
+        "the_registered_value_was_used": bool(
+            float(effective) == float(parameter.value)
+        ),
+        "the_declaration_stands": bool(float(effective) == float(weaker)),
+        "the_attempt_is_recorded": bool(
+            record is not None and record["kind"] == "weakening"
+        ),
+        "the_weakening_record_reaches_the_sealing_gate": bool(
+            sealing_refused_overrides([record])
+        ),
+        "the_weakening_record_does_not_fail_require": not bool(
+            weakening_overrides([record])
+        ),
+        "declaring_the_registered_value_records_nothing": bool(
+            no_record is None and float(at_registered) == float(parameter.value)
+        ),
+        "record": record,
+        "why_this_class_is_not_clamped": (
+            "clamping a self-declared flag would make the receipt report "
+            "replay: false for a gate that WAS a replay, which is the "
+            "registered_*-echoes-the-caller defect with the sign flipped. The "
+            "enforcement is at the sealing boundary instead"
+        ),
+    }
+
+
+def _declared_row_holds(row: dict[str, Any]) -> bool:
+    return bool(
+        row["the_declaration_stands"]
+        and row["the_attempt_is_recorded"]
+        and row["the_weakening_record_reaches_the_sealing_gate"]
+        and row["declaring_the_registered_value_records_nothing"]
+    )
 
 
 def run_clamp_controls() -> dict[str, Any]:
-    """Attempt every registered override through `clamp()`. All must refuse.
+    """Attempt every registered override through the function its call sites use.
 
     This is the mechanical half: the registry itself must never hand a caller a
     weaker number than it registers, for any parameter, in either direction.
     The per-parameter *call-site* controls below prove the same thing through
     the actual construction paths.
+
+    **R0249, review-0248-01 §B finding 3.** This used to push every parameter
+    through `clamp()` regardless of class, which published a passing clamp row
+    for `replay` — a parameter whose only call site is `record_declaration()`,
+    a function that deliberately does not clamp. The control proved a property
+    the code does not have. A `declared` parameter is now controlled through
+    `record_declaration()`, and what is asserted of it is what is actually
+    true: the declaration STANDS, the weakening is recorded, and the record
+    reaches `sealing_refused_overrides()` so the sealing gate refuses it.
     """
     verify_registry(label="R0247 clamp controls")
     rows: list[dict[str, Any]] = []
@@ -140,34 +205,26 @@ def run_clamp_controls() -> dict[str, Any]:
                 f"R0247 has no planted weaker value for registered parameter "
                 f"{name!r}. Every registered parameter must carry a control."
             )
+        if parameter.enforcement == ENFORCEMENT_DECLARED:
+            rows.append(
+                _declared_control_row(name, parameter, float(weaker))
+            )
+            continue
         effective, record = clamp(
             name, weaker, site="R0247 clamp control", label=name
         )
-        no_stricter = NO_STRICTER_VALUE_EXISTS.get(name)
-        if no_stricter is None:
-            stricter_value = (
-                float(parameter.value) * 0.5 if parameter.direction == "ceiling"
-                else float(parameter.value) * 2.0
-            )
-            stricter_effective, stricter_record = clamp(
-                name, stricter_value, site="R0247 clamp control", label=name
-            )
-            stricter_honoured = bool(
-                float(stricter_effective) == float(stricter_value)
-            )
-            stricter_recorded = bool(
-                stricter_record is not None
-                and stricter_record["kind"] == "stricter"
-            )
-        else:
-            stricter_value = float(parameter.value)
-            stricter_record = None
-            stricter_honoured = True
-            stricter_recorded = True
+        stricter_value = (
+            float(parameter.value) * 0.5 if parameter.direction == "ceiling"
+            else float(parameter.value) * 2.0
+        )
+        stricter_effective, stricter_record = clamp(
+            name, stricter_value, site="R0247 clamp control", label=name
+        )
         rows.append({
             "parameter": name,
             "direction": parameter.direction,
             "enforcement": parameter.enforcement,
+            "controlled_through": "clamp",
             "registered_value": float(parameter.value),
             "attempted_weaker_value": float(weaker),
             "effective_value": float(effective),
@@ -177,30 +234,58 @@ def run_clamp_controls() -> dict[str, Any]:
             "the_attempt_is_recorded": bool(
                 record is not None and record["kind"] == "weakening"
             ),
+            "the_weakening_record_reaches_the_sealing_gate": bool(
+                sealing_refused_overrides([record])
+            ),
             "record": record,
-            "a_stricter_value_is_honoured": stricter_honoured,
-            "stricter_attempt_is_recorded_as_stricter": stricter_recorded,
-            "no_stricter_value_exists_because": no_stricter,
+            "a_stricter_value_is_honoured": bool(
+                float(stricter_effective) == float(stricter_value)
+            ),
+            "stricter_attempt_is_recorded_as_stricter": bool(
+                stricter_record is not None
+                and stricter_record["kind"] == "stricter"
+            ),
         })
     failures = [
         row["parameter"] for row in rows
         if not (
-            row["the_registered_value_was_used"]
-            and row["the_attempt_is_recorded"]
-            and row["a_stricter_value_is_honoured"]
-            and row["stricter_attempt_is_recorded_as_stricter"]
+            _declared_row_holds(row)
+            if row["enforcement"] == ENFORCEMENT_DECLARED
+            else (
+                row["the_registered_value_was_used"]
+                and row["the_attempt_is_recorded"]
+                and row["a_stricter_value_is_honoured"]
+                and row["stricter_attempt_is_recorded_as_stricter"]
+            )
         )
     ]
     evidence = {
         "control": "round0247-clamp-control-v1",
         "parameters_controlled": len(rows),
+        "parameters_controlled_through_clamp": sum(
+            1 for row in rows if row["controlled_through"] == "clamp"
+        ),
+        "parameters_controlled_through_record_declaration": sum(
+            1 for row in rows
+            if row["controlled_through"] == "record_declaration"
+        ),
         "rows": rows,
         "failures": failures,
         "holds": not failures,
         "planted": (
             "for every registered parameter, a value strictly weaker than the "
-            "registered one in the direction the registry declares, plus a "
-            "strictly stricter one that must be honoured"
+            "registered one in the direction the registry declares. For a "
+            "`refused`/`clamped` parameter the weaker value goes through "
+            "clamp() and the registered value must come back, plus a strictly "
+            "stricter value that must be honoured. For a `declared` parameter "
+            "it goes through record_declaration() - the function its call "
+            "sites actually use - and the declaration must STAND while its "
+            "weakening record reaches sealing_refused_overrides()"
+        ),
+        "why_the_split_exists": (
+            "review-0248-01 §B finding 3: R0248 controlled `replay` through "
+            "clamp(), a function no call site uses for it, and published a "
+            "passing clamp row for a parameter that is never clamped"
         ),
     }
     if failures:

@@ -247,7 +247,14 @@ class AbortPollTracker:
         #: allocated for hours. A scripted clock is now permitted only on a gate
         #: explicitly declared `replay=True`, whose verdict is marked
         #: `replay_only` and which a node may not seal as enforcement evidence.
-        self.replay = bool(replay)
+        #: R0249, review-0248-01 §B. This was a plain instance attribute, and
+        #: `g.replay = False` after construction flipped `replay_only` to
+        #: false, emptied `gate_arms_waived_by_declaration`, and sealed a
+        #: replayed, scripted-clock gate as enforcement evidence in two
+        #: statements. R0247 had already established the remedy on this very
+        #: class — `max_poll_spacing_s` is a read-only property — and the three
+        #: disclosure fields did not get it. They have it now.
+        self._replay = bool(replay)
         #: R0248 gap 4, review-0247-01 A.6. `replay` is a self-declared bool
         #: that waives TWO arms of `require()`, which is the exact shape R0247
         #: retired `training_performed` for. It is registered now, so the
@@ -261,14 +268,14 @@ class AbortPollTracker:
             site="AbortPollTracker(replay=)", label=str(label),
         )
         self.replay_declaration = replay_record
-        self.clock_is_the_registered_monotonic_clock = bool(clock is None)
+        self._clock_is_the_registered_monotonic_clock = bool(clock is None)
         self._clock = clock if clock is not None else time.monotonic
         self.inner = inner
         #: R0247 attack a2-r0247-2: the gate times calls to ITSELF, so a gate
         #: wrapping a no-op publishes a flawless spacing for a stage that never
         #: reads the cooperative abort flag. `inner` must be a registered abort
         #: reader on any gate that is not a replay.
-        self.inner_is_a_registered_abort_reader = bool(
+        self._inner_is_a_registered_abort_reader = bool(
             is_registered_abort_reader(inner)
         )
         #: review-0246-01 C and D3. Both of these were keywords with registered
@@ -282,7 +289,11 @@ class AbortPollTracker:
             "min_binding_slope_bytes_per_s", slope_bytes_per_s,
             site="AbortPollTracker(slope_bytes_per_s=)", label=str(label),
         )
-        self.safety_overrides = override_records(
+        #: R0249: read-only for the same reason as the three flags above. The
+        #: sealing arm `no_sealing_blocking_override_was_attempted` is computed
+        #: from these records, so leaving the tuple rebindable would put the
+        #: independent catch back on a plain attribute assignment.
+        self._safety_overrides = override_records(
             [headroom_record, slope_record, replay_record]
         )
         self.declared_headroom_bytes = int(headroom_bytes)
@@ -295,6 +306,30 @@ class AbortPollTracker:
         self.total_gap_s = 0.0
         self.max_gap_at: str | None = None
         self._last: float | None = None
+
+    # ---- R0249: the disclosure fields are read-only ----------------------- #
+    #: review-0248-01 §B, the fifth gap. Every one of these four is a fact the
+    #: gate PUBLISHES about how it was built, and each one waives or scores an
+    #: arm. R0247's remedy for exactly this shape was a read-only property
+    #: (`AbortPollGate.max_poll_spacing_s`); R0248 then added three more of the
+    #: same shape as plain attributes, and two assignments sealed a replayed,
+    #: scripted-clock gate as enforcement evidence. There is no setter, so each
+    #: assignment now raises `AttributeError` at the statement that makes it.
+    @property
+    def replay(self) -> bool:
+        return self._replay
+
+    @property
+    def clock_is_the_registered_monotonic_clock(self) -> bool:
+        return self._clock_is_the_registered_monotonic_clock
+
+    @property
+    def inner_is_a_registered_abort_reader(self) -> bool:
+        return self._inner_is_a_registered_abort_reader
+
+    @property
+    def safety_overrides(self) -> tuple[dict[str, Any], ...]:
+        return self._safety_overrides
 
     def __call__(self, where: str) -> None:
         self._record(float(self._clock()), where)

@@ -34,9 +34,10 @@ from basemap.round0248_guard import (
     run_self_attack_battery,
 )
 from basemap.round0248_inventory import (
-    GUARDED_MODULES,
     derive_arm_waiver_inventory,
     derive_gate_constant_inventory,
+    discover_registry_regime_modules,
+    discover_round_modules,
     require_inventory_complete,
 )
 
@@ -108,66 +109,91 @@ def test_the_inventory_is_derived_and_complete_at_this_checkout() -> None:
     assert inventory["arm_waivers"]["arms_waivable_by_a_declaration"] >= 2
 
 
-def test_every_guard_module_in_the_tree_is_in_guarded_modules() -> None:
-    """A guard module added and not enumerated is itself the defect."""
-    found = {
+def test_the_module_scope_is_discovered_and_covers_the_guard_family() -> None:
+    """R0249: there is no hand-written module list left to fall out of date.
+
+    review-0248-01 §D.3 found the seventh `bare_registered_symbol` one file
+    outside `GUARDED_MODULES`. The scope is now derived from the tree, so this
+    asserts the derivation's own coverage instead of a tuple's contents.
+    """
+    discovered = set(discover_round_modules(repo_root=REPO))
+    on_disk = {
         os.path.relpath(path, REPO)
-        for path in glob.glob(os.path.join(REPO, "basemap", "round024[4-8]*.py"))
+        for directory in ("basemap", "experiments")
+        for path in glob.glob(os.path.join(REPO, directory, "round0*.py"))
     }
-    #: the tie/precision/did/sampler helpers hold no gate comparisons of their
-    #: own; the ones that do are enumerated.
-    missing = {
-        name for name in found
-        if name.endswith(("_guard.py", "_prereq.py", "_registry.py",
-                          "_external.py", "_inventory.py"))
-    } - set(GUARDED_MODULES) - {"basemap/round0248_inventory.py"}
-    assert not missing, sorted(missing)
+    assert discovered == on_disk
+    regime = set(discover_registry_regime_modules(repo_root=REPO))
+    assert regime <= discovered
+    #: every module that imports the registry is in the triage scope, including
+    #: the four the hand-written list waived by an in-line comment and the
+    #: pre-R0244 node module R0249 routed through the registry.
+    for name in (
+        "basemap/round0246_tie.py",
+        "basemap/round0247_precision.py",
+        "experiments/round0242_nodes.py",
+    ):
+        assert name in regime, name
+
+
+def _plant(tmp_path, relative: str, source: str) -> None:
+    path = tmp_path / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
 
 
 def test_the_derivation_catches_a_planted_bare_registered_comparison(
     tmp_path,
 ) -> None:
-    """The positive control for the DERIVATION itself."""
-    module = tmp_path / "planted_guard.py"
-    module.write_text(
+    """The positive control for the DERIVATION itself, through discovery.
+
+    R0249: the planted module does **not** import the registry, so it is
+    outside the triage scope — exactly the position `round0242_nodes.py:246`
+    was in. The wide discovered scope must still catch it.
+    """
+    _plant(
+        tmp_path, "experiments/round0242_planted.py",
         "R0246_MAX_POLL_SPACING_S = 2.5\n"
         "def gate(gap):\n"
         "    return gap <= R0246_MAX_POLL_SPACING_S\n",
-        encoding="utf-8",
     )
-    import basemap.round0248_inventory as inventory_module
-
-    saved = inventory_module.GUARDED_MODULES
-    try:
-        inventory_module.GUARDED_MODULES = ("planted_guard.py",)
-        derived = derive_gate_constant_inventory(repo_root=str(tmp_path))
-    finally:
-        inventory_module.GUARDED_MODULES = saved
+    derived = derive_gate_constant_inventory(repo_root=str(tmp_path))
     assert derived["holds"] is False
-    assert derived["defects"][0]["status"] == "bare_registered_symbol"
-    assert derived["defects"][0]["symbol"] == "R0246_MAX_POLL_SPACING_S"
+    bare = derived["bare_registered_symbols_anywhere_in_the_release"]
+    assert [row["symbol"] for row in bare] == ["R0246_MAX_POLL_SPACING_S"]
+    assert bare[0]["module"] == "experiments/round0242_planted.py"
+    #: and it is outside the triage scope, which is the point
+    assert bare[0]["module"] not in derived["modules_declared"]
+
+
+def test_the_derivation_catches_a_planted_untriaged_constant(tmp_path) -> None:
+    """The regime scope's own defect class, also reached through discovery."""
+    _plant(
+        tmp_path, "basemap/round0249_planted.py",
+        "from basemap.round0247_registry import registered_value\n"
+        "AN_UNEXAMINED_CEILING = 12.0\n"
+        "def gate(x):\n"
+        "    return x <= AN_UNEXAMINED_CEILING\n",
+    )
+    derived = derive_gate_constant_inventory(repo_root=str(tmp_path))
+    assert derived["holds"] is False
+    untriaged = derived["untriaged_in_the_registry_regime"]
+    assert [row["symbol"] for row in untriaged] == ["AN_UNEXAMINED_CEILING"]
 
 
 def test_the_derivation_catches_a_planted_unregistered_arm_waiver(
     tmp_path,
 ) -> None:
-    module = tmp_path / "planted_waiver.py"
-    module.write_text(
+    _plant(
+        tmp_path, "basemap/round0249_planted_waiver.py",
+        "from basemap.round0247_registry import registered_value\n"
         "class G:\n"
         "    def require(self):\n"
         "        return [n for n, ok in (\n"
         "            ('an_arm', bool(self.measured or self.pretend)),\n"
         "        ) if not ok]\n",
-        encoding="utf-8",
     )
-    import basemap.round0248_inventory as inventory_module
-
-    saved = inventory_module.GUARDED_MODULES
-    try:
-        inventory_module.GUARDED_MODULES = ("planted_waiver.py",)
-        derived = derive_arm_waiver_inventory(repo_root=str(tmp_path))
-    finally:
-        inventory_module.GUARDED_MODULES = saved
+    derived = derive_arm_waiver_inventory(repo_root=str(tmp_path))
     assert derived["holds"] is False
     #: both operands of the disjunction are reported: the derivation does
     #: not decide which one is "the real measurement", it demands that
@@ -346,18 +372,22 @@ def test_the_allocator_imports_no_array_library() -> None:
 
 
 def test_this_round_adds_only_its_own_files_and_the_declared_edits() -> None:
+    """R0248's scope, over R0248's own commit range.
+
+    R0249 note: this used to read `0941b37..HEAD` plus the worktree, so it
+    re-failed the moment a later round touched anything. R0248's release is
+    `6359243`, so its scope is the fixed range `0941b37..6359243` and stays
+    true forever; R0249 asserts its own scope over `6359243..HEAD` in
+    `tests/test_round0249_contract.py`.
+    """
     repo = REPO
     committed = subprocess.run(
         ["git", "-C", repo, "diff", "--name-only",
-         "0941b3776442cfdf00575f84c2688d63d28a5611", "HEAD"],
+         "0941b3776442cfdf00575f84c2688d63d28a5611",
+         "6359243baf2afc5b31156f05cc321f1fe0b93879"],
         check=False, capture_output=True, text=True,
     ).stdout.split()
-    worktree = [
-        line[3:] for line in subprocess.run(
-            ["git", "-C", repo, "status", "--porcelain"],
-            check=False, capture_output=True, text=True,
-        ).stdout.splitlines() if line
-    ]
+    worktree: list[str] = []
     allowed = {
         #: the declared edits to reviewed modules — every one is a comparison
         #: site that had to move from a module global onto the registry

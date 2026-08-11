@@ -63,24 +63,37 @@ from basemap.round0247_registry import (
 
 ROUND_ID = "0248"
 
-#: The modules whose comparisons are gate decisions. A module added to the
-#: guard family and not added here is itself a defect, so the contract test
-#: asserts this list against the `basemap/round024*_guard.py` glob.
-GUARDED_MODULES: tuple[str, ...] = (
-    "basemap/round0244_guard.py",
-    "basemap/round0244_prereq.py",
-    "basemap/round0245_guard.py",
-    "basemap/round0246_guard.py",
-    "basemap/round0247_guard.py",
-    "basemap/round0247_registry.py",
-    "basemap/round0248_guard.py",
-    "basemap/round0248_external.py",
-    "experiments/round0244_nodes.py",
-    "experiments/round0245_nodes.py",
-    "experiments/round0246_nodes.py",
-    "experiments/round0247_nodes.py",
-    "experiments/round0248_nodes.py",
-)
+#: R0249, review-0248-01 §D.3. **`GUARDED_MODULES` used to be a hand-written
+#: tuple of thirteen paths, and that is how the seventh
+#: `bare_registered_symbol` survived: `experiments/round0242_nodes.py:246`
+#: compared a bare `WATCHDOG_ANON_BYTES` against a second literal copy of a
+#: registered number, one file outside the list.** A hand-written module list
+#: is the same artifact the inventory exists to eliminate, so it is gone.
+#:
+#: Two scopes are now DISCOVERED from the tree, and they answer different
+#: questions:
+#:
+#: * `discover_round_modules()` — **every** `round0*.py` under `basemap/` and
+#:   `experiments/` in the release, `380` files at R0249. Over this scope the
+#:   derivation enforces the one thing it can decide with no human input at
+#:   all: a comparison whose operand is a **registered** symbol read as a bare
+#:   name is a defect. The registry supplies the symbol set, so this needs no
+#:   list of any kind.
+#: * `discover_registry_regime_modules()` — the modules whose source names
+#:   `round0247_registry`, i.e. those that have opted into the registry regime,
+#:   `17` files at R0249 against the thirteen hand-written before. Over this
+#:   narrower scope the derivation additionally requires every constant a
+#:   comparison reads to be triaged, which is the part that does need a human
+#:   sentence per symbol (`NOT_A_BOUND`).
+#:
+#: The rule is mechanical in both directions: a new guard module that imports
+#: the registry joins the triage scope automatically, and a module that does
+#: not import the registry is still scanned for bare registered symbols.
+ROUND_MODULE_DIRECTORIES: tuple[str, ...] = ("basemap", "experiments")
+ROUND_MODULE_PREFIX = "round0"
+#: The import whose presence in a module's source means "this module has opted
+#: into the safety-parameter registry", and therefore into full triage.
+REGISTRY_REGIME_MARKER = "round0247_registry"
 
 #: The sanctioned comparison-site reads. A comparison whose operand is one of
 #: these calls resolves the registry at the moment of the comparison, so a
@@ -208,6 +221,56 @@ NOT_A_BOUND: dict[str, str] = {
         "is registered, and R0248 routes the anonymous term itself through "
         "the registry at the comparison site"
     ),
+    # -- R0249: the symbols the DISCOVERED scope brought in that the
+    #    hand-written module list had waived by omission.
+    "REGISTRY_READERS": (
+        "the allowlist of sanctioned registry-reader function names, compared "
+        "as `inner.func.id in REGISTRY_READERS` inside this module's own ast "
+        "walk. It classifies source, it bounds nothing, and widening it makes "
+        "the inventory report MORE comparisons as sanctioned - which is a "
+        "source change in the diff, exactly like REGISTERED_ABORT_READERS"
+    ),
+    "REGISTRY_REGIME_MARKER": (
+        "the substring whose presence in a module's source puts that module in "
+        "the TRIAGE scope. It is a discovery rule, not a bound: narrowing it "
+        "removes modules from triage, which shows as a source change in the "
+        "diff and cannot make a bare registered symbol pass - the wide scope "
+        "that catches those does not consult it at all"
+    ),
+    "LOCALITY_ACTION": "an action name, compared for handler dispatch",
+    "FUZZY_ACTION": "an action name, compared for handler dispatch",
+    "GUARDFIX_ACTION": "an action name, compared for handler dispatch",
+    "KNOWN_EXTERNAL_MEMORY_MODES": (
+        "the set of external-memory modes that are IMPLEMENTED, compared as "
+        "`mode not in KNOWN_EXTERNAL_MEMORY_MODES` to refuse a mode nobody has "
+        "written. Removing an entry makes MORE modes refuse, never fewer; it "
+        "bounds no resource"
+    ),
+    "CONTROL_MAX_THROTTLED_RATE_RATIO": (
+        "an acceptance threshold on R0249's OWN positive control - how far the "
+        "measured allocation rate must collapse for the throttle arm to hold. "
+        "Loosening it weakens the round's evidence for its own claim, which is "
+        "self-punishing. Same class as SAMPLER_MIN_CHI_SQUARE_P"
+    ),
+    "DEFAULT_EXTERNAL_MEMORY_MODE": (
+        "the mode a caller gets when it names none. It is a mode NAME, not a "
+        "bound, and it is not the enforcement: require_external_memory_mode() "
+        "refuses an unplaceable mode and never downgrades, and every R0249 "
+        "receipt carries cgroup_self_report(), which reads back the limit the "
+        "KERNEL applied. So weakening the default shows up in the artifact as "
+        "a changed cgroup and a changed mode field, not only in the source"
+    ),
+    "LOCALITY_SCHEMA": (
+        "a schema-version identity, compared to refuse an artifact written "
+        "under a different schema. Moving it makes the load FAIL, never pass"
+    ),
+    "ENFORCEMENT_REFUSED": (
+        "an enforcement-class TAG ('refused'/'clamped'/'declared') compared "
+        "inside the registry to decide which set a weakening record belongs "
+        "to. Same class as CEILING and FLOOR: a string, not a bound"
+    ),
+    "ENFORCEMENT_CLAMPED": "the second enforcement tag; same as ENFORCEMENT_REFUSED",
+    "ENFORCEMENT_DECLARED": "the third enforcement tag; same as ENFORCEMENT_REFUSED",
     "NODE_HEADROOM_BYTES": (
         "a DERIVED quantity: WATCHDOG_ANON_BYTES - NODE_ANON_BUDGET_BYTES, "
         "both of which are themselves triaged or registered. It is the node's "
@@ -216,6 +279,43 @@ NOT_A_BOUND: dict[str, str] = {
         "max_declared_headroom_bytes rather than this"
     ),
 }
+
+
+def discover_round_modules(*, repo_root: str) -> tuple[str, ...]:
+    """Every `round0*.py` under `basemap/` and `experiments/`, sorted.
+
+    Discovery, not a list. This is the scope over which a bare comparison
+    against a REGISTERED symbol is a defect — a judgement the registry makes
+    on its own, with no hand-written adjudication anywhere in it.
+    """
+    found: list[str] = []
+    for directory in ROUND_MODULE_DIRECTORIES:
+        absolute = os.path.join(repo_root, directory)
+        if not os.path.isdir(absolute):
+            continue
+        for name in os.listdir(absolute):
+            if not name.startswith(ROUND_MODULE_PREFIX):
+                continue
+            if not name.endswith(".py"):
+                continue
+            found.append(f"{directory}/{name}")
+    return tuple(sorted(found))
+
+
+def discover_registry_regime_modules(*, repo_root: str) -> tuple[str, ...]:
+    """The discovered round modules whose source names the registry.
+
+    A module that imports `basemap.round0247_registry` has opted into the
+    registry regime, so every module-level constant its comparisons read is
+    expected to be either a registry read or triaged. Adding a new guard
+    module puts it in this scope on the next derivation, without an edit here.
+    """
+    regime: list[str] = []
+    for relative in discover_round_modules(repo_root=repo_root):
+        source = _module_source(repo_root, relative)
+        if source is not None and REGISTRY_REGIME_MARKER in source:
+            regime.append(relative)
+    return tuple(regime)
 
 
 def _module_source(repo_root: str, relative: str) -> str | None:
@@ -290,14 +390,15 @@ def _triaged_symbols() -> dict[str, str]:
     return triaged
 
 
-def derive_gate_constant_inventory(*, repo_root: str) -> dict[str, Any]:
-    """Every module-level constant any guarded module compares against."""
-    verify_registry(label="R0248 gate-constant inventory")
+def _scan_modules(
+    *, repo_root: str, modules: tuple[str, ...],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Classify every comparison against a module-level constant in `modules`."""
     registered = _registered_symbols()
     triaged = _triaged_symbols()
     rows: list[dict[str, Any]] = []
     modules_read: list[str] = []
-    for relative in GUARDED_MODULES:
+    for relative in modules:
         source = _module_source(repo_root, relative)
         if source is None:
             continue
@@ -330,17 +431,59 @@ def derive_gate_constant_inventory(*, repo_root: str) -> dict[str, Any]:
                     "registered_parameter_or_reason": reason,
                     "the_comparison_reads_the_registry": bool(reads_registry),
                 })
-    defects = [
-        row for row in rows
-        if row["status"] in {"bare_registered_symbol", "untriaged"}
+    return rows, modules_read
+
+
+def derive_gate_constant_inventory(*, repo_root: str) -> dict[str, Any]:
+    """Every module-level constant a round module compares against.
+
+    Two scopes, two different obligations — see `ROUND_MODULE_DIRECTORIES`.
+    The wide scope is where `bare_registered_symbol` is enforced and needs no
+    hand-written list at all; the registry-regime scope is where `untriaged`
+    is additionally enforced.
+    """
+    verify_registry(label="R0248 gate-constant inventory")
+    all_modules = discover_round_modules(repo_root=repo_root)
+    regime_modules = discover_registry_regime_modules(repo_root=repo_root)
+    all_rows, all_read = _scan_modules(repo_root=repo_root, modules=all_modules)
+    regime = set(regime_modules)
+    rows = [row for row in all_rows if row["module"] in regime]
+    #: The wide-scope defect: a REGISTERED symbol compared as a bare name,
+    #: anywhere in the release. This is the class that produced
+    #: `round0242_nodes:246`, and deciding it needs no human sentence.
+    bare_registered_anywhere = [
+        row for row in all_rows if row["status"] == "bare_registered_symbol"
     ]
+    #: The regime-scope defect: a constant nobody has triaged, in a module that
+    #: opted into the registry.
+    untriaged_in_the_regime = [
+        row for row in rows if row["status"] == "untriaged"
+    ]
+    defects = bare_registered_anywhere + untriaged_in_the_regime
     return {
         "instrument": "round0248-gate-constant-inventory-v1",
-        "modules_read": modules_read,
-        "modules_declared": list(GUARDED_MODULES),
+        "modules_read": [row for row in all_read if row in regime],
+        "modules_declared": list(regime_modules),
+        "discovery": {
+            "how_the_scope_is_found": (
+                "every round0*.py under basemap/ and experiments/ is scanned "
+                "for bare registered symbols; the subset whose source names "
+                f"{REGISTRY_REGIME_MARKER!r} is additionally required to have "
+                "every compared constant triaged. Neither scope is written by "
+                "hand - review-0248-01 §D.3 found the seventh defect one file "
+                "outside the hand-written list"
+            ),
+            "round_modules_scanned": len(all_read),
+            "registry_regime_modules": len(regime_modules),
+            "comparisons_over_the_whole_scope": len(all_rows),
+        },
         "comparisons_against_module_level_constants": len(rows),
         "rows": rows,
         "distinct_symbols": sorted({str(row["symbol"]) for row in rows}),
+        "bare_registered_symbols_anywhere_in_the_release": (
+            bare_registered_anywhere
+        ),
+        "untriaged_in_the_registry_regime": untriaged_in_the_regime,
         "defects": defects,
         "holds": not defects,
         "registry_fingerprint": registry_fingerprint(),
@@ -395,7 +538,7 @@ def derive_arm_waiver_inventory(*, repo_root: str) -> dict[str, Any]:
     """Every gate arm whose truth value a declaration can switch off."""
     verify_registry(label="R0248 arm-waiver inventory")
     rows: list[dict[str, Any]] = []
-    for relative in GUARDED_MODULES:
+    for relative in discover_registry_regime_modules(repo_root=repo_root):
         source = _module_source(repo_root, relative)
         if source is None:
             continue
@@ -466,10 +609,14 @@ def require_inventory_complete(*, repo_root: str) -> dict[str, Any]:
 
 
 __all__ = [
-    "GUARDED_MODULES",
     "NOT_A_BOUND",
     "REGISTRY_READERS",
+    "REGISTRY_REGIME_MARKER",
     "ROUND_ID",
+    "ROUND_MODULE_DIRECTORIES",
+    "ROUND_MODULE_PREFIX",
+    "discover_registry_regime_modules",
+    "discover_round_modules",
     "derive_arm_waiver_inventory",
     "derive_gate_constant_inventory",
     "derive_inventory",

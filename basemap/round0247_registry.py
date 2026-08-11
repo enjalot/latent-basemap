@@ -81,6 +81,18 @@ SAFETY_PARAMETER_CLASS_NOTE = (
 CEILING = "ceiling"
 FLOOR = "floor"
 
+#: The three enforcement classes. R0249 adds the third, because R0248 registered
+#: `replay` as `clamped` and review-0248-01 §B showed that string is false three
+#: ways: `replay`'s only call site is `record_declaration()`, which deliberately
+#: does not clamp; `run_clamp_controls()` proved a clamp for it through a
+#: function no call site uses; and `weakening_overrides()` filters on `refused`,
+#: so the weakening `replay` record was invisible to the
+#: `no_weakening_safety_override_was_attempted` arm and that arm reported `True`
+#: on a replayed, scripted-clock gate.
+ENFORCEMENT_REFUSED = "refused"
+ENFORCEMENT_CLAMPED = "clamped"
+ENFORCEMENT_DECLARED = "declared"
+
 
 @dataclass(frozen=True)
 class SafetyParameter:
@@ -101,10 +113,16 @@ class SafetyParameter:
     #: envelope (its budget, its headroom). Clamping it to the registry can
     #: only make the node stricter and leaves no residual weakening, so the
     #: attempt is recorded in the receipt and does not by itself fail the gate.
+    #: `declared` (R0249) — a self-declared flag whose value STANDS because
+    #: clamping it would misreport what actually happened, and which therefore
+    #: cannot be enforced by substitution at all. Its enforcement is at the
+    #: SEALING boundary: the weakening record reaches
+    #: `sealing_refused_overrides()`, so `require_enforcement_evidence()`
+    #: refuses the verdict independently of any attribute on the gate object.
     #: The distinction is registered rather than ad hoc: a bound belongs to the
     #: guard, an envelope belongs to the node, and only the first is a safety
     #: decision the node is not entitled to make.
-    enforcement: str = "refused"
+    enforcement: str = ENFORCEMENT_REFUSED
 
     def weaker_than_registered(self, requested: float) -> bool:
         if self.direction == CEILING:
@@ -684,7 +702,16 @@ _PARAMETERS: tuple[SafetyParameter, ...] = (
             "what closes it is that the node module is the diff a reviewer "
             "reads, and that the arms it waived are now named in the receipt"
         ),
-        enforcement="clamped",
+        #: R0249, review-0248-01 §B finding 3. R0248 registered this `clamped`,
+        #: which was false three ways and switched OFF the pre-existing
+        #: `no_weakening_safety_override_was_attempted` arm on exactly the gate
+        #: it needed to catch. `declared` is the honest class: the value stands
+        #: (so a replay receipt still says it is a replay), it is not clamped
+        #: and no clamp is claimed for it, and the weakening record reaches
+        #: `sealing_refused_overrides()` so the sealing gate refuses a replayed
+        #: verdict whether or not any attribute on the gate object survives to
+        #: `require()`.
+        enforcement=ENFORCEMENT_DECLARED,
     ),
     _p(
         name="tie_bound_confidence",
@@ -927,12 +954,19 @@ def registry_fingerprint() -> str:
 #: same commit, which is exactly the "register the change and its basis" rule.
 #: Re-pinned 2026-08-11 by R0248. R0247's digest was
 #: `35128f85e10ccf74387391b403bd1f18f33732863fc893b7b087db37c826d23f` over
-#: `_PARAMETERS`; this one is over `REGISTERED_SAFETY_PARAMETERS` — the object
-#: the decisions read — with `replay` registered as the twentieth parameter and
-#: the retired-marker note folded in. Changing a registered bound still
-#: requires changing this digest in the same commit.
+#: `_PARAMETERS`; R0248's was
+#: `239e9a480b6229b1730cc2c0f72c03cfaf6c25abbb3ec67a2eac5164c6553431` over
+#: `REGISTERED_SAFETY_PARAMETERS` — the object the decisions read — with
+#: `replay` registered as the twentieth parameter and the retired-marker note
+#: folded in.
+#:
+#: Re-pinned again 2026-08-11 by R0249: `replay`'s enforcement class moved from
+#: `clamped` (false three ways, review-0248-01 §B) to `declared`. `enforcement`
+#: is one of the six fields `registry_rows()` hashes, so the correction to the
+#: classification is itself registered in this digest. No registered VALUE
+#: changed; `21` parameters before and after.
 REGISTERED_REGISTRY_SHA256 = (
-    "239e9a480b6229b1730cc2c0f72c03cfaf6c25abbb3ec67a2eac5164c6553431"
+    "2f61d1ed00996b5e6b20a5712b0b0c0903eb9e4a6e9a896b2235faf635ffe020"
 )
 
 
@@ -1118,11 +1152,41 @@ def clamp_int(
 def weakening_overrides(
     records: Iterable[Mapping[str, Any] | None],
 ) -> tuple[dict[str, Any], ...]:
+    """Weakening attempts on a bound the guard OWNS. These fail the gate.
+
+    A `clamped` envelope declaration is excluded because the registry already
+    substituted the stricter value, and a `declared` flag is excluded because
+    substituting it would misreport what ran — see
+    `sealing_refused_overrides()`, which is where a `declared` weakening is
+    enforced.
+    """
     return tuple(
         dict(record) for record in records
         if record is not None
         and record.get("kind") == "weakening"
-        and record.get("enforcement", "refused") == "refused"
+        and record.get("enforcement", ENFORCEMENT_REFUSED) == ENFORCEMENT_REFUSED
+    )
+
+
+def sealing_refused_overrides(
+    records: Iterable[Mapping[str, Any] | None],
+) -> tuple[dict[str, Any], ...]:
+    """Every weakening record that must stop a verdict being SEALED as evidence.
+
+    R0249, review-0248-01 §B. A `declared` flag such as `replay` is not clamped
+    and does not fail `require()` — a replay demonstration has to be scoreable,
+    or every reviewer-shaped control in this family becomes unrunnable. What it
+    must not do is reach a receipt as enforcement evidence. This is the set the
+    sealing gate refuses on, and it is computed from the override records built
+    at construction rather than from a disclosure attribute on the gate, so it
+    fires even if a later assignment flips the disclosure.
+    """
+    return tuple(
+        dict(record) for record in records
+        if record is not None
+        and record.get("kind") == "weakening"
+        and record.get("enforcement", ENFORCEMENT_REFUSED)
+        in {ENFORCEMENT_REFUSED, ENFORCEMENT_DECLARED}
     )
 
 
@@ -1268,6 +1332,10 @@ EXAMINED_NOT_SAFETY: tuple[dict[str, str], ...] = (
 __all__ = [
     "CEILING",
     "CONSTRUCTION_PATH_NOTE",
+    "ENFORCEMENT_CLAMPED",
+    "ENFORCEMENT_DECLARED",
+    "ENFORCEMENT_REFUSED",
+    "sealing_refused_overrides",
     "MARKER_APPLICATIONS",
     "RETIRED_MARKER_NOTE",
     "abort_reader_qualified_name",
