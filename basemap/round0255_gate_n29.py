@@ -708,36 +708,73 @@ def independence_control(
             "holds": identical,
         })
 
-    # Arm 3: the same perturbation on a FAMILY cell must move the fit.
-    moved_series = {
+    # Arm 3: ONE family cell driven by the same amount. Reported, NOT asserted --
+    # `MAD_n` is a rank-order scale with an exact invariance depth of two or more on
+    # these series, so a single contaminated cell moving nothing is the registered
+    # estimator behaving as registered, not evidence of an inert fit. It is
+    # published because it is the number a reader will want beside arm 4.
+    one_series = {
         metric: [
             value - 1_000.0 if index == 0 else value
             for index, value in enumerate(series[metric])
         ]
         for metric in METRICS
     }
-    moved_logs = {
+    one_logs = {
         metric: [
             value - 1_000.0 if index == 0 else value
             for index, value in enumerate(log_series[metric])
         ]
         for metric in PURITY_METRICS
     }
-    moved_floors, moved_bands = _fit(moved_series, moved_logs)
-    any_moved = any(
-        moved_floors[metric] != baseline_floors[metric] for metric in METRICS
-    ) or any(moved_bands[metric] != baseline_bands[metric] for metric in PURITY_METRICS)
+    one_floors, one_bands = _fit(one_series, one_logs)
+    one_moved = any(
+        one_floors[metric] != baseline_floors[metric] for metric in METRICS
+    ) or any(one_bands[metric] != baseline_bands[metric] for metric in PURITY_METRICS)
     arms.append({
-        "arm": "a_family_cell_driven_by_the_same_amount",
+        "arm": "one_family_cell_driven_by_the_same_amount",
         "cells_perturbed": 1,
         "perturbation": "value - 1000.0 on the first family cell",
-        "any_floor_moved": any_moved,
-        "floors": moved_floors,
+        "any_floor_moved": one_moved,
+        "floors": one_floors,
         "expectation": (
-            "MOVED -- otherwise arms 1 and 2 would pass for a fit that ignores its "
-            "inputs, and independence would be indistinguishable from inertness"
+            "REPORTED, not required: a rank-order scale with invariance depth >= 1 "
+            "is entitled to absorb one contaminated cell, and that robustness is "
+            "why the owner ruled this estimator"
         ),
-        "holds": any_moved,
+        "holds": True,
+        "is_an_assertion": False,
+    })
+
+    # Arm 4: EVERY family cell shifted. The fit must move, or arms 1 and 2 would
+    # also pass for a fit that ignores its inputs entirely and independence would be
+    # indistinguishable from inertness.
+    shift = 0.1
+    all_series = {
+        metric: [value - shift for value in series[metric]] for metric in METRICS
+    }
+    all_logs = {
+        metric: [value - shift for value in log_series[metric]]
+        for metric in PURITY_METRICS
+    }
+    all_floors, all_bands = _fit(all_series, all_logs)
+    all_moved = all(
+        all_floors[metric] != baseline_floors[metric] for metric in METRICS
+    ) and all(
+        all_bands[metric] != baseline_bands[metric] for metric in PURITY_METRICS
+    )
+    arms.append({
+        "arm": "every_family_cell_shifted",
+        "cells_perturbed": len(series[METRICS[0]]),
+        "perturbation": f"value - {shift} on every family cell",
+        "every_floor_moved": all_moved,
+        "floors": all_floors,
+        "expectation": (
+            "MOVED on every metric -- this is the not-inert half. Without it, arms "
+            "1 and 2 would pass for a fit that reads nothing at all"
+        ),
+        "holds": all_moved,
+        "is_an_assertion": True,
     })
 
     return {
@@ -750,7 +787,10 @@ def independence_control(
         "the_fit_is_independent_of_every_held_out_cell": all(
             arm["holds"] for arm in arms[:2]
         ),
-        "the_fit_is_not_inert": bool(arms[2]["holds"]),
+        "one_contaminated_family_cell_moved_the_fit": bool(
+            arms[2]["any_floor_moved"]
+        ),
+        "the_fit_is_not_inert": bool(arms[3]["holds"]),
         "holds": all(arm["holds"] for arm in arms),
         "no_tuning_statement": NO_TUNING_STATEMENT,
     }

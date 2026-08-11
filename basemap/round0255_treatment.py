@@ -66,8 +66,15 @@ R0217_RELEASE_SHA = "8ae96e16a0d328a8c816958a866f436c426ccfaa"
 #: has a fixed membership a reviewer can audit; the runtime check then proves the
 #: files behind these names are the sealed ones.
 TRAIN_CLOSURE_MODULES: tuple[str, ...] = (
+    "basemap.pumap.parametric_umap",
     "basemap.pumap.parametric_umap.core",
-    "basemap.pumap.parametric_umap.model",
+    "basemap.pumap.parametric_umap.perf",
+    "basemap.pumap.parametric_umap.models.mlp",
+    "basemap.pumap.parametric_umap.datasets.edge_dataset",
+    "basemap.pumap.parametric_umap.datasets.edge_list_dataset",
+    "basemap.pumap.parametric_umap.utils.data_prefetcher",
+    "basemap.pumap.parametric_umap.utils.graph",
+    "basemap.pumap.parametric_umap.utils.losses",
     "basemap.round0113_prompt_contrast",
     "basemap.round0217_minilm_2m_pipeline",
     "basemap.round0217_minilm_2m_seed_family",
