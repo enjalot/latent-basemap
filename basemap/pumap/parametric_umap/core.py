@@ -203,6 +203,34 @@ class ParametricUMAP:
         self._anchor_ids_pool_dev = None
         self._anchor_ids_pool = None
         self._hold_pool_size = 0
+        # R0251: cooperative-abort read hook. A training node holds a live CUDA
+        # context, so the cooperative abort flag is the ONLY safe way to stop it
+        # — signalling one wedged this box twice. R0250 measured that nothing
+        # under basemap/pumap/ read that flag, so a training node's widest
+        # abort-read gap was its whole fit() wall (35.8x the registered ceiling
+        # on a 90 s rung). `abort_poll` is that read. It is None by default, so
+        # every caller that does not install one runs a byte-identical path.
+        self.abort_poll = None
+
+    #: R0251 poll sites, as constants so the per-batch call does no string
+    #: formatting: at 4.1M batches an f-string per batch is pure overhead, and
+    #: the instrument that consumes the site knows its own batch index.
+    ABORT_POLL_SITE_FIT_ENTERED = "pumap.fit setup entered"
+    ABORT_POLL_SITE_EDGE_LIST_PREPARED = "pumap.fit setup edge-list prepared"
+    ABORT_POLL_SITE_MODEL_ALLOCATED = "pumap.fit setup model allocated"
+    ABORT_POLL_SITE_SETUP_COMPLETE = "pumap.fit setup complete"
+    ABORT_POLL_SITE_TRAIN_BATCH = "pumap.fit train batch"
+
+    def _poll_abort(self, where):
+        """One cooperative-abort read. No-op unless a caller installs a hook.
+
+        Deliberately not a science path: it reads no state the trainer owns,
+        writes none, and returns nothing. When ``abort_poll`` is None (every
+        production caller today) this is one attribute load and one comparison.
+        """
+        poll = self.abort_poll
+        if poll is not None:
+            poll(where)
 
     def _init_model(self, input_dim):
         """Initialize the configured parametric model."""
@@ -1161,6 +1189,7 @@ class ParametricUMAP:
         # S2: setup timer — everything before the first bench step (graph load,
         # CDF build/upload, device residency) is "setup_seconds" in the canary.
         self._setup_t0 = time.perf_counter()
+        self._poll_abort(self.ABORT_POLL_SITE_FIT_ENTERED)
         if use_wandb:
             import wandb
             config = {
@@ -1217,8 +1246,10 @@ class ParametricUMAP:
             ed = None
             dataset, loader, n_pos_edges = self._prepare_edge_list_training(
                 X, precomputed_edges_path, n_train, low_memory, random_state)
+            self._poll_abort(self.ABORT_POLL_SITE_EDGE_LIST_PREPARED)
             if self.model is None:
                 self._init_model(n_features)
+            self._poll_abort(self.ABORT_POLL_SITE_MODEL_ALLOCATED)
             logging.info("Model parameters: %d", sum(p.numel() for p in self.model.parameters()))
             neg_desc = "on-the-fly"
         else:
@@ -1550,6 +1581,7 @@ class ParametricUMAP:
         self._train_t0 = time.perf_counter()
         # S2: setup = graph load + CDF build/upload + device residency + model init.
         self._setup_seconds = self._train_t0 - getattr(self, "_setup_t0", self._train_t0)
+        self._poll_abort(self.ABORT_POLL_SITE_SETUP_COMPLETE)
         # S2: attach the canary profiler in profile mode (canary runs only). It
         # partitions the post-warmup window into >=5 rate windows, times the hot
         # phases with SAMPLED CUDA events, and aborts on consecutive sub-floor
@@ -1603,6 +1635,7 @@ class ParametricUMAP:
 
             batch = _get_next()
             while batch is not None:
+                self._poll_abort(self.ABORT_POLL_SITE_TRAIN_BATCH)
                 self._train_stats["attempted_batches"] += 1
                 optimizer.zero_grad(set_to_none=True)
                 src_values, dst_values, targets = batch
