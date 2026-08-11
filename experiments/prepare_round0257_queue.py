@@ -260,7 +260,16 @@ def prepare_round0257(
     release_sha: str,
     queue_root: str = QUEUE_ROOT,
     only_nodes: tuple[str, ...] | None = None,
+    completed_train_root: str | None = None,
 ) -> str:
+    """Build the queue manifest.
+
+    `completed_train_root` points the panel node at train receipts a PREVIOUS
+    queue root already produced. A correction queue that re-runs only the panel
+    and the judge must consume the trains that already ran -- retraining them
+    would spend GPU hours to reproduce artifacts that are already sealed, and
+    would charge the round for a setup defect twice.
+    """
     frontmatter, required_reviews = _issued_round(release_sha)
     review_state = _review_state(required_reviews)
 
@@ -423,6 +432,11 @@ def prepare_round0257(
         capability = map_capability(seed)
         node = f"train_seed{seed}"
         output = os.path.join(artifacts, capability)
+        receipt_root = (
+            os.path.join(completed_train_root, capability)
+            if completed_train_root
+            else output
+        )
         jobs.append({
             "id": node,
             "action": TRAIN_ACTION,
@@ -456,7 +470,9 @@ def prepare_round0257(
             "cell_id": rung_cell_id(seed),
             "train_receipt": {
                 "kind": "file",
-                "canonical_path": os.path.join(output, f"{node}-train-receipt.json"),
+                "canonical_path": os.path.join(
+                    receipt_root, f"{node}-train-receipt.json"
+                ),
             },
         })
 
@@ -605,10 +621,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--release-sha", required=True)
     parser.add_argument("--queue-root", default=QUEUE_ROOT)
     parser.add_argument("--only-nodes", default="")
+    parser.add_argument("--completed-train-root", default="")
     args = parser.parse_args(argv)
     only = tuple(item for item in args.only_nodes.split(",") if item) or None
     path = prepare_round0257(
-        release_sha=args.release_sha, queue_root=args.queue_root, only_nodes=only
+        release_sha=args.release_sha,
+        queue_root=args.queue_root,
+        only_nodes=only,
+        completed_train_root=args.completed_train_root or None,
     )
     print(json.dumps({"queue": path, "sha256": file_sha256(path)}))
     return 0
