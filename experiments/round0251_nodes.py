@@ -464,6 +464,7 @@ def run_rescore(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 f"{REFERENCE_MISMATCH_MESSAGE} seed-42 recomputed the reference"
             )
         observed_coordinates_sha256 = ordered_array_sha256(coordinates)
+        transform_rows = int(coordinates.shape[0])
         del model, coordinates
         torch.cuda.empty_cache()
         gc.collect()
@@ -497,7 +498,7 @@ def run_rescore(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             len(shift["prior_seeds"]) + len(shift["new_seeds"]) == len(POOLED_SEEDS)
         ),
         "every_comparable_value_was_compared": comparison["values_compared"] > 0,
-        "the_transform_covered_every_row": True,
+        "the_transform_covered_every_row": transform_rows == ROWS,
     }
     if not all(execution_checks.values()):
         raise Round0251RescoreError(
@@ -643,7 +644,8 @@ def build_joint_table(
         second_cell=second,
     )
     checks = reproduction_checks(table=table, r0250_gate=r0250_gate)
-    if not all(item["reproduced"] for item in checks):
+    reproduced = all(item["reproduced"] for item in checks)
+    if not reproduced:
         raise Round0251TableError(
             "R0251's re-derivation does not reproduce R0250's sealed values: "
             f"{[item for item in checks if not item['reproduced']]}"
@@ -657,7 +659,7 @@ def build_joint_table(
         "table": table,
         "dominance": dominance(table),
         "reproduction_checks": checks,
-        "reproduction_checks_all_passed": True,
+        "reproduction_checks_all_passed": reproduced,
     }
 
 
