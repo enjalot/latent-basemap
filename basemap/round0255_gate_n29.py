@@ -29,6 +29,15 @@ and band is **bitwise identical**, while the same perturbation applied to a *fam
 cell moves the floor. A control that only shows "nothing changed" cannot distinguish
 independence from an inert fit; this one shows both halves.
 
+**`independence_control` was repaired in R0256 and did not run as shipped in
+R0255.** Its arms 1 and 2 built a `perturbed` copy of the held-out cells and then
+re-fitted the *unperturbed* family, so they could not fail; review-0255 found it
+and `vacuouscheck` now detects the shape. The function below derives the fit's
+inputs from cells through `family_series_from_cells`, so the perturbation reaches
+the fit, and it takes the builder as a parameter so
+`round0256_gate_repair.independence_positive_controls` can plant a builder that
+does read a held-out cell and require the arms to report `false`.
+
 **Attainability and power sit beside every floor.** R0219's "4/4 pass" and R0225's
 "0 failures at n = 8 under k = 3.187" were theorems about their `n`, and the
 identity bound `(n-1)/sqrt(n)` is `28/sqrt(29) = 5.1988...` here -- a `k` at or above
@@ -621,38 +630,119 @@ def attainability_and_power(
 # --------------------------------------------------------------------------- #
 
 
+#: An extreme drive on a cell's metric values.
+EXTREME_VALUE_SHIFT = 1_000.0
+#: An extreme multiplicative drive on a cell's purity ratios that still has a
+#: finite logarithm. R0255 wrote `ratio * 1000.0` while the assertion it wanted
+#: was in log space; the ratios are held in linear space, so the intent and the
+#: arithmetic did not match. `exp(-20.72...)` is unambiguous in either.
+EXTREME_RATIO_FACTOR = 1e-9
+FAMILY_SHIFT = 0.1
+
+
+def family_series_from_cells(
+    cells: Sequence[Mapping[str, Any]],
+    *,
+    defining_cell_ids: Sequence[str],
+) -> tuple[dict[str, list[float]], dict[str, list[float]]]:
+    """Select the defining cells out of the whole scored panel and build the fit.
+
+    This is the function `independence_control` puts under test. The realistic
+    way a held-out cell reaches a floor is not that somebody appends it to a
+    series by hand -- it is that the **selection** lets it in. That is the v0
+    defect the R0161/R0193 audit named: rung maps ended up among R0161's own
+    fitting cells. So the control perturbs *cells* and re-runs *this*.
+    """
+    by_id = {str(cell["cell_id"]): cell for cell in cells}
+    wanted = [str(cell_id) for cell_id in defining_cell_ids]
+    missing = [cell_id for cell_id in wanted if cell_id not in by_id]
+    if missing:
+        raise Round0255GateError(
+            f"R0255 series builder is missing defining cells {sorted(missing)}"
+        )
+    series = {
+        metric: [float(by_id[cell_id]["values"][metric]) for cell_id in wanted]
+        for metric in METRICS
+    }
+    log_series = {
+        metric: [
+            math.log(float(by_id[cell_id]["ratios"][PURITY_RATIO_KEYS[metric]]))
+            for cell_id in wanted
+        ]
+        for metric in PURITY_METRICS
+    }
+    return series, log_series
+
+
+def _drive_cells(
+    cells: Sequence[Mapping[str, Any]],
+    *,
+    target_ids: Sequence[str],
+    value_shift: float,
+    ratio_factor: float,
+) -> list[dict[str, Any]]:
+    """Return a NEW cell list with the named cells driven. Inputs untouched."""
+    targets = {str(cell_id) for cell_id in target_ids}
+    out: list[dict[str, Any]] = []
+    for cell in cells:
+        row = dict(cell)
+        values = {
+            metric: float(value) for metric, value in dict(cell["values"]).items()
+        }
+        ratios = {key: float(value) for key, value in dict(cell["ratios"]).items()}
+        if str(row["cell_id"]) in targets:
+            values = {
+                metric: value - float(value_shift) for metric, value in values.items()
+            }
+            ratios = {key: value * float(ratio_factor) for key, value in ratios.items()}
+        row["values"] = values
+        row["ratios"] = ratios
+        out.append(row)
+    return out
+
+
 def independence_control(
     *,
     estimator: str,
     multiplier_one_sided: float,
     multiplier_two_sided: float,
-    series: Mapping[str, Sequence[float]],
-    log_series: Mapping[str, Sequence[float]],
+    family_cells: Sequence[Mapping[str, Any]],
     held_out_cells: Sequence[Mapping[str, Any]],
+    defining_cell_ids: Sequence[str],
+    build: Any = family_series_from_cells,
 ) -> dict[str, Any]:
     """Prove the fit cannot be tuned to a held-out cell, and that it is not inert.
 
-    Three arms, all calling the SHIPPED `floor_at` / `band_at`:
+    **Repaired in R0256.** As shipped in R0255 this function built a `perturbed`
+    copy of the held-out cells, counted it into the artifact, and then called
+    `_fit(series, log_series)` on the **unperturbed family**. `perturbed` was
+    loaded in exactly two places -- its own `.append` and a `len()` -- so arms 1
+    and 2 compared a function of the family to itself and
+    `every_floor_bitwise_identical: true` was structurally incapable of being
+    false. It would have reported `true` for a fit that genuinely read held-out
+    cells. Review-0255 found this and `vacuouscheck` now detects the shape.
+
+    Here the fit's inputs are **derived from cells** by `build`, so a
+    perturbation applied to a cell reaches the floor if and only if that cell
+    reaches the fit. `build` is a parameter so a positive control can plant a
+    builder that *does* select a held-out cell and require arms 1 and 2 to report
+    `false`; `round0256_gate_repair.independence_positive_controls` ships three.
+
+    Four arms, all calling the SHIPPED `floor_at` / `band_at`:
 
     1. **c8-seed42 driven to an extreme** -- the one cell the ruling names. Every
-       fitted floor and band must be **bitwise identical**.
-    2. **every held-out cell driven at once** -- same requirement.
-    3. **a FAMILY cell driven by the same amount** -- the floor must MOVE. Without
-       this arm, arms 1 and 2 would also pass for a fit that ignores its inputs
-       entirely, which is the vacuity review-0253-01 refused elsewhere.
+       fitted floor and band must be **bitwise identical**. ASSERTED.
+    2. **every held-out cell driven at once** -- same requirement. ASSERTED.
+    3. **a FAMILY cell driven by the same amount** -- REPORTED, not asserted.
+    4. **every FAMILY cell shifted** -- the floors must MOVE. Without this arm,
+       arms 1 and 2 would also pass for a fit that ignores its inputs entirely.
     """
-    baseline_floors = {
-        metric: floor_at(estimator, list(series[metric]), float(multiplier_one_sided))
-        for metric in METRICS
-    }
-    baseline_bands = {
-        metric: band_at(estimator, list(log_series[metric]), float(multiplier_two_sided))
-        for metric in PURITY_METRICS
-    }
+    ids = [str(cell_id) for cell_id in defining_cell_ids]
 
     def _fit(
-        values: Mapping[str, Sequence[float]], logs: Mapping[str, Sequence[float]]
+        cells: Sequence[Mapping[str, Any]]
     ) -> tuple[dict[str, float], dict[str, tuple[float, float]]]:
+        values, logs = build(cells, defining_cell_ids=ids)
         return (
             {
                 metric: floor_at(
@@ -668,107 +758,128 @@ def independence_control(
             },
         )
 
-    arms: list[dict[str, Any]] = []
+    baseline_floors, baseline_bands = _fit(
+        list(family_cells) + list(held_out_cells)
+    )
 
-    # Arms 1 and 2: the held-out cells are not inputs to the fit at all, so the
-    # perturbation is applied to the objects the round holds them in and the fit is
-    # re-run on the family series. Bitwise identity is the assertion.
-    for label, targets in (
-        ("c8_seed42_driven_to_an_extreme", ["cluster-spill-c8-seed42"]),
-        ("every_held_out_cell_driven_at_once", list(HELD_OUT_CELL_IDS)),
-    ):
-        perturbed = []
-        for cell in held_out_cells:
-            row = {key: value for key, value in dict(cell).items()}
-            if str(row["cell_id"]) in set(targets):
-                row["values"] = {
-                    metric: float(value) - 1_000.0
-                    for metric, value in dict(row["values"]).items()
-                }
-                row["ratios"] = {
-                    key: float(value) * 1_000.0
-                    for key, value in dict(row["ratios"]).items()
-                }
-            perturbed.append(row)
-        floors, bands = _fit(series, log_series)
+    def _compare(
+        cells: Sequence[Mapping[str, Any]]
+    ) -> tuple[dict[str, float], dict[str, list[float]], bool]:
+        floors, bands = _fit(cells)
         identical = all(
             floors[metric] == baseline_floors[metric] for metric in METRICS
         ) and all(
             bands[metric] == baseline_bands[metric] for metric in PURITY_METRICS
         )
+        return floors, {m: list(v) for m, v in bands.items()}, identical
+
+    arms: list[dict[str, Any]] = []
+
+    # Arms 1 and 2: held-out cells driven, and THE FIT RE-RUN ON THE RESULT.
+    for label, targets in (
+        ("c8_seed42_driven_to_an_extreme", ["cluster-spill-c8-seed42"]),
+        ("every_held_out_cell_driven_at_once", list(HELD_OUT_CELL_IDS)),
+    ):
+        driven = _drive_cells(
+            held_out_cells,
+            target_ids=targets,
+            value_shift=EXTREME_VALUE_SHIFT,
+            ratio_factor=EXTREME_RATIO_FACTOR,
+        )
+        floors, bands, identical = _compare(list(family_cells) + driven)
         arms.append({
             "arm": label,
-            "cells_perturbed": len([
-                row for row in perturbed if str(row["cell_id"]) in set(targets)
-            ]),
-            "perturbation": "value - 1000.0 and ratio * 1000.0",
+            "cells_perturbed": sum(
+                1 for row in driven if str(row["cell_id"]) in set(targets)
+            ),
+            "perturbation": (
+                f"value - {EXTREME_VALUE_SHIFT} and ratio * {EXTREME_RATIO_FACTOR} "
+                "on the named held-out cells, PASSED INTO the builder under test"
+            ),
+            "perturbation_reaches_the_fit": True,
             "every_floor_bitwise_identical": identical,
             "floors": floors,
-            "expectation": "identical -- held-out cells are not inputs to the fit",
+            "bands": bands,
+            "expectation": (
+                "identical -- held-out cells must not be selected into the fit. "
+                "ASSERTED, with positive controls proving this arm reports false "
+                "when a builder does select them."
+            ),
             "holds": identical,
+            "is_an_assertion": True,
         })
 
-    # Arm 3: ONE family cell driven by the same amount. Reported, NOT asserted --
-    # `MAD_n` is a rank-order scale with an exact invariance depth of two or more on
-    # these series, so a single contaminated cell moving nothing is the registered
-    # estimator behaving as registered, not evidence of an inert fit. It is
-    # published because it is the number a reader will want beside arm 4.
-    one_series = {
-        metric: [
-            value - 1_000.0 if index == 0 else value
-            for index, value in enumerate(series[metric])
-        ]
-        for metric in METRICS
-    }
-    one_logs = {
-        metric: [
-            value - 1_000.0 if index == 0 else value
-            for index, value in enumerate(log_series[metric])
-        ]
-        for metric in PURITY_METRICS
-    }
-    one_floors, one_bands = _fit(one_series, one_logs)
-    one_moved = any(
-        one_floors[metric] != baseline_floors[metric] for metric in METRICS
-    ) or any(one_bands[metric] != baseline_bands[metric] for metric in PURITY_METRICS)
+    # Arm 3: ONE family cell driven the same way. Reported, NOT asserted.
+    driven_one = _drive_cells(
+        family_cells,
+        target_ids=[str(family_cells[0]["cell_id"])],
+        value_shift=EXTREME_VALUE_SHIFT,
+        ratio_factor=EXTREME_RATIO_FACTOR,
+    )
+    one_floors, one_bands, one_identical = _compare(
+        driven_one + list(held_out_cells)
+    )
     arms.append({
         "arm": "one_family_cell_driven_by_the_same_amount",
         "cells_perturbed": 1,
-        "perturbation": "value - 1000.0 on the first family cell",
-        "any_floor_moved": one_moved,
+        "perturbation": (
+            f"value - {EXTREME_VALUE_SHIFT} and ratio * {EXTREME_RATIO_FACTOR} on "
+            f"{family_cells[0]['cell_id']}"
+        ),
+        "perturbation_reaches_the_fit": True,
+        "any_floor_moved": not one_identical,
         "floors": one_floors,
+        "bands": one_bands,
         "expectation": (
-            "REPORTED, not required: a rank-order scale with invariance depth >= 1 "
-            "is entitled to absorb one contaminated cell, and that robustness is "
-            "why the owner ruled this estimator"
+            "REPORTED, not required. At n = 29 driving an ABOVE-median cell to "
+            "-inf moves the median from the 15th to the 14th order statistic, so "
+            "the LOCATION moves even though the MAD_n scale is robust. Driving a "
+            "below-median cell would move nothing, so this arm's outcome depends "
+            "on which cell is driven and is published as a measurement, never as "
+            "a property of the estimator."
         ),
         "holds": True,
         "is_an_assertion": False,
     })
 
     # Arm 4: EVERY family cell shifted. The fit must move, or arms 1 and 2 would
-    # also pass for a fit that ignores its inputs entirely and independence would be
-    # indistinguishable from inertness.
-    shift = 0.1
-    all_series = {
-        metric: [value - shift for value in series[metric]] for metric in METRICS
-    }
-    all_logs = {
-        metric: [value - shift for value in log_series[metric]]
-        for metric in PURITY_METRICS
-    }
-    all_floors, all_bands = _fit(all_series, all_logs)
+    # also pass for a fit that ignores its inputs entirely and independence would
+    # be indistinguishable from inertness.
+    shifted = [
+        {
+            **dict(cell),
+            "values": {
+                metric: float(value) - FAMILY_SHIFT
+                for metric, value in dict(cell["values"]).items()
+            },
+            "ratios": {
+                key: float(value) * math.exp(-FAMILY_SHIFT)
+                for key, value in dict(cell["ratios"]).items()
+            },
+        }
+        for cell in family_cells
+    ]
+    all_floors, all_bands, all_identical = _compare(
+        shifted + list(held_out_cells)
+    )
     all_moved = all(
         all_floors[metric] != baseline_floors[metric] for metric in METRICS
     ) and all(
-        all_bands[metric] != baseline_bands[metric] for metric in PURITY_METRICS
+        tuple(all_bands[metric]) != tuple(baseline_bands[metric])
+        for metric in PURITY_METRICS
     )
     arms.append({
         "arm": "every_family_cell_shifted",
-        "cells_perturbed": len(series[METRICS[0]]),
-        "perturbation": f"value - {shift} on every family cell",
+        "cells_perturbed": len(family_cells),
+        "perturbation": (
+            f"value - {FAMILY_SHIFT} and ratio * exp(-{FAMILY_SHIFT}) on every "
+            "family cell"
+        ),
+        "perturbation_reaches_the_fit": True,
         "every_floor_moved": all_moved,
+        "any_floor_moved": not all_identical,
         "floors": all_floors,
+        "bands": all_bands,
         "expectation": (
             "MOVED on every metric -- this is the not-inert half. Without it, arms "
             "1 and 2 would pass for a fit that reads nothing at all"
@@ -779,19 +890,20 @@ def independence_control(
 
     return {
         "estimator": estimator,
+        "builder": getattr(build, "__name__", str(build)),
         "baseline_floors": baseline_floors,
         "baseline_bands": {
             metric: list(value) for metric, value in baseline_bands.items()
         },
         "arms": arms,
-        "the_fit_is_independent_of_every_held_out_cell": all(
-            arm["holds"] for arm in arms[:2]
+        "the_fit_is_independent_of_every_held_out_cell": bool(
+            arms[0]["holds"] and arms[1]["holds"]
         ),
         "one_contaminated_family_cell_moved_the_fit": bool(
             arms[2]["any_floor_moved"]
         ),
         "the_fit_is_not_inert": bool(arms[3]["holds"]),
-        "holds": all(arm["holds"] for arm in arms),
+        "holds": all(bool(arm["holds"]) for arm in arms),
         "no_tuning_statement": NO_TUNING_STATEMENT,
     }
 
@@ -859,6 +971,9 @@ __all__ = [
     "DENSITY_V2_DEFECT",
     "DESCRIPTIVE_METRICS",
     "EXACT_FAMILY_SEEDS",
+    "EXTREME_RATIO_FACTOR",
+    "EXTREME_VALUE_SHIFT",
+    "FAMILY_SHIFT",
     "GATED_METRICS",
     "GATE_CAPABILITY",
     "GATE_SCHEMA",
@@ -902,6 +1017,7 @@ __all__ = [
     "degenerate_witness",
     "exact_cell_id",
     "falsifiability_statement",
+    "family_series_from_cells",
     "floor_at",
     "identity_bound",
     "independence_control",

@@ -2086,13 +2086,16 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             series=series,
             log_series=log_series,
         )
+        # Repaired in R0256: the control now derives the fit's inputs from the
+        # cells, so the perturbation reaches the fit. As shipped in R0255 arms 1
+        # and 2 re-fitted the unperturbed family and could not fail.
         independence = independence_control(
             estimator=chosen,
             multiplier_one_sided=winner["one_sided_multiplier"],
             multiplier_two_sided=winner["two_sided_multiplier"],
-            series=series,
-            log_series=log_series,
+            family_cells=exact_scoring_cells,
             held_out_cells=held_out_cells,
+            defining_cell_ids=defining_ids,
         )
         changes = verdict_changes(
             chosen=scoring[chosen]["all_cells"],

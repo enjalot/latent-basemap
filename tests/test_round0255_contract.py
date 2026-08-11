@@ -54,6 +54,7 @@ from basemap.round0255_seed_extension_n29 import (
     predict_cell_footprint,
 )
 from basemap.round0255_treatment import (
+    HELD_OUT_CELL_IDS,
     Round0255FamilyError,
     Round0255TreatmentError,
     TRAIN_CLOSURE_MODULES,
@@ -311,38 +312,52 @@ def test_attainability_and_power_covers_every_gated_floor():
 # --------------------------------------------------------------------------- #
 
 
+def _family_cell_fixture():
+    """The synthetic family, expressed as CELLS -- the repaired control's input."""
+    series, _logs = _series()
+    return [
+        {
+            "cell_id": exact_cell_id(seed),
+            "family": "exact-graph",
+            "values": {metric: series[metric][index] for metric in METRICS},
+            "ratios": {
+                "k256": 1.008 + 0.001 * ((index % 5) - 2),
+                "k1024": 0.712 + 0.001 * ((index % 3) - 1),
+            },
+        }
+        for index, seed in enumerate(POOLED_SEEDS)
+    ]
+
+
 def _held_out_fixture():
     return [
         {
-            "cell_id": "cluster-spill-c8-seed42",
-            "family": "cluster-spill-c8",
+            "cell_id": cell_id,
+            "family": cell_id.rsplit("-", 1)[0],
             "values": {metric: 0.3 for metric in METRICS},
             "ratios": {"k256": 1.01, "k1024": 0.71},
-        },
-        {
-            "cell_id": "cuvs-igd48-seed42",
-            "family": "cuvs-igd48",
-            "values": {metric: 0.3 for metric in METRICS},
-            "ratios": {"k256": 1.01, "k1024": 0.71},
-        },
+        }
+        for cell_id in HELD_OUT_CELL_IDS
     ]
 
 
 def test_the_independence_control_holds_and_is_not_inert():
-    at29, series, log_series, _selection = _selection_fixture()
+    at29, _series_values, _logs, _selection = _selection_fixture()
     entry = at29["candidates"][OWNER_RULING_ESTIMATOR]
+    family = _family_cell_fixture()
     control = independence_control(
         estimator=OWNER_RULING_ESTIMATOR,
         multiplier_one_sided=float(entry["one_sided"]["calibrated_multiplier"]),
         multiplier_two_sided=float(entry["two_sided"]["calibrated_multiplier"]),
-        series=series,
-        log_series=log_series,
+        family_cells=family,
         held_out_cells=_held_out_fixture(),
+        defining_cell_ids=[cell["cell_id"] for cell in family],
     )
     assert control["the_fit_is_independent_of_every_held_out_cell"] is True
     assert control["the_fit_is_not_inert"] is True
     assert control["holds"] is True
     assert len(control["arms"]) == 4
+    assert all(arm["perturbation_reaches_the_fit"] for arm in control["arms"])
 
 
 # --------------------------------------------------------------------------- #
