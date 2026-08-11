@@ -664,7 +664,24 @@ def run_graph_load(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "what_the_unpolled_arm_is": WHAT_THE_UNPOLLED_ARM_IS,
         "mem_available_at_start": headroom,
         "declared_anonymous_budget_bytes": NODE_ANON_BUDGET_BYTES,
-        "runs": runs,
+        # Sealed BY ARM, not as a flat indexed list. `rounds/report.py::_is_control`
+        # classifies on the flattened dotted KEY PATH, so a control run sealed at
+        # `runs[0].gap_report.widest_gap_s` carries no control token and the census
+        # ranks it as SHIPPED -- which is exactly what the first attempt of this
+        # node did, putting the unpolled control's 34.517681 s at the head of the
+        # shipped table. Keying by arm puts `unpolled_control` in the path of every
+        # figure the control produces.
+        "runs_by_arm": {
+            arm: [run for run in runs if run["arm"] == arm]
+            for arm in sorted({run["arm"] for run in runs})
+        },
+        "why_the_runs_are_keyed_by_arm": (
+            "rounds/report.py::_is_control matches on the flattened dotted key "
+            "path, not on the arm value. A flat `runs[N]` list hides the arm from "
+            "the path and makes the census rank a registered control as a shipped "
+            "arm. This is the R0252 mistake and the first attempt of this node "
+            "reproduced it; the run is preserved and reported."
+        ),
         "verdict": verdict,
         "combined_residency_is_arithmetic_not_a_measurement": {
             "three_edge_arrays_bytes": 3 * (DIRECTED_EDGES * 4),
