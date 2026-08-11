@@ -463,6 +463,31 @@ def test_a_hashless_intra_queue_reference_resolves_and_a_wrong_hash_is_refused(t
         )
 
 
+def test_the_corpus_label_dtype_holds_every_slug_and_a_narrow_one_would_not():
+    """POSITIVE CONTROL for the defect that stopped attempt 3's panel node.
+
+    Two of this rung's four corpus ids are 52 and 57 characters. A fixed `U48`
+    dtype truncates both, so `labels == slug` matched ZERO anchors for them and
+    the anchor-coverage guard refused the node. This asserts the shipped width
+    round-trips every slug, and that the narrow width genuinely loses two.
+    """
+    import numpy as np
+    from experiments.round0257_nodes import (
+        CORPUS_LABEL_DTYPE,
+        CORPUS_SLUGS,
+    )
+
+    shipped = np.asarray(list(CORPUS_SLUGS), dtype=CORPUS_LABEL_DTYPE)
+    assert shipped.tolist() == list(CORPUS_SLUGS)
+    for slug in CORPUS_SLUGS:
+        assert int((shipped == slug).sum()) == 1
+
+    # the planted defect: the width attempt 3 shipped
+    narrow = np.asarray(list(CORPUS_SLUGS), dtype="U48")
+    lost = [slug for slug in CORPUS_SLUGS if int((narrow == slug).sum()) == 0]
+    assert len(lost) == 2, lost
+
+
 # --------------------------------------------------------------------------- #
 # safety
 # --------------------------------------------------------------------------- #

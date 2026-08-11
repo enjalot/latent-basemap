@@ -163,6 +163,14 @@ TRANSFORM_CHUNK_ROWS = 100_000
 CORPUS_SLUGS: tuple[str, ...] = tuple(name for name, _rows in COMPOSITION)
 CORPUS_ROWS: dict[str, int] = {name: int(rows) for name, rows in COMPOSITION}
 
+#: Fixed-width numpy string dtype for the per-anchor corpus labels, derived from
+#: the slugs themselves. R0218 could hardcode `U16` because its slugs were short
+#: names; these are full dataset ids, two of which are 52 and 57 characters, and
+#: a hardcoded width silently TRUNCATES them so every `labels == slug` test
+#: returns zero matches. That is what stopped this round's second panel attempt,
+#: and the anchor-coverage guard is what caught it.
+CORPUS_LABEL_DTYPE = f"U{max(len(slug) for slug in CORPUS_SLUGS)}"
+
 SAFETY_NOTE = (
     "no node in this module signals any process, starts a child process, hands "
     "cuVS anything, or wraps a subprocess in a timeout. Every bulk input is a "
@@ -911,8 +919,16 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         save_hiD_reference(reference, reference_path)
         reference_signature = expected_input_signature(reference_path)
         anchor_labels = np.asarray(
-            [CORPUS_SLUGS[int(value)] for value in corpus_of_row[anchors]], dtype="U48"
+            [CORPUS_SLUGS[int(value)] for value in corpus_of_row[anchors]],
+            dtype=CORPUS_LABEL_DTYPE,
         )
+        if sorted(set(anchor_labels.tolist())) != sorted(
+            {CORPUS_SLUGS[int(value)] for value in corpus_of_row[anchors]}
+        ):
+            raise Round0257Error(
+                "R0257 anchor corpus labels do not round-trip: the numpy string "
+                f"dtype {CORPUS_LABEL_DTYPE} truncates a corpus id"
+            )
         anchor_corpus_counts = {
             slug: int((anchor_labels == slug).sum()) for slug in CORPUS_SLUGS
         }
@@ -1322,6 +1338,7 @@ def run_job(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 
 
 __all__ = [
+    "CORPUS_LABEL_DTYPE",
     "CORPUS_ROWS",
     "CORPUS_SLUGS",
     "JUDGE_ACTION",
