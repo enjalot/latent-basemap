@@ -511,7 +511,18 @@ def _sealed_gate_inputs() -> list[dict[str, Any]]:
     return signatures
 
 
-def prepare_round0250(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
+#: The two instrumentation nodes. They depend on nothing this queue produces, so
+#: a correction queue may carry them alone after the Part B nodes have sealed
+#: their artifacts in the original queue directory.
+INSTRUMENTATION_NODES: tuple[str, ...] = ("blocksize_0250", "trainloop_0250")
+
+
+def prepare_round0250(
+    *,
+    release_sha: str,
+    queue_root: str = QUEUE_ROOT,
+    only_nodes: tuple[str, ...] | None = None,
+) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0250 release SHA must be one full commit")
     round_signature, required_reviews = _issued_round(release_sha)
@@ -777,6 +788,20 @@ def prepare_round0250(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
     })
     p90[trainloop_node] = TRAINLOOP_P90_WALL_S
 
+    if only_nodes is not None:
+        wanted = set(only_nodes)
+        unknown = wanted - {job["id"] for job in jobs}
+        if unknown:
+            raise RuntimeError(f"R0250 correction queue names unknown nodes: {unknown}")
+        jobs = [job for job in jobs if job["id"] in wanted]
+        for job in jobs:
+            if set(job["deps"]) - wanted:
+                raise RuntimeError(
+                    f"R0250 correction node {job['id']} depends on a node the "
+                    "correction queue does not carry"
+                )
+        p90 = {key: value for key, value in p90.items() if key in wanted}
+
     p90["total"] = sum(value for key, value in p90.items() if key != "total")
 
     queue = _base_manifest(
@@ -807,13 +832,26 @@ def prepare_round0250(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
             *(r0221_capability_for_seed(seed) for seed in (46, 47, 48, 49)),
             *(r0230_capability_for_seed(seed) for seed in (50, 51, 52, 53, 54)),
         ],
-        "capabilities_produced": [
-            TRAINER_LOOP_CAPABILITY,
-            BLOCKSIZE_CAPABILITY,
-            *CAPABILITIES,
-            PANEL_CAPABILITY_N16,
-            GATE_CAPABILITY,
-        ],
+        "capabilities_produced": (
+            [
+                TRAINER_LOOP_CAPABILITY,
+                BLOCKSIZE_CAPABILITY,
+                *CAPABILITIES,
+                PANEL_CAPABILITY_N16,
+                GATE_CAPABILITY,
+            ]
+            if only_nodes is None
+            else [
+                capability
+                for node, capability in (
+                    ("blocksize_0250", BLOCKSIZE_CAPABILITY),
+                    ("trainloop_0250", TRAINER_LOOP_CAPABILITY),
+                )
+                if node in set(only_nodes)
+            ]
+        ),
+        "correction_of": (None if only_nodes is None else QUEUE_ROOT),
+        "correction_nodes": (None if only_nodes is None else list(only_nodes)),
         "training_performed": True,
         "jobs": jobs,
         "p90_gpu_seconds": p90,
@@ -935,10 +973,25 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release-sha", required=True)
     parser.add_argument("--queue-root", default=QUEUE_ROOT)
+    parser.add_argument(
+        "--only-nodes",
+        default=None,
+        help=(
+            "comma-separated node ids for a correction queue; the nodes must "
+            "not depend on any node the correction queue omits"
+        ),
+    )
     args = parser.parse_args(argv)
+    only = (
+        tuple(item.strip() for item in args.only_nodes.split(",") if item.strip())
+        if args.only_nodes
+        else None
+    )
     print(json.dumps({
         "queue_manifest": prepare_round0250(
-            release_sha=args.release_sha, queue_root=args.queue_root
+            release_sha=args.release_sha,
+            queue_root=args.queue_root,
+            only_nodes=only,
         )
     }, indent=2, sort_keys=True))
     return 0

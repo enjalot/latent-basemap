@@ -209,3 +209,43 @@ def test_the_exact_family_is_the_sixteen_seeds_the_round_trains_towards():
     assert len(EXACT_FAMILY_SEEDS) == N_EXACT == 16
     assert set(METRICS) - set(GATED_METRICS) == {"density_v2"}
     assert set(PURITY_METRICS) <= set(GATED_METRICS)
+
+
+# --------------------------------------------------------------------------- #
+# the blocksize node must PUBLISH a ceiling breach, not die on it
+# --------------------------------------------------------------------------- #
+
+
+def test_a_measurement_node_publishes_a_refused_gate_rather_than_aborting():
+    """Attempt 1's defect, as a control.
+
+    `_score_gate_without_raising` must return a scored verdict whose
+    `meets_the_registered_ceiling` is False, with the failing arm named, instead
+    of propagating `Round0246Error`. A measurement node that dies on its own
+    finding destroys the measurement — which is what attempt 1 of `blocksize_0250`
+    did at the warm block=2,000 arm.
+    """
+    from basemap.round0246_guard import Round0246Error
+    from experiments.round0250_nodes import (
+        _node_gate,
+        _score_gate_without_raising,
+    )
+
+    gate = _node_gate("R0250 breach control", training_performed=False)
+    gate.start()
+    gate("first read")
+    # a hand-made gap wider than the registered ceiling
+    gate._last = gate._clock() - 9.0
+    gate("second read, far too late")
+    gate.finish("control end")
+
+    tail = {"host_watchdog": {"anonymous_trace_by_second": []}}
+    # the raising path is what attempt 1 used
+    with pytest.raises(Round0246Error):
+        gate.require(measured_slope_bytes_per_s=None)
+    # the reporting path publishes the same refusal as data
+    scored = _score_gate_without_raising(gate, tail, label="R0250 breach control")
+    assert scored["meets_the_registered_ceiling"] is False
+    assert scored["max_gap_between_enforcement_polls_s"] > 2.5109531834854018
+    assert scored["outcome"]["require_raised"] is True
+    assert "meets_the_registered_ceiling" in scored["failures"]

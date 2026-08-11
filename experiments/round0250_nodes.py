@@ -822,8 +822,15 @@ def run_blocksize(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         )
         gate("R0250 adaptive gather probe complete")
         gate.finish(f"{label} stage end")
-    tail = _guard_tail(guard, label=label)
-    enforcement = _close_gate(gate, tail, label=label)
+    # The blocksize node exists to find out WHETHER a block breaches the
+    # ceiling, so a breach is its finding and not its error. Attempt 1 of this
+    # round used the raising `_close_gate` here and died on
+    # `meets_the_registered_ceiling` at the warm block=2,000 arm, destroying the
+    # measurement it had just made. The gate is unchanged and still refuses; the
+    # refusal is now recorded as data. (The trainer-loop node already did this;
+    # this node should have from the start.)
+    tail = _guard_tail_reported(guard, label=label)
+    enforcement = _score_gate_without_raising(gate, tail, label=label)
     io_after = io_counters()
 
     arms = [*cold_arms, warm]
@@ -855,6 +862,19 @@ def run_blocksize(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "adaptive_probe": adaptive,
         "resolution": resolution,
         "enforcement_poll_spacing": enforcement,
+        "the_probe_itself_met_the_registered_ceiling": bool(
+            enforcement.get("meets_the_registered_ceiling")
+        ),
+        "the_probe_widest_gap_s": enforcement.get(
+            "max_gap_between_enforcement_polls_s"
+        ),
+        "the_probe_widest_gap_sits_after": enforcement.get("widest_gap_before"),
+        "probe_gate_note": (
+            "this probe walks the released gather at four block sizes, so a "
+            "block wide enough to breach the ceiling makes the probe's own gate "
+            "refuse. That refusal is the measurement, recorded here rather than "
+            "raised: the gate is unchanged and its verdict stands."
+        ),
         **tail,
         "note": BLOCKSIZE_NOTE,
         "training_performed": False,
