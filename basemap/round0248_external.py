@@ -349,7 +349,14 @@ def run_external_memory_bound_control(
         _scope_argv(unit=unit_killed, max_bytes=max_bytes, mode=mode)
         + [sys.executable, "-c", _ALLOCATOR, str(CONTROL_TARGET_BYTES),
            str(CONTROL_STEP_BYTES), killed_receipt],
-        check=False, capture_output=True, text=True, timeout=180.0,
+        #: NO `timeout=`. `subprocess.run(timeout=)` delivers SIGKILL, and the
+        #: release's signal-safety detector rightly refuses that for any child
+        #: it cannot prove GPU-free. It is also unnecessary: the bound on this
+        #: child IS the cgroup limit - an over-allocator is OOM-killed by the
+        #: kernel in well under a second - and the runner's cooperative soft
+        #: deadline bounds the node above it. The allocator loop is finite by
+        #: construction and the escape battery makes four bounded attempts.
+        check=False, capture_output=True, text=True,
     )
     child_receipt: dict[str, Any] = {}
     if os.path.exists(killed_receipt):
@@ -363,14 +370,28 @@ def run_external_memory_bound_control(
         + [sys.executable, "-c", _ALLOCATOR, str(CONTROL_SAFE_BYTES),
            str(CONTROL_STEP_BYTES),
            os.path.join(workspace, "surviving-child.json")],
-        check=False, capture_output=True, text=True, timeout=180.0,
+        #: NO `timeout=`. `subprocess.run(timeout=)` delivers SIGKILL, and the
+        #: release's signal-safety detector rightly refuses that for any child
+        #: it cannot prove GPU-free. It is also unnecessary: the bound on this
+        #: child IS the cgroup limit - an over-allocator is OOM-killed by the
+        #: kernel in well under a second - and the runner's cooperative soft
+        #: deadline bounds the node above it. The allocator loop is finite by
+        #: construction and the escape battery makes four bounded attempts.
+        check=False, capture_output=True, text=True,
     )
 
     # -- arm 4: the escape battery ------------------------------------------ #
     escapes = subprocess.run(
         _scope_argv(unit=unit_escape, max_bytes=max_bytes, mode=mode)
         + [sys.executable, "-c", _ESCAPES, escape_receipt],
-        check=False, capture_output=True, text=True, timeout=180.0,
+        #: NO `timeout=`. `subprocess.run(timeout=)` delivers SIGKILL, and the
+        #: release's signal-safety detector rightly refuses that for any child
+        #: it cannot prove GPU-free. It is also unnecessary: the bound on this
+        #: child IS the cgroup limit - an over-allocator is OOM-killed by the
+        #: kernel in well under a second - and the runner's cooperative soft
+        #: deadline bounds the node above it. The allocator loop is finite by
+        #: construction and the escape battery makes four bounded attempts.
+        check=False, capture_output=True, text=True,
     )
     escape_rows: dict[str, Any] = {}
     if os.path.exists(escape_receipt):
@@ -397,7 +418,14 @@ def run_external_memory_bound_control(
                 max_bytes=max_bytes, mode=other,
             )
             + [sys.executable, "-c", _ESCAPES, other_receipt],
-            check=False, capture_output=True, text=True, timeout=180.0,
+            #: NO `timeout=`. `subprocess.run(timeout=)` delivers SIGKILL, and the
+            #: release's signal-safety detector rightly refuses that for any child
+            #: it cannot prove GPU-free. It is also unnecessary: the bound on this
+            #: child IS the cgroup limit - an over-allocator is OOM-killed by the
+            #: kernel in well under a second - and the runner's cooperative soft
+            #: deadline bounds the node above it. The allocator loop is finite by
+            #: construction and the escape battery makes four bounded attempts.
+        check=False, capture_output=True, text=True,
         )
         if os.path.exists(other_receipt):
             with open(other_receipt, encoding="utf-8") as handle:
