@@ -33,6 +33,7 @@ flag path.  No signal is delivered on any path.
 from __future__ import annotations
 
 import ast
+import gc
 import json
 import os
 import shutil
@@ -602,12 +603,20 @@ def run_writepath(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                         if os.path.exists(_path):
                             os.unlink(_path)
 
-                stop_controls.append(measure_stop_latency(
+                outcome = measure_stop_latency(
                     label="write of a 100M-scale substrate",
                     flag_path=os.path.join(scratch, "write-stop.abort"),
                     delay_s=STOP_CONTROL_DELAY_S,
                     run=run_write_under_poll,
-                ))
+                )
+                # The round's abort rule: a stop control that does not stop is a
+                # HARD failure of its node, not a null in a table.
+                if not outcome["the_work_stopped_cooperatively"]:
+                    raise Round0253NodeError(
+                        "R0253 write stop control did not stop: the polled write "
+                        "path ran to completion with the flag planted"
+                    )
+                stop_controls.append(outcome)
     finally:
         force_remove_tree(scratch)
     io_after = io_counters()
@@ -791,6 +800,7 @@ def run_cudasetup(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 # is the allocation a training node performs and not a stand-in.
                 # Its cost does not depend on N -- it is reported beside the
                 # N-dependent stages, never as one of them.
+                treatment_started = time.monotonic()
                 template_graph = _sealed_graph(job)
                 template_source, template_signature = _open_substrate(template_graph)
                 template, _template_sha = r0217_train_config(
@@ -801,19 +811,27 @@ def run_cudasetup(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                     graph_edges=template_graph["directed_edges"],
                     rows=R0217_ROWS,
                 )
-                del template_source
+                treatment_edges = int(template_graph["directed_edges"])
+                del template_source, template_graph
+                gc.collect()
+                treatment_wall = time.monotonic() - treatment_started
                 wrapped("R0253 treatment config resolved")
                 model_config, _model_sha, _model_identity = short_rung_config(
                     template, updates=STOP_CONTROL_UPDATES
                 )
                 model_started = time.monotonic()
                 model = _new_model(model_config)
+                # `_new_model` constructs the estimator; the network itself is
+                # materialised by `_init_model`, which is what `fit()` calls and
+                # therefore what "model allocation" means. Nothing is fitted.
+                model._init_model(TARGET_DIMENSION)
                 torch.cuda.synchronize()
                 model_wall = time.monotonic() - model_started
                 wrapped("R0253 model allocated on device")
-                parameters = int(sum(
-                    p.numel() for p in getattr(model, "model", model).parameters()
-                ))
+                parameters = int(sum(p.numel() for p in model.model.parameters()))
+                parameter_devices = sorted({
+                    str(p.device) for p in model.model.parameters()
+                })
                 del memmap
             finally:
                 artifact_identity.set_abort_poll(previous)
@@ -857,6 +875,21 @@ def run_cudasetup(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "model_allocation_wall_s": model_wall,
             "model_allocation_wall_over_the_ceiling": over_the_ceiling(model_wall),
         },
+        "the_2m_rung_stages_measured_here_and_NOT_carried_up": {
+            "treatment_graph_load_and_config_wall_s": treatment_wall,
+            "treatment_graph_load_and_config_wall_over_the_ceiling": over_the_ceiling(
+                treatment_wall
+            ),
+            "directed_edges": treatment_edges,
+            "rows": int(R0217_ROWS),
+            "why_it_is_here": (
+                "The model this node allocates is the treatment's real model, so "
+                "its config has to be resolved, which means loading the sealed 2M "
+                "graph. That load is a 2,000,000-row measurement and is reported "
+                "as one. It is NOT a 100M graph-load figure and nothing in this "
+                "artifact extrapolates it."
+            ),
+        },
         "creation": created,
         "page_cache": eviction,
         "substrate_signature": signature,
@@ -871,7 +904,13 @@ def run_cudasetup(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 "deadlocks against anonymous host buffers."
             ),
         },
-        "model": {"parameters": parameters, "device": "cuda"},
+        "model": {
+            "parameters": parameters,
+            "parameter_devices": parameter_devices,
+            "input_dimension": int(TARGET_DIMENSION),
+            "allocated_through": "ParametricUMAP._init_model, the call fit() makes",
+            "nothing_was_fitted": True,
+        },
         "gap_report": report,
         "enforcement_poll_spacing": scored,
         "guard_tail": tail,
