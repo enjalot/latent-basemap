@@ -29,6 +29,7 @@ No signal is delivered on any path, and no CUDA library is loaded by either node
 """
 from __future__ import annotations
 
+import importlib
 import os
 import shutil
 import sys
@@ -273,12 +274,20 @@ def _plant_and_audit(scratch: str) -> dict[str, Any]:
         handle.write("")
     if scratch not in sys.path:
         sys.path.insert(0, scratch)
+    # Every file is written BEFORE the first import, and the finder's directory
+    # cache is invalidated once afterwards. `importlib`'s `FileFinder` caches a
+    # package directory's listing on first import and revalidates it only on an
+    # mtime change with 1 s granularity, so writing the second module after
+    # importing the first raises `ModuleNotFoundError` on a fast disk. That is a
+    # property of the harness, not of the guard under test.
+    for name, source in (*PLANTED_DEFECTS, PLANTED_HONEST):
+        with open(os.path.join(package, f"{name}.py"), "w", encoding="utf-8") as handle:
+            handle.write(source)
+    importlib.invalidate_caches()
+
     rows: list[dict[str, Any]] = []
     try:
-        for name, source in (*PLANTED_DEFECTS, PLANTED_HONEST):
-            path = os.path.join(package, f"{name}.py")
-            with open(path, "w", encoding="utf-8") as handle:
-                handle.write(source)
+        for name, _source in (*PLANTED_DEFECTS, PLANTED_HONEST):
             module_name = f"round0254_planted.{name}"
             verdict = install_effectiveness(module_name, "run_job")
             rows.append({

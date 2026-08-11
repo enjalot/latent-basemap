@@ -168,6 +168,25 @@ def test_the_auditor_still_accepts_an_honest_install(tmp_path):
     assert verdict["the_install_is_effective"] is True, verdict["why_not"]
 
 
+def test_the_node_s_own_planted_defect_harness_runs_end_to_end(tmp_path):
+    """The node helper itself, in one package directory, as the node runs it.
+
+    Regression: the first launch of `dispatch_0254` died with
+    `ModuleNotFoundError: round0254_planted.module_level_shadow`. `importlib`'s
+    `FileFinder` caches a package directory's listing on first import and
+    revalidates it only on an mtime change with 1 s granularity, so writing the
+    second planted module *after* importing the first is invisible on a fast
+    disk. The per-test `_plant` helper above uses a fresh directory each time
+    and could not see it. This calls the node's own helper.
+    """
+    from experiments.round0254_nodes import _plant_and_audit
+
+    report = _plant_and_audit(str(tmp_path))
+    assert report["every_planted_defect_was_caught"] is True, report["controls"]
+    assert report["the_honest_install_still_passes"] is True
+    assert report["defects_caught_by_the_shipped_auditor"] == len(PLANTED_DEFECTS)
+
+
 def test_the_auditor_refuses_an_install_imported_from_the_wrong_module(tmp_path):
     module_name = _plant(
         tmp_path, "wrong_source",
