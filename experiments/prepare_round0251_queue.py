@@ -267,7 +267,9 @@ def _sealed_graph() -> tuple[dict[str, Any], dict[str, Any], int]:
         or int(manifest.get("k", -1)) != GRAPH_K
     ):
         raise RuntimeError("R0251 sealed R0216 substrate+graph contract changed")
-    edges = int(manifest.get("directed_edge_count", 0))
+    edges = int(manifest.get("directed_edge_count", 0)) or int(
+        (manifest.get("graph_checks") or {}).get("directed_edges", 0)
+    )
     if edges != SEALED_DIRECTED_EDGES:
         raise RuntimeError(
             f"R0251 sealed graph reports {edges} directed edges, registered "
