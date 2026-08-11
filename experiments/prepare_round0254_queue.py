@@ -450,16 +450,24 @@ def prepare_round0254(
             "registry_mutated": False,
             "guard_modules_edited": False,
             "science_modules_edited": (
-                "None. The only edits to pre-existing files are 13 "
-                "`install_stop_hooks(label=...)` lines as the first statement of "
-                "each dispatched `run_job` and of the six delegates that carried "
-                "no install, and one optional `source=` parameter on "
-                "`basemap/round0253_write_path.write_loop_polls` so its positive "
+                "None. Two kinds of edit touch pre-existing files, and "
+                "`git diff --numstat 7e2a8fe..HEAD` is the source of both counts. "
+                "(1) Thirteen `install_stop_hooks(label=...)` lines, each the "
+                "first statement of a function, across seven "
+                "`experiments/*_nodes.py` files -- `round0113_nodes` 4, "
+                "`round0250_nodes` 4, and one `run_job` each in `round0218_nodes`, "
+                "`round0230_nodes`, `round0238_nodes`, `round0240_nodes` and "
+                "`round0253_nodes`: 13 insertions, 0 deletions. (2) "
+                "`basemap/round0253_write_path.py`, an audit path the mandate "
+                "explicitly permits editing, gains an optional `source=` on "
+                "`write_loop_polls` / `assert_write_loop_polls` so its positive "
                 "control can call the guard instead of re-implementing it "
-                "(review-0253-01 §I). 13 + 8 inserted lines, 2 deleted, across 8 "
-                "files. No metric, neighbour set, ordering, rounding, threshold, "
-                "treatment or digest changes; `basemap/artifact_identity.py` and "
-                "`basemap/panel_v2.py` are untouched."
+                "(review-0253-01 §I): 17 insertions, 6 deletions. Total across "
+                "pre-existing files: 30 insertions, 6 deletions, 8 files. No "
+                "metric, neighbour set, ordering, rounding, threshold, treatment "
+                "or digest changes; `basemap/artifact_identity.py` and "
+                "`basemap/panel_v2.py` are untouched, and no guard, registry or "
+                "watchdog module appears in the diff."
             ),
             "the_instrument_is_defeatable": THE_INSTRUMENT_IS_DEFEATABLE,
             "upstream_review_state": review_state,
