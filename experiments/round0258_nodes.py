@@ -498,7 +498,10 @@ def run_controls(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     scored = _score_gate_without_raising(gate, tail, label=label)
     report = gap_report(recorder.records, arm="controls")
 
-    both = sorted(gates["entries_that_both_install_and_gate"])
+    both = sorted(
+        row["entry"] for row in gates["entries"]
+        if row["constructs_a_gate"] and row["installs_effectively"]
+    )
     coverage = ledger.receipt()
     body = dict(_receipt_envelope(active["manifest"]))
     body.update({
@@ -523,10 +526,12 @@ def run_controls(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "entries_that_construct_a_gate": int(
                 gates["entries_that_construct_a_gate"]
             ),
-            "entries_that_both_install_and_gate": len(both),
+            "entries_that_both_install_and_gate": int(
+                gates["entries_that_both_install_and_gate"]
+            ),
             "the_entries_that_both_install_and_gate": both,
-            "entries_that_construct_no_gate": sorted(
-                gates["entries_that_construct_no_gate"]
+            "entries_that_install_but_construct_no_gate": sorted(
+                gates["entries_that_install_but_construct_no_gate"]
             ),
             "scope_modules": list(SCOPE_MODULES),
             "scope_note": (
