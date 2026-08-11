@@ -656,6 +656,7 @@ def test_this_round_adds_only_its_own_files_and_the_declared_edits() -> None:
         "experiments/round0246_nodes.py",
         "tests/test_round0248_contract.py",
         "tests/test_round0248_cpu_smoke.py",
+        "tests/test_round0245_cpu_smoke.py",
     }
     changed = set(committed + worktree)
     assert changed <= allowed, sorted(changed - allowed)

@@ -26,6 +26,7 @@ from basemap import round0113_prompt_contrast as prompt_contract
 from basemap.artifact_identity import expected_input_signature
 from basemap.output_safety import atomic_save_new_npy, atomic_write_new_json
 from basemap.round0238_rung5 import json_safe
+from basemap.round0247_registry import REGISTERED_SAFETY_PARAMETERS
 from basemap import round0245_guard as guard_module
 from experiments import round0245_nodes as nodes
 
@@ -41,7 +42,14 @@ SMOKE_ROOT = "/data/latent-basemap/tests"
 TINY_TRACE = [[0, 100], [1, 200], [2, 600], [3, 900], [4, 850]]
 TINY_TRACE_SLOPE = 400
 TINY_TRACE_PEAK = 900
-TINY_HEADROOM = 100
+#: R0248: the headroom-agreement arm in `round0245_nodes` now reads the
+#: REGISTERED max_declared_headroom_bytes at the comparison site instead of the
+#: module-level mirror, so the tiny world's sealed receipt has to carry the
+#: registered number. Patching the mirror no longer moves the decision - which
+#: is the point of R0248 gap 1/2, demonstrated here on the round's own fixture.
+TINY_HEADROOM = int(
+    REGISTERED_SAFETY_PARAMETERS["max_declared_headroom_bytes"].value
+)
 
 
 def _npy(path: str, array: np.ndarray) -> dict:
