@@ -57,6 +57,7 @@ from experiments.round0238_nodes import (
     run_ladder as _r0238_run_ladder,
     run_qualify as _r0238_run_qualify,
 )
+from basemap.round0253_stop_hooks import install_stop_hooks
 
 #: The two actions this round authorizes. Deliberately the same identifiers
 #: R0238 used, because the handler it delegates to dispatches on them.
@@ -130,6 +131,7 @@ def _seal_attestation(
 
 def run_ladder(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     """Verify the inheritance, run R0238's ladder unchanged, attest the result."""
+    install_stop_hooks(label="R0253 round0240_nodes.run_ladder")
     manifest = active["manifest"]
     inheritance = verify_inheritance(job)
     started = time.monotonic()
@@ -155,6 +157,7 @@ def run_ladder(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 
 def run_qualify(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     """Verify the inheritance, run R0238's qualification unchanged, attest it."""
+    install_stop_hooks(label="R0253 round0240_nodes.run_qualify")
     manifest = active["manifest"]
     inheritance = verify_inheritance(job)
     started = time.monotonic()

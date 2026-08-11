@@ -86,6 +86,7 @@ from basemap.round0113_prompt_contrast import (
     train_config,
     verify_signature,
 )
+from basemap.round0253_stop_hooks import install_stop_hooks
 
 def _schema(stem: str) -> str:
     return f"round0113-{stem}-v1"
@@ -830,6 +831,7 @@ def _write_compact(
 
 
 def run_assemble(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+    install_stop_hooks(label="R0253 round0113_nodes.run_assemble")
     output = create_fresh_directory(
         job["outputs"][0], label="R0113 compact prompt arrays"
     )
@@ -1363,6 +1365,7 @@ def _load_query_reserve(
 def run_build_graph(
     active: dict[str, Any], job: dict[str, Any]
 ) -> dict[str, Any]:
+    install_stop_hooks(label="R0253 round0113_nodes.run_build_graph")
     import faiss
     import umap.umap_ as umap_api
     from basemap.panel_v2 import (
@@ -1923,6 +1926,7 @@ def _weighted_rejection_accounting_mismatch(
 
 
 def run_train(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+    install_stop_hooks(label="R0253 round0113_nodes.run_train")
     import torch
 
     arm = _arm(job)
@@ -2190,6 +2194,7 @@ def _load_query_selection(
 def run_evaluate(
     active: dict[str, Any], job: dict[str, Any]
 ) -> dict[str, Any]:
+    install_stop_hooks(label="R0253 round0113_nodes.run_evaluate")
     from basemap.panel_v2 import (
         build_query_truth,
         cross_knn,
