@@ -292,18 +292,29 @@ def _sealed_rung_graph(job: Mapping[str, Any]) -> dict[str, Any]:
             f"R0257 R0215 degree-zero tripwire: sealed rung graph reports "
             f"{zero_degree} edgeless rows"
         )
-    tie_aware = float(
-        selected.get("tie_aware_mean")
-        or selected.get("tie_aware_recall_at_k")
-        or manifest.get("tie_aware_mean")
-        or 0.0
-    )
+    tie_aware_block = selected.get("tie_aware")
+    if not isinstance(tie_aware_block, Mapping):
+        raise Round0257Error(
+            "R0257 sealed rung graph carries no tie-aware recall block"
+        )
+    tie_aware = float(tie_aware_block["mean"])
+    tie_aware_p10 = float(tie_aware_block["p10"])
+    if int(tie_aware_block.get("n", -1)) != RUNG_ROWS:
+        raise Round0257Error(
+            "R0257 sealed rung graph recall was not measured over all rung rows"
+        )
     floors = manifest.get("floors") or {}
     floor = float(floors.get("tie_aware_mean", 0.9))
-    if tie_aware < floor:
+    p10_floor = float(floors.get("tie_aware_p10", 0.8))
+    if tie_aware < floor or tie_aware_p10 < p10_floor:
         raise Round0257Error(
-            f"R0257 sealed rung graph tie-aware recall {tie_aware} is below its "
-            f"registered floor {floor}"
+            f"R0257 sealed rung graph tie-aware recall mean {tie_aware} / p10 "
+            f"{tie_aware_p10} is below its registered floors {floor} / {p10_floor}"
+        )
+    if abs(tie_aware - SEALED_TIE_AWARE_RECALL) > 1e-6:
+        raise Round0257Error(
+            f"R0257 sealed rung graph tie-aware recall {tie_aware} is not the "
+            f"registered {SEALED_TIE_AWARE_RECALL}"
         )
     graph_signature = dict(manifest["graph"])
     graph_path = prompt_contract.verify_signature(
@@ -332,6 +343,7 @@ def _sealed_rung_graph(job: Mapping[str, Any]) -> dict[str, Any]:
         "directed_edges": edges,
         "zero_degree_rows": zero_degree,
         "tie_aware_recall_at_k": tie_aware,
+        "tie_aware_p10": tie_aware_p10,
         "sources": sources,
         "targets": targets,
         "weights": weights,

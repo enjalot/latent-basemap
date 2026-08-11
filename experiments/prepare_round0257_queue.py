@@ -291,6 +291,16 @@ def prepare_round0257(
             f"R0257 sealed rung graph reports {edges} directed edges, registered "
             f"{SEALED_RUNG_DIRECTED_EDGES}"
         )
+    # The same key path the node's reader uses, asserted at prepare time so a
+    # manifest whose qualification block is missing is a prepare-time refusal.
+    tie_aware = graph_manifest["selected_graph"]["tie_aware"]
+    if (
+        int(tie_aware["n"]) != RUNG_ROWS
+        or float(tie_aware["mean"]) < float(graph_manifest["floors"]["tie_aware_mean"])
+        or float(tie_aware["p10"]) < float(graph_manifest["floors"]["tie_aware_p10"])
+        or int(graph_manifest["degrees"]["zero_degree_rows"]) != 0
+    ):
+        raise RuntimeError("R0257 sealed rung graph does not clear its own floors")
 
     # The gate is validated HERE as well as in the node: a moved floor must be a
     # prepare-time refusal, not a discovery after three GPU-hours.

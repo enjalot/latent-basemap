@@ -53,6 +53,10 @@ from basemap.round0257_rung_pipeline import (
     validate_full_rung_map,
 )
 
+R0233_GRAPH = (
+    "/data/latent-basemap/runs/round-0233/queue-correction-1/artifacts/"
+    "minilm-mixed-6250k-cluster-spill-k15-fuzzy-graph-v1/qualified-graph.json"
+)
 R0256_GATE = (
     "/data/latent-basemap/runs/round-0256/queue-correction-1/artifacts/"
     "minilm-mixed-2m-calibrated-madn-floors-n29-v2/"
@@ -182,6 +186,24 @@ def test_a_wrong_rung_or_a_wrong_edge_count_is_refused():
         _config(42, graph_edges=SEALED_RUNG_DIRECTED_EDGES + 1)
     with pytest.raises(Round0257Error):
         _config(99)
+
+
+def test_the_sealed_rung_graph_carries_the_fields_the_node_reads():
+    """The node's graph reader failed on attempt 1 because it looked for
+    `tie_aware_mean` where R0233 seals a `tie_aware` block. This asserts the exact
+    key path the shipped reader now uses, against the real sealed bytes."""
+    if not os.path.exists(R0233_GRAPH):
+        pytest.skip("the sealed 6250k graph receipt is not on this machine")
+    with open(R0233_GRAPH, "rb") as handle:
+        manifest = json.load(handle)
+    assert int(manifest["rows"]) == RUNG_ROWS
+    assert int(manifest["directed_edges"]) == SEALED_RUNG_DIRECTED_EDGES
+    assert int(manifest["degrees"]["zero_degree_rows"]) == 0
+    tie_aware = manifest["selected_graph"]["tie_aware"]
+    assert int(tie_aware["n"]) == RUNG_ROWS
+    assert tie_aware["mean"] >= float(manifest["floors"]["tie_aware_mean"])
+    assert tie_aware["p10"] >= float(manifest["floors"]["tie_aware_p10"])
+    assert abs(float(tie_aware["mean"]) - 0.9999016) <= 1e-6
 
 
 # --------------------------------------------------------------------------- #
