@@ -418,6 +418,52 @@ def test_a_gate_artifact_with_a_moved_floor_is_refused(gate_artifact):
 
 
 # --------------------------------------------------------------------------- #
+# intra-queue references -- the defect that failed attempt 2's panel node
+# --------------------------------------------------------------------------- #
+
+
+def test_a_hashless_intra_queue_reference_resolves_and_a_wrong_hash_is_refused(tmp_path):
+    """POSITIVE CONTROL for the failure that stopped attempt 2 at the panel node.
+
+    A node downstream of a producer is handed a canonical path with NO hash,
+    because the bytes do not exist at prepare time. `verify_signature` refuses
+    such a reference outright ("content changed"), which is what happened. The
+    shipped resolver must accept the hashless form, compute the signature at
+    read time, and still refuse a reference whose declared hash is wrong.
+    """
+    from experiments.round0257_nodes import _intra_queue_signature
+    from basemap.artifact_identity import expected_input_signature
+
+    target = tmp_path / "panel_6250k-ladder-panel.json"
+    target.write_text(json.dumps({"schema": "probe"}), encoding="utf-8")
+
+    # hashless intra-queue reference: resolves, and returns the real signature
+    path, signature = _intra_queue_signature(
+        {"kind": "file", "canonical_path": str(target)}, label="probe"
+    )
+    assert path == str(target)
+    assert signature == expected_input_signature(str(target))
+
+    # a fully-signed reference still verifies
+    path2, signature2 = _intra_queue_signature(signature, label="probe")
+    assert path2 == str(target)
+    assert signature2 == signature
+
+    # a reference whose declared hash is wrong is refused
+    tampered = dict(signature)
+    tampered["sha256"] = "0" * 64
+    with pytest.raises(Exception):
+        _intra_queue_signature(tampered, label="probe")
+
+    # an absent path is refused
+    with pytest.raises(Round0257Error):
+        _intra_queue_signature(
+            {"kind": "file", "canonical_path": str(tmp_path / "nope.json")},
+            label="probe",
+        )
+
+
+# --------------------------------------------------------------------------- #
 # safety
 # --------------------------------------------------------------------------- #
 

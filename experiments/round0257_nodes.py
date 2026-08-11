@@ -184,6 +184,27 @@ def _bound_path(job: Mapping[str, Any], key: str, *, label: str) -> str:
     return prompt_contract.verify_signature(dict(signature), label=label)
 
 
+def _intra_queue_signature(
+    reference: Mapping[str, Any], *, label: str
+) -> tuple[str, dict[str, Any]]:
+    """Resolve a reference to an artifact THIS queue produces.
+
+    A node downstream of a producer cannot be handed a hash at prepare time,
+    because the bytes do not exist yet. R0255 established the shape: if the
+    reference carries a `sha256` it is verified in full; otherwise the path is
+    resolved and its signature computed at read time. Using `verify_signature`
+    on a hashless intra-queue reference is what failed this round's first panel
+    attempt.
+    """
+    reference = dict(reference)
+    if reference.get("sha256"):
+        return prompt_contract.verify_signature(reference, label=label), reference
+    path = str(reference.get("canonical_path") or "")
+    if not path or not os.path.exists(path):
+        raise Round0257Error(f"{label} is absent at {path!r}")
+    return path, expected_input_signature(path)
+
+
 def _read_json(path: str, label: str) -> dict[str, Any]:
     if not os.path.exists(path):
         raise Round0257Error(f"{label} is absent at {path}")
@@ -760,7 +781,7 @@ def _authenticate_rung_map(
     seed = cell.get("seed")
     if isinstance(seed, bool) or not isinstance(seed, int) or seed not in SEEDS:
         raise Round0257Error(f"R0257 panel cell seed {seed!r} is not registered")
-    receipt_path = prompt_contract.verify_signature(
+    receipt_path, receipt_signature = _intra_queue_signature(
         dict(cell["train_receipt"]), label=f"R0257 seed-{seed} rung train receipt"
     )
     receipt = prompt_contract.read_sealed(
@@ -782,7 +803,7 @@ def _authenticate_rung_map(
     model_path = prompt_contract.verify_signature(
         dict(receipt["model"]), label=f"R0257 seed-{seed} rung checkpoint"
     )
-    return seed, receipt, expected_input_signature(receipt_path), model_path
+    return seed, receipt, receipt_signature, model_path
 
 
 def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
@@ -1153,8 +1174,8 @@ def run_judge(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             )
         wrapped("R0257 judgement controls ran")
 
-        panel_path = _bound_path(
-            job, "panel_signature", label="R0257 sealed rung panel"
+        panel_path, panel_signature = _intra_queue_signature(
+            dict(job["panel_signature"]), label="R0257 sealed rung panel"
         )
         panel = prompt_contract.read_sealed(panel_path, label="R0257 sealed rung panel")
         if (
@@ -1258,7 +1279,7 @@ def run_judge(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "corresponding MEASUREMENT is "
             "`the_sealed_gate_artifact_is_byte_identical_after_the_judgement`."
         ),
-        "panel_artifact": expected_input_signature(panel_path),
+        "panel_artifact": panel_signature,
         "judgement": judgement,
         "descriptive_metrics_by_cell": descriptive,
         "family_verdict": family_verdict,
