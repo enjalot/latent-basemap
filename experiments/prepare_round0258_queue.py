@@ -358,7 +358,7 @@ def prepare_round0258(
         "stages": list(STAGES),
         "schedule": [
             {"arm": arm, "repetition": repetition}
-            for arm, repetition in arm_schedule(ARMS, REPETITIONS)
+            for repetition, arm in arm_schedule(ARMS, REPETITIONS)
         ],
         "read_chunk_bytes": READ_CHUNK_BYTES,
         "scan_chunk_elements": SCAN_CHUNK_ELEMENTS,

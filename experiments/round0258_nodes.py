@@ -521,8 +521,13 @@ def run_controls(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "chunk_loop_audit": chunk_audit,
         "install_and_gate": {
             "install_guard": install_guard,
-            "entry_count": int(gates["entry_count"]),
-            "effective_installs": int(installs["effective_installs"]),
+            "entry_count": int(gates["entries_audited"]),
+            "effective_installs": int(
+                installs["entries_with_an_effective_install"]
+            ),
+            "every_entry_installs_effectively": bool(
+                installs["every_entry_installs_effectively"]
+            ),
             "entries_that_construct_a_gate": int(
                 gates["entries_that_construct_a_gate"]
             ),
@@ -601,7 +606,7 @@ def run_graph_load(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     runs: list[dict[str, Any]] = []
     identity: dict[str, Any] | None = None
     try:
-        for index, (arm, repetition) in enumerate(schedule):
+        for index, (repetition, arm) in enumerate(schedule):
             _require_headroom(label=f"{label} {arm} rep {repetition}")
             window = ledger.window(f"R0258 {arm} rep {repetition}")
             guard = _node_guard(label)
@@ -730,7 +735,7 @@ def arm_verdict(runs: list[dict[str, Any]]) -> dict[str, Any]:
             "repetitions": len(arm_runs),
             "worst_single_interval_s": worst,
             "worst_single_interval_over_the_ceiling": worst / ceiling,
-            "interval_summary": interval_summary(intervals),
+            "interval_summary": interval_summary(intervals, ceiling_s=ceiling),
             "census_widest_gap_s": max(census_gaps),
             "census_widest_gap_over_the_ceiling": max(census_gaps) / ceiling,
             "per_repetition_total_stage_wall_s": [
