@@ -587,6 +587,7 @@ def _run_trainer_arm(
 
 
 def run_trainloop(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
+    install_stop_hooks(label="R0254 round0250_nodes.run_trainloop")
     import torch
 
     if active.get("manifest", {}).get("round_id") != ROUND_ID:
@@ -740,6 +741,7 @@ def run_trainloop(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 
 
 def run_blocksize(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
+    install_stop_hooks(label="R0254 round0250_nodes.run_blocksize")
     if active.get("manifest", {}).get("round_id") != ROUND_ID:
         raise Round0250BlockSizeError("R0250 blocksize handler received another queue")
     started = time.monotonic()
@@ -2017,6 +2019,7 @@ def evaluate_selection_n16(
 
 
 def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
+    install_stop_hooks(label="R0254 round0250_nodes.run_gate")
     if active.get("manifest", {}).get("round_id") != ROUND_ID:
         raise Round0250GateError("R0250 gate handler received another queue")
     started = time.monotonic()
@@ -2410,6 +2413,7 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 
 
 def run_job(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
+    install_stop_hooks(label="R0254 round0250_nodes.run_job")
     action = str(job.get("action") or "")
     if action == TRAINLOOP_ACTION:
         run_trainloop(active, job)

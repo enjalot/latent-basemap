@@ -160,16 +160,26 @@ def write_sized_file(
 # --------------------------------------------------------------------------- #
 
 
-def write_loop_polls() -> dict[str, Any]:
+def write_loop_polls(source: str | None = None) -> dict[str, Any]:
     """Read this module's own AST: does the write loop contain an abort read?
 
     Structural, not textual: the poll call must sit INSIDE the `while` that
     issues the writes.  A poll before the loop is the R0252 shape -- one read,
     then a 144.5 s interval -- and this returns False for it.
+
+    **`source` added by R0254 (review-0253-01 §I).**  R0253's positive control
+    for this guard parsed a planted source string and then re-implemented the
+    walk in the test body, so it would have passed had this function returned
+    `True` unconditionally.  The guard could not be pointed at planted source
+    because it took no argument.  Now it can, and the control calls the guard.
+    `source=None` is the shipped behaviour: read this module's own writer.
     """
-    source = textwrap.dedent(inspect.getsource(write_sized_file))
-    tree = ast.parse(source)
-    function = tree.body[0]
+    planted = source is not None
+    text = textwrap.dedent(
+        inspect.getsource(write_sized_file) if source is None else source
+    )
+    tree = ast.parse(text)
+    function = tree.body[0] if tree.body else None
     if not isinstance(function, ast.FunctionDef):
         raise Round0253WriteError("R0253 write-path guard could not parse the writer")
     loops = [node for node in ast.walk(function) if isinstance(node, ast.While)]
@@ -189,6 +199,7 @@ def write_loop_polls() -> dict[str, Any]:
                     polled.append(int(getattr(node, "lineno", -1)))
     return {
         "schema": "round0253-write-loop-poll-guard-v1",
+        "checked": "planted source" if planted else "the shipped writer",
         "write_loops_found": len(write_loops),
         "poll_calls_inside_a_write_loop": len(polled),
         "the_write_loop_polls": bool(write_loops) and bool(polled),
@@ -196,8 +207,8 @@ def write_loop_polls() -> dict[str, Any]:
     }
 
 
-def assert_write_loop_polls() -> dict[str, Any]:
-    guard = write_loop_polls()
+def assert_write_loop_polls(source: str | None = None) -> dict[str, Any]:
+    guard = write_loop_polls(source)
     if not guard["the_write_loop_polls"]:
         raise Round0253WriteError(
             "R0253: the write loop contains no abort read. This is the "

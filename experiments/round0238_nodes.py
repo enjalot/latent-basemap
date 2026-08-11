@@ -4100,6 +4100,7 @@ def _intra(
 
 
 def run_job(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
+    install_stop_hooks(label="R0254 round0238_nodes.run_job")
     action = str(job.get("action") or "")
     if action == REACHABILITY_ACTION:
         run_reachability(active, job)

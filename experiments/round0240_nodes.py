@@ -186,6 +186,7 @@ def run_qualify(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 
 
 def run_job(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
+    install_stop_hooks(label="R0254 round0240_nodes.run_job")
     action = str(job.get("action") or "")
     if action == LADDER_ACTION_0240:
         run_ladder(active, job)

@@ -947,6 +947,7 @@ def run_cudasetup(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 
 
 def run_job(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
+    install_stop_hooks(label="R0254 round0253_nodes.run_job")
     action = str(job.get("action") or "")
     if action == INSTALL_ACTION:
         run_install(active, job)

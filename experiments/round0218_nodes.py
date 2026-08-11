@@ -470,6 +470,7 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 
 
 def run_job(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
+    install_stop_hooks(label="R0254 round0218_nodes.run_job")
     if str(job.get("action") or "") != ACTION:
         raise Round0218Error("R0218 authorizes only the MiniLM 2M seed-family panel")
     run_panel(active, job)

@@ -1029,6 +1029,7 @@ def run_assemble(active: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
 def run_embed_queries(
     active: dict[str, Any], job: dict[str, Any]
 ) -> dict[str, Any]:
+    install_stop_hooks(label="R0254 round0113_nodes.run_embed_queries")
     from experiments.round0112_nodes import (
         _cosine_rows,
         _encode,
@@ -1712,6 +1713,7 @@ def run_build_graph(
 def run_select_queries(
     active: dict[str, Any], job: dict[str, Any]
 ) -> dict[str, Any]:
+    install_stop_hooks(label="R0254 round0113_nodes.run_select_queries")
     output = create_fresh_directory(
         job["outputs"][0], label="R0113 matched clean query selection"
     )
@@ -2578,6 +2580,7 @@ def run_evaluate(
 def run_decide(
     active: dict[str, Any], job: dict[str, Any]
 ) -> dict[str, Any]:
+    install_stop_hooks(label="R0254 round0113_nodes.run_decide")
     output = create_fresh_directory(
         job["outputs"][0], label="R0113 paired prompt decision"
     )
@@ -2787,6 +2790,7 @@ def run_job(
     active: dict[str, Any],
     job: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    install_stop_hooks(label="R0254 round0113_nodes.run_job")
     _execution_round_id(active)
     selected = job if job is not None else active.get("job") or {}
     action = selected.get("action")
