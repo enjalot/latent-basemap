@@ -5,7 +5,6 @@ import copy
 import datetime
 import json
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -55,11 +54,8 @@ def _git(repo: Path, *args: str) -> str:
 
 
 @pytest.fixture
-def clean_fixture_release(tmp_path, fresh_data_root):
-    repo = tmp_path / "clean-release"
-    shutil.copytree(
-        ROOT, repo, symlinks=True,
-        ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "*.pyc"))
+def clean_fixture_release(tmp_path, fresh_data_root, source_release_copy):
+    repo = source_release_copy("clean-release")
     subprocess.check_call(["git", "init", "-q", str(repo)])
     subprocess.check_call(["git", "-C", str(repo), "config", "user.email",
                            "fixture@example.invalid"])

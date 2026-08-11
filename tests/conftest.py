@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import json
 import shutil
+import stat
 import subprocess
 import sys
 import uuid
@@ -13,6 +15,83 @@ import pytest
 
 from basemap.release_preflight import (CACHE_KEYS, _canonical_freeze_sha,
                                        issue_release_preflight_receipt)
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: Never copied into a materialised release.  A checkout of this repo carries
+#: its virtualenv *inside* the tree (``.venv``, ~9.4 GB, ~39k files), and a
+#: fixture that copies the tree per test therefore paid ~14 GB and minutes of
+#: Git hashing per test — the reason three rounds abandoned a full suite run
+#: mid-way.  No test executes the copied tree's interpreter: every test runs
+#: under ``sys.executable`` from the outer environment and only ever needs the
+#: *sources* (import closure, tracked-file set, Git identity) of the copy.
+SOURCE_RELEASE_EXCLUDES = (
+    ".git", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache",
+    ".ruff_cache", "*.pyc",
+)
+
+
+def force_remove_tree(path: str | os.PathLike) -> None:
+    """``rm -rf`` that first restores owner write permission on every entry.
+
+    A copied release inherits ``r--`` files and ``r-x`` directories from the
+    virtualenv and from Git's object store, so a plain ``rmtree``/``rm -rf``
+    fails part-way and a reported reclaim silently never happened (R0239).
+    Clearing the modes is part of the deletion here, not a runbook step.
+    """
+    root = os.fspath(path)
+    if not os.path.lexists(root):
+        return
+    os.chmod(root, os.stat(root).st_mode | stat.S_IRWXU)
+    for parent, directories, files in os.walk(root, topdown=True):
+        for name in directories:
+            target = os.path.join(parent, name)
+            if not os.path.islink(target):
+                os.chmod(target, os.stat(target).st_mode | stat.S_IRWXU)
+        for name in files:
+            target = os.path.join(parent, name)
+            if not os.path.islink(target):
+                os.chmod(target, os.stat(target).st_mode | stat.S_IWUSR | stat.S_IRUSR)
+    shutil.rmtree(root)
+
+
+def copy_source_release(destination: str | os.PathLike,
+                        source: str | os.PathLike = REPO_ROOT) -> Path:
+    """Copy the repo's *source* tree only; never its in-repo virtualenv."""
+    path = Path(destination)
+    shutil.copytree(
+        source, path, symlinks=True,
+        ignore=shutil.ignore_patterns(*SOURCE_RELEASE_EXCLUDES))
+    return path
+
+
+@contextlib.contextmanager
+def source_release_copies(parent: str | os.PathLike):
+    """Hand out source-only repo copies under ``parent`` and remove them after.
+
+    Removing at teardown (rather than at basetemp expiry) keeps the peak cost
+    of a full suite at one copy instead of one copy per test.
+    """
+    created: list[Path] = []
+
+    def make(name: str) -> Path:
+        destination = copy_source_release(Path(parent) / name)
+        created.append(destination)
+        return destination
+
+    try:
+        yield make
+    finally:
+        for destination in created:
+            force_remove_tree(destination)
+
+
+@pytest.fixture
+def source_release_copy(tmp_path):
+    """Factory for detached source-only repo copies, removed at teardown."""
+    with source_release_copies(tmp_path) as make:
+        yield make
 
 
 @pytest.fixture
@@ -80,13 +159,9 @@ def clean_release_evidence(tmp_path, fresh_data_root):
 
 
 @pytest.fixture
-def round0005_clean_release(tmp_path, fresh_data_root):
+def round0005_clean_release(tmp_path, fresh_data_root, source_release_copy):
     """Clean detached copy containing the complete fixture runtime closure."""
-    source = Path(__file__).resolve().parents[1]
-    repo = tmp_path / "round0005-clean-release"
-    shutil.copytree(
-        source, repo, symlinks=True,
-        ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "*.pyc"))
+    repo = source_release_copy("round0005-clean-release")
     subprocess.check_call(["git", "init", "-q", str(repo)])
     subprocess.check_call(["git", "-C", str(repo), "config", "user.email",
                            "fixture@example.invalid"])
