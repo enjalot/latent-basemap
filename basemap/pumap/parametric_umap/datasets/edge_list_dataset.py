@@ -27,7 +27,7 @@ import torch
 
 
 def load_edge_arrays(path, load_weights=True):
-    """Load the ``.npz`` edge list.
+    """Load the ``.npz`` edge list, or the 100M rung's streamed ``.npy`` members.
 
     Returns ``(sources, targets, weights_or_None, n_nodes)``. The arrays are
     read from the ``NpzFile`` lazily (per-array); ``savez_compressed`` output
@@ -35,7 +35,28 @@ def load_edge_arrays(path, load_weights=True):
     once (~8.8 GB per 2.2B-edge int32 array — within the 123 GB budget). When
     ``load_weights`` is False (binary-target mode) the weights array is skipped
     entirely to save memory.
+
+    **R0259 branch (incompatibility I5).** R0243 ships the 100M graph as three
+    streamed ``.npy`` members plus a scalar header, deliberately — an ``.npz``
+    "yields an archive no 100M trainer can memmap" (``round0243_nodes.py:960``).
+    This function indexed ``npz["sources"]`` and therefore could not open it at
+    all: ``KeyError`` on the header, ``IndexError`` on a member, and
+    ``IsADirectoryError`` on the artifact directory (review-0258-01 §H.1).
+    ``streamed_member_layout`` discriminates on **content** — a directory holding
+    the four member files, or an ``.npz`` whose member set is exactly the scalar
+    header keys and which therefore holds no edge array. A bulk ``.npz`` with a
+    ``sources`` member is never claimed, so every rung at or below 50M takes the
+    identical path it always has; ``round0259_hundred_m.bulk_npz_is_not_claimed``
+    is the positive control for that.
     """
+    from basemap.round0259_hundred_m import (
+        load_streamed_edge_members,
+        streamed_member_layout,
+    )
+
+    if streamed_member_layout(path) is not None:
+        return load_streamed_edge_members(path, load_weights=load_weights)
+
     npz = np.load(path, mmap_mode="r")
     sources = npz["sources"]
     targets = npz["targets"]
