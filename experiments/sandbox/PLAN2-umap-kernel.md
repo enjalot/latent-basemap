@@ -13,6 +13,49 @@ with the low-D kernel switched `legacy_lp → umap` at `a=1.577, b=0.895`
 (the standard fit for `min_dist = 0.1`). Its checkpoint projects new data
 like any registered map. It is a candidate treatment, not a reference.
 
+## The collapse mechanism — measured, 2026-08-12
+
+Owner observation: every map except `umap-kernel` is "useless as a map —
+everything collapses" into beads joined by filaments, while the cuVS paper
+(lit 0197) shows healthy maps. Resolution, in three measurements:
+
+- **Collapse metric** (median 2D radius to the 10th neighbor / p90 map
+  radius, 20k sample): every `legacy_lp` map sits at ~1e-4 — a typical
+  point's ten nearest neighbors fit inside 0.01% of the map radius, i.e.
+  point-like beads. `sealed R0217` 0.00012, `cuVS-graph parametric` 0.00010,
+  `dose-x2` 0.00009, `kernel-a4` 0.00010. The umap-kernel arm: **0.00110**;
+  the cuML 1M reference: **0.00167**. The kernel moves this number 10–15x;
+  graph choice, dose, and legacy `a`/`b` do not move it at all.
+- **The graph is exonerated.** Exact-graph and cuVS-graph parametric maps
+  collapse identically. In lit 0197, cuVS builds the *graph* and cuML's UMAP
+  optimizer does the *layout* — their pictures are umap-kernel pictures. Our
+  cuML reference is that method (RAPIDS cuML uses nn-descent internally),
+  and the substrate is exactly unit-norm (measured: sd 0.0000), so cuML's
+  euclidean metric coincides with our cosine graph. The baseline is proper.
+- **Why the kernel does it:** `legacy_lp` similarity `1/(1 + a·‖Δ‖_{2b})` is
+  degree-1 in distance near zero, so the attractive gradient on a positive
+  pair never vanishes — pairs keep pulling until numerical zero and every
+  tight neighborhood collapses to a bead; rows with edges into two beads
+  stretch into filaments. The umap kernel `1/(1 + a·r^{2b})` has a vanishing
+  gradient at r→0 (for 2b > 1) — the min_dist plateau, invented for exactly
+  this — so neighborhoods keep finite area. Rescaling legacy's `a`/`b`
+  changes the norm, not the degree-1 behavior, which is why `kernel-a4` and
+  `kernel-b2` didn't help.
+
+Two program-level consequences, flagged for the owner:
+
+1. **FFR rewards collapse.** `dose-x2` is simultaneously the most collapsed
+   and the best-scoring arm: a bead packs all true neighbors into the 0.1%
+   disc trivially. The program's headline fidelity metric cannot see this
+   failure mode, and `density_v2` (which could) is benched for the anchor
+   defect. The `r10_over_map_radius_median` metric now computed by
+   `heldout_eval.py` is the candidate gate for it.
+2. **The two-sided purity band was smelling this.** R0257's 6.25M maps
+   breached `k256` *above 1.0* — map neighborhoods purer than the high-D
+   space — which is the collapse direction, and the R0260 one-sided ruling
+   explicitly excuses that direction. Once a collapse metric is registered,
+   the one-sided ruling deserves a revisit.
+
 **The tension to resolve (history matters here):** the July kernel decision
 kept `legacy_lp` at 8M for two reasons — higher FFR (0.578 vs 0.536), and the
 kNN-regressor guard: a held-out point placed by averaging its high-D

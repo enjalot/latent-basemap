@@ -101,13 +101,24 @@ def stage_truth() -> None:
 
 def tissue_metrics(xy: np.ndarray) -> dict:
     from map_renders import robust_extent, binned_counts
+    from scipy.spatial import cKDTree
+
     counts = binned_counts(xy, robust_extent(xy))
     occupied = counts > 0
     peak = counts.max()
     low = occupied & (counts < max(peak * 0.01, 1))
+    # Collapse metric (measured 2026-08-12): median 2D radius to the 10th
+    # neighbor over the p90 map radius. legacy_lp maps sit near 1e-4 (bead
+    # collapse); umap-kernel ~1.1e-3; cuML ~1.7e-3. The kernel is the only
+    # knob that moves it — graph choice, dose, and legacy a/b do not.
+    rng = np.random.default_rng(0)
+    sample = xy[rng.choice(len(xy), min(20_000, len(xy)), replace=False)]
+    dists, _ = cKDTree(xy).query(sample, k=11, workers=8)
+    radius = np.percentile(np.linalg.norm(xy - xy.mean(axis=0), axis=1), 90)
     return {
         "occupied_bin_fraction": float(occupied.mean()),
         "low_density_mass_fraction": float(counts[low].sum() / counts.sum()),
+        "r10_over_map_radius_median": float(np.median(dists[:, 10]) / radius),
     }
 
 
@@ -181,7 +192,8 @@ def _append_to_page(results: dict) -> None:
             f'<td style="text-align:right">'
             + (f"{v[c]:.4f}" if isinstance(v[c], float) else "—") + "</td>"
             for c in ("heldout_ffr", "regressor_ffr", "net_minus_regressor",
-                      "occupied_bin_fraction", "low_density_mass_fraction"))
+                      "occupied_bin_fraction", "low_density_mass_fraction",
+                      "r10_over_map_radius_median"))
         + "</tr>"
         for k, v in sorted(results.items()))
     table = ('<h2 id="heldout">Held-out projection + regressor guard</h2>'
@@ -191,7 +203,8 @@ def _append_to_page(results: dict) -> None:
              "</small></p>"
              '<table border="0" cellpadding="6" style="border-collapse:collapse">'
              "<tr><th>arm</th><th>heldout ffr</th><th>regressor ffr</th><th>net − reg</th>"
-             "<th>occupied bins</th><th>tissue mass</th></tr>" + rows + "</table>")
+             "<th>occupied bins</th><th>tissue mass</th><th>r10/R (collapse)</th></tr>"
+             + rows + "</table>")
     text = page.read_text()
     marker = '<h2 id="heldout">'
     text = text.split(marker)[0] + table
