@@ -352,11 +352,21 @@ def _assemble(poll: Any) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
             if rounds > 8:
                 raise Round0261NodeError(
                     f"{corpus}: replacement did not converge after 8 rounds")
+            # Two unsplittable numpy calls over the WHOLE corpus index --
+            # `flatnonzero` over a `total`-length bool and a `total`-length
+            # permutation inside `choice(replace=False)`. Their cost scales with
+            # the CORPUS (pile is 227,613,720 rows), not with this round's N, and
+            # neither can be chunked without changing the draw. They are bracketed
+            # by polls so the census attributes the gap to the draw by name rather
+            # than to whatever shard read happens to follow it.
+            poll(f"R0261 {corpus} selection draw round {rounds} about to start")
             free = np.flatnonzero(~picked)
             if free.size < need:
                 raise Round0261NodeError(f"{corpus}: exhausted usable rows")
             draw = np.sort(rng.choice(free, need, replace=False)).astype(np.int64)
             picked[draw] = True
+            poll(f"R0261 {corpus} selection draw round {rounds} complete "
+                 f"({total} corpus rows)")
             shard_of = np.searchsorted(offs_all, draw, side="right") - 1
             for si, (path, rows, real_npy) in enumerate(shards):
                 local = draw[shard_of == si] - offs_all[si]
