@@ -635,12 +635,19 @@ def _training_signal_fidelity(*, poll, rng) -> dict[str, Any]:
     int8_median = arm_report["b_int8_of_the_same_rows"]["relative_l2"]["median"]
     sgd_median = arm_report["c_an_independent_minibatch"]["relative_l2"]["median"]
 
+    # Capture every scalar the receipt needs BEFORE releasing the big arrays --
+    # the fidelity pools must not still be resident when the caller allocates
+    # the 38.6 GB host-int8 X.
+    rows_sampled = int(len(rows))
+    components_at_the_clip = int((np.abs(encoded) >= 127).sum())
+    components_total = int(encoded.size)
     del fp32_pool, int8_pool, rows, dequantised, encoded, difference
+    gc.collect()
     torch.cuda.empty_cache()
 
     return {
         "schema": "round0262-int8-training-signal-fidelity-v1",
-        "rows_sampled": int(len(rows)),
+        "rows_sampled": rows_sampled,
         "sample_blocks": FIDELITY_SAMPLE_BLOCKS,
         "sampled_from": SUBSTRATE_100M_PATH,
         "encoding": "per-row symmetric max-abs int8 with an exact fp16 row scale",
@@ -652,8 +659,8 @@ def _training_signal_fidelity(*, poll, rng) -> dict[str, Any]:
                 np.sqrt((error ** 2).sum() / (reference ** 2).sum())),
             "cosine_mean": float(cosine.mean()),
             "cosine_min": float(cosine.min()),
-            "components_at_the_clip": int((np.abs(encoded) >= 127).sum()),
-            "components_total": int(encoded.size),
+            "components_at_the_clip": components_at_the_clip,
+            "components_total": components_total,
         },
         "pairwise_distance": {
             "pairs": int(len(pair_fp32)),
