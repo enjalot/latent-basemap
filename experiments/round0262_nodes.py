@@ -152,7 +152,7 @@ MAX_PROBE_UPDATES = 2000
 #: Gradient-fidelity arms.
 FIDELITY_BATCHES = 24
 FIDELITY_WARMUP_STEPS = 600
-FIDELITY_SAMPLE_BLOCKS = 16
+FIDELITY_SAMPLE_BLOCKS = 12
 FIDELITY_ROWS_PER_BLOCK = 50_000
 
 #: Chunking for the quantiser. 2M rows is 3.07 GB of fp32 in flight.
@@ -635,7 +635,7 @@ def _training_signal_fidelity(*, poll, rng) -> dict[str, Any]:
     int8_median = arm_report["b_int8_of_the_same_rows"]["relative_l2"]["median"]
     sgd_median = arm_report["c_an_independent_minibatch"]["relative_l2"]["median"]
 
-    del fp32_pool, int8_pool
+    del fp32_pool, int8_pool, rows, dequantised, encoded, difference
     torch.cuda.empty_cache()
 
     return {
@@ -698,6 +698,21 @@ def _wired_body(*, job, poll, rng) -> dict[str, Any]:
         "substrate": assert_substrate_dimension(),
     }
 
+    # R0262 addendum 2026-08-12: the fidelity arms run FIRST, before the
+    # 38,600,000,000 B host-int8 X exists. The first attempt ran them last and
+    # tripped the node's own anonymous-budget watchdog at 64,433,184,768 B
+    # against 64,424,509,440 B -- an overshoot of 8,675,328 B (0.013%), because
+    # `estimator._X_dev` still referenced X while the fidelity pools were live.
+    # Ordering them this way means the two never coexist; nothing scientific
+    # changes, because the fidelity arms sample the fp32 substrate directly and
+    # never touch the int8 artifact or the graph.
+    poll("R0262 training signal fidelity")
+    payload["training_signal_fidelity"] = _training_signal_fidelity(
+        poll=poll, rng=rng)
+    gc.collect()
+    torch.cuda.empty_cache()
+    payload["host_memory_accounting_after_fidelity"] = host_memory_accounting()
+
     poll("R0262 open the 100M graph")
     started = time.monotonic()
     sources, targets, weights, n_nodes = load_edge_arrays(
@@ -724,7 +739,7 @@ def _wired_body(*, job, poll, rng) -> dict[str, Any]:
     host_x, load_receipt = build_host_int8_source(
         int8_path=INT8_100M_PATH, scales_path=SCALES_100M_PATH,
         row_count=ROWS_100M, dimension=DIMENSION, device="cuda",
-        buffer_rows=BATCH_SIZE, poll=poll)
+        buffer_rows=BATCH_SIZE, poll=poll, rows_per_chunk=2_000_000)
     payload["host_int8_x"] = load_receipt
     payload["host_int8_x"]["buffer_admits_batch"] = assert_buffer_admits_batch(
         host_x, BATCH_SIZE)
@@ -828,13 +843,13 @@ def _wired_body(*, job, poll, rng) -> dict[str, Any]:
 
     loader.close()
     payload["closed_the_sampler"] = True
-    del loader, dataset, host_x, sources, targets, weights
+    # `estimator._X_dev` and `dataset` both alias the host-int8 X; dropping only
+    # the local name frees nothing. That is what tripped the first attempt.
+    estimator._X_dev = None
+    del loader, dataset, host_x, sources, targets, weights, estimator
     gc.collect()
     torch.cuda.empty_cache()
-
-    poll("R0262 training signal fidelity")
-    payload["training_signal_fidelity"] = _training_signal_fidelity(
-        poll=poll, rng=rng)
+    payload["host_memory_accounting_after_release"] = host_memory_accounting()
     return payload
 
 
