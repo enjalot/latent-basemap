@@ -317,8 +317,11 @@ class _FidelityAccumulator:
         self.zero_rows = 0
 
     def update(self, block: np.ndarray, encoded: np.ndarray, scales: np.ndarray) -> None:
-        ref = np.asarray(block, dtype=np.float64)
-        hat = dequantise_block(encoded, scales).astype(np.float64)
+        # float32 per-row reductions, float64 across chunks. The quantities are
+        # O(1e-3) against rows of unit norm, so float32 carries ~7 digits where
+        # 4 are reported; float64 here would triple the stage wall for nothing.
+        ref = np.asarray(block, dtype=np.float32)
+        hat = dequantise_block(encoded, scales)
         diff = hat - ref
         err = np.sqrt(np.einsum("ij,ij->i", diff, diff))
         ref_norm = np.sqrt(np.einsum("ij,ij->i", ref, ref))
