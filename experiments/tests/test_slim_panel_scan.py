@@ -185,6 +185,80 @@ def test_scan_attributes_a_map_to_the_round_that_trained_it(tmp_path):
     assert entry["map_id"] == "round-0217-map-seed42-v1"
 
 
+# ------------------------------------------------- R0228/R0229 shapes -------
+
+def test_slim_cells_seed_comes_from_the_cell_not_the_key(tmp_path):
+    """R0228 keys cells '<clusters>:<seed>'; the key is not a seed."""
+    runs = tmp_path / "runs"
+    art = runs / "round-0228" / "queue" / "artifacts"
+    map_dir = art / "minilm-mixed-2m-cluster-spill-c16-map-seed42-low-dose-v1"
+    map_dir.mkdir(parents=True)
+    (map_dir / "train-receipt.json").write_text(json.dumps({
+        "rows": 2_000_000,
+        "graph_capability": "minilm-mixed-2m-cluster-spill-c16-k15-fuzzy-graph-v1",
+    }))
+    (map_dir / "production-config.json").write_text(json.dumps({"config": {"model": {}}}))
+    coords = art / "panel/coordinates-c16-seed42.npy"
+    coords.parent.mkdir(parents=True)
+    coords.write_bytes(b"x")
+    (art / "panel" / "panel.json").write_text(json.dumps({"cells": {"16:42": {
+        "capability": "minilm-mixed-2m-cluster-spill-c16-map-seed42-low-dose-v1",
+        "seed": 42,
+        "coordinates": {"canonical_path": str(coords)},
+        "model": {"canonical_path": str(map_dir / "model.pt")},
+        "train_receipt": {"canonical_path": str(map_dir / "train-receipt.json")},
+        "panel_metrics": {"ffr": 0.31}}}}))
+
+    entry, = map_registry.scan_slim_panel_round(runs / "round-0228", {})
+    assert entry["seed"] == 42
+    assert entry["title"] == "c16 seed 42"
+    assert entry["graph"]["treatment"] == "cluster-spill"
+
+
+def test_graph_treatment_labels():
+    assert map_registry._graph_treatment("minilm-2m-cuvs-igd48-k15-graph-v1") == "cuvs"
+    assert map_registry._graph_treatment("minilm-mixed-2m-spill-lifted-k15-fuzzy-graph-v1") == "cluster-spill"
+    assert map_registry._graph_treatment("R0216-exact-k15-fuzzy-tconorm-graph") == "exact"
+
+
+def test_queue_family_dirs_sees_phase_families(tmp_path):
+    """R0229 runs `queue`/`queue-correction-1` beside `queue-phase2-correction-3`."""
+    rd = tmp_path / "round-0229"
+    _queue(rd, "queue")
+    p1 = _queue(rd, "queue-correction-1")
+    _queue(rd, "queue-phase2")
+    _queue(rd, "queue-phase2-correction-2")
+    p2 = _queue(rd, "queue-phase2-correction-3")
+    _queue(rd, "queue-refresh-20260802")
+    families = map_registry._queue_family_dirs(rd)
+    assert families == {"queue": p1, "queue-phase2": p2}
+
+
+def test_orphan_map_dirs_surface_unscored_trained_maps(tmp_path):
+    """R0229's spill-lifted maps have no panel cell anywhere, only artifacts."""
+    rd = tmp_path / "round-0229"
+    art = rd / "queue-phase2-correction-3" / "artifacts"
+    map_dir = art / "minilm-mixed-2m-spill-lifted-map-seed43-v1"
+    map_dir.mkdir(parents=True)
+    (map_dir / "train-receipt.json").write_text(json.dumps({
+        "rows": 2_000_000, "seed": 43,
+        "graph_capability": "minilm-mixed-2m-spill-lifted-k15-fuzzy-graph-v1",
+    }))
+    (map_dir / "production-config.json").write_text(json.dumps(
+        {"config": {"model": {"hidden_dimension": 2048}}}))
+    (map_dir / "coordinates-seed43.npy").write_bytes(b"x")
+    (map_dir / "model.pt").write_bytes(b"m")
+    (art / "not-a-map").mkdir()
+
+    entry, = map_registry.scan_orphan_map_dirs(
+        rd, {}, queue_dir=rd / "queue-phase2-correction-3")
+    assert entry["map_id"] == "round-0229-minilm-mixed-2m-spill-lifted-map-seed43-v1"
+    assert entry["seed"] == 43
+    assert entry["graph"]["treatment"] == "cluster-spill"
+    assert entry["panel"]["source"] == "unscored"
+    assert entry["panel"]["ffr"] is None
+
+
 # ------------------------------------------------------- group ordering -----
 
 def _m(map_id, treatment, seed):

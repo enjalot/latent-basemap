@@ -316,6 +316,37 @@ SLIM_CELL_KEYS = ("cells", "new_cells")
 SLIM_CELL_REQUIRED = {"capability", "coordinates", "panel_metrics", "seed"}
 
 
+def _graph_treatment(graph_capability: str) -> str:
+    """Coarse label for the graph builder a map trained on.
+
+    ``cluster-spill`` covers both the c-sweep graphs (R0228) and the
+    spill-lifted ``(c=200, s=8)`` family (R0229) — "spill" is the common token.
+    Everything unrecognized is the exact brute-force family.
+    """
+    if "cuvs" in graph_capability:
+        return "cuvs"
+    if "spill" in graph_capability:
+        return "cluster-spill"
+    return "exact"
+
+
+def _variant_tag(capability: str) -> str | None:
+    """Short discriminator for siblings that share a seed inside one group.
+
+    R0228 trains three maps per seed (c4/c8/c16); a bare "seed 42" title
+    cannot tell them apart in the compare grid or the drift table.
+    """
+    m = re.search(r"cluster-spill-(c\d+)", capability)
+    if m:
+        return m.group(1)
+    if "spill-lifted" in capability:
+        return "spill-lifted"
+    m = re.search(r"cuvs(?:-igd\d+)?", capability)
+    if m:
+        return m.group(0)
+    return None
+
+
 def _slim_cells(doc) -> tuple[str | None, dict]:
     """Per-seed map cells inside a slim-protocol panel/comparison artifact.
 
@@ -375,9 +406,21 @@ def scan_slim_panel_round(
         cell_key, cells = _slim_cells(doc)
         if not cell_key:
             continue
-        for seed in sorted(cells, key=lambda s: int(s) if s.isdigit() else s):
-            cell = cells[seed]
-            capability = str(cell.get("capability") or f"seed{seed}")
+        for cell_id in sorted(cells, key=lambda s: (not s.isdigit(), int(s) if s.isdigit() else 0, s)):
+            cell = cells[cell_id]
+            # R0228 keys its cells "<clusters>:<seed>", so the dict key is not
+            # a seed. The cell's own field is authoritative; the key is only a
+            # fallback for older docs.
+            seed_field = cell.get("seed")
+            if isinstance(seed_field, int):
+                seed = seed_field
+            elif str(seed_field).isdigit():
+                seed = int(str(seed_field))
+            elif cell_id.isdigit():
+                seed = int(cell_id)
+            else:
+                seed = None
+            capability = str(cell.get("capability") or f"seed{cell_id}")
             coords = cell.get("coordinates") if isinstance(cell.get("coordinates"), dict) else {}
             coords_path = Path(str(coords.get("canonical_path") or ""))
             if not coords_path.is_file():
@@ -386,7 +429,13 @@ def scan_slim_panel_round(
             receipt_ref = cell.get("train_receipt") if isinstance(cell.get("train_receipt"), dict) else {}
             receipt = _load_json(Path(str(receipt_ref.get("canonical_path") or ""))) or {}
             model_path = Path(str(model.get("canonical_path") or ""))
-            config = _load_json(model_path.parent / "production-config.json") or {}
+            # R0257 prefixes per-node artifact names (train_seed42-production-
+            # config.json); earlier rounds use the bare name. Glob for either.
+            config = {}
+            if model_path.parent.is_dir():
+                for cfg_path in sorted(model_path.parent.glob("*production-config.json")):
+                    config = _load_json(cfg_path) or {}
+                    break
             model_cfg = (config.get("config") or {}).get("model", {})
             pm = cell.get("panel_metrics") if isinstance(cell.get("panel_metrics"), dict) else {}
             graph_capability = str(receipt.get("graph_capability") or "")
@@ -398,9 +447,10 @@ def scan_slim_panel_round(
             trained_m = re.search(r"/runs/round-(\d{4})/", str(model_path))
             trained_rid = trained_m.group(1) if trained_m else rid
 
+            tag = _variant_tag(capability)
             entries.append({
                 "map_id": f"round-{trained_rid}-{capability}",
-                "title": f"seed {seed}",
+                "title": f"{tag} seed {seed}" if tag else f"seed {seed}",
                 "round_id": trained_rid,
                 "scored_in_round": rid,
                 "kind": "round-map",
@@ -409,13 +459,13 @@ def scan_slim_panel_round(
                 "evidence_status": evidence_status(trained_rid, ledger),
                 "n_rows": int(rows) if rows else None,
                 "dims": [receipt.get("dimension"), model_cfg.get("output_dimension")],
-                "seed": int(seed) if str(seed).isdigit() else None,
+                "seed": seed,
                 "architecture": model_cfg.get("architecture"),
                 "hidden_dim": model_cfg.get("hidden_dimension"),
                 "kernel": model_cfg.get("low_dim_kernel"),
                 "graph": {
                     "capability": graph_capability,
-                    "treatment": "cuvs" if "cuvs" in graph_capability else "exact",
+                    "treatment": _graph_treatment(graph_capability),
                     "sha256": ((receipt.get("exact_execution_receipt") or {})
                                .get("graph", {}).get("graph", {}).get("sha256")),
                     "directed_edges": receipt.get("directed_edges"),
@@ -911,17 +961,133 @@ def _latest_queue_dir(round_dir: Path) -> Path | None:
     invisible. No round on disk mixes the two families, so one numeric rank
     across both is unambiguous.
     """
-    candidates: list[tuple[int, Path]] = []
-    canonical = round_dir / "queue"
-    if (canonical / "artifacts").is_dir():
-        candidates.append((1, canonical))
-    for candidate in round_dir.glob("queue-*"):
-        match = re.fullmatch(r"queue-(?:attempt|correction)-(\d+)", candidate.name)
-        if match and (candidate / "artifacts").is_dir():
-            candidates.append((int(match.group(1)), candidate))
-    if not candidates:
-        return None
-    return max(candidates, key=lambda item: item[0])[1]
+    families = _queue_family_dirs(round_dir)
+    return families.get("queue")
+
+
+def _queue_family_dirs(round_dir: Path) -> dict[str, Path]:
+    """The newest materialized attempt of every queue *family* in one round.
+
+    R0229 runs two queue families side by side — ``queue``/``queue-correction-1``
+    holds phase 1 and ``queue-phase2``/``queue-phase2-correction-{1..3}`` holds
+    phase 2, including the round's three trained maps. A single "latest queue"
+    can only ever surface one of them. Descriptive-suffix directories
+    (``queue-attempt-1-unrunnable-metadata``, ``queue.setup-failed-…``,
+    ``queue-refresh-…``) remain invisible, exactly as before: only the bare
+    family name and its ``-attempt-N`` / ``-correction-N`` forms count.
+    """
+    best: dict[str, tuple[int, Path]] = {}
+    for candidate in round_dir.iterdir() if round_dir.is_dir() else []:
+        match = re.fullmatch(
+            r"(queue(?:-phase\d+)?)(?:-(?:attempt|correction)-(\d+))?",
+            candidate.name,
+        )
+        if not match or not (candidate / "artifacts").is_dir():
+            continue
+        family, rank = match.group(1), int(match.group(2) or 1)
+        if family not in best or rank > best[family][0]:
+            best[family] = (rank, candidate)
+    return {family: path for family, (rank, path) in best.items()}
+
+
+def scan_orphan_map_dirs(
+    round_dir: Path,
+    ledger: dict,
+    *,
+    queue_dir: Path | None = None,
+) -> list[dict]:
+    """Trained maps that no panel document anywhere has scored.
+
+    R0229 trained three ``(c=200, s=8)`` spill-lifted maps and then measured
+    their displacement *geometry* instead of running the quality panel, so no
+    document carries the per-seed cell schema and ``scan_slim_panel_round``
+    cannot see them. The map artifact directory itself is complete — model,
+    train receipt, production config, sealed coordinates — which is everything
+    the viewer needs. Panel fields stay null; if a later round does score the
+    map, ``scan()`` replaces the unscored entry with the scored one.
+    """
+    rid_m = re.match(r"round-(\d{4})", round_dir.name)
+    rid = rid_m.group(1) if rid_m else round_dir.name
+    queue_dir = queue_dir or round_dir / "queue"
+    art = queue_dir / "artifacts"
+    if not art.is_dir():
+        return []
+    queue = _load_json(queue_dir / "queue.json") or {}
+
+    entries: list[dict] = []
+    for map_dir in sorted(art.iterdir()):
+        if not map_dir.is_dir() or "-map-" not in map_dir.name:
+            continue
+        receipt = _load_json(map_dir / "train-receipt.json")
+        config = _load_json(map_dir / "production-config.json")
+        coords_files = sorted(map_dir.glob("coordinates*.npy"))
+        if not receipt or not config or not coords_files:
+            continue
+        coords_path = coords_files[0]
+        if coords_path.stat().st_size == 0:
+            continue
+        capability = map_dir.name
+        seed_m = re.search(r"seed(\d+)", capability)
+        seed = int(seed_m.group(1)) if seed_m else receipt.get("seed")
+        model_path = map_dir / "model.pt"
+        model_cfg = (config.get("config") or {}).get("model", {})
+        graph_capability = str(receipt.get("graph_capability") or "")
+        rows = receipt.get("rows")
+        tag = _variant_tag(capability)
+        entries.append({
+            "map_id": f"round-{rid}-{capability}",
+            "title": f"{tag} seed {seed}" if tag else f"seed {seed}",
+            "round_id": rid,
+            "scored_in_round": None,
+            "kind": "round-map",
+            "page": f"round-{rid}/{_slug(capability)}",
+            "date": None,
+            "evidence_status": evidence_status(rid, ledger),
+            "n_rows": int(rows) if rows else None,
+            "dims": [receipt.get("dimension"), model_cfg.get("output_dimension")],
+            "seed": seed,
+            "architecture": model_cfg.get("architecture"),
+            "hidden_dim": model_cfg.get("hidden_dimension"),
+            "kernel": model_cfg.get("low_dim_kernel"),
+            "graph": {
+                "capability": graph_capability,
+                "treatment": _graph_treatment(graph_capability),
+                "sha256": ((receipt.get("exact_execution_receipt") or {})
+                           .get("graph", {}).get("graph", {}).get("sha256")),
+                "directed_edges": receipt.get("directed_edges"),
+            },
+            "updates": receipt.get("optimizer_updates"),
+            "updates_per_s": receipt.get("steady_updates_per_s"),
+            "model": {
+                "path": _relpath(model_path),
+                "sha256": None,
+                "bytes": model_path.stat().st_size if model_path.is_file() else None,
+            },
+            "coordinates": {
+                "file": _relpath(coords_path),
+                "dir": _relpath(coords_path.parent),
+                "rows": None,
+                "sha256": None,
+                "ordered_sha256": None,
+            },
+            "panel": {
+                "path": None,
+                "source": "unscored",
+                "ffr": None,
+                "density": None,
+                "density_semantics": "density-v2",
+                "purity_k256": None,
+                "purity_k1024": None,
+                "proj_ffr": None,
+                "corpus_ffr": None,
+                "formula_version": None,
+            },
+            "renders": [],
+            "release_sha": receipt.get("release_sha")
+                           or (queue.get("release") or {}).get("sha"),
+            "run_dir": _relpath(round_dir),
+        })
+    return entries
 
 
 def scan() -> dict:
@@ -931,7 +1097,8 @@ def scan() -> dict:
         for round_dir in sorted(RUNS_DIR.glob("round-*")):
             if re.fullmatch(r"round-\d{4}", round_dir.name) is None:
                 continue
-            queue_dir = _latest_queue_dir(round_dir)
+            families = _queue_family_dirs(round_dir)
+            queue_dir = families.get("queue")
             if queue_dir is not None:
                 maps += scan_modern_round(
                     round_dir, ledger, queue_dir=queue_dir
@@ -945,12 +1112,19 @@ def scan() -> dict:
                 maps += scan_round0108_atlas(
                     round_dir, ledger, queue_dir=queue_dir
                 )
-                maps += scan_slim_panel_round(
-                    round_dir, ledger, queue_dir=queue_dir
-                )
                 maps += scan_projection_maps(
                     round_dir, ledger, queue_dir=queue_dir
                 )
+            if families:
+                # Slim-family maps and unscored map dirs can live in any queue
+                # family (R0229's trained maps are in queue-phase2-correction-3).
+                for family in sorted(families):
+                    maps += scan_slim_panel_round(
+                        round_dir, ledger, queue_dir=families[family]
+                    )
+                    maps += scan_orphan_map_dirs(
+                        round_dir, ledger, queue_dir=families[family]
+                    )
             elif (round_dir / "renders").is_dir():
                 maps += scan_legacy_renders(round_dir, ledger)
     maps += scan_checkpoints()
@@ -964,6 +1138,14 @@ def scan() -> dict:
         if prior is None:
             seen[m["map_id"]] = m
             deduped.append(m)
+        elif (prior.get("panel") or {}).get("source") == "unscored" and (
+            (m.get("panel") or {}).get("source") != "unscored"
+        ):
+            # A panel scored a map the orphan scanner had already minted an
+            # unscored entry for: the scored entry is strictly richer.
+            prior.clear()
+            prior.update(m)
+            seen[m["map_id"]] = prior
         elif m.get("scored_in_round"):
             prior.setdefault("also_scored_in", []).append(m["scored_in_round"])
     maps = deduped
@@ -1037,6 +1219,11 @@ th { position: sticky; top: 0; background: var(--bg); }
 .accepted { color: var(--ok); } .partial, .pending { color: var(--warn); } .rejected { color: var(--bad); }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
 img.render { max-width: 100%; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+img.thumb { width: 72px; height: 72px; object-fit: cover; border: 1px solid var(--line); border-radius: 4px; display: block; }
+td.thumbcell { padding: 2px 6px; }
+.pair { display: flex; gap: 12px; flex-wrap: wrap; }
+.pair figure { margin: 0; flex: 1 1 320px; max-width: 480px; }
+.pair figcaption { font-size: 12px; color: var(--muted, #666); margin-top: 4px; }
 code { font-size: 12.5px; background: var(--card); padding: 1px 5px; border-radius: 4px; }
 dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; margin: 8px 0; }
 dt { color: var(--muted); } dd { margin: 0; overflow-wrap: anywhere; }
@@ -1156,6 +1343,60 @@ def _page_slug(m: dict) -> str:
     return str(m.get("page") or f'round-{m["round_id"]}')
 
 
+def _render_cache_dir(m: dict) -> Path:
+    from map_renders import RENDER_CACHE
+    return RENDER_CACHE / m["map_id"]
+
+
+def _binned_section(m: dict, page_dir: Path) -> str:
+    """Copy this map's registry-side binned renders into the page and describe them.
+
+    These are derived views regenerated by ``map_renders.py`` from the sealed
+    full-N coordinates (and, where the universe sealed a held-out reserve, the
+    reserve projected through the map's own checkpoint on CPU). They are not
+    round artifacts.
+    """
+    cache = _render_cache_dir(m)
+    meta_path = cache / "meta.json"
+    if not meta_path.is_file():
+        return ""
+    meta = _load_json(meta_path) or {}
+    rmeta = meta.get("renders", {})
+    figures = []
+    captions = {
+        "density.png": f'all {_fmt(meta.get("n_rows"))} training rows, '
+                       f'log-scaled counts on a {BINS_LABEL} grid',
+        "heldout.png": (f'{_fmt((rmeta.get("heldout") or {}).get("rows"))} sealed '
+                        'held-out reserve rows (never trained on), projected '
+                        'through this checkpoint'),
+        "train-matched.png": (f'{_fmt((rmeta.get("train_matched") or {}).get("rows"))} '
+                              'training rows, subsampled to match the reserve size'),
+    }
+    for name in ("density.png", "train-matched.png", "heldout.png"):
+        src = cache / name
+        if not src.is_file():
+            continue
+        dst = page_dir / name
+        if not dst.exists() or dst.stat().st_size != src.stat().st_size:
+            shutil.copy2(src, dst)
+        figures.append(f'<figure><img class="render" src="{name}" alt="{name}">'
+                       f'<figcaption>{captions[name]}</figcaption></figure>')
+    if not figures:
+        return ""
+    note = ""
+    if len(figures) >= 3:
+        note = ('<p class="muted">Held-out vs train-matched share the grid, '
+                'extent and color scale: matching structure means the model '
+                'places unseen rows where the training data lives.</p>')
+    return ('<h2>Binned density</h2>'
+            f'<div class="pair">{figures[0]}</div>'
+            + (f'<div class="pair">{figures[1]}{figures[2]}</div>' if len(figures) >= 3 else "")
+            + note)
+
+
+BINS_LABEL = "1024×1024"
+
+
 def publish(registry: dict) -> None:
     SITE_DIR.mkdir(parents=True, exist_ok=True)
     round_maps = [m for m in registry["maps"] if m["kind"] == "round-map"]
@@ -1167,8 +1408,13 @@ def publish(registry: dict) -> None:
     for m in sorted(round_maps, key=lambda x: x.get("date") or "", reverse=True):
         p = m["panel"]
         page = _page_slug(m) + "/index.html"
+        thumb = ""
+        if (_render_cache_dir(m) / "density.png").is_file():
+            thumb = (f'<a href="{page}"><img class="thumb" '
+                     f'src="{_page_slug(m)}/density.png" alt=""></a>')
         rows.append(
-            f'<tr><td><a href="{page}">{html.escape(m["map_id"])}</a></td>'
+            f'<tr><td class="thumbcell">{thumb}</td>'
+            f'<td><a href="{page}">{html.escape(m["map_id"])}</a></td>'
             f'<td>{(m.get("date") or "")[:10]}</td>'
             f'<td class="num">{_fmt(m.get("n_rows"))}</td>'
             f'<td>h{m.get("hidden_dim")} {html.escape(str(m.get("architecture") or ""))}</td>'
@@ -1232,7 +1478,7 @@ def publish(registry: dict) -> None:
 </table></div>
 <h2>Round maps</h2>
 <div class="scroll"><table>
-<tr><th>map</th><th>date</th><th>N</th><th>net</th><th>ffr</th><th>density</th>
+<tr><th></th><th>map</th><th>date</th><th>N</th><th>net</th><th>ffr</th><th>density</th>
 <th>purity k1024</th><th>proj ffr</th><th>evidence</th></tr>
 {''.join(rows) or '<tr><td colspan=9 class="muted">none</td></tr>'}
 </table></div>
@@ -1317,9 +1563,10 @@ def publish(registry: dict) -> None:
 <h1>{html.escape(m["map_id"])}</h1>
 {f'<p class="muted">{html.escape(str(m.get("title")))}</p>' if m.get("title") else ''}
 {metrics}
+{_binned_section(m, page_dir)}
 <div class="card"><b>Provenance</b><dl>{''.join(dl_items)}</dl></div>
-<h2>Renders</h2>
-{''.join(img_tags) or '<p class="muted">no renders on disk</p>'}
+<h2>Round-sealed renders</h2>
+{''.join(img_tags) or '<p class="muted">none sealed by the round</p>'}
 """
         (page_dir / "index.html").write_text(page)
 
