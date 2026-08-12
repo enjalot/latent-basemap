@@ -84,6 +84,11 @@ BUILD_ACTION = "round0261_build_4m_substrate_and_exact_graph"
 PREDICT_CAPABILITY = "round0261-four-m-exact-graph-price-prediction-and-controls-v1"
 PREDICT_SCHEMA = "round0261-four-m-price-prediction-and-controls-v1"
 
+#: Rows read from one shard between two abort polls. Small enough that a cold
+#: random gather cannot hide a multi-second gap, large enough that the poll
+#: overhead is invisible against the read.
+SHARD_READ_CHUNK = 2_048
+
 #: Refuse to start the build without this much free space on /data: the
 #: predicted `6,144,000,128 + 44,000,192 + ~1,160,000,000` B artifact plus room
 #: for the `.tmp` copy `atomic_save_new_npz` writes before renaming.
@@ -358,7 +363,20 @@ def _assemble(poll: Any) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
                 if local.size == 0:
                     continue
                 arr = _open(path, rows, real_npy)
-                block = np.asarray(arr[local], dtype=np.float32)
+                # Read the shard's selected rows in sub-blocks with a poll
+                # between them. `local` is sorted, so concatenating the
+                # sub-blocks is bit-identical to one fancy index -- the change
+                # is stoppability, not arithmetic. The 30,000-row release smoke
+                # measured an 8.45 s widest gap, 3.37x the registered ceiling,
+                # inside exactly this unpolled cold read.
+                parts = []
+                for lo in range(0, local.size, SHARD_READ_CHUNK):
+                    parts.append(np.asarray(arr[local[lo:lo + SHARD_READ_CHUNK]],
+                                            dtype=np.float32))
+                    poll(f"R0261 assembly {corpus} shard {si} rows {lo}")
+                block = (np.concatenate(parts, axis=0) if len(parts) > 1
+                         else parts[0])
+                del parts
                 norm = np.linalg.norm(block, axis=1)
                 ok = np.isfinite(block).all(axis=1) & (norm > 0)
                 dropped += int((~ok).sum())
