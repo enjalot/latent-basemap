@@ -1,12 +1,17 @@
-"""One-variable visual-quality arms at 2M on the sealed R0216 substrate/graph.
+"""One-variable kernel/dose arms on sealed substrates (2M and 6.25M rungs).
 
-Owner-directed sandbox (see PLAN.md). Not a round: no capability, no gate, no
-sealed claim. Each arm re-runs R0217's treatment with exactly one knob changed
-and renders the result for visual comparison against the sealed baseline.
+Owner-directed sandbox (PLAN.md, PLAN2-umap-kernel.md, PLAN3-kernels.md).
+Not rounds: no capability, no gate, no sealed claim. Each arm re-runs the
+registered treatment of its rung (R0217 at 2M, R0257 at 6.25M) with the
+arm's named knobs changed and renders the result for visual comparison.
 
-Safety: refuses to start when any compute process holds the GPU (the round
-runner keeps priority), and refuses when the output directory already exists
-(arms are write-once; delete the arm dir to re-run).
+Arms may set:
+  dose          multiplier on the rung's registered draws-per-edge (default 1)
+  kernel_alpha  gcauchy tail exponent (alpha=1 is exactly the umap kernel)
+  any ParametricUMAP constructor field (a, b, low_dim_kernel, pos_ratio, ...)
+
+Safety: refuses a busy GPU (issued rounds keep priority) and existing output
+dirs (write-once; delete an arm dir to re-run).
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ import argparse
 import datetime
 import json
 import logging
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -25,50 +31,96 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "experiments"))
 
-R0216 = Path("/data/latent-basemap/runs/round-0216/queue-correction-3/artifacts"
-             "/minilm-mixed-2m-substrate-and-exact-k15-graph-v1")
-SUBSTRATE = R0216 / "substrate.f32.npy"
-EDGES = R0216 / "edges-k15-fuzzy.npz"
-R0217_RECEIPT = Path("/data/latent-basemap/runs/round-0217/queue-correction-1/artifacts"
-                     "/minilm-mixed-2m-map-seed42-low-dose-v1/train-receipt.json")
-OUT_ROOT = Path("/data/latent-basemap/sandbox/2m-knobs")
-SITE_DIR = Path.home() / ".agent/basemap-maps/sandbox/2m-knobs"
-
-ROWS = 2_000_000
-DIRECTED_EDGES = 48_344_648
 BATCH = 8192
 POS_RATIO = 0.05
-POS_PER_UPDATE = int(BATCH * POS_RATIO)          # 409
-BASE_HORIZON = 80_163                            # R0217: 0.6782 draws/edge
 SEED = 42
+SITE_DIR = Path.home() / ".agent/basemap-maps/sandbox/2m-knobs"
 
-# R0217's constructor treatment (from the sealed checkpoint + config).
+RUNGS: dict[str, dict] = {
+    "2m": {
+        "rows": 2_000_000,
+        "substrate": Path("/data/latent-basemap/runs/round-0216/queue-correction-3/artifacts"
+                          "/minilm-mixed-2m-substrate-and-exact-k15-graph-v1/substrate.f32.npy"),
+        "edges": Path("/data/latent-basemap/runs/round-0216/queue-correction-3/artifacts"
+                      "/minilm-mixed-2m-substrate-and-exact-k15-graph-v1/edges-k15-fuzzy.npz"),
+        "directed_edges": 48_344_648,
+        "sealed_checkpoint": Path("/data/latent-basemap/runs/round-0217/queue-correction-1/artifacts"
+                                  "/minilm-mixed-2m-map-seed42-low-dose-v1/model.pt"),
+        "base_horizon": 80_163,          # R0217: 0.6782 draws/edge
+        "out_root": Path("/data/latent-basemap/sandbox/2m-knobs"),
+    },
+    "6250k": {
+        "rows": 6_250_000,
+        "substrate": Path("/data/latent-basemap/runs/round-0233/queue/artifacts"
+                          "/minilm-mixed-6250k-substrate-and-reserves-v1/substrate.f32.npy"),
+        "edges": None,   # resolved at runtime: fuzzy npz inside the R0233 graph artifact
+        "edges_glob": ("/data/latent-basemap/runs/round-0233/queue-correction-1/artifacts"
+                       "/minilm-mixed-6250k-cluster-spill-k15-fuzzy-graph-v1/*.npz"),
+        "directed_edges": 153_872_500,
+        "sealed_checkpoint": Path("/data/latent-basemap/runs/round-0257/queue/artifacts"
+                                  "/minilm-mixed-6250k-ladder-map-seed42-v1/train_seed42-model.pt"),
+        "base_horizon": 255_142,         # R0257: 0.6782 draws/edge
+        "out_root": Path("/data/latent-basemap/sandbox/6250k-knobs"),
+    },
+}
+
+# The registered treatment shared by R0217 and R0257 (seed aside).
 BASE_KWARGS = dict(
     n_components=2, hidden_dim=2048, n_layers=3, n_neighbors=15,
-    a=1.0, b=1.0, low_dim_kernel="legacy_lp", correlation_weight=0.0,
-    learning_rate=1e-3, n_epochs=1, batch_size=BATCH, pos_ratio=POS_RATIO,
-    architecture="residual_bottleneck", positive_target_mode="binary",
-    lr_schedule="cosine", use_amp=True, use_batchnorm=False, use_dropout=False,
-    total_steps_estimate=BASE_HORIZON,
+    a=1.0, b=1.0, low_dim_kernel="legacy_lp", kernel_alpha=1.0,
+    correlation_weight=0.0, learning_rate=1e-3, n_epochs=1, batch_size=BATCH,
+    pos_ratio=POS_RATIO, architecture="residual_bottleneck",
+    positive_target_mode="binary", lr_schedule="cosine", use_amp=True,
+    use_batchnorm=False, use_dropout=False,
     require_full_budget=False,   # exploratory: the horizon break ends the run
     device="cuda",
 )
 
-UMAP_MIND01 = {"low_dim_kernel": "umap", "a": 1.577, "b": 0.895}
+# umap-kernel (a, b) fits at spread=1 (scipy curve_fit, verified 2026-08-12).
+MD = {
+    "000": {"a": 1.9328, "b": 0.7905},   # min_dist 0.0
+    "005": {"a": 1.7502, "b": 0.8421},   # min_dist 0.05
+    "010": {"a": 1.5769, "b": 0.8951},   # min_dist 0.1
+    "020": {"a": 1.2621, "b": 1.0030},   # min_dist 0.2
+    "035": {"a": 0.8741, "b": 1.1673},   # min_dist 0.35
+    "050": {"a": 0.5830, "b": 1.3342},   # min_dist 0.5
+}
+
+
+def _umap(md: str, **extra) -> dict:
+    return {"low_dim_kernel": "umap", **MD[md], **extra}
+
+
+def _gc(md: str, alpha: float, **extra) -> dict:
+    return {"low_dim_kernel": "gcauchy", "kernel_alpha": alpha, **MD[md], **extra}
+
 
 ARMS: dict[str, dict] = {
+    # phase 1/2 (PLAN.md, PLAN2)
     "replay-baseline": {},
-    "dose-x2": {"total_steps_estimate": 2 * BASE_HORIZON, "n_epochs": 2},
+    "dose-x2": {"dose": 2},
     "kernel-a4": {"a": 4.0},
     "kernel-b2": {"b": 2.0},
-    "umap-kernel": dict(UMAP_MIND01),
-    # Phase 2 (PLAN2-umap-kernel.md): one knob each off the umap-kernel config.
-    "umap-dose-x2": {**UMAP_MIND01,
-                     "total_steps_estimate": 2 * BASE_HORIZON, "n_epochs": 2},
-    "umap-dose-x4": {**UMAP_MIND01,
-                     "total_steps_estimate": 4 * BASE_HORIZON, "n_epochs": 3},
-    "umap-mind0": {"low_dim_kernel": "umap", "a": 1.929, "b": 0.7915},
-    "umap-mind05": {"low_dim_kernel": "umap", "a": 0.583, "b": 1.334},
+    "umap-kernel": _umap("010"),
+    "umap-dose-x2": _umap("010", dose=2),
+    "umap-dose-x4": _umap("010", dose=4),
+    "umap-mind0": _umap("000"),
+    "umap-mind05": _umap("050"),
+    # phase 3 (PLAN3-kernels.md) — min_dist sweep at the established dose x2
+    "umap-md000-x2": _umap("000", dose=2),
+    "umap-md005-x2": _umap("005", dose=2),
+    "umap-md020-x2": _umap("020", dose=2),
+    "umap-md035-x2": _umap("035", dose=2),
+    "umap-md050-x2": _umap("050", dose=2),
+    # phase 3 — tail exponent (gcauchy; alpha=1 would equal the umap arms)
+    "gc-a05-md000-x2": _gc("000", 0.5, dose=2),
+    "gc-a05-md010-x2": _gc("010", 0.5, dose=2),
+    "gc-a2-md000-x2": _gc("000", 2.0, dose=2),
+    "gc-a2-md010-x2": _gc("010", 2.0, dose=2),
+    # phase 3 — attraction/repulsion spectrum probes (dose covaries with
+    # pos_ratio at fixed horizon; exploratory, documented in PLAN3)
+    "umap-pos02-x2": _umap("010", dose=2, pos_ratio=0.02),
+    "umap-pos15-x2": _umap("010", dose=2, pos_ratio=0.15),
 }
 
 
@@ -82,37 +134,35 @@ def gpu_is_free() -> bool:
     return not out.stdout.strip()
 
 
-def receipt_diff(kwargs: dict) -> list[str]:
-    """Fields where our constructor departs from R0217's sealed checkpoint.
+def resolve_edges(rung: dict) -> Path:
+    if rung["edges"] is not None:
+        return rung["edges"]
+    import glob
+    hits = [p for p in sorted(glob.glob(rung["edges_glob"]))]
+    if not hits:
+        raise SystemExit(f"no fuzzy edge npz at {rung['edges_glob']}")
+    return Path(hits[0])
 
-    The sealed train receipt + checkpoint are the authority on the treatment;
-    an arm must depart only on its own knob.
-    """
+
+def receipt_diff(kwargs: dict, sealed_checkpoint: Path) -> list[str]:
+    """Fields where our constructor departs from the rung's sealed checkpoint."""
     import torch
-    ck_path = R0217_RECEIPT.parent / "model.pt"
-    ck = torch.load(ck_path, map_location="cpu", weights_only=False)
+    ck = torch.load(sealed_checkpoint, map_location="cpu", weights_only=False)
     mismatches = []
     for key in ("a", "b", "low_dim_kernel", "correlation_weight", "learning_rate",
                 "pos_ratio", "positive_target_mode", "use_batchnorm", "use_dropout",
                 "architecture"):
-        ours, sealed = kwargs.get(key), ck.get(key)
-        if key == "architecture":
-            sealed = ck.get("architecture")
-        if ours != sealed:
-            mismatches.append(f"{key}: ours={ours!r} sealed={sealed!r}")
+        if kwargs.get(key) != ck.get(key):
+            mismatches.append(f"{key}: ours={kwargs.get(key)!r} sealed={ck.get(key)!r}")
     return mismatches
 
 
-def quick_ffr(xy: np.ndarray, n_queries: int = 20_000, k_true: int = 15) -> float:
-    """FFR@0.1% with the sealed exact graph's edges as high-D truth.
-
-    The k15 graph IS brute-force truth on this substrate (R0216), so each
-    query's edge destinations are its true neighbors. Not the sealed panel;
-    a fast guard against an arm that tidies the picture by scrambling it.
-    """
+def quick_ffr(xy: np.ndarray, edges_path: Path, rows: int,
+              n_queries: int = 20_000, k_true: int = 15) -> float:
+    """FFR@0.1% with the rung's sealed graph edges as high-D truth."""
     from scipy.spatial import cKDTree
 
-    with np.load(EDGES) as z:
+    with np.load(edges_path) as z:
         names = z.files
         src_name = next(n for n in ("sources", "src", "rows") if n in names)
         dst_name = next(n for n in ("destinations", "dst", "cols", "targets") if n in names)
@@ -120,12 +170,12 @@ def quick_ffr(xy: np.ndarray, n_queries: int = 20_000, k_true: int = 15) -> floa
         dests = z[dst_name]
     order = np.argsort(sources, kind="stable")
     sources, dests = sources[order], dests[order]
-    starts = np.searchsorted(sources, np.arange(ROWS))
-    ends = np.searchsorted(sources, np.arange(ROWS), side="right")
+    starts = np.searchsorted(sources, np.arange(rows))
+    ends = np.searchsorted(sources, np.arange(rows), side="right")
 
     rng = np.random.default_rng(0)
-    queries = rng.choice(ROWS, size=n_queries, replace=False)
-    disc = max(int(ROWS * 0.001), 1)
+    queries = rng.choice(rows, size=n_queries, replace=False)
+    disc = max(int(rows * 0.001), 1)
     tree = cKDTree(xy)
     _, near = tree.query(xy[queries], k=disc, workers=8)
     hits = 0
@@ -139,37 +189,43 @@ def quick_ffr(xy: np.ndarray, n_queries: int = 20_000, k_true: int = 15) -> floa
     return hits / max(total, 1)
 
 
-def run_arm(arm: str, dry_run: bool, seed: int = SEED) -> int:
-    overrides = ARMS[arm]
+def run_arm(arm: str, dry_run: bool, seed: int = SEED, rung_name: str = "2m") -> int:
+    rung = RUNGS[rung_name]
+    overrides = dict(ARMS[arm])
+    dose_mult = overrides.pop("dose", 1)
     kwargs = {**BASE_KWARGS, **overrides}
-    horizon = kwargs["total_steps_estimate"]
-    dose = horizon * POS_PER_UPDATE / DIRECTED_EDGES
+    horizon = round(dose_mult * rung["base_horizon"])
+    num_pos = int(BATCH * kwargs["pos_ratio"])
+    steps_per_epoch = math.ceil(rung["directed_edges"] / num_pos)
+    kwargs["total_steps_estimate"] = horizon
+    kwargs["n_epochs"] = max(1, math.ceil(horizon / steps_per_epoch))
+    dose = horizon * num_pos / rung["directed_edges"]
 
-    for path in (SUBSTRATE, EDGES, R0217_RECEIPT):
+    edges_path = resolve_edges(rung)
+    for path in (rung["substrate"], edges_path, rung["sealed_checkpoint"]):
         if not path.is_file():
             raise SystemExit(f"missing sealed input: {path}")
 
-    expected_knobs = set(overrides)
-    departures = [d for d in receipt_diff(kwargs)
+    expected_knobs = set(overrides) | {"kernel_alpha"}
+    departures = [d for d in receipt_diff(kwargs, rung["sealed_checkpoint"])
                   if d.split(":")[0] not in expected_knobs]
-    print(f"arm={arm}  horizon={horizon} updates  dose={dose:.4f} draws/edge")
-    print("constructor:", json.dumps({k: v for k, v in kwargs.items()}, default=str))
+    print(f"rung={rung_name} arm={arm} seed={seed} horizon={horizon} updates "
+          f"dose={dose:.4f} draws/edge n_epochs={kwargs['n_epochs']}")
     if departures:
-        raise SystemExit("treatment departs from R0217 outside the arm's knob:\n  "
-                         + "\n  ".join(departures))
-    print("receipt check: all non-arm fields match R0217's sealed checkpoint")
+        raise SystemExit("treatment departs from the sealed rung recipe outside "
+                         "the arm's knobs:\n  " + "\n  ".join(departures))
+    print("receipt check: all non-arm fields match the sealed checkpoint")
     if dry_run:
         return 0
 
-    out_dir = OUT_ROOT / (arm if seed == SEED else f"{arm}-seed{seed}")
+    out_dir = rung["out_root"] / (arm if seed == SEED else f"{arm}-seed{seed}")
     if out_dir.exists():
         raise SystemExit(f"{out_dir} exists; arms are write-once (delete to re-run)")
     if not gpu_is_free():
         raise SystemExit("GPU busy (round runner has priority); try again later")
     out_dir.mkdir(parents=True)
-    log_path = out_dir / "fit.log"
     logging.basicConfig(level=logging.INFO,
-                        handlers=[logging.FileHandler(log_path),
+                        handlers=[logging.FileHandler(out_dir / "fit.log"),
                                   logging.StreamHandler()])
 
     import torch
@@ -177,24 +233,30 @@ def run_arm(arm: str, dry_run: bool, seed: int = SEED) -> int:
 
     torch.manual_seed(seed)
     started = datetime.datetime.now(datetime.timezone.utc)
-    X = np.load(SUBSTRATE, mmap_mode="r")
+    X = np.load(rung["substrate"], mmap_mode="r")
     model = ParametricUMAP(**kwargs)
-    model.fit(X, precomputed_edges_path=str(EDGES), random_state=seed)
+    model.fit(X, precomputed_edges_path=str(edges_path), random_state=seed)
     model.save(str(out_dir / "model.pt"))
     xy = model.transform(X, batch_size=8192).astype(np.float32)
     np.save(out_dir / "coordinates.npy", xy)
     wall_s = (datetime.datetime.now(datetime.timezone.utc) - started).total_seconds()
 
-    ffr = quick_ffr(xy)
+    ffr = quick_ffr(xy, edges_path, rung["rows"])
+    from scipy.spatial import cKDTree
+    rng = np.random.default_rng(0)
+    sample = xy[rng.choice(len(xy), 20_000, replace=False)]
+    dists, _ = cKDTree(xy).query(sample, k=11, workers=8)
+    radius = np.percentile(np.linalg.norm(xy - xy.mean(axis=0), axis=1), 90)
+    r10 = float(np.median(dists[:, 10]) / radius)
     from map_renders import robust_extent, binned_counts, render_png
-    extent = robust_extent(xy)
-    render_png(binned_counts(xy, extent), out_dir / "density.png")
+    render_png(binned_counts(xy, robust_extent(xy)), out_dir / "density.png")
 
     summary = {
-        "arm": arm, "overrides": overrides, "seed": seed,
-        "horizon_updates": horizon, "draws_per_edge": dose,
-        "wall_s": wall_s, "quick_ffr_at_0.1pct": ffr,
-        "substrate": str(SUBSTRATE), "edges": str(EDGES),
+        "arm": arm, "rung": rung_name, "overrides": overrides, "seed": seed,
+        "dose_multiplier": dose_mult, "horizon_updates": horizon,
+        "draws_per_edge": dose, "wall_s": wall_s, "quick_ffr_at_0.1pct": ffr,
+        "r10_over_map_radius_median": r10,
+        "substrate": str(rung["substrate"]), "edges": str(edges_path),
         "started_utc": started.isoformat(),
         "note": "sandbox artifact; not a round, no sealed claim",
     }
@@ -205,10 +267,12 @@ def run_arm(arm: str, dry_run: bool, seed: int = SEED) -> int:
 
 
 def build_page() -> None:
-    """Comparison page over every completed arm plus the sealed baseline render."""
+    """Legacy phase-1/2 page (2M only). The kernel program's dedicated page is
+    built by build_kernels_page.py and covers both rungs."""
     import html as html_mod
     import shutil
 
+    OUT_ROOT = RUNGS["2m"]["out_root"]
     SITE_DIR.mkdir(parents=True, exist_ok=True)
     cards = []
     sealed = Path("/data/latent-basemap/render-cache"
@@ -216,7 +280,7 @@ def build_page() -> None:
     if sealed.is_file():
         shutil.copy2(sealed, SITE_DIR / "sealed-r0217-seed42.png")
         cards.append(("sealed R0217 seed 42", "sealed-r0217-seed42.png",
-                      "the registered low-dose baseline (ffr 0.3369)"))
+                      "the registered low-dose baseline"))
     for arm_dir in sorted(OUT_ROOT.iterdir()) if OUT_ROOT.is_dir() else []:
         s_path = arm_dir / "summary.json"
         png = arm_dir / "density.png"
@@ -241,14 +305,15 @@ def build_page() -> None:
         "<h1>2M visual-quality knobs (sandbox)</h1>"
         "<p>One knob per arm on the sealed R0216 substrate/graph, seed 42. "
         "Not rounds; quick-ffr uses sealed graph edges as truth. "
-        "See experiments/sandbox/PLAN.md.</p>"
+        'Kernel program page: <a href="../kernels/">sandbox/kernels</a>.</p>'
         f'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:16px">{figs}</div>')
-    print(f"page: {SITE_DIR}/index.html  (http://gsv.local:8800/basemap-maps/sandbox/2m-knobs/)")
+    print(f"page: {SITE_DIR}/index.html")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--arm", choices=sorted(ARMS), required=False)
+    ap.add_argument("--rung", choices=sorted(RUNGS), default="2m")
     ap.add_argument("--seed", type=int, default=SEED)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--rebuild-page", action="store_true")
@@ -258,7 +323,7 @@ def main() -> int:
         return 0
     if not args.arm:
         raise SystemExit("pass --arm (or --rebuild-page)")
-    return run_arm(args.arm, args.dry_run, seed=args.seed)
+    return run_arm(args.arm, args.dry_run, seed=args.seed, rung_name=args.rung)
 
 
 if __name__ == "__main__":

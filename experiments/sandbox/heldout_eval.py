@@ -74,7 +74,7 @@ def stage_truth() -> None:
     X = np.load(SUBSTRATE, mmap_mode="r")
     best_val = torch.full((N_PROBES, K_TRUE), -2.0, device="cuda")
     best_idx = torch.zeros((N_PROBES, K_TRUE), dtype=torch.int64, device="cuda")
-    chunk = 250_000
+    chunk = 40_000  # sized for the 32 GB card: sims is (N_PROBES, chunk); exact top-K is chunk-invariant
     for start in range(0, ROWS, chunk):
         block = torch.from_numpy(np.asarray(X[start:start + chunk], dtype=np.float32)).cuda()
         block = torch.nn.functional.normalize(block, dim=1)

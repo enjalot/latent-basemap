@@ -33,6 +33,7 @@ class ParametricUMAP:
         a=0.1,
         b=1.0,
         low_dim_kernel="legacy_lp",
+        kernel_alpha=1.0,
         correlation_weight=0.1,
         learning_rate=1e-4,
         n_epochs=10,
@@ -89,9 +90,12 @@ class ParametricUMAP:
         # 1/(1+a·‖Δ‖_{2b}) (an Lp/quasi-norm curve, NOT UMAP). "umap" = the
         # standard 1/(1+a·‖Δ‖²^b). Default legacy_lp so old checkpoints keep
         # their trained semantics; new runs opt into "umap" explicitly.
-        if low_dim_kernel not in ("legacy_lp", "umap"):
-            raise ValueError(f"low_dim_kernel must be 'legacy_lp' or 'umap', got {low_dim_kernel!r}")
+        if low_dim_kernel not in ("legacy_lp", "umap", "gcauchy"):
+            raise ValueError(
+                f"low_dim_kernel must be 'legacy_lp', 'umap' or 'gcauchy', got {low_dim_kernel!r}")
         self.low_dim_kernel = low_dim_kernel
+        # Tail exponent for "gcauchy" only; alpha=1 reproduces "umap" exactly.
+        self.kernel_alpha = float(kernel_alpha)
         # P0.8: only allow prefix-filtering a larger graph onto X for a verified
         # literal prefix (never for balanced/sampled matrices).
         self.allow_prefix_edge_filter = False
@@ -198,10 +202,14 @@ class ParametricUMAP:
           NOT the UMAP kernel. Kept so old checkpoints retain their semantics.
         - ``umap`` (standard): ``1 / (1 + a·(‖Δ‖²)^b)`` = ``1/(1+a·r²^b)``.
           At b=1 these differ: legacy 1/(1+a·r) vs umap 1/(1+a·r²).
+        - ``gcauchy`` (generalized Cauchy): ``(1 + a·r²^b)^(-alpha)`` — the
+          umap kernel with a tail-exponent dial ``kernel_alpha``. alpha=1 is
+          exactly ``umap``; smaller alpha is a heavier tail (t-SNE-family
+          direction, cf. heavy-tailed SNE kernels), larger is lighter.
         """
         # fp32 throughout: the singular derivative at r=0 must not run in fp16.
         delta = src.float() - dst.float()
-        if self.low_dim_kernel == "umap":
+        if self.low_dim_kernel in ("umap", "gcauchy"):
             r2 = delta.square().sum(dim=1)
             # P0-A: r2.pow(b) has a singular derivative b·r2^(b-1) at r2=0 for
             # b<1 → autograd yields 0·inf = NaN, silently corrupting the model on
@@ -214,7 +222,8 @@ class ParametricUMAP:
             radial = torch.where(r2 == 0, torch.zeros_like(radial_nz), radial_nz)
         else:  # legacy_lp — unchanged shipped behaviour
             radial = torch.norm(delta, dim=1, p=2 * self.b)
-        return torch.pow(1 + self.a * radial, -1), radial
+        power = self.kernel_alpha if self.low_dim_kernel == "gcauchy" else 1.0
+        return torch.pow(1 + self.a * radial, -power), radial
 
     def _decide_gpu_resident(self, n_train, n_features, n_pos_edges,
                              edge_set, low_memory):
@@ -2093,6 +2102,7 @@ class ParametricUMAP:
             'a': self.a,
             'b': self.b,
             'low_dim_kernel': self.low_dim_kernel,
+            'kernel_alpha': self.kernel_alpha,
             'correlation_weight': self.correlation_weight,
             'learning_rate': self.learning_rate,
             'use_batchnorm': self.use_batchnorm,
@@ -2126,6 +2136,7 @@ class ParametricUMAP:
             # Checkpoints predating the P0.1 switch were trained with the
             # legacy Lp kernel; load them as such (never silently upgrade).
             low_dim_kernel=save_dict.get('low_dim_kernel', 'legacy_lp'),
+            kernel_alpha=save_dict.get('kernel_alpha', 1.0),
             correlation_weight=save_dict['correlation_weight'],
             device=device,
             use_batchnorm=save_dict['use_batchnorm'],
