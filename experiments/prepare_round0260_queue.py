@@ -286,7 +286,9 @@ def prepare_round0260(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
         "scope_modules": list(SCOPE_MODULES),
         "stop_hook_install_guard": {
             "derived_entries": guard["derived"],
-            "every_derived_entry_installs": guard["holds"],
+            "every_derived_entry_installs": guard["audit"][
+                "every_entry_installs_effectively"
+            ],
             "gate_census": gates,
             "scope_residual": residual,
         },
