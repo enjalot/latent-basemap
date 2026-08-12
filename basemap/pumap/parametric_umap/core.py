@@ -639,6 +639,73 @@ class ParametricUMAP:
         if use_fast and positive_source_rows is not None and not fixed_cap_device_compatible:
             use_fast = False
             reason = "variable-degree/weighted retained-node cap requires hybrid path"
+
+        # ── R0262: host-int8 hybrid ─────────────────────────────────────────
+        # The 100M rung's blocker, stated exactly (review-0259-01 §D): no
+        # host-resident-X path was wired to the weighted fuzzy edge sampler.
+        # `device` and `hybrid` are both weighted-capable but both put X on the
+        # card, and at 100M X is 38.4 GB at int8 against a 33.68 GB card, so
+        # neither can be constructed at ANY dtype. The one host-X path,
+        # `legacy`, is stamped weighted_ok=False and raises below -- correctly,
+        # and that raise stays.
+        #
+        # This branch is the missing fourth pipeline: X host-resident as int8 +
+        # exact per-row fp16 scales, edges and the fuzzy CDF host-resident, both
+        # endpoints streamed per batch through the pinned double-buffer the
+        # array already owns. It is entered ONLY when the caller hands in a
+        # HostInt8MaterializedArray, so no existing rung can reach it and no
+        # existing rung's pipeline, sampler, residency or RNG stream changes.
+        if getattr(X, "round0034_host_int8", False):
+            if "cuda" not in str(self.device):
+                raise RuntimeError(
+                    "host-int8 X dequantises on the training device; it requires "
+                    "a CUDA device (R0262).")
+            if edge_set is not None:
+                raise RuntimeError(
+                    "host-int8 X is incompatible with reject_neighbors: the "
+                    "rejection set needs the legacy sampler, which is uniform "
+                    "(R0262).")
+            if positive_source_rows is not None and not fixed_cap_device_compatible:
+                # The hybrid sampler does serve retained-node caps; keep the
+                # combination out until a rung registers it rather than
+                # silently pairing two unvalidated paths.
+                raise RuntimeError(
+                    "host-int8 X with a duplicate-multiplicity cap is not a "
+                    "registered combination (R0262).")
+            if int(getattr(X, "buffer_rows", 0)) < int(self.batch_size):
+                raise RuntimeError(
+                    f"host-int8 X stages {getattr(X, 'buffer_rows', 0)} rows per "
+                    f"pinned slot but the sampler gathers {self.batch_size} rows "
+                    f"per endpoint; construct it with buffer_rows >= batch_size "
+                    f"(R0262).")
+            reason = (
+                f"host-int8 X ({len(X)} x {n_features} int8 + fp16 scales) does "
+                f"not fit the card at any dtype; weighted fuzzy sampling stays "
+                f"on the host")
+            logging.info("Edge-list mode: HOST-INT8 HYBRID (%s).", reason)
+            _stamp_pipeline(
+                "host_int8_hybrid", "HostStreamEdgeSampler", weighted_ok=True,
+                x_residency="host_int8_plus_exact_fp16_row_scales",
+                uniform_with_replacement=not self.weighted_edge_sampling)
+            self._X_dev = X
+            self._fast_device_path = True
+            loader = HostStreamEdgeSampler(
+                X, sources, targets, weights, n_nodes=n_train,
+                pos_ratio=self.pos_ratio, batch_size=self.batch_size,
+                random_state=random_state,
+                positive_target_mode=self.positive_target_mode,
+                weighted_edge_sampling=self.weighted_edge_sampling,
+                retained_node_rows=positive_source_rows,
+                device=self.device,
+            )
+            if int(loader.n_pos) != n_pos_edges:
+                loader.close()
+                raise RuntimeError(
+                    f"host-int8 retained-edge count {loader.n_pos} != admission "
+                    f"count {n_pos_edges}")
+            return X, loader, n_pos_edges
+        # ── end R0262 ───────────────────────────────────────────────────────
+
         if use_fast:
             logging.info("Edge-list mode: GPU-resident fast path (%s).", reason)
             exact_uniform = (

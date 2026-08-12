@@ -579,7 +579,9 @@ class HostStreamEdgeSampler:
                  device="cuda", n_workers=2, queue_size=8,
                  retained_node_rows=None):
         import threading, queue
-        self.dataset = dataset            # DeviceArrayDataset (X resident)
+        # DeviceArrayDataset (X resident on the card), or -- R0262 -- a
+        # HostInt8MaterializedArray when X does not fit the card at any dtype.
+        self.dataset = dataset
         self.device = device
         self.n_nodes = int(n_nodes)
         self.batch_size = batch_size
@@ -774,8 +776,27 @@ class HostStreamEdgeSampler:
         all_src = torch.cat([p_src, neg_src])
         all_dst = torch.cat([p_dst, neg_dst])
         targets = torch.cat([p_labels, neg_labels])
-        src_feats = self.dataset.index_select(all_src)
-        dst_feats = self.dataset.index_select(all_dst)
+        # R0262: a host-resident int8 X gathers BOTH endpoints from one pinned
+        # slot (`gather_pairs`), so the pair costs one host fill and one H2D per
+        # endpoint. Calling `index_select` twice against it would work but would
+        # gather and transfer 4x the rows it needs -- `HostInt8MaterializedArray.
+        # index_select` is implemented as `gather_pairs(rows, rows)` and discards
+        # half of every transfer. The discriminator is the marker the class has
+        # carried since R0034 (`round0034_pipeline.py:732`), not a new protocol.
+        # The device path below is byte-for-byte unchanged.
+        if getattr(self.dataset, "round0034_host_int8", False):
+            # The row ids must reach the host to index host RAM. Positives are
+            # already host-side upstream, negatives are drawn on-device; moving
+            # the concatenated pair back costs 2*batch_size int64 (262 kB at the
+            # registered 8192) and keeps the negative RNG stream identical to
+            # the device path.
+            pair = torch.cat([all_src, all_dst]).to("cpu").numpy()
+            half = int(all_src.numel())
+            src_feats, dst_feats = self.dataset.gather_pairs(
+                pair[:half], pair[half:])
+        else:
+            src_feats = self.dataset.index_select(all_src)
+            dst_feats = self.dataset.index_select(all_dst)
         return src_feats, dst_feats, targets
 
     def close(self):
