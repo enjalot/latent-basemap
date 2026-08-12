@@ -54,12 +54,21 @@ BASE_KWARGS = dict(
     device="cuda",
 )
 
+UMAP_MIND01 = {"low_dim_kernel": "umap", "a": 1.577, "b": 0.895}
+
 ARMS: dict[str, dict] = {
     "replay-baseline": {},
     "dose-x2": {"total_steps_estimate": 2 * BASE_HORIZON, "n_epochs": 2},
     "kernel-a4": {"a": 4.0},
     "kernel-b2": {"b": 2.0},
-    "umap-kernel": {"low_dim_kernel": "umap", "a": 1.577, "b": 0.895},
+    "umap-kernel": dict(UMAP_MIND01),
+    # Phase 2 (PLAN2-umap-kernel.md): one knob each off the umap-kernel config.
+    "umap-dose-x2": {**UMAP_MIND01,
+                     "total_steps_estimate": 2 * BASE_HORIZON, "n_epochs": 2},
+    "umap-dose-x4": {**UMAP_MIND01,
+                     "total_steps_estimate": 4 * BASE_HORIZON, "n_epochs": 3},
+    "umap-mind0": {"low_dim_kernel": "umap", "a": 1.929, "b": 0.7915},
+    "umap-mind05": {"low_dim_kernel": "umap", "a": 0.583, "b": 1.334},
 }
 
 
@@ -130,7 +139,7 @@ def quick_ffr(xy: np.ndarray, n_queries: int = 20_000, k_true: int = 15) -> floa
     return hits / max(total, 1)
 
 
-def run_arm(arm: str, dry_run: bool) -> int:
+def run_arm(arm: str, dry_run: bool, seed: int = SEED) -> int:
     overrides = ARMS[arm]
     kwargs = {**BASE_KWARGS, **overrides}
     horizon = kwargs["total_steps_estimate"]
@@ -152,7 +161,7 @@ def run_arm(arm: str, dry_run: bool) -> int:
     if dry_run:
         return 0
 
-    out_dir = OUT_ROOT / arm
+    out_dir = OUT_ROOT / (arm if seed == SEED else f"{arm}-seed{seed}")
     if out_dir.exists():
         raise SystemExit(f"{out_dir} exists; arms are write-once (delete to re-run)")
     if not gpu_is_free():
@@ -166,11 +175,11 @@ def run_arm(arm: str, dry_run: bool) -> int:
     import torch
     from basemap.pumap.parametric_umap.core import ParametricUMAP
 
-    torch.manual_seed(SEED)
+    torch.manual_seed(seed)
     started = datetime.datetime.now(datetime.timezone.utc)
     X = np.load(SUBSTRATE, mmap_mode="r")
     model = ParametricUMAP(**kwargs)
-    model.fit(X, precomputed_edges_path=str(EDGES), random_state=SEED)
+    model.fit(X, precomputed_edges_path=str(EDGES), random_state=seed)
     model.save(str(out_dir / "model.pt"))
     xy = model.transform(X, batch_size=8192).astype(np.float32)
     np.save(out_dir / "coordinates.npy", xy)
@@ -182,7 +191,7 @@ def run_arm(arm: str, dry_run: bool) -> int:
     render_png(binned_counts(xy, extent), out_dir / "density.png")
 
     summary = {
-        "arm": arm, "overrides": overrides, "seed": SEED,
+        "arm": arm, "overrides": overrides, "seed": seed,
         "horizon_updates": horizon, "draws_per_edge": dose,
         "wall_s": wall_s, "quick_ffr_at_0.1pct": ffr,
         "substrate": str(SUBSTRATE), "edges": str(EDGES),
@@ -214,9 +223,10 @@ def build_page() -> None:
         if not (s_path.is_file() and png.is_file()):
             continue
         s = json.loads(s_path.read_text())
-        name = f"{s['arm']}.png"
+        label = arm_dir.name
+        name = f"{label}.png"
         shutil.copy2(png, SITE_DIR / name)
-        cards.append((s["arm"], name,
+        cards.append((label, name,
                       f"quick-ffr {s['quick_ffr_at_0.1pct']:.4f} · "
                       f"{s['horizon_updates']:,} updates · "
                       f"{s['draws_per_edge']:.3f} draws/edge"))
@@ -239,6 +249,7 @@ def build_page() -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--arm", choices=sorted(ARMS), required=False)
+    ap.add_argument("--seed", type=int, default=SEED)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--rebuild-page", action="store_true")
     args = ap.parse_args()
@@ -247,7 +258,7 @@ def main() -> int:
         return 0
     if not args.arm:
         raise SystemExit("pass --arm (or --rebuild-page)")
-    return run_arm(args.arm, args.dry_run)
+    return run_arm(args.arm, args.dry_run, seed=args.seed)
 
 
 if __name__ == "__main__":
