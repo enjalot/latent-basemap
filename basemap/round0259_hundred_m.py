@@ -847,6 +847,8 @@ def weight_cdf_fully_polled(
     poll: Any,
     chunk: int = SCAN_CHUNK_ELEMENTS,
     leaf: int = 1 << 20,
+    sum_proof_leaves: Sequence[int] = (),
+    sum_proof_controls: bool = False,
 ) -> tuple[np.ndarray, float, dict[str, Any]]:
     """R0258's `weight_cdf_polled` with its one unpollable interval removed.
 
@@ -870,6 +872,45 @@ def weight_cdf_fully_polled(
         w[start:end] = weights[start:end]
         poll("round0259_hundred_m.weight_cdf_fully_polled convert chunk")
     timings["convert_s"] = time.monotonic() - started
+
+    if sum_proof_leaves or sum_proof_controls:
+        # The proof runs on the REAL float64 array, before the cumsum, so
+        # nothing about it is a scaled-down stand-in. review-0258-01 §E's table
+        # is reproduced here at the same three leaf sizes over the same
+        # 2,511,103,254 elements.
+        proof_started = time.monotonic()
+        reference_started = time.monotonic()
+        reference = float(np.sum(w))
+        reference_s = time.monotonic() - reference_started
+        rows: list[dict[str, Any]] = []
+        for proof_leaf in sum_proof_leaves:
+            leaf_started = time.monotonic()
+            candidate, sites = pairwise_sum_polled(w, poll=poll, leaf=int(proof_leaf))
+            leaf_wall = time.monotonic() - leaf_started
+            rows.append({
+                "leaf_elements": int(proof_leaf),
+                "poll_sites": int(sites),
+                "wall_s": leaf_wall,
+                "wall_over_one_np_sum": leaf_wall / reference_s if reference_s else None,
+                "mean_poll_spacing_s": leaf_wall / sites if sites else None,
+                "bitwise_identical": candidate == reference,
+                "absolute_deviation": abs(candidate - reference),
+            })
+        timings["sum_proof"] = {
+            "schema": "round0259-real-rung-pairwise-proof-v1",
+            "elements": int(n),
+            "dtype": "float64",
+            "one_np_sum_s": reference_s,
+            "reference_total": reference,
+            "by_leaf": rows,
+            "every_leaf_bitwise_identical": all(r["bitwise_identical"] for r in rows),
+            "numpy_version": str(np.__version__),
+            "controls_at_the_real_rung": (
+                pairwise_sum_controls(values=w, leaf=leaf)
+                if sum_proof_controls else None
+            ),
+            "proof_wall_s": time.monotonic() - proof_started,
+        }
 
     started = time.monotonic()
     total, leaves = pairwise_sum_polled(w, poll=poll, leaf=leaf)
