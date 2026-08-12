@@ -127,7 +127,7 @@ def _node_guard(label: str, *, interval_s: float = 0.05) -> EnforcedHostWatchdog
 def _seal(output: str, name: str, body: Mapping[str, Any]) -> str:
     path = os.path.join(output, name)
     atomic_write_new_json(
-        path, prompt_contract.seal(json_safe(json_scrub(dict(body)))), immutable=True)
+        path, prompt_contract.seal(json_scrub(json_safe(dict(body)))), immutable=True)
     return path
 
 
@@ -161,7 +161,7 @@ def _require_headroom(*, label: str) -> dict[str, Any]:
             "mem_available_required_bytes": MIN_MEM_AVAILABLE_BYTES,
             "data_free_bytes": free,
             "data_free_required_bytes": MIN_DATA_FREE_BYTES,
-            "host_anonymous_bytes_at_entry": int(host_anonymous_bytes())}
+            "host_memory_at_entry": host_anonymous_bytes()}
 
 
 def _read_sealed_number(signature: Any, *, keys: tuple[str, ...], label: str) -> float:
@@ -741,7 +741,7 @@ def run_build(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "host_watchdog": guard.receipt(),
             "poll_coverage": coverage,
             "observed_span_s": coverage["observed_span_s"],
-            "node_wall_s_top_level": float(node_wall_s),
+            "node_wall_s": float(node_wall_s),
             "coverage_summary": coverage_summary([coverage]),
         })
         _seal(output, "substrate-graph.json", body)
