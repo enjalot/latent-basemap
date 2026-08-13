@@ -167,6 +167,7 @@ class ParametricUMAP:
         self.fneg_weight = fneg_weight
         self.fneg_lo = fneg_lo
         self.fneg_hi = fneg_hi
+        self.fneg_telemetry = None   # P1: populated by fit() when fneg is on
         self.weighted_edge_sampling = weighted_edge_sampling
         self.graph_manifest_path = graph_manifest_path
         self.graph_manifest_sha256 = graph_manifest_sha256
@@ -1644,11 +1645,23 @@ class ParametricUMAP:
             return prof.phase(name, global_step) if prof is not None else _perf_null
         consecutive_nonfinite_losses = 0
         consecutive_nonfinite_gradients = 0   # P0-3: separate from the loss counter
+        fneg_epoch_telemetry = []   # P1: per-epoch fneg diagnostics (opt-in)
         for epoch in range(self.n_epochs):
             epoch_loss_t = torch.zeros((), device=self.device)
             epoch_umap_t = torch.zeros((), device=self.device)
             epoch_corr_t = torch.zeros((), device=self.device)
             num_batches = 0
+            if self.fneg_weight > 0:
+                # P1 fneg telemetry accumulators (band-hit, loss share, batch
+                # p90-radius distribution). Device scalars; negligible cost,
+                # only live when the fneg term is on.
+                z = lambda: torch.zeros((), device=self.device)
+                fneg_band_t, fneg_neg_t = z(), z()
+                fneg_extra_t, fneg_wsum_t = z(), z()
+                fneg_R_sum, fneg_R_sqsum = z(), z()
+                fneg_R_min = torch.full((), float("inf"), device=self.device)
+                fneg_R_max = z()
+                fneg_batches = 0
             pbar = tqdm(
                 range(len(loader)),
                 desc=f'Epoch {epoch+1}/{self.n_epochs}',
@@ -1729,6 +1742,17 @@ class ParametricUMAP:
                                 & (r2d <= self.fneg_hi * R))
                     w = w + band.float() * self.fneg_weight
                     umap_loss = (per_elem * w).sum() / w.sum()
+                    with torch.no_grad():
+                        _pe = per_elem.detach()
+                        fneg_band_t += band.sum()
+                        fneg_neg_t += (targets_for_loss < 0.5).sum()
+                        fneg_extra_t += (_pe * band.float() * self.fneg_weight).sum()
+                        fneg_wsum_t += (_pe * w).sum()
+                        fneg_R_sum += R
+                        fneg_R_sqsum += R * R
+                        fneg_R_min = torch.minimum(fneg_R_min, R)
+                        fneg_R_max = torch.maximum(fneg_R_max, R)
+                        fneg_batches += 1
                 else:
                     umap_loss = self.loss_fn(qs.float(), targets_for_loss)
                 # P0.3: skip the correlation branch entirely when its weight is 0
@@ -2147,6 +2171,34 @@ class ParametricUMAP:
             avg_corr = epoch_corr_loss / max(num_batches, 1)
             losses.append(avg_loss)
 
+            if self.fneg_weight > 0 and fneg_batches > 0:
+                nb = float(fneg_batches)
+                R_mean = float(fneg_R_sum.item()) / nb
+                R_var = max(float(fneg_R_sqsum.item()) / nb - R_mean * R_mean, 0.0)
+                neg_tot = float(fneg_neg_t.item())
+                wsum = float(fneg_wsum_t.item())
+                fneg_epoch_telemetry.append({
+                    "epoch": epoch + 1,
+                    "band_hit_frac_of_neg": (float(fneg_band_t.item()) / neg_tot
+                                             if neg_tot > 0 else 0.0),
+                    "fneg_loss_share": (float(fneg_extra_t.item()) / wsum
+                                        if wsum > 0 else 0.0),
+                    "batch_p90_radius_mean": R_mean,
+                    "batch_p90_radius_std": R_var ** 0.5,
+                    "batch_p90_radius_min": float(fneg_R_min.item()),
+                    "batch_p90_radius_max": float(fneg_R_max.item()),
+                    "n_batches": fneg_batches,
+                })
+                if verbose:
+                    _t = fneg_epoch_telemetry[-1]
+                    logging.info(
+                        "  fneg telemetry ep%d: band-hit %.4f of neg, loss-share "
+                        "%.4f, batch p90-radius %.3f±%.3f [%.3f,%.3f]",
+                        _t["epoch"], _t["band_hit_frac_of_neg"],
+                        _t["fneg_loss_share"], _t["batch_p90_radius_mean"],
+                        _t["batch_p90_radius_std"], _t["batch_p90_radius_min"],
+                        _t["batch_p90_radius_max"])
+
             # Step plateau scheduler per-epoch; cosine schedule is stepped per-batch.
             if self.lr_schedule == "plateau":
                 scheduler.step(avg_loss)
@@ -2164,6 +2216,17 @@ class ParametricUMAP:
                 wandb.log(log_dict)
 
         self.is_fitted = True
+        # P1: expose fneg telemetry for the summary (opt-in; None when off).
+        if self.fneg_weight > 0 and fneg_epoch_telemetry:
+            last = fneg_epoch_telemetry[-1]
+            self.fneg_telemetry = {
+                "per_epoch": fneg_epoch_telemetry,
+                "final_band_hit_frac_of_neg": last["band_hit_frac_of_neg"],
+                "final_fneg_loss_share": last["fneg_loss_share"],
+                "final_batch_p90_radius_mean": last["batch_p90_radius_mean"],
+            }
+        else:
+            self.fneg_telemetry = None
         # P0-B: honest step accounting. Also compute throughput in meaningful
         # units (positive-LR updates/s and edge-pairs/s), not n*epochs/time.
         s = self._train_stats

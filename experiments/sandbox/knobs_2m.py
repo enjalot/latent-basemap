@@ -308,6 +308,9 @@ def run_arm(arm: str, dry_run: bool, seed: int = SEED, rung_name: str = "2m") ->
         "started_utc": started.isoformat(),
         "note": "sandbox artifact; not a round, no sealed claim",
     }
+    fneg_tel = getattr(model, "fneg_telemetry", None)
+    if fneg_tel is not None:
+        summary["fneg_telemetry"] = fneg_tel
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=1))
     print(json.dumps(summary, indent=1))
     build_page()
