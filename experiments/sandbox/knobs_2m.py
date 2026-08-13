@@ -62,6 +62,24 @@ RUNGS: dict[str, dict] = {
         "base_horizon": 255_142,         # R0257: 0.6782 draws/edge
         "out_root": Path("/data/latent-basemap/sandbox/6250k-knobs"),
     },
+    "12500k": {
+        # P1 drift cell (promotion plan): third N point at x2 on the sealed
+        # R0235 nested substrate + cluster-spill fuzzy graph. No 12.5M ladder
+        # map was sealed (R0235 built substrate+graph only), so the recipe
+        # reference is R0257's checkpoint — the registered treatment is
+        # rung-invariant and receipt_diff only compares recipe fields
+        # (a, b, kernel, pos_ratio, ...), never rung-specific quantities.
+        "rows": 12_500_000,
+        "substrate": Path("/data/latent-basemap/runs/round-0235/queue/artifacts"
+                          "/minilm-mixed-12500k-nested-substrate-and-reserves-v1/substrate.f32.npy"),
+        "edges": Path("/data/latent-basemap/runs/round-0235/queue/artifacts"
+                      "/minilm-mixed-12500k-cluster-spill-k15-fuzzy-graph-v1/edges-k15-fuzzy.npz"),
+        "directed_edges": 310_512_394,
+        "sealed_checkpoint": Path("/data/latent-basemap/runs/round-0257/queue/artifacts"
+                                  "/minilm-mixed-6250k-ladder-map-seed42-v1/train_seed42-model.pt"),
+        "base_horizon": 514_889,         # 0.6782 draws/edge at 310.5M directed edges
+        "out_root": Path("/data/latent-basemap/sandbox/12500k-knobs"),
+    },
 }
 
 # The registered treatment shared by R0217 and R0257 (seed aside).
