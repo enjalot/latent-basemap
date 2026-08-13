@@ -59,12 +59,15 @@ GROUPS = [
     ("6250k", "6.25M rung checks",
      "Winning configs at 3.1x scale on the sealed R0233 graph; compare "
      "against R0257's legacy maps."),
+    ("12500k", "12.5M rung checks (P1 drift)",
+     "The x2 fneg drift cell at 12.5M on the sealed R0235 graph — fog 0.060, "
+     "near cuML's 0.030: the clean-and-healthy corner reached by scale."),
 ]
 
 
 def classify(name: str, rung: str) -> str:
-    if rung == "6250k":
-        return "6250k"
+    if rung in ("6250k", "12500k"):
+        return rung
     if any(tag in name for tag in ("-mn", "-dw", "-fneg")):
         return "fog"
     if name.startswith("gc-"):
@@ -93,7 +96,8 @@ def collect() -> list[dict]:
     if HELDOUT.is_file():
         heldout = json.loads(HELDOUT.read_text()).get("results", {})
     cards = []
-    for rung, root in (("2m", SANDBOX / "2m-knobs"), ("6250k", SANDBOX / "6250k-knobs")):
+    for rung, root in (("2m", SANDBOX / "2m-knobs"), ("6250k", SANDBOX / "6250k-knobs"),
+                       ("12500k", SANDBOX / "12500k-knobs")):
         if not root.is_dir():
             continue
         for arm_dir in sorted(root.iterdir()):
