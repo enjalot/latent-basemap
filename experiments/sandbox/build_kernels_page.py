@@ -120,9 +120,30 @@ def collect() -> list[dict]:
                       "group": "references", "quick_ffr": 0.2764, "dose": 0.6782,
                       "heldout_ffr": None, "net_minus_regressor": None,
                       "r10": 0.00011, "tissue": None})
+    # Full-substrate cuML benchmarks (cuml_reference.py): the non-parametric
+    # method run on the EXACT rung substrate, scored with our instruments.
+    full_cuml_rungs = set()
+    for ref_dir in sorted((SANDBOX / "cuml-ref").iterdir()) \
+            if (SANDBOX / "cuml-ref").is_dir() else []:
+        coords = ref_dir / "coordinates.npy"
+        s_path = ref_dir / "summary.json"
+        if not (coords.is_file() and s_path.is_file()):
+            continue
+        s = json.loads(s_path.read_text())
+        rung = ref_dir.name
+        full_cuml_rungs.add(rung)
+        cards.append({
+            "name": f"cuML reference (full {rung})", "rung": rung,
+            "coords": coords, "rows": None, "group": "references",
+            "quick_ffr": s.get("quick_ffr_at_0.1pct"), "dose": None,
+            "heldout_ffr": None, "net_minus_regressor": None,
+            "r10": s.get("r10_over_map_radius_median"),
+            "tissue": s.get("low_density_mass_fraction"),
+        })
+    # The old 1M-subsample card only appears until the full-2M benchmark exists.
     cuml_xy = SANDBOX / "cuml-1m/cuml-xy.npy"
     cuml_rows = SANDBOX / "cuml-1m/rows.npy"
-    if cuml_xy.is_file() and cuml_rows.is_file():
+    if "2m" not in full_cuml_rungs and cuml_xy.is_file() and cuml_rows.is_file():
         h = heldout.get("cuml-1m-reference", {})
         cards.append({"name": "cuML 1M (RAPIDS, non-parametric)", "rung": "2m",
                       "coords": cuml_xy, "rows": cuml_rows, "group": "references",
@@ -141,10 +162,9 @@ def pick_reference(cards: list[dict], rung: str) -> dict | None:
     rows are a known subset of the 2M substrate, so every 2M map fits into the
     non-parametric target look's orientation. The 6.25M rung shares no rows
     with cuML and keeps a parametric reference."""
-    if rung == "2m":
-        for c in cards:
-            if c["rows"] is not None and "cuML" in c["name"]:
-                return c
+    for c in cards:
+        if c["rung"] == rung and "cuML" in c["name"]:
+            return c
     rung_cards = [c for c in cards if c["rung"] == rung and c["rows"] is None]
     for name in REFERENCE_PREFERENCE:
         for c in rung_cards:
@@ -300,7 +320,7 @@ def main() -> int:
             continue
         frame_xy = np.asarray(np.load(frame["coords"], mmap_mode="r"), dtype=np.float32)
         extent = robust_extent(frame_xy)
-        if frame["rows"] is not None:
+        if "cuML" in frame["name"]:
             # Two-stage anchor (cuML frame): siblings fitted directly onto cuML
             # would each inherit its weak cross-method correspondence and lose
             # mutual consistency. Instead align the parametric anchor onto cuML
@@ -311,12 +331,20 @@ def main() -> int:
                            and c["name"] in REFERENCE_PREFERENCE), None)
             if anchor is None:
                 continue
-            frame_rows = np.load(frame["rows"])
-            idx = np.sort(rng.choice(len(frame_rows),
-                                     min(FIT_SAMPLE, len(frame_rows)), replace=False))
             anchor_raw = np.asarray(np.load(anchor["coords"], mmap_mode="r"),
                                     dtype=np.float32)
-            t1 = fit_similarity(frame_xy[idx], anchor_raw[frame_rows[idx]])
+            if frame["rows"] is not None:
+                frame_rows = np.load(frame["rows"])
+                idx = np.sort(rng.choice(len(frame_rows),
+                                         min(FIT_SAMPLE, len(frame_rows)),
+                                         replace=False))
+                t1 = fit_similarity(frame_xy[idx], anchor_raw[frame_rows[idx]])
+            else:
+                # Full-substrate cuML frame: full row correspondence.
+                idx = np.sort(rng.choice(len(frame_xy),
+                                         min(FIT_SAMPLE, len(frame_xy)),
+                                         replace=False))
+                t1 = fit_similarity(frame_xy[idx], anchor_raw[idx])
             ref_xy = t1(anchor_raw)          # the anchor, expressed in cuML's frame
             n_rows = len(ref_xy)
             positions = np.sort(rng.choice(n_rows, min(FIT_SAMPLE, n_rows),
