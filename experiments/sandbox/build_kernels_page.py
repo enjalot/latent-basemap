@@ -32,7 +32,7 @@ SITE = Path.home() / ".agent/basemap-maps/sandbox/kernels"
 HELDOUT = SANDBOX / "2m-knobs/heldout-eval.json"
 CACHE = SANDBOX / ".aligned-cache"
 REGISTRY = Path("/data/latent-basemap/maps.json")
-CACHE_VERSION = 1
+CACHE_VERSION = 5   # v5: two-stage cuML-frame anchoring, outlier-trimmed variance-matched fit
 FIT_SAMPLE = 200_000
 
 EXPERIMENTS = Path(__file__).resolve().parents[1]
@@ -137,6 +137,14 @@ REFERENCE_PREFERENCE = ("umap-md000-x4", "umap-md000-x2", "umap-dose-x2")
 
 
 def pick_reference(cards: list[dict], rung: str) -> dict | None:
+    """The 2M rung anchors on the cuML frame (owner request 2026-08-13): its
+    rows are a known subset of the 2M substrate, so every 2M map fits into the
+    non-parametric target look's orientation. The 6.25M rung shares no rows
+    with cuML and keeps a parametric reference."""
+    if rung == "2m":
+        for c in cards:
+            if c["rows"] is not None and "cuML" in c["name"]:
+                return c
     rung_cards = [c for c in cards if c["rung"] == rung and c["rows"] is None]
     for name in REFERENCE_PREFERENCE:
         for c in rung_cards:
@@ -146,7 +154,27 @@ def pick_reference(cards: list[dict], rung: str) -> dict | None:
 
 
 def fit_similarity(ref_s: np.ndarray, x_s: np.ndarray):
-    """The compare pages' _procrustes math, returned as a reusable transform."""
+    """Rotation/reflection + translation from Procrustes, VARIANCE-MATCHED scale.
+
+    Classic similarity Procrustes scales by the layouts' correlation
+    (``s.sum()``), which shrinks a map toward the centroid when structural
+    correspondence is weak — cross-method pairs (parametric vs cuML) got
+    compressed into a corner. Visual comparison wants the best orientation
+    with the map's spread preserved, so scale matches total variance
+    (``nr/nx``) instead. For high-correspondence siblings the two scalings
+    agree to within a few percent.
+    """
+    # Outlier trim first: cuML-style maps throw distant stragglers that
+    # dominate a Frobenius norm (cuML's rms spread is 2x its robust extent),
+    # skewing both scale and rotation. Keep pairs where both points sit
+    # within their own config's 99.5th-percentile radius.
+    def _radii(z):
+        med = np.median(z, axis=0)
+        return np.linalg.norm(z - med, axis=1)
+    rr, rx = _radii(ref_s), _radii(x_s)
+    keep = (rr <= np.percentile(rr, 99.5)) & (rx <= np.percentile(rx, 99.5))
+    ref_s, x_s = ref_s[keep], x_s[keep]
+
     mu_r, mu_x = ref_s.mean(0), x_s.mean(0)
     r0, x0 = ref_s - mu_r, x_s - mu_x
     nr, nx = np.linalg.norm(r0), np.linalg.norm(x0)
@@ -154,7 +182,7 @@ def fit_similarity(ref_s: np.ndarray, x_s: np.ndarray):
         return lambda xy: xy.copy()
     u, s, vt = np.linalg.svd((x0 / nx).T @ (r0 / nr))
     rot = u @ vt
-    scale = nr * s.sum() / nx
+    scale = nr / nx
     return lambda xy: ((xy - mu_x) @ rot) * scale + mu_r
 
 
@@ -163,12 +191,20 @@ def _cache_key(card: dict, ref: dict) -> dict:
         st = p.stat()
         return [str(p), st.st_size, st.st_mtime_ns]
     return {"v": CACHE_VERSION, "map": ident(card["coords"]),
-            "ref": ident(ref["coords"])}
+            "frame": ident(ref["frame"]["coords"]),
+            "anchor": ident(ref["anchor"]["coords"])}
 
 
 def aligned_render(card: dict, ref: dict, ref_xy: np.ndarray,
-                   ref_extent: list, ref_sample_idx: np.ndarray) -> Path:
-    """Render this card aligned onto the reference, cached."""
+                   ref_extent: list, ref_positions: np.ndarray,
+                   substrate_rows: np.ndarray) -> Path:
+    """Render this card aligned onto the reference, cached.
+
+    ``ref_positions`` index into the reference's coordinate array and
+    ``substrate_rows`` are the same sample expressed in the rung's substrate
+    row space — identical arrays for a full-substrate reference, distinct
+    when the reference is cuML (whose rows are a subset of the 2M substrate).
+    """
     from map_renders import binned_counts, render_png
 
     CACHE.mkdir(parents=True, exist_ok=True)
@@ -184,20 +220,27 @@ def aligned_render(card: dict, ref: dict, ref_xy: np.ndarray,
             pass
 
     xy = np.asarray(np.load(card["coords"], mmap_mode="r"), dtype=np.float32)
-    if card is ref:
-        aligned = xy
+    if card is ref["frame"]:
+        aligned = xy          # the frame itself defines the coordinate system
+    elif card is ref["anchor"]:
+        aligned = ref_xy      # already expressed in the frame (two-stage)
     elif card["rows"] is not None:
-        # cuML: its rows index the reference's row space.
-        rows = np.load(card["rows"])
-        rng = np.random.default_rng(1)
-        idx = rng.choice(len(rows), min(FIT_SAMPLE, len(rows)), replace=False)
-        transform = fit_similarity(ref_xy[rows[idx]], xy[idx])
+        # Card lives on a row subset: intersect with the fit sample.
+        card_rows = np.load(card["rows"])
+        pos_in_card = {r: i for i, r in enumerate(card_rows)}
+        keep = [(rp, pos_in_card[sr]) for rp, sr in zip(ref_positions, substrate_rows)
+                if sr in pos_in_card]
+        rp_idx = np.array([a for a, _ in keep])
+        card_idx = np.array([b for _, b in keep])
+        transform = fit_similarity(ref_xy[rp_idx], xy[card_idx])
         aligned = transform(xy)
     else:
-        transform = fit_similarity(ref_xy[ref_sample_idx], xy[ref_sample_idx])
+        # Full-substrate card: substrate_rows index it directly.
+        transform = fit_similarity(ref_xy[ref_positions], xy[substrate_rows])
         aligned = transform(xy)
     render_png(binned_counts(aligned, ref_extent), png)
-    meta.write_text(json.dumps({"key": key, "aligned_to": ref["name"],
+    meta.write_text(json.dumps({"key": key, "aligned_to": ref["frame"]["name"],
+                                "via_anchor": ref["anchor"]["name"],
                                 "extent": ref_extent}))
     return png
 
@@ -247,18 +290,45 @@ def main() -> int:
     cards = collect()
     SITE.mkdir(parents=True, exist_ok=True)
 
+    from map_renders import robust_extent
+
     refs: dict[str, tuple] = {}
     rng = np.random.default_rng(1)
     for rung in ("2m", "6250k"):
-        ref = pick_reference(cards, rung)
-        if ref is None:
+        frame = pick_reference(cards, rung)
+        if frame is None:
             continue
-        ref_xy = np.asarray(np.load(ref["coords"], mmap_mode="r"), dtype=np.float32)
-        from map_renders import robust_extent
-        extent = robust_extent(ref_xy)
-        sample_idx = np.sort(rng.choice(len(ref_xy),
-                                        min(FIT_SAMPLE, len(ref_xy)), replace=False))
-        refs[rung] = (ref, ref_xy, extent, sample_idx)
+        frame_xy = np.asarray(np.load(frame["coords"], mmap_mode="r"), dtype=np.float32)
+        extent = robust_extent(frame_xy)
+        if frame["rows"] is not None:
+            # Two-stage anchor (cuML frame): siblings fitted directly onto cuML
+            # would each inherit its weak cross-method correspondence and lose
+            # mutual consistency. Instead align the parametric anchor onto cuML
+            # ONCE, then fit every sibling to the anchored parametric frame
+            # through full shared rows (high correspondence).
+            anchor = next((c for c in cards if c["rung"] == rung
+                           and c["rows"] is None
+                           and c["name"] in REFERENCE_PREFERENCE), None)
+            if anchor is None:
+                continue
+            frame_rows = np.load(frame["rows"])
+            idx = np.sort(rng.choice(len(frame_rows),
+                                     min(FIT_SAMPLE, len(frame_rows)), replace=False))
+            anchor_raw = np.asarray(np.load(anchor["coords"], mmap_mode="r"),
+                                    dtype=np.float32)
+            t1 = fit_similarity(frame_xy[idx], anchor_raw[frame_rows[idx]])
+            ref_xy = t1(anchor_raw)          # the anchor, expressed in cuML's frame
+            n_rows = len(ref_xy)
+            positions = np.sort(rng.choice(n_rows, min(FIT_SAMPLE, n_rows),
+                                           replace=False))
+            refs[rung] = ({"frame": frame, "anchor": anchor}, ref_xy, extent,
+                          positions, positions)
+        else:
+            positions = np.sort(rng.choice(len(frame_xy),
+                                           min(FIT_SAMPLE, len(frame_xy)),
+                                           replace=False))
+            refs[rung] = ({"frame": frame, "anchor": frame}, frame_xy, extent,
+                          positions, positions)
 
     sections = []
     for key, title, blurb in GROUPS:
@@ -269,14 +339,15 @@ def main() -> int:
         for c in group:
             if c["rung"] not in refs:
                 continue
-            ref, ref_xy, extent, sample_idx = refs[c["rung"]]
-            png = aligned_render(c, ref, ref_xy, extent, sample_idx)
+            ref, ref_xy, extent, positions, substrate_rows = refs[c["rung"]]
+            png = aligned_render(c, ref, ref_xy, extent, positions, substrate_rows)
             name = png.name
             shutil.copy2(png, SITE / name)
             caption = (f"quick {fmt(c['quick_ffr'])} · heldout {fmt(c['heldout_ffr'])} · "
                        f"net−reg {fmt(c['net_minus_regressor'])} · r10/R {fmt(c['r10'], 5)} · "
                        f"tissue {fmt(c['tissue'])}")
-            aligned_note = "" if c is ref else f' · aligned to {html.escape(ref["name"])}'
+            aligned_note = ("" if c is ref["frame"] else
+                            f' · aligned into {html.escape(ref["frame"]["name"])} frame')
             figs.append(
                 f'<figure style="margin:0"><img src="{name}" loading="lazy" '
                 f'style="width:100%;border:1px solid #ddd;border-radius:6px">'
