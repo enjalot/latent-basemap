@@ -160,6 +160,15 @@ ARMS: dict[str, dict] = {
     # BCE of negatives whose current 2D pair distance is in [0.1, 0.4] x p90
     # map radius, by (1 + fneg_weight). Reweighting, not resampling. One arm.
     "umap-md000-x4-fneg10": _umap("000", dose=4, fneg_weight=1.0),
+    # 4C follow-up: is fog a monotone dial in fneg_weight? fneg10 Pareto-beat
+    # the base (heldFFR 0.411, tissue 0.371); push the weight to chase the
+    # clean corner and bracket the sweet spot.
+    "umap-md000-x4-fneg30": _umap("000", dose=4, fneg_weight=3.0),
+    # 4C SCALE CHECK (code-71 owner call): fneg at 6.25M dose-x2, matched to the
+    # existing no-fneg control umap-md000-x2 at 6250k. Tests whether fneg10's
+    # 2M Pareto-win (fog down + fidelity up, healthy) reproduces at scale — the
+    # program law that a 2M result never carries upward without same-N evidence.
+    "umap-md000-x2-fneg10": _umap("000", dose=2, fneg_weight=1.0),
 }
 
 
