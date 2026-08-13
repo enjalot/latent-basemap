@@ -32,7 +32,7 @@ SITE = Path.home() / ".agent/basemap-maps/sandbox/kernels"
 HELDOUT = SANDBOX / "2m-knobs/heldout-eval.json"
 CACHE = SANDBOX / ".aligned-cache"
 REGISTRY = Path("/data/latent-basemap/maps.json")
-CACHE_VERSION = 5   # v5: two-stage cuML-frame anchoring, outlier-trimmed variance-matched fit
+CACHE_VERSION = 6   # v6: frame extent from the trimmed reference core
 FIT_SAMPLE = 200_000
 
 EXPERIMENTS = Path(__file__).resolve().parents[1]
@@ -318,12 +318,18 @@ def main() -> int:
 
     refs: dict[str, tuple] = {}
     rng = np.random.default_rng(1)
-    for rung in ("2m", "6250k"):
+    for rung in ("2m", "6250k", "12500k"):
         frame = pick_reference(cards, rung)
         if frame is None:
             continue
         frame_xy = np.asarray(np.load(frame["coords"], mmap_mode="r"), dtype=np.float32)
-        extent = robust_extent(frame_xy)
+        # Frame extent from the frame's trimmed core, not its full point set:
+        # cuML maps can carry a sparse far halo (<0.5% of points) that
+        # stretches percentile extents and shrinks every aligned card into the
+        # middle of an empty frame (seen at 12.5M).
+        radii = np.linalg.norm(frame_xy - np.median(frame_xy, axis=0), axis=1)
+        core = frame_xy[radii <= np.percentile(radii, 99.5)]
+        extent = robust_extent(core)
         if "cuML" in frame["name"]:
             # Two-stage anchor (cuML frame): siblings fitted directly onto cuML
             # would each inherit its weak cross-method correspondence and lose
@@ -333,6 +339,14 @@ def main() -> int:
             anchor = next((c for c in cards if c["rung"] == rung
                            and c["rows"] is None
                            and c["name"] in REFERENCE_PREFERENCE), None)
+            if anchor is None:
+                # Rungs whose only parametric card is a non-preferred arm
+                # (12.5M has just the fneg drift cell) still deserve a frame:
+                # any full-substrate non-cuML card anchors; with one sibling
+                # there is no sibling-consistency concern.
+                anchor = next((c for c in cards if c["rung"] == rung
+                               and c["rows"] is None
+                               and "cuML" not in c["name"]), None)
             if anchor is None:
                 continue
             anchor_raw = np.asarray(np.load(anchor["coords"], mmap_mode="r"),
