@@ -1,0 +1,30 @@
+{
+ "method": "R0234 Gaussian null, median +/- k * MAD_n, 95/95",
+ "runs": {
+  "13": {
+   "confidence": 0.95,
+   "content": 0.95,
+   "families": 4000000,
+   "n": 13,
+   "one_sided_multiplier": 3.7363661743730416,
+   "published_two_sided_multiplier": 4.452408030160313,
+   "relative_error_vs_published": -8.815170815523743e-14,
+   "seed": 20260809,
+   "two_sided_multiplier": 4.45240803015992,
+   "z_content": 1.6448536269514724
+  },
+  "29": {
+   "confidence": 0.95,
+   "content": 0.95,
+   "families": 4000000,
+   "n": 29,
+   "one_sided_multiplier": 2.6934393367626033,
+   "published_two_sided_multiplier": 3.147763220676551,
+   "relative_error_vs_published": 3.0686564400639327e-13,
+   "seed": 20260809,
+   "two_sided_multiplier": 3.147763220677517,
+   "z_content": 1.6448536269514724
+  }
+ },
+ "validation_target_n13_k2": 4.452408030160313
+}

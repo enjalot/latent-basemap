@@ -1,0 +1,45 @@
+{
+ "validation_gate_n13": {
+  "gate": "reproduce_r0234_n13_one_sided_madn_multiplier",
+  "sealed_value": 3.7363661743730416,
+  "sealed_source": "/data/latent-basemap/runs/round-0234/queue/artifacts/minilm-mixed-2m-calibrated-robust-floors-n13-v1/minilm-calibrated-robust-floors-n13.json",
+  "sealed_key": "calibration.n13.candidates.median_minus_k_madn.one_sided.calibrated_multiplier",
+  "reproduced_value": 3.7363661743730416,
+  "relative_error": 0.0,
+  "tolerance": 0.02,
+  "passes": true,
+  "reproduced_false_fail_rate": 0.009172109999105104,
+  "reproduced_detection_power": {
+   "minus_1_sigma": 0.050658268300140946,
+   "minus_2_sigma": 0.17146402274028838,
+   "minus_3_sigma": 0.3865586190993393
+  }
+ },
+ "n29": {
+  "estimator": "median_minus_k_madn",
+  "madn_consistency": 1.4826,
+  "n": 29,
+  "families_simulated": 4000000,
+  "seed": 20260809,
+  "content": 0.95,
+  "confidence": 0.95,
+  "z_content": 1.6448536269514722,
+  "calibrated_multiplier": 2.6934393367626024,
+  "delivered_coverage": 0.95,
+  "new_cell_false_fail_rate": 0.012232837963810885,
+  "detection_power": {
+   "minus_1_sigma": 0.08348317559113318,
+   "minus_2_sigma": 0.30055933144175795,
+   "minus_3_sigma": 0.6283649798954166
+  }
+ },
+ "n29_agreement_with_sealed_r0255": {
+  "sealed_value": 2.6934393367626024,
+  "sealed_source": "/data/latent-basemap/runs/round-0255/queue/artifacts/minilm-mixed-2m-calibrated-madn-floors-n29-v1/minilm-calibrated-madn-floors-n29.json",
+  "sealed_key": "calibration.n29.candidates.median_minus_k_madn.one_sided.calibrated_multiplier",
+  "reproduced_value": 2.6934393367626024,
+  "relative_error": 0.0
+ },
+ "families_simulated": 4000000,
+ "seed": 20260809
+}
