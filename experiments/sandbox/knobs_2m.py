@@ -80,6 +80,21 @@ RUNGS: dict[str, dict] = {
         "base_horizon": 514_889,         # 0.6782 draws/edge at 310.5M directed edges
         "out_root": Path("/data/latent-basemap/sandbox/12500k-knobs"),
     },
+    "25000k": {
+        # P1 analysis-v2 4th x2 point (owner-approved 2026-08-13): 25M on the
+        # sealed R0236 nested substrate + cluster-spill fuzzy graph. Recipe
+        # reference R0257 (rung-invariant; receipt_diff checks recipe fields only).
+        "rows": 25_000_000,
+        "substrate": Path("/data/latent-basemap/runs/round-0236/queue-correction-2/artifacts"
+                          "/minilm-mixed-25000k-nested-substrate-and-reserves-v1/substrate.f32.npy"),
+        "edges": Path("/data/latent-basemap/runs/round-0236/queue-correction-2/artifacts"
+                      "/minilm-mixed-25000k-cluster-spill-k15-fuzzy-graph-v1/edges-k15-fuzzy.npz"),
+        "directed_edges": 625_148_276,
+        "sealed_checkpoint": Path("/data/latent-basemap/runs/round-0257/queue/artifacts"
+                                  "/minilm-mixed-6250k-ladder-map-seed42-v1/train_seed42-model.pt"),
+        "base_horizon": 1_036_615,       # 0.6782 draws/edge at 625.1M directed edges
+        "out_root": Path("/data/latent-basemap/sandbox/25000k-knobs"),
+    },
 }
 
 # The registered treatment shared by R0217 and R0257 (seed aside).
