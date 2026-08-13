@@ -2326,6 +2326,16 @@ class ParametricUMAP:
             pos_ratio=save_dict.get('pos_ratio', 0.5),
             architecture=save_dict.get('architecture', 'mlp'),
             positive_target_mode=save_dict.get('positive_target_mode', 'probability'),
+            # Sandbox mechanism params (2026-08-13 review finding: save() wrote
+            # these but load() silently reset them to defaults, so a reloaded
+            # fneg checkpoint reported fneg_weight=0.0 — wrong provenance and
+            # wrong resume behavior. Transform-only scoring was unaffected.)
+            density_weight=save_dict.get('density_weight', 0.0),
+            density_radii_path=save_dict.get('density_radii_path', ''),
+            density_nn_path=save_dict.get('density_nn_path', ''),
+            fneg_weight=save_dict.get('fneg_weight', 0.0),
+            fneg_lo=save_dict.get('fneg_lo', 0.1),
+            fneg_hi=save_dict.get('fneg_hi', 0.4),
         )
 
         state_dict = save_dict['model_state_dict']
