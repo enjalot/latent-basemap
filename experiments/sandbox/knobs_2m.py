@@ -79,6 +79,7 @@ BASE_KWARGS = dict(
 # umap-kernel (a, b) fits at spread=1 (scipy curve_fit, verified 2026-08-12).
 MD = {
     "000": {"a": 1.9328, "b": 0.7905},   # min_dist 0.0
+    "0025": {"a": 1.8404, "b": 0.8160},  # min_dist 0.025 (phase 3c; fit verified vs published md010 before minting)
     "005": {"a": 1.7502, "b": 0.8421},   # min_dist 0.05
     "010": {"a": 1.5769, "b": 0.8951},   # min_dist 0.1
     "020": {"a": 1.2621, "b": 1.0030},   # min_dist 0.2
@@ -121,6 +122,39 @@ ARMS: dict[str, dict] = {
     # pos_ratio at fixed horizon; exploratory, documented in PLAN3)
     "umap-pos02-x2": _umap("010", dose=2, pos_ratio=0.02),
     "umap-pos15-x2": _umap("010", dose=2, pos_ratio=0.15),
+    # phase 3c reserve (code-71 decision 2026-08-12): finer min_dist between the
+    # two best (md000/md005), and md000 at dose x4 to test if convergence keeps
+    # buying fidelity or creeps toward collapse.
+    "umap-md0025-x2": _umap("0025", dose=2),
+    "umap-md000-x4": _umap("000", dose=4),
+    # phase 4A (PLAN4-fog): mid-near PaCMAP attractive term on the winner base.
+    # Existing dormant core machinery (midnear_enabled/mn_pairs_per_batch);
+    # values bracket the ~409 positives/batch (small/≈match/large). One
+    # mechanism per arm. Loss semantics stamped in the arm summary.
+    "umap-md000-x4-mn100":  _umap("000", dose=4, midnear_enabled=True, mn_pairs_per_batch=100),
+    "umap-md000-x4-mn410":  _umap("000", dose=4, midnear_enabled=True, mn_pairs_per_batch=410),
+    "umap-md000-x4-mn1600": _umap("000", dose=4, midnear_enabled=True, mn_pairs_per_batch=1600),
+    # phase 4B (PLAN4-fog): densMAP-style local-density term on the winner base.
+    # Opt-in core params (default-off), log-spaced density_weight. r_hd =
+    # per-row mean cosine distance to sealed-graph neighbors (precomputed).
+    "umap-md000-x4-dw01": _umap("000", dose=4, density_weight=0.1,
+                                density_radii_path="/data/latent-basemap/sandbox/density-radii-2m.npy"),
+    "umap-md000-x4-dw03": _umap("000", dose=4, density_weight=0.3,
+                                density_radii_path="/data/latent-basemap/sandbox/density-radii-2m.npy"),
+    "umap-md000-x4-dw10": _umap("000", dose=4, density_weight=1.0,
+                                density_radii_path="/data/latent-basemap/sandbox/density-radii-2m.npy"),
+    # phase 4B faithful discriminator: same density term but the 2D radius r_2d
+    # is measured to each anchor's TRUE nearest graph neighbour (precomputed
+    # density-nn-2m.npy), not the crude nearest-of-6-random surrogate. If the
+    # crude sweep's fog INCREASE is a surrogate artifact, these should behave
+    # differently (fog flat or down); if the term genuinely fails here, they
+    # confirm it. One knob changed vs the matching dw arm (density_nn_path).
+    "umap-md000-x4-dw01-nn": _umap("000", dose=4, density_weight=0.1,
+                                   density_radii_path="/data/latent-basemap/sandbox/density-radii-2m.npy",
+                                   density_nn_path="/data/latent-basemap/sandbox/density-nn-2m.npy"),
+    "umap-md000-x4-dw03-nn": _umap("000", dose=4, density_weight=0.3,
+                                   density_radii_path="/data/latent-basemap/sandbox/density-radii-2m.npy",
+                                   density_nn_path="/data/latent-basemap/sandbox/density-nn-2m.npy"),
 }
 
 

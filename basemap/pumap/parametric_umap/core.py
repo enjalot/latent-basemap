@@ -66,6 +66,17 @@ class ParametricUMAP:
         midnear_enabled=False,
         mn_pairs_per_batch=0,
         mn_weight_scale=1.0,
+        # densMAP-style local-density term (PLAN4 Track 4B, opt-in, default-off).
+        # Aligns each anchor's local 2D radius with its precomputed high-D k15
+        # radius in log space. density_weight=0.0 leaves every existing config
+        # byte-identical (the term's code is guarded by `density_weight > 0`).
+        density_weight=0.0,
+        density_radii_path="",
+        # Optional faithful local partner for r_2d: a precomputed per-row TRUE
+        # nearest-neighbour id. When set, the density term measures the 2D
+        # distance to each anchor's actual nearest neighbour (a genuine local
+        # radius) instead of the crude nearest-of-6-random surrogate.
+        density_nn_path="",
         weighted_edge_sampling=False,
         gpu_resident_data="auto",
         gpu_resident_vram_budget_gb=10.0,
@@ -140,6 +151,9 @@ class ParametricUMAP:
         self.midnear_enabled = midnear_enabled
         self.mn_pairs_per_batch = mn_pairs_per_batch
         self.mn_weight_scale = mn_weight_scale
+        self.density_weight = density_weight
+        self.density_radii_path = density_radii_path
+        self.density_nn_path = density_nn_path
         self.weighted_edge_sampling = weighted_edge_sampling
         self.graph_manifest_path = graph_manifest_path
         self.graph_manifest_sha256 = graph_manifest_sha256
@@ -1080,6 +1094,70 @@ class ParametricUMAP:
                                    near_idx]                       # (m, D)
         return anchor_feats, partner_feats
 
+    def _sample_density_features(self, dataset, n_anchors, n_train, rng,
+                                 n_candidates=6):
+        """Non-device counterpart of ``_sample_density_features_device`` (lazy
+        path / CPU smoke). Same selection: nearest of ``n_candidates`` random
+        rows as the near-neighbour; gathers r_hd for the anchors.
+        """
+        anchors = rng.randint(0, n_train, size=n_anchors)
+        anchor_feats = self._gather_feature_rows(dataset, anchors)
+        if self._density_nn_dev is not None:
+            # faithful: the anchor's TRUE nearest neighbour
+            near_ids = self._density_nn_dev.index_select(
+                0, torch.as_tensor(anchors, device=self._density_nn_dev.device))
+            near_feats = self._gather_feature_rows(
+                dataset, near_ids.cpu().numpy())
+        else:
+            # crude surrogate: nearest of n_candidates random rows
+            cands = rng.randint(0, n_train, size=n_anchors * n_candidates)
+            cand_feats = self._gather_feature_rows(dataset, cands).view(
+                n_anchors, n_candidates, -1)
+            with torch.no_grad():
+                d = torch.linalg.vector_norm(
+                    anchor_feats.unsqueeze(1).float() - cand_feats.float(), dim=2)
+                near_idx = torch.topk(d, k=1, dim=1, largest=False).indices[:, 0]
+            near_feats = cand_feats[torch.arange(n_anchors, device=cand_feats.device),
+                                    near_idx]
+        r_hd_anchor = self._density_radii_dev.index_select(
+            0, torch.as_tensor(anchors, device=self._density_radii_dev.device))
+        return anchor_feats, near_feats, r_hd_anchor
+
+    def _sample_density_features_device(self, n_anchors, n_train, gen,
+                                        n_candidates=6):
+        """Device-resident sampling for the densMAP-style density term (4B).
+
+        Draws ``n_anchors`` random anchors, gathers their features, their
+        precomputed high-D k15 radius ``r_hd`` (``self._density_radii_dev``,
+        indexed by row id), and a near-neighbour: the NEAREST of
+        ``n_candidates`` random rows in high-D (rank=0), whose 2D distance to
+        the anchor serves as the local-2D-radius surrogate. Mirrors
+        ``_sample_midnear_features_device`` exactly (same draw/gather path) so
+        it touches no legacy code. Returns
+        ``(anchor_feats, near_feats, r_hd_anchor)``.
+        """
+        X_dev = self._X_dev
+        anchors = torch.randint(0, n_train, (n_anchors,), generator=gen,
+                                device=self.device)
+        anchor_feats = X_dev.index_select(anchors)
+        if self._density_nn_dev is not None:
+            # faithful: the anchor's TRUE nearest neighbour
+            near_ids = self._density_nn_dev.index_select(0, anchors)
+            near_feats = X_dev.index_select(near_ids)
+        else:
+            # crude surrogate: nearest of n_candidates random rows
+            cands = torch.randint(0, n_train, (n_anchors * n_candidates,),
+                                  generator=gen, device=self.device)
+            cand_feats = X_dev.index_select(cands).view(n_anchors, n_candidates, -1)
+            with torch.no_grad():
+                d = torch.linalg.vector_norm(
+                    anchor_feats.unsqueeze(1) - cand_feats, dim=2)  # (m, C)
+                near_idx = torch.topk(d, k=1, dim=1, largest=False).indices[:, 0]
+            near_feats = cand_feats[torch.arange(n_anchors, device=self.device),
+                                    near_idx]
+        r_hd_anchor = self._density_radii_dev.index_select(0, anchors)  # (m,)
+        return anchor_feats, near_feats, r_hd_anchor
+
     def fit(self, X, y=None,
             resample_negatives=False,
             n_processes=6,
@@ -1169,6 +1247,9 @@ class ParametricUMAP:
                 "anchor_holdout_fraction": self.anchor_holdout_fraction,
                 "midnear_enabled": self.midnear_enabled,
                 "mn_pairs_per_batch": self.mn_pairs_per_batch,
+                "density_weight": self.density_weight,
+                "density_radii_path": self.density_radii_path,
+                "density_nn_path": self.density_nn_path,
                 "mn_weight_scale": self.mn_weight_scale,
                 "gpu_resident_data": str(self.gpu_resident_data),
                 "gpu_resident_vram_budget_gb": self.gpu_resident_vram_budget_gb,
@@ -1364,6 +1445,33 @@ class ParametricUMAP:
         if self._fast_device_path:
             mn_gen = torch.Generator(device=self.device)
             mn_gen.manual_seed(int(random_state) + 104729)
+
+        # ── densMAP-style local-density term setup (PLAN4 Track 4B, opt-in) ──
+        dens_gen = None
+        dens_rng = np.random.RandomState(random_state + 60013)
+        self._density_radii_dev = None
+        self._density_nn_dev = None
+        if self.density_weight > 0:
+            if not self.density_radii_path:
+                raise RuntimeError("density_weight > 0 requires density_radii_path")
+            _r_hd = np.load(self.density_radii_path)
+            if _r_hd.shape[0] != n_train_rows:
+                raise RuntimeError(
+                    f"density radii rows {_r_hd.shape[0]} != n_train_rows {n_train_rows}")
+            # resident on the training device (fast path) or CPU (lazy path)
+            self._density_radii_dev = torch.as_tensor(
+                _r_hd.astype(np.float32), device=self.device)
+            self._density_nn_dev = None
+            if self.density_nn_path:
+                _nn = np.load(self.density_nn_path)
+                if _nn.shape[0] != n_train_rows:
+                    raise RuntimeError(
+                        f"density nn rows {_nn.shape[0]} != n_train_rows {n_train_rows}")
+                self._density_nn_dev = torch.as_tensor(
+                    _nn.astype(np.int64), device=self.device)
+            if self._fast_device_path:
+                dens_gen = torch.Generator(device=self.device)
+                dens_gen.manual_seed(int(random_state) + 60013)
 
         # ── Anchor-hold sampler setup (reference-atlas distillation, §4.3) ──
         hold_rng = np.random.RandomState(random_state + 92821)
@@ -1639,6 +1747,34 @@ class ParametricUMAP:
                         w_mn *= self.mn_weight_scale
                         loss = loss + w_mn * mn_loss
                         mn_loss_val = mn_loss.item() if use_wandb else 0.0
+
+                # ── densMAP-style local-density term (PLAN4 Track 4B, opt-in) ──
+                # Align each anchor's local 2D radius (2D distance to a high-D
+                # near neighbour) with its precomputed high-D k15 radius, in log
+                # space, batch-standardised. Minimised when the 2D layout
+                # preserves the high-D local density ordering. Guarded by
+                # density_weight > 0 so the frozen recipe is byte-identical.
+                dens_loss_val = 0.0
+                if self.density_weight > 0:
+                    d_m = int((targets > 0.5).sum().item()) or self.batch_size
+                    if self._fast_device_path:
+                        a_feats, near_feats, r_hd_a = \
+                            self._sample_density_features_device(d_m, n_train_rows, dens_gen)
+                    else:
+                        a_feats, near_feats, r_hd_a = \
+                            self._sample_density_features(dataset, d_m, n_train_rows, dens_rng)
+                    with torch.autocast(device_type='cuda' if use_amp else 'cpu',
+                                        enabled=bool(use_amp), dtype=amp_dtype):
+                        z_a = self.model(a_feats)
+                        z_n = self.model(near_feats)
+                    r_2d = torch.linalg.vector_norm(z_a.float() - z_n.float(), dim=1)
+                    la = torch.log(r_2d + 1e-6)
+                    lh = torch.log(r_hd_a.float() + 1e-6)
+                    la = (la - la.mean()) / (la.std() + 1e-6)
+                    lh = (lh - lh.mean()) / (lh.std() + 1e-6)
+                    dens_loss = (la - lh).pow(2).mean()
+                    loss = loss + self.density_weight * dens_loss
+                    dens_loss_val = dens_loss.item() if use_wandb else 0.0
 
                 # ── Anchor-hold term (reference-atlas distillation, §4.3 / O2
                 # sparse-landmark growth hold) ──
@@ -2111,6 +2247,9 @@ class ParametricUMAP:
             'clip_grad_value': self.clip_grad_value,
             'pos_ratio': self.pos_ratio,
             'positive_target_mode': self.positive_target_mode,
+            'density_weight': self.density_weight,
+            'density_radii_path': self.density_radii_path,
+            'density_nn_path': self.density_nn_path,
         }
         torch.save(save_dict, path)
 
