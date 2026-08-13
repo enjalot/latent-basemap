@@ -77,6 +77,16 @@ class ParametricUMAP:
         # distance to each anchor's actual nearest neighbour (a genuine local
         # radius) instead of the crude nearest-of-6-random surrogate.
         density_nn_path="",
+        # Fog-targeted negatives (PLAN4 Track 4C, opt-in, default-off). Extra
+        # repulsion where fog lives: negatives whose CURRENT 2D pair distance
+        # falls in [fneg_lo, fneg_hi] x p90-map-radius get their BCE term
+        # up-weighted by (1 + fneg_weight). Reweighting, not resampling — the
+        # gradient effect is identical to oversampling those pairs and it needs
+        # no sampler change. fneg_weight=0.0 leaves every existing config
+        # byte-identical (guarded by `fneg_weight > 0`).
+        fneg_weight=0.0,
+        fneg_lo=0.1,
+        fneg_hi=0.4,
         weighted_edge_sampling=False,
         gpu_resident_data="auto",
         gpu_resident_vram_budget_gb=10.0,
@@ -154,6 +164,9 @@ class ParametricUMAP:
         self.density_weight = density_weight
         self.density_radii_path = density_radii_path
         self.density_nn_path = density_nn_path
+        self.fneg_weight = fneg_weight
+        self.fneg_lo = fneg_lo
+        self.fneg_hi = fneg_hi
         self.weighted_edge_sampling = weighted_edge_sampling
         self.graph_manifest_path = graph_manifest_path
         self.graph_manifest_sha256 = graph_manifest_sha256
@@ -1250,6 +1263,9 @@ class ParametricUMAP:
                 "density_weight": self.density_weight,
                 "density_radii_path": self.density_radii_path,
                 "density_nn_path": self.density_nn_path,
+                "fneg_weight": self.fneg_weight,
+                "fneg_lo": self.fneg_lo,
+                "fneg_hi": self.fneg_hi,
                 "mn_weight_scale": self.mn_weight_scale,
                 "gpu_resident_data": str(self.gpu_resident_data),
                 "gpu_resident_vram_budget_gb": self.gpu_resident_vram_budget_gb,
@@ -1692,7 +1708,29 @@ class ParametricUMAP:
                 # precision, then compute BCE in fp32.
                 targets_for_loss = torch.nan_to_num(targets.float(), nan=0.0, posinf=1.0, neginf=0.0)
                 targets_for_loss = torch.clamp(targets_for_loss, min=0.0, max=1.0)
-                umap_loss = self.loss_fn(qs.float(), targets_for_loss)
+                if self.fneg_weight > 0:
+                    # Track 4C: up-weight the BCE of mid-range negatives (extra
+                    # repulsion where fog lives). "Mid-range" = 2D pair distance
+                    # in [fneg_lo, fneg_hi] x p90 map radius, both measured this
+                    # batch. Reweighting is gradient-equivalent to oversampling
+                    # those negatives; no sampler change, legacy path untouched.
+                    per_elem = torch.nn.functional.binary_cross_entropy(
+                        qs.float(), targets_for_loss, reduction="none")
+                    w = torch.ones_like(per_elem)
+                    with torch.no_grad():
+                        endpts = torch.cat([src_embeddings, dst_embeddings], dim=0).float()
+                        center = endpts.mean(dim=0)
+                        pr = torch.linalg.vector_norm(endpts - center, dim=1)
+                        R = torch.quantile(pr, 0.9)
+                        r2d = torch.linalg.vector_norm(
+                            (src_embeddings - dst_embeddings).float(), dim=1)
+                        band = ((targets_for_loss < 0.5)
+                                & (r2d >= self.fneg_lo * R)
+                                & (r2d <= self.fneg_hi * R))
+                    w = w + band.float() * self.fneg_weight
+                    umap_loss = (per_elem * w).sum() / w.sum()
+                else:
+                    umap_loss = self.loss_fn(qs.float(), targets_for_loss)
                 # P0.3: skip the correlation branch entirely when its weight is 0
                 # (the frozen recipe). It computed two 384-D distance vectors +
                 # a sync-forcing Pearson every batch, and `0 * NaN = NaN` could
@@ -2250,6 +2288,9 @@ class ParametricUMAP:
             'density_weight': self.density_weight,
             'density_radii_path': self.density_radii_path,
             'density_nn_path': self.density_nn_path,
+            'fneg_weight': self.fneg_weight,
+            'fneg_lo': self.fneg_lo,
+            'fneg_hi': self.fneg_hi,
         }
         torch.save(save_dict, path)
 

@@ -155,6 +155,11 @@ ARMS: dict[str, dict] = {
     "umap-md000-x4-dw03-nn": _umap("000", dose=4, density_weight=0.3,
                                    density_radii_path="/data/latent-basemap/sandbox/density-radii-2m.npy",
                                    density_nn_path="/data/latent-basemap/sandbox/density-nn-2m.npy"),
+    # phase 4C (PLAN4-fog): fog-targeted negatives — the only repulsion-class
+    # lever (4A/4B are attraction/matching, both inflate fog). Up-weights the
+    # BCE of negatives whose current 2D pair distance is in [0.1, 0.4] x p90
+    # map radius, by (1 + fneg_weight). Reweighting, not resampling. One arm.
+    "umap-md000-x4-fneg10": _umap("000", dose=4, fneg_weight=1.0),
 }
 
 
