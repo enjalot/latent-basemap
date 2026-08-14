@@ -415,6 +415,19 @@ def _build_fneg_model(config: Mapping[str, Any]):
             "R0265 model was built with weighted_edge_sampling="
             f"{model.weighted_edge_sampling!r}; the promoted recipe is uniform sampling"
         )
+    # Manifest posture: match the sandbox. `_new_model` hardcodes require_graph_manifest
+    # =True and binds graph_manifest_path to the R0216 substrate-graph.json — values the
+    # R0217 WRAPPER path validates via its own graph_signatures, so they were inert there.
+    # The raw-array uniform path instead feeds graph_manifest_path to core.fit's P0-E
+    # validator, which expects core's `graph_manifest.v1` schema (top-level n_nodes/
+    # data_fingerprint); the R0216 file is the round's provenance schema, so the validator
+    # raises KeyError('n_nodes'). The sandbox promoted recipe used the ParametricUMAP
+    # defaults (BASE_KWARGS sets no manifest); reset to that posture. Graph/substrate
+    # identity is guaranteed here by the round's sealed-input pack (the queue binds the
+    # edges .npz and substrate .npy by sha256, verified at preflight), not P0-E.
+    model.require_graph_manifest = False
+    model.graph_manifest_path = None
+    model.graph_manifest_sha256 = None
     return model
 
 
