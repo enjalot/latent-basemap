@@ -47,7 +47,12 @@ CELLS = {  # (dose, N): coords path
     ("x2", 2_000_000):  f"{SB}/2m-knobs/umap-md000-x2-fneg10/coordinates.npy",
     ("x2", 6_250_000):  f"{SB}/6250k-knobs/umap-md000-x2-fneg10/coordinates.npy",
     ("x2", 12_500_000): f"{SB}/12500k-knobs/umap-md000-x2-fneg10/coordinates.npy",
-    ("x2", 25_000_000): f"{SB}/25000k-knobs/umap-md000-x2-fneg10/coordinates.npy",
+    # 25M is the host-int8 arm: fp32 X (35.76 GiB) OOMs the 32 GB card, so >20M
+    # rungs are int8-path (P5 passed: 2M int8-vs-fp32 delta collapse -0.040/fog
+    # -0.052, < seed variation). Path corrected 2026-08-14 BEFORE the 25M int8
+    # coords existed (prospective, not fit-to-data); fit form/band/seed/rule
+    # byte-unchanged. The 6.25M int8-vs-fp32 delta is published beside the verdict.
+    ("x2", 25_000_000): f"{SB}/25000k-knobs/umap-md000-x2-fneg10-hostint8/coordinates.npy",
     ("x4", 2_000_000):  f"{SB}/2m-knobs/umap-md000-x4-fneg10/coordinates.npy",
     ("x4", 6_250_000):  f"{SB}/6250k-knobs/umap-md000-x4-fneg10/coordinates.npy",
     ("x4", 12_500_000): f"{SB}/12500k-knobs/umap-md000-x4-fneg10/coordinates.npy",
