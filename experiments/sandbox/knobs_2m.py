@@ -212,6 +212,11 @@ ARMS: dict[str, dict] = {
     "umap-md000-x4-hostint8": _umap("000", dose=4, x_residency="host_int8"),
     "umap-md000-x4-fneg10-hostint8": _umap("000", dose=4, fneg_weight=1.0,
                                            x_residency="host_int8"),
+    # x2 int8 siblings (P5 pass, 2026-08-14): the 6.25M int8-vs-fp32 delta cell
+    # and the 25M 4th-x2-point cell (fp32 OOMs >20M). Same DeviceEdgeSampler/
+    # uwr=False as the fp32 x2 device cells — isolates X precision only.
+    "umap-md000-x2-fneg10-hostint8": _umap("000", dose=2, fneg_weight=1.0,
+                                           x_residency="host_int8"),
 }
 
 
