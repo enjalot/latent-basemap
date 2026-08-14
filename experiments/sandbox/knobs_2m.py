@@ -97,7 +97,15 @@ RUNGS: dict[str, dict] = {
     },
 }
 
-# The registered treatment shared by R0217 and R0257 (seed aside).
+# The registered treatment shared by R0217 and R0257 (seed aside) — EXCEPT
+# sampling: this trainer's device edge-list path samples positives UNIFORMLY,
+# while R0217's sealed receipt says fuzzy-weight-proportional. That silent
+# difference was caught by R0265's seed-42 cross-check (2026-08-14). All
+# sandbox arms shared the uniform sampler, so arm-vs-arm contrasts are valid,
+# and UNIFORM is now the promoted treatment's registered sampling field (see
+# guides/plan-umap-fneg-promotion.md). The checkpoint dict does not persist a
+# sampling field, so receipt_diff cannot check it — the round program's
+# treatment closure pins weighted_edge_sampling=False with a refusal plant.
 BASE_KWARGS = dict(
     n_components=2, hidden_dim=2048, n_layers=3, n_neighbors=15,
     a=1.0, b=1.0, low_dim_kernel="legacy_lp", kernel_alpha=1.0,
