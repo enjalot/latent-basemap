@@ -202,6 +202,16 @@ ARMS: dict[str, dict] = {
     # 2M Pareto-win (fog down + fidelity up, healthy) reproduces at scale — the
     # program law that a 2M result never carries upward without same-N evidence.
     "umap-md000-x2-fneg10": _umap("000", dose=2, fneg_weight=1.0),
+    # P5 SCALE UNBLOCK (opt-in host-int8 X residency): the fp16/fp32 feature
+    # matrix will not fit VRAM at the 25M rung (fp32 X = 35.76 GiB > 32 GB card).
+    # x_residency="host_int8" keeps X in host RAM as int8 rows + fp16 scales
+    # (R0262 encoding, verified bit-for-bit vs the sealed 100M substrate) and
+    # dequantises per batch on device. One knob vs the matching fneg arm.
+    # NOTE: run only on the 25000k rung. GPU run pending owner review of the
+    # host-int8 integration report.
+    "umap-md000-x4-hostint8": _umap("000", dose=4, x_residency="host_int8"),
+    "umap-md000-x4-fneg10-hostint8": _umap("000", dose=4, fneg_weight=1.0,
+                                           x_residency="host_int8"),
 }
 
 
