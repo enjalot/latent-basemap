@@ -171,5 +171,7 @@ async function adaptReal(
         }
       : undefined,
     chunking: raw.chunking as Manifest["chunking"],
+    // written by mirror_pack.py when the pack ships model/ (see types.ts)
+    model: raw.model as Manifest["model"],
   };
 }

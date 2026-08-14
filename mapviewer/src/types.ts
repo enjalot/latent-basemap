@@ -89,6 +89,19 @@ export interface Manifest {
     suffix?: string;
     files: Record<string, { bytes: number; parts: number }>;
   };
+  /**
+   * In-browser projection assets, written by `scripts/mirror_pack.py` when the
+   * pack ships `model/`. Declared in the manifest rather than probed, so the
+   * viewer never 404s looking for a head that isn't there.
+   */
+  model?: {
+    /** relative to the pack base — mappack-models-v1 */
+    models_json: string;
+    /** relative to the pack base — ONNX map head, fp32, dynamic batch */
+    map_head: string;
+    map_head_bytes?: number;
+    encoder?: string;
+  };
 }
 
 export interface PackIndexEntry {

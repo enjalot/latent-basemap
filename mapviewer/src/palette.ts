@@ -25,6 +25,8 @@ export const CORPUS_FALLBACK = [
 ];
 
 export function hexToRgb(hex: string): [number, number, number] {
+  const rgb = /rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/.exec(hex);
+  if (rgb) return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])];
   const h = hex.replace("#", "");
   const v =
     h.length === 3

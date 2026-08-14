@@ -47,6 +47,66 @@ function decode(
   return { n, u, v, corpus, id, minz };
 }
 
+/**
+ * A spatial index over `lod.bin` so a draw only submits the vertices that can
+ * be on screen.
+ *
+ * The file is ordered "min_zoom, then finest tile id" (map_pack.build_lod), so
+ * within one min-zoom band the records for a row-major run of tiles are
+ * contiguous. `tileStart[band]` holds absolute record offsets for every finest
+ * tile plus a terminator, which turns "draw the visible tiles" into a handful
+ * of `drawArrays` ranges instead of one 1.8M-vertex draw.
+ *
+ * The order is verified rather than trusted: if any band is not sorted by tile
+ * id, the index is refused and the caller falls back to the prefix draw.
+ */
+export interface LodIndex {
+  z: number;
+  /** per band: record offsets, length (1<<z)^2 + 1 */
+  tileStart: Int32Array[];
+}
+
+export function buildLodIndex(
+  b: PointBatch,
+  z: number,
+  zoomOffsets: number[] | undefined,
+): LodIndex | null {
+  if (!b.n) return null;
+  const n = 1 << z;
+  const nTiles = n * n;
+  // band boundaries in records; without min_zoom_offsets treat it as one band
+  const bounds: [number, number][] = [];
+  if (zoomOffsets && zoomOffsets.length >= 2) {
+    for (let i = 0; i + 1 < zoomOffsets.length; i++) {
+      const lo = Math.min(zoomOffsets[i], b.n);
+      const hi = Math.min(zoomOffsets[i + 1], b.n);
+      if (hi > lo) bounds.push([lo, hi]);
+      else bounds.push([lo, lo]);
+    }
+  } else {
+    bounds.push([0, b.n]);
+  }
+
+  const tileStart: Int32Array[] = [];
+  for (const [lo, hi] of bounds) {
+    const starts = new Int32Array(nTiles + 1);
+    let prev = -1;
+    for (let i = lo; i < hi; i++) {
+      const tx = Math.min(n - 1, Math.max(0, Math.floor(b.u[i] * n)));
+      const ty = Math.min(n - 1, Math.max(0, Math.floor(b.v[i] * n)));
+      const t = ty * n + tx;
+      if (t < prev) return null; // not sorted by tile id — refuse the index
+      if (t !== prev) {
+        for (let k = prev + 1; k <= t; k++) starts[k] = i;
+        prev = t;
+      }
+    }
+    for (let k = prev + 1; k <= nTiles; k++) starts[k] = hi;
+    tileStart.push(starts);
+  }
+  return { z, tileStart };
+}
+
 export class PointStore {
   private manifest: Manifest;
   private reader: RangeReader;
@@ -60,6 +120,8 @@ export class PointStore {
   private deepInflight = 0;
 
   onChange: () => void = () => {};
+  /** a deep tile left the cache — the renderer should free its point buffer */
+  onDropTile: (key: string) => void = () => {};
 
   constructor(manifest: Manifest, reader: RangeReader) {
     this.manifest = manifest;
@@ -201,6 +263,7 @@ export class PointStore {
       const k = this.deepTiles.keys().next().value as string | undefined;
       if (k === undefined) break;
       this.deepTiles.delete(k);
+      this.onDropTile(k);
     }
   }
 }

@@ -84,6 +84,27 @@ def main() -> int:
         if (src / sub).is_dir():
             link(dest / sub, src / sub)
 
+    # In-browser projection: the map head is exported by a separate step and is
+    # NOT listed in the pack's `files` block, so declare it in the manifest.
+    # The viewer refuses to probe for it (a 404 is an error in the smoke check).
+    head = src / "model" / "map_head.onnx"
+    models_json = src / "model" / "models.json"
+    if head.is_file() and models_json.is_file():
+        encoder = None
+        try:
+            encoder = (json.loads(models_json.read_text()).get("encoder") or {}).get("name")
+        except Exception:
+            pass
+        manifest["model"] = {
+            "models_json": "model/models.json",
+            "map_head": "model/map_head.onnx",
+            "map_head_bytes": head.stat().st_size,
+            "encoder": encoder,
+        }
+        print(f"    model: map_head.onnx {head.stat().st_size/1e6:.1f} MB")
+    else:
+        manifest.pop("model", None)
+
     chunking: dict[str, dict[str, int]] = {}
 
     (dest / "points").mkdir(exist_ok=True)

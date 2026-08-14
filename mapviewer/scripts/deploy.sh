@@ -13,9 +13,16 @@
 # every pack directory in it is symlinked into packs/ and merged into the
 # index. Fixtures are only linked when $WITH_FIXTURES=1 (default 1).
 #
+# In-browser projection (viewer v2): the vendored ONNX runtime, the MiniLM
+# encoder and the tokenizer live in projection-poc/{vendor,models} and are
+# gitignored. They are NOT part of the vite build (122 MB); this script rsyncs
+# them next to the site so `src/projection.ts` finds them at ./vendor/ and
+# ./models/. Set PROJECTION=0 to publish the viewer without them.
+#
 # Usage:
 #   scripts/deploy.sh
 #   WITH_FIXTURES=0 scripts/deploy.sh
+#   PROJECTION=0 scripts/deploy.sh
 #   REAL_PACKS=/data/latent-basemap/mappacks scripts/deploy.sh
 set -euo pipefail
 
@@ -23,6 +30,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST="${DEST:-$HOME/.agent/basemap-maps}"
 REAL_PACKS="${REAL_PACKS:-/data/latent-basemap/mappacks}"
 WITH_FIXTURES="${WITH_FIXTURES:-1}"
+PROJECTION="${PROJECTION:-1}"
 
 # shellcheck disable=SC1090
 [ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh"
@@ -34,8 +42,22 @@ npm run build
 mkdir -p "$DEST/viewer" "$DEST/packs"
 
 echo "==> publishing site -> $DEST/viewer"
-rsync -a --delete --exclude packs dist/ "$DEST/viewer/"
+# --delete only prunes what this script owns. `packs` is a symlink we manage,
+# `vendor`/`models` are rsynced separately below, and other tools publish
+# sibling directories (round-*/ projection pages) into the same viewer root.
+rsync -a --delete \
+  --exclude packs --exclude vendor --exclude models --exclude 'round-*' \
+  dist/ "$DEST/viewer/"
 ln -sfn ../packs "$DEST/viewer/packs"
+
+if [ "$PROJECTION" = "1" ] && [ -d "$HERE/projection-poc/vendor" ]; then
+  echo "==> publishing projection runtime -> $DEST/viewer/{vendor,models}"
+  rsync -aL --delete "$HERE/projection-poc/vendor/" "$DEST/viewer/vendor/"
+  rsync -aL --delete "$HERE/projection-poc/models/" "$DEST/viewer/models/"
+  du -sh "$DEST/viewer/vendor" "$DEST/viewer/models" | sed 's/^/    /'
+else
+  echo "==> skipping projection runtime (PROJECTION=$PROJECTION)"
+fi
 
 link_pack() {  # $1 = source pack dir
   local src="$1" name

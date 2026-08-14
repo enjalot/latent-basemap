@@ -6,6 +6,11 @@
  * readout), and hands copies to the compose worker to turn into RGBA. The PNG
  * render in the pack is a convenience/fallback only — client-side recomposition
  * from the planes is what makes corpus toggles free.
+ *
+ * v2: the worker's RGBA is kept as-is and handed to the GL layer as a texture
+ * (`rgba` + `rgbaKey`), instead of being turned into an ImageBitmap and
+ * re-blitted every frame. A tile is uploaded to the GPU exactly once per
+ * recompose; `onEvict` lets the renderer free the matching texture.
  */
 
 import type { Manifest } from "./types";
@@ -16,7 +21,7 @@ import type { ComposeRequest, ComposeResponse } from "./worker/compose.worker";
 
 export type ComposeMode = "combined" | "dominant";
 
-interface TileEntry {
+export interface TileEntry {
   key: string;
   z: number;
   x: number;
@@ -24,8 +29,10 @@ interface TileEntry {
   state: "loading" | "ready" | "missing";
   planes: Map<number, Uint32Array>;
   total?: Uint32Array;
-  bitmap?: ImageBitmap;
-  bitmapKey?: string;
+  /** composed RGBA, ready for texImage2D */
+  rgba?: Uint8ClampedArray;
+  /** the renderKey `rgba` was composed for; stale => recompose */
+  rgbaKey?: string;
   composing?: boolean;
 }
 
@@ -42,6 +49,8 @@ export class DensityStore {
   enabled: number[];
   mode: ComposeMode = "combined";
   onChange: () => void = () => {};
+  /** a tile left the cache — the renderer should free its texture */
+  onEvict: (key: string) => void = () => {};
 
   constructor(base: string, manifest: Manifest) {
     this.base = base;
@@ -75,7 +84,7 @@ export class DensityStore {
 
   private invalidateBitmaps() {
     for (const t of this.tiles.values()) {
-      if (t.bitmapKey !== this.renderKey && t.state === "ready") {
+      if (t.rgbaKey !== this.renderKey && t.state === "ready") {
         t.composing = false;
       }
     }
@@ -110,12 +119,15 @@ export class DensityStore {
     return `${z}/${x}/${y}`;
   }
 
-  /** Composed bitmap for a tile, kicking off load/compose if needed. */
-  getBitmap(z: number, x: number, y: number): ImageBitmap | undefined {
+  /**
+   * The composed tile, kicking off load/compose if needed. Returns the entry
+   * only once it has RGBA the renderer can upload.
+   */
+  getRender(z: number, x: number, y: number): TileEntry | undefined {
     const t = this.ensure(z, x, y);
     if (!t || t.state !== "ready") return undefined;
-    if (t.bitmapKey !== this.renderKey && !t.composing) this.requestCompose(t);
-    return t.bitmap;
+    if (t.rgbaKey !== this.renderKey && !t.composing) this.requestCompose(t);
+    return t.rgba ? t : undefined;
   }
 
   /** Raw planes for hover readout. */
@@ -146,8 +158,8 @@ export class DensityStore {
       if (oldestKey === undefined) break;
       const victim = this.tiles.get(oldestKey);
       if (victim?.composing) break; // don't evict something mid-flight
-      victim?.bitmap?.close?.();
       this.tiles.delete(oldestKey);
+      this.onEvict(oldestKey);
     }
   }
 
@@ -200,21 +212,14 @@ export class DensityStore {
     this.worker.postMessage(req, transfer);
   }
 
-  private async onComposed(res: ComposeResponse) {
+  private onComposed(res: ComposeResponse) {
     const t = this.pending.get(res.key);
     this.pending.delete(res.key);
     if (!t) return;
     t.composing = false;
     const renderKey = res.key.split("|")[1];
-    const img = new ImageData(
-      new Uint8ClampedArray(res.rgba),
-      res.size,
-      res.size,
-    );
-    const bmp = await createImageBitmap(img);
-    t.bitmap?.close?.();
-    t.bitmap = bmp;
-    t.bitmapKey = renderKey;
+    t.rgba = new Uint8ClampedArray(res.rgba);
+    t.rgbaKey = renderKey;
     this.onChange();
     // the toggle may have moved on while we were composing
     if (renderKey !== this.renderKey) this.requestCompose(t);
@@ -241,7 +246,7 @@ export class DensityStore {
 
   dispose() {
     this.worker.terminate();
-    for (const t of this.tiles.values()) t.bitmap?.close?.();
+    for (const key of this.tiles.keys()) this.onEvict(key);
     this.tiles.clear();
   }
 }

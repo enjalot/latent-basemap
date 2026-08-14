@@ -25,8 +25,11 @@
       </header>
 
       <main>
+        <!-- layered rendering: WebGL base raster, 2D overlay, DOM controls.
+             Only #overlay sees pointer events; #map never redraws on hover. -->
         <div id="stage">
-          <canvas id="map"></canvas>
+          <canvas id="map" class="layer"></canvas>
+          <canvas id="overlay" class="layer"></canvas>
           <div id="controls"></div>
           <div id="hud"></div>
           <div id="boot" class="boot">loading manifest…</div>

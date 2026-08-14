@@ -1,16 +1,33 @@
 /**
- * map.ts — camera, canvas renderer and pointer interaction.
+ * map.ts — camera, layered renderer and pointer interaction.
  *
  * World space is the unit square: u = (x - xmin)/(xmax - xmin),
  * v = (ymax - y)/(ymax - ymin)  (v is Y-DOWN, matching tile and bin order).
  * The camera is (cx, cy, scale) with scale in device-independent px per world
- * unit; the zoom level picked for tiles is round(log2(scale / tile_size)).
+ * unit; the zoom level picked for tiles is floor(log2(scale / tile_size)).
+ *
+ * v2 layering (the fix for the v1 flicker + point lag):
+ *
+ *   base layer     WebGL2 (`gl.ts`), or the canvas-2D fallback. Density tiles
+ *                  are textures uploaded once per recompose; points are VBOs
+ *                  uploaded once per data change. Redrawn ONLY on camera or
+ *                  data change.
+ *   overlay layer  a second canvas (`overlay.ts`) carrying the hover highlight,
+ *                  the selection ring and the projection markers. This is the
+ *                  only thing a mousemove touches.
+ *
+ * Both layers are driven by one rAF via `RenderLoop`, so pointer/wheel/tile
+ * events coalesce into at most one draw per frame.
  */
 
 import type { Manifest } from "./types";
 import { DensityStore } from "./density";
-import { PointStore, type PointBatch } from "./points";
-import { CORPUS_FALLBACK } from "./palette";
+import { PointStore, buildLodIndex, type LodIndex, type PointBatch } from "./points";
+import { CORPUS_FALLBACK, hexToRgb } from "./palette";
+import { GLRenderer, type Camera, type PointRef, type Scene, type TileRef } from "./gl";
+import { Raster2DRenderer } from "./raster2d";
+import { OverlayRenderer, type MarkerItem } from "./overlay";
+import { RenderLoop } from "./render";
 
 export interface HoverInfo {
   /** preview zoom level the bin was resolved at */
@@ -39,9 +56,19 @@ export interface PickedPoint {
 
 export type PointMode = "off" | "lod" | "deep";
 
+type BaseRenderer = GLRenderer | Raster2DRenderer;
+
+const LOD_BUFFER = "lod";
+const deepName = (tx: number, ty: number) => `deep:${tx}_${ty}`;
+
 export class MapView {
   readonly canvas: HTMLCanvasElement;
-  private ctx: CanvasRenderingContext2D;
+  readonly overlayCanvas: HTMLCanvasElement;
+  readonly base: BaseRenderer;
+  readonly overlay: OverlayRenderer;
+  readonly loop: RenderLoop;
+  readonly backend: string;
+
   private manifest: Manifest;
   private density: DensityStore;
   private points: PointStore;
@@ -57,46 +84,76 @@ export class MapView {
   hovered: HoverInfo | null = null;
   pinned: HoverInfo | null = null;
   selected: PickedPoint | null = null;
+  markers: MarkerItem[] = [];
   previewLevelCap = Infinity;
 
   onHover: (h: HoverInfo | null) => void = () => {};
   onPick: (p: PickedPoint | null) => void = () => {};
   onViewChange: () => void = () => {};
 
-  private raf = 0;
   private dragging = false;
   private lastPointer: { x: number; y: number } | null = null;
   private moved = 0;
+  private detach: (() => void)[] = [];
+  /** spatial index over the LOD buffer; null when the file isn't tile-sorted */
+  private lodIndex: LodIndex | null = null;
 
   constructor(
     canvas: HTMLCanvasElement,
+    overlayCanvas: HTMLCanvasElement,
     manifest: Manifest,
     density: DensityStore,
     points: PointStore,
   ) {
     this.canvas = canvas;
-    const ctx = canvas.getContext("2d", { alpha: false });
-    if (!ctx) throw new Error("2d canvas context unavailable");
-    this.ctx = ctx;
+    this.overlayCanvas = overlayCanvas;
     this.manifest = manifest;
     this.density = density;
     this.points = points;
     this.tileSize = manifest.tile_size ?? 256;
     this.zmax = manifest.zoom.max;
+
+    let base: BaseRenderer;
+    try {
+      base = new GLRenderer(canvas);
+    } catch {
+      base = new Raster2DRenderer(canvas);
+    }
+    this.base = base;
+    this.backend = base instanceof GLRenderer ? `webgl2 — ${base.renderer}` : base.renderer;
+    this.overlay = new OverlayRenderer(overlayCanvas);
+    this.loop = new RenderLoop(
+      () => this.drawBase(),
+      () => this.drawOverlay(),
+    );
+
+    const rgb: Record<number, [number, number, number]> = {};
     manifest.corpora.forEach((c, i) => {
-      this.colors[c.code] = c.color ?? CORPUS_FALLBACK[i % CORPUS_FALLBACK.length];
+      const hex = c.color ?? CORPUS_FALLBACK[i % CORPUS_FALLBACK.length];
+      this.colors[c.code] = hex;
+      rgb[c.code] = hexToRgb(hex);
       this.enabled.add(c.code);
     });
+    this.base.setCorpusColors(rgb);
+
+    // a tile leaving the LRU must free its GPU texture
+    this.density.onEvict = (key) => this.base.dropTile(key);
+    this.points.onDropTile = (key) => this.base.dropPoints(`deep:${key}`);
+
     this.attach();
   }
 
   // -- camera ---------------------------------------------------------------
 
   get width() {
-    return this.canvas.clientWidth || 1;
+    return this.overlayCanvas.clientWidth || 1;
   }
   get height() {
-    return this.canvas.clientHeight || 1;
+    return this.overlayCanvas.clientHeight || 1;
+  }
+
+  get camera(): Camera {
+    return { cx: this.cx, cy: this.cy, scale: this.scale, width: this.width, height: this.height };
   }
 
   /**
@@ -115,7 +172,7 @@ export class MapView {
     this.cx = 0.5;
     this.cy = 0.5;
     this.scale = Math.min(this.width, this.height) * 0.92;
-    this.requestDraw();
+    this.loop.markView();
     this.onViewChange();
   }
 
@@ -127,7 +184,17 @@ export class MapView {
     this.cx = u - (px - this.width / 2) / this.scale;
     this.cy = v - (py - this.height / 2) / this.scale;
     this.clampCamera();
-    this.requestDraw();
+    this.loop.markView();
+    this.onViewChange();
+  }
+
+  /** Centre the camera on a world point, optionally zooming in. */
+  flyTo(u: number, v: number, scale?: number) {
+    this.cx = u;
+    this.cy = v;
+    if (scale) this.scale = Math.max(64, scale);
+    this.clampCamera();
+    this.loop.markView();
     this.onViewChange();
   }
 
@@ -175,169 +242,210 @@ export class MapView {
 
   // -- drawing --------------------------------------------------------------
 
+  /** Data changed (tile composed, points loaded): base only. */
   requestDraw() {
-    if (this.raf) return;
-    this.raf = requestAnimationFrame(() => {
-      this.raf = 0;
-      this.draw();
-    });
+    this.loop.markView();
+  }
+
+  /** Overlay-only invalidation — hover, selection, markers. */
+  requestOverlay() {
+    this.loop.markOverlay();
   }
 
   resize() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
-    this.canvas.width = Math.round(this.width * dpr);
-    this.canvas.height = Math.round(this.height * dpr);
-    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    this.requestDraw();
+    this.base.resize(this.width, this.height, dpr);
+    this.overlay.resize(this.width, this.height, dpr);
+    this.loop.markView();
   }
 
-  private bgColor(): string {
-    return getComputedStyle(this.canvas).getPropertyValue("--map-bg").trim() || "#0f1113";
+  private cssVar(name: string, fallback: string): string {
+    const v = getComputedStyle(this.overlayCanvas).getPropertyValue(name).trim();
+    return v || fallback;
   }
 
-  draw() {
-    const ctx = this.ctx;
-    ctx.save();
-    ctx.fillStyle = this.bgColor();
-    ctx.fillRect(0, 0, this.width, this.height);
+  private bgColor(): [number, number, number] {
+    return hexToRgb(this.cssVar("--map-bg", "#0f1113"));
+  }
 
+  private drawBase() {
+    this.base.draw(this.camera, this.buildScene());
+  }
+
+  private drawOverlay() {
+    const h = this.pinned ?? this.hovered;
+    this.overlay.draw(this.camera, {
+      highlight: h
+        ? { u0: h.u0, v0: h.v0, size: h.size, pinned: this.pinned !== null }
+        : null,
+      selected: this.selected ? { u: this.selected.u, v: this.selected.v } : null,
+      markers: this.markers,
+      accent: this.cssVar("--accent", "#eb6834"),
+      marker: this.cssVar("--marker", "#c2185b"),
+      ink: this.cssVar("--overlay-ink", "#ffffff"),
+      paper: this.cssVar("--bg", "#ffffff"),
+    });
+  }
+
+  /**
+   * The per-frame scene description. Cheap: it only walks the visible tile
+   * grid and pushes rects — no pixel work, no allocation per point. Texture and
+   * buffer uploads happen here at most once per data change.
+   */
+  private buildScene(): Scene {
     const z = this.z;
-    ctx.imageSmoothingEnabled = false;
-    const r = this.visibleTiles(z);
     const n = 1 << z;
-    const tw = this.scale / n;
+    const r = this.visibleTiles(z);
+    const tiles: TileRef[] = [];
     for (let ty = r.y0; ty <= r.y1; ty++) {
       for (let tx = r.x0; tx <= r.x1; tx++) {
-        const [sx, sy] = this.screenAt(tx / n, ty / n);
-        const bmp = this.density.getBitmap(z, tx, ty);
-        if (bmp) {
-          ctx.drawImage(bmp, sx, sy, tw + 0.5, tw + 0.5);
-        } else {
-          this.drawAncestor(z, tx, ty, sx, sy, tw);
-        }
+        const ref = this.tileRef(z, tx, ty, n);
+        if (ref) tiles.push(ref);
       }
     }
-
-    if (this.pointMode !== "off") this.drawPoints(z);
-    this.drawHighlight();
-    this.drawSelected();
-    ctx.restore();
+    return {
+      bg: this.bgColor(),
+      tiles,
+      points: this.pointRefs(z),
+    };
   }
 
-  /** While a tile loads, upscale the matching sub-rect of a coarser tile. */
-  private drawAncestor(
-    z: number,
-    tx: number,
-    ty: number,
-    sx: number,
-    sy: number,
-    tw: number,
-  ) {
+  private tileRef(z: number, tx: number, ty: number, n: number): TileRef | null {
+    const dest = { u0: tx / n, v0: ty / n, du: 1 / n, dv: 1 / n };
+    const t = this.density.getRender(z, tx, ty);
+    if (t && t.rgba && t.rgbaKey) {
+      if (this.base.tileVersion(t.key) !== t.rgbaKey)
+        this.base.uploadTile(t.key, t.rgbaKey, t.rgba, this.tileSize);
+      return { key: t.key, ...dest, su: 0, sv: 0, sw: 1, sh: 1 };
+    }
+    // while a tile loads, magnify the matching sub-rect of a coarser ancestor
     for (let pz = z - 1; pz >= this.manifest.zoom.min; pz--) {
       const d = z - pz;
       const px = tx >> d;
       const py = ty >> d;
-      const bmp = this.density.getBitmap(pz, px, py);
-      if (!bmp) continue;
+      const a = this.density.getRender(pz, px, py);
+      if (!a || !a.rgba || !a.rgbaKey) continue;
+      if (this.base.tileVersion(a.key) !== a.rgbaKey)
+        this.base.uploadTile(a.key, a.rgbaKey, a.rgba, this.tileSize);
       const k = 1 << d;
-      const sub = this.tileSize / k;
-      this.ctx.drawImage(
-        bmp,
-        (tx - px * k) * sub,
-        (ty - py * k) * sub,
-        sub,
-        sub,
-        sx,
-        sy,
-        tw + 0.5,
-        tw + 0.5,
-      );
-      return;
+      return {
+        key: a.key,
+        ...dest,
+        su: (tx - px * k) / k,
+        sv: (ty - py * k) / k,
+        sw: 1 / k,
+        sh: 1 / k,
+      };
     }
+    return null;
   }
 
-  private drawPoints(z: number) {
-    const ctx = this.ctx;
-    const size = Math.max(1, Math.min(3.5, this.scale / 900));
-    ctx.globalAlpha = 0.9;
-    const batches: PointBatch[] = [];
-    let filterMinZoom = false;
-    if (this.pointMode === "lod" && this.points.lod) {
-      batches.push(this.points.lod);
-      filterMinZoom = true;
-    } else if (this.pointMode === "deep") {
-      const dz = this.points.deepZ;
-      for (const [tx, ty] of this.visibleTileList(dz)) {
+  private get corpusMask(): number {
+    let m = 0;
+    for (const c of this.enabled) if (c >= 0 && c < 16) m |= 1 << c;
+    return m;
+  }
+
+  /**
+   * How many LOD records to draw at this zoom. `lod.bin` is sorted by min_zoom,
+   * so the visible set is a prefix — no per-vertex filtering needed, and z0
+   * costs 25k points instead of 485k.
+   */
+  private lodCount(z: number): number {
+    const b = this.points.lod;
+    if (!b) return 0;
+    const offs = this.manifest.points?.lod?.zoom_offsets;
+    if (!offs || offs.length < 2) return b.n;
+    const i = Math.min(Math.max(z, 0) + 1, offs.length - 1);
+    return Math.min(b.n, offs[i] ?? b.n);
+  }
+
+  /**
+   * Draw ranges for the LOD buffer: the min-zoom bands up to `z`, each cut down
+   * to the visible tile rows via the spatial index. Without the index this is
+   * the min-zoom prefix, which is still correct, just heavier.
+   */
+  private lodRanges(z: number): [number, number][] {
+    const b = this.points.lod;
+    if (!b || !b.n) return [];
+    const idx = this.lodIndex;
+    const offs = this.manifest.points?.lod?.zoom_offsets;
+    if (!idx || !offs) return [[0, this.lodCount(z)]];
+
+    const n = 1 << idx.z;
+    const r = this.visibleTiles(idx.z);
+    // one tile of slack: point sprites overhang, and the tile a record is
+    // bucketed into is re-derived from its u16 coordinate
+    const x0 = Math.max(0, r.x0 - 1);
+    const x1 = Math.min(n - 1, r.x1 + 1);
+    const y0 = Math.max(0, r.y0 - 1);
+    const y1 = Math.min(n - 1, r.y1 + 1);
+
+    const bands = Math.min(idx.tileStart.length - 1, Math.max(0, z));
+    const out: [number, number][] = [];
+    for (let band = 0; band <= bands; band++) {
+      const starts = idx.tileStart[band];
+      if (!starts) continue;
+      for (let ty = y0; ty <= y1; ty++) {
+        const first = starts[ty * n + x0];
+        const end = starts[ty * n + x1 + 1];
+        if (end > first) out.push([first, end - first]);
+      }
+    }
+    return out;
+  }
+
+  private pointRefs(z: number): PointRef[] {
+    if (this.pointMode === "off") return [];
+    const size = Math.max(1, Math.min(3.5, this.scale / 900)) * this.dprNow();
+    const mask = this.corpusMask;
+    const out: PointRef[] = [];
+
+    if (this.pointMode === "deep") {
+      for (const [tx, ty] of this.visibleTileList(this.points.deepZ)) {
         const b = this.points.deepTile(tx, ty);
-        if (b && b.n) batches.push(b);
+        if (!b || !b.n) continue;
+        const name = deepName(tx, ty);
+        if (!this.base.hasPoints(name)) this.base.uploadPoints(name, b);
+        out.push({ name, ranges: [[0, b.n]], size, alpha: 0.9, mask, maxMinZ: 255 });
       }
-      if (!batches.length && this.points.lod) {
-        batches.push(this.points.lod);
-        filterMinZoom = true;
+      if (out.length) return out;
+    }
+
+    const lod = this.points.lod;
+    if (lod && lod.n) {
+      if (!this.base.hasPoints(LOD_BUFFER)) {
+        this.base.uploadPoints(LOD_BUFFER, lod);
+        this.lodIndex = buildLodIndex(
+          lod,
+          this.manifest.points?.deep?.tile_index?.z ?? this.zmax,
+          this.manifest.points?.lod?.zoom_offsets,
+        );
       }
+      out.push({
+        name: LOD_BUFFER,
+        ranges: this.lodRanges(z),
+        size,
+        alpha: 0.9,
+        mask,
+        maxMinZ: z,
+      });
     }
-    if (!batches.length) {
-      ctx.globalAlpha = 1;
-      return;
-    }
-    const [uL, vT] = this.worldAt(-8, -8);
-    const [uR, vB] = this.worldAt(this.width + 8, this.height + 8);
-    for (const code of this.enabled) {
-      ctx.fillStyle = this.colors[code] ?? "#888";
-      for (const b of batches) {
-        for (let i = 0; i < b.n; i++) {
-          if (b.corpus[i] !== code) continue;
-          if (filterMinZoom && b.minz && b.minz[i] > z) continue;
-          const u = b.u[i];
-          const v = b.v[i];
-          if (u < uL || u > uR || v < vT || v > vB) continue;
-          ctx.fillRect(
-            (u - this.cx) * this.scale + this.width / 2 - size / 2,
-            (v - this.cy) * this.scale + this.height / 2 - size / 2,
-            size,
-            size,
-          );
-        }
-      }
-    }
-    ctx.globalAlpha = 1;
+    return out;
   }
 
-  private drawHighlight() {
-    const h = this.pinned ?? this.hovered;
-    if (!h) return;
-    const [sx, sy] = this.screenAt(h.u0, h.v0);
-    const w = h.size * this.scale;
-    const ctx = this.ctx;
-    ctx.save();
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = this.pinned ? "#eb6834" : "#ffffff";
-    ctx.strokeRect(
-      Math.round(sx) - 0.5,
-      Math.round(sy) - 0.5,
-      Math.max(3, w) + 1,
-      Math.max(3, w) + 1,
-    );
-    if (w < 8) {
-      ctx.beginPath();
-      ctx.arc(sx + w / 2, sy + w / 2, 9, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-    ctx.restore();
+  private dprNow(): number {
+    return Math.min(window.devicePixelRatio || 1, 2);
   }
 
-  private drawSelected() {
-    const p = this.selected;
-    if (!p) return;
-    const [sx, sy] = this.screenAt(p.u, p.v);
-    const ctx = this.ctx;
-    ctx.save();
-    ctx.strokeStyle = "#eb6834";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(sx, sy, 7, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.restore();
+  /** Drop GPU point buffers when the tier is turned off. */
+  releasePoints(which: "lod" | "deep" | "all") {
+    if (which === "lod" || which === "all") {
+      this.base.dropPoints(LOD_BUFFER);
+      this.lodIndex = null;
+    }
+    if (which === "deep" || which === "all")
+      this.base.retainPoints(new Set([LOD_BUFFER]));
   }
 
   // -- hit testing ----------------------------------------------------------
@@ -396,11 +504,13 @@ export class MapView {
     const z = this.z;
     let best: PickedPoint | null = null;
     let bestD = radius * radius;
-    const consider = (b: PointBatch, tier: "lod" | "deep", useMinZoom: boolean) => {
-      for (let i = 0; i < b.n; i++) {
+    const consider = (b: PointBatch, tier: "lod" | "deep", limit: number) => {
+      const n = Math.min(limit || b.n, b.n);
+      for (let i = 0; i < n; i++) {
         if (!this.enabled.has(b.corpus[i])) continue;
-        if (useMinZoom && b.minz && b.minz[i] > z) continue;
-        const [sx, sy] = this.screenAt(b.u[i], b.v[i]);
+        if (b.minz && b.minz[i] > z) continue;
+        const sx = (b.u[i] - this.cx) * this.scale + this.width / 2;
+        const sy = (b.v[i] - this.cy) * this.scale + this.height / 2;
         const d = (sx - px) * (sx - px) + (sy - py) * (sy - py);
         if (d < bestD) {
           bestD = d;
@@ -411,24 +521,35 @@ export class MapView {
     if (this.pointMode === "deep") {
       for (const [tx, ty] of this.visibleTileList(this.points.deepZ)) {
         const b = this.points.deepTile(tx, ty);
-        if (b && b.n) consider(b, "deep", false);
+        if (b && b.n) consider(b, "deep", b.n);
       }
     }
-    if (!best && this.points.lod) consider(this.points.lod, "lod", true);
+    if (!best && this.points.lod) consider(this.points.lod, "lod", this.lodCount(z));
     return best;
   }
 
   // -- events ---------------------------------------------------------------
 
   private attach() {
-    const c = this.canvas;
-    c.addEventListener("pointerdown", (e) => {
+    // The overlay canvas is the topmost layer, so it owns the pointer.
+    const c = this.overlayCanvas;
+    const on = <K extends keyof HTMLElementEventMap>(
+      type: K,
+      fn: (e: HTMLElementEventMap[K]) => void,
+      opts?: AddEventListenerOptions,
+    ) => {
+      c.addEventListener(type, fn as EventListener, opts);
+      this.detach.push(() => c.removeEventListener(type, fn as EventListener, opts));
+    };
+
+    on("pointerdown", (e) => {
       c.setPointerCapture(e.pointerId);
       this.dragging = true;
       this.moved = 0;
       this.lastPointer = { x: e.offsetX, y: e.offsetY };
     });
-    c.addEventListener("pointermove", (e) => {
+
+    on("pointermove", (e) => {
       if (this.dragging && this.lastPointer) {
         const dx = e.offsetX - this.lastPointer.x;
         const dy = e.offsetY - this.lastPointer.y;
@@ -437,10 +558,11 @@ export class MapView {
         this.cy -= dy / this.scale;
         this.lastPointer = { x: e.offsetX, y: e.offsetY };
         this.clampCamera();
-        this.requestDraw();
+        this.loop.markView();
         this.onViewChange();
         return;
       }
+      // HOVER PATH: overlay only. Nothing here may dirty the base layer.
       const h = this.binAt(e.offsetX, e.offsetY, this.previewLevelCap);
       const changed =
         (h === null) !== (this.hovered === null) ||
@@ -452,37 +574,38 @@ export class MapView {
       this.hovered = h;
       if (changed) {
         this.onHover(h);
-        this.requestDraw();
+        this.loop.markOverlay();
       }
     });
+
     const end = (e: PointerEvent) => {
       if (!this.dragging) return;
       this.dragging = false;
       this.lastPointer = null;
       if (this.moved < 4) this.handleClick(e);
     };
-    c.addEventListener("pointerup", end);
-    c.addEventListener("pointercancel", () => {
+    on("pointerup", end);
+    on("pointercancel", () => {
       this.dragging = false;
       this.lastPointer = null;
     });
-    c.addEventListener("pointerleave", () => {
+    on("pointerleave", () => {
       if (this.hovered) {
         this.hovered = null;
         this.onHover(null);
-        this.requestDraw();
+        this.loop.markOverlay();
       }
     });
-    c.addEventListener(
+    on(
       "wheel",
       (e) => {
         e.preventDefault();
         const f = Math.pow(2, -e.deltaY * (e.deltaMode === 1 ? 0.05 : 0.0022));
         this.zoomBy(f, e.offsetX, e.offsetY);
       },
-      { passive: false },
+      { passive: false } as AddEventListenerOptions,
     );
-    c.addEventListener("dblclick", (e) => this.zoomBy(2, e.offsetX, e.offsetY));
+    on("dblclick", (e) => this.zoomBy(2, e.offsetX, e.offsetY));
   }
 
   private handleClick(e: PointerEvent) {
@@ -490,7 +613,7 @@ export class MapView {
     if (p) {
       this.selected = p;
       this.onPick(p);
-      this.requestDraw();
+      this.loop.markOverlay();
       return;
     }
     const h = this.binAt(e.offsetX, e.offsetY, this.previewLevelCap);
@@ -498,6 +621,13 @@ export class MapView {
     this.selected = null;
     this.onPick(null);
     this.onHover(h);
-    this.requestDraw();
+    this.loop.markOverlay();
+  }
+
+  dispose() {
+    for (const off of this.detach) off();
+    this.detach = [];
+    this.loop.dispose();
+    this.base.dispose();
   }
 }

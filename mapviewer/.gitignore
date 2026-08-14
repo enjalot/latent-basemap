@@ -1,5 +1,6 @@
 node_modules/
 dist/
 packs/
+public/
 .vite/
 smoke-shots*/

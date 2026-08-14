@@ -129,19 +129,33 @@ main {
   background: var(--map-bg);
 }
 
-#map {
+/* the two stacked canvases: #map (WebGL base) below, #overlay (2D) above */
+.layer {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
   display: block;
+  --map-bg: #f2f4f6;
+  --overlay-ink: #1a1d21;
+  /* projection markers: distinct from every corpus swatch and from --accent */
+  --marker: #c2185b;
+}
+#map {
+  z-index: 1;
+  pointer-events: none;
+}
+#overlay {
+  z-index: 2;
   cursor: crosshair;
   touch-action: none;
-  --map-bg: #f2f4f6;
+  background: transparent;
 }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) #map {
+  :root:not([data-theme="light"]) .layer {
     --map-bg: #0d0f11;
+    --overlay-ink: #ffffff;
+    --marker: #ff5c8a;
   }
 }
 
@@ -168,6 +182,8 @@ main {
 
 #controls {
   position: absolute;
+  /* above both canvas layers (the overlay owns z-index 2) */
+  z-index: 3;
   top: 10px;
   left: 10px;
   width: 250px;
@@ -184,6 +200,7 @@ main {
 
 #hud {
   position: absolute;
+  z-index: 3;
   right: 10px;
   bottom: 10px;
   display: flex;
@@ -407,6 +424,84 @@ label.check input {
   color: var(--muted);
   font-size: 12px;
   font-style: italic;
+}
+
+/* ---- projection panel ------------------------------------------------- */
+
+#sec-projection textarea {
+  width: 100%;
+  font: 12px/1.45 var(--mono);
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 6px 7px;
+  resize: vertical;
+}
+
+#sec-projection .ask {
+  margin-top: 0;
+}
+
+#sec-projection details.detail {
+  margin-top: 7px;
+  font-size: 11px;
+  color: var(--muted);
+}
+#sec-projection details.detail summary {
+  cursor: pointer;
+}
+#sec-projection details.detail select {
+  width: 100%;
+  margin: 5px 0 3px;
+}
+
+#projection-out {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-style: normal;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+
+.markers {
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.marker {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+  font-size: 11.5px;
+}
+.marker:hover {
+  color: var(--accent);
+}
+.marker .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  border: 1.5px solid #c2185b;
+}
+.marker.on .dot {
+  background: #c2185b;
+}
+.marker .txt {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.marker .xy {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  flex: 0 0 auto;
 }
 
 .pill {

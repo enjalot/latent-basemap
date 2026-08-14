@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Static pan/zoom viewer for latent-basemap map packs (PLAN6 viewer v1)",
+  "description": "Static pan/zoom viewer for latent-basemap map packs (PLAN6 viewer v2: layered WebGL2 + in-browser projection)",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
