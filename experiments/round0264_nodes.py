@@ -1104,9 +1104,13 @@ def run_register(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         collapse_floor = float(bands["collapse"]["floor"])
         fog_ceiling = float(bands["fog"]["ceiling"])
         separation = _separation_record(collapse_floor=collapse_floor)
+        # Reproduce the published anchors at THEIR precision (6 decimals):
+        # SEALED_* are the REPORT §6 values 0.644414 / 0.732966, so the computed
+        # floor/ceiling must round to 6 places, not 4 (a round-to-4 computed value
+        # can never equal a 6-decimal literal — the R0264 setup-fix bug).
         bands_reproduce_published = (
-            round(collapse_floor, 4) == SEALED_COLLAPSE_FLOOR
-            and round(fog_ceiling, 4) == SEALED_FOG_CEILING
+            round(collapse_floor, 6) == SEALED_COLLAPSE_FLOOR
+            and round(fog_ceiling, 6) == SEALED_FOG_CEILING
         )
         measurements_cross_check = _measurements_cross_check(job)
         wrapped("R0264 provisional bands fitted on the healthy family")
