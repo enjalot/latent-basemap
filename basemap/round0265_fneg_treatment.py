@@ -4,10 +4,18 @@ R0255 registered the Phase 3 gate on R0217's *unchanged* treatment, so its closu
 proved a config is R0217's -- byte-for-byte outside the nine seed-bearing paths --
 and its positive control planted a *source* change the config-level digest could not
 see. R0265 is different: it is a **new treatment**. The pinned fog-targeted-negatives
-recipe (`fneg`) changes the low-dim kernel, the `a`/`b` curve, the dose, and turns the
-fneg reweighting on. So this closure does not prove "same as R0217"; it proves "is the
-one registered fneg recipe", and its positive controls plant the four ways a config
-could drift *off* that recipe while still looking like a seed-family cell.
+recipe (`fneg`) moves FIVE field groups off R0217's template: the low-dim kernel, the
+`a`/`b` curve, the dose, the fneg reweighting, and -- caught by the seed-42 cross-check
+(2026-08-14) -- the positive-edge SAMPLING mode, from R0217's fuzzy-weight-proportional
+sampler to the promoted UNIFORM sampler. The sampling change carries the execution
+ROUTING that makes `core.fit` select the uniform device path (`required_pipeline=device`,
+`gpu_resident_data=auto`, VRAM budget) and rewrites the declared `expected_pipeline_stamp`
+to the honest device-uniform stamp, because R0217's template pins the fuzzy HOST pipeline.
+So this closure does not prove "same as R0217"; it proves "is the one registered fneg
+recipe including uniform sampling on the device path", and its positive controls plant the
+six ways a config could drift *off* that recipe while still looking like a seed-family
+cell. The promoted treatment differs from R0217 in four ways (kernel + dose + fneg +
+sampling, where sampling includes the device-uniform routing).
 
 **The recipe, pinned (promotion plan, GO 2026-08-14).** Built from R0217's own
 `train_config` for the sealed R0216 2M substrate + exact k15 graph, then exactly these
@@ -27,11 +35,13 @@ fields moved, and nothing else outside the nine seed-bearing paths:
 pinned recipe. The kernel/curve/fneg fields are checked against registered constants;
 the horizon is checked against `dose_multiplier x successful_updates_for_edges(edges)`
 derived from the config's own sealed edge count, so a `x1` or `x2` dose is caught by
-the rule and not by a literal. The four `recipe_refusal_controls` plant wrong-kernel,
-wrong-dose, fneg-off and wrong-band configs against the SHIPPED predicate and prove it
-refuses each; the OLD predicate this replaces -- a shape check that reads only the seed
-and the output dimension -- accepts every one, which is the point: a guard that reads
-the seed but not the recipe cannot tell an fneg cell from a legacy_lp cell.
+the rule and not by a literal. The six `recipe_refusal_controls` plant wrong-kernel,
+wrong-dose, fneg-off, wrong-band, weighted-sampling-on and routes-off-device configs
+against the SHIPPED predicate and prove it refuses each; the OLD predicate this replaces
+-- a shape check that reads only the seed and the output dimension -- accepts every one,
+which is the point: a guard that reads the seed but not the recipe cannot tell an fneg
+cell from a legacy_lp cell, nor a uniform-sampled device-path cell from a fuzzy-weighted
+host-path one.
 
 **Import-closure seal.** As in R0255, the round also seals, at prepare time, the
 SHA-256 of every source file in the training import closure, and every training node
@@ -135,6 +145,23 @@ RECIPE_FNEG_PATHS: tuple[tuple[str, ...], ...] = (
 RECIPE_DOSE_PATHS: tuple[tuple[str, ...], ...] = (
     ("optimizer", "successful_positive_lr_updates"),
     ("execution", "target_positive_draws_per_edge"),
+)
+#: The sampling-mode path. The promoted recipe samples positive edges UNIFORMLY; this
+#: is the field the seed-42 cross-check proved R0265 had silently inherited as `True`
+#: (R0217's fuzzy sampler) instead of the uniform recipe the P1 GO was accepted on.
+RECIPE_SAMPLING_PATHS: tuple[tuple[str, ...], ...] = (
+    ("optimizer", "weighted_edge_sampling"),
+)
+#: The execution-routing paths that make `core.fit` SELECT the uniform device path.
+#: R0217's template pins the fuzzy HOST pipeline (`required_pipeline=host_weighted...`,
+#: `gpu_resident_data=False`, budget `0.0`); with the raw-array fit those force core.fit
+#: to raise on the pipeline mismatch and route off the device fast path. The promoted
+#: recipe IS the sandbox's uniform device path, so it pins these three to the values
+#: that reach it.
+RECIPE_EXECUTION_PATHS: tuple[tuple[str, ...], ...] = (
+    ("execution", "required_pipeline"),
+    ("execution", "gpu_resident_data"),
+    ("execution", "gpu_resident_vram_budget_gb"),
 )
 
 #: The modules a training node imports that can change what the trainer computes -- the
@@ -356,6 +383,10 @@ def fneg_train_config(
         "fneg_lo": FNEG_LO,
         "fneg_hi": FNEG_HI,
         "dose_multiplier": DOSE_MULTIPLIER,
+        "weighted_edge_sampling": False,
+        "required_pipeline": "device",
+        "gpu_resident_data": "auto",
+        "gpu_resident_vram_budget_gb": 10.0,
     }
 
     # The kernel + curve.
@@ -367,6 +398,47 @@ def fneg_train_config(
     _set_path_new(config, ("optimizer", "fneg_weight"), FNEG_WEIGHT)
     _set_path_new(config, ("optimizer", "fneg_lo"), FNEG_LO)
     _set_path_new(config, ("optimizer", "fneg_hi"), FNEG_HI)
+
+    # Positive-edge sampling: UNIFORM, the promoted recipe. R0217's template carries
+    # `weighted_edge_sampling=True` (its fuzzy-weight-proportional sampler); every
+    # sandbox cell the P1 GO was accepted on trained uniform (weighted_effective=False).
+    # The seed-42 cross-check (2026-08-14) caught R0265 inheriting the weighted flag; it
+    # is overridden to False here so the recipe registers the uniform sampler.
+    _set_path(config, ("optimizer", "weighted_edge_sampling"), False)
+
+    # The execution routing that makes core.fit SELECT the promoted uniform device path.
+    # R0217's template pins the fuzzy HOST pipeline (required_pipeline=host_weighted...,
+    # gpu_resident_data=False, budget 0.0); with the raw-array fit those force core.fit to
+    # raise on the pipeline mismatch (core.py:642-646) and route off the device fast path
+    # (core.py:313). "device" is a deliberate STRENGTHENING over the sandbox's None
+    # default: the 2M substrate always fits VRAM and the stamp is always pipeline="device",
+    # so "device" fail-closes if a fit ever routes to the host/hybrid path -- the exact
+    # silent divert this incident was.
+    _set_path(config, ("execution", "required_pipeline"), "device")
+    _set_path(config, ("execution", "gpu_resident_data"), "auto")
+    _set_path(config, ("execution", "gpu_resident_vram_budget_gb"), 10.0)
+
+    # expected_pipeline_stamp honesty. R0217's stamp describes the fuzzy-weighted host
+    # sampler; leaving it in the promoted-recipe config is exactly the silent-inherited-
+    # weighted-field hygiene failure that caused this incident. Rewrite the sampler keys
+    # to the ACTUAL device-uniform stamp core.fit emits (verified from the sandbox
+    # umap-md000-x4-fneg10 fit.log) and drop the weighted-only keys the device stamp never
+    # emits. The two seed-bearing keys (positive/negative_rng_seed) are documentary and
+    # stay -- the nine-path seed invariant is unchanged from R0217.
+    stamp = config["execution"]["expected_pipeline_stamp"]
+    stamp["pipeline"] = "device"
+    stamp["sampler_class"] = "DeviceEdgeSampler"
+    stamp["positive_sampling"] = "uniform"
+    stamp["x_residency"] = "device_fp16"
+    stamp["weighted_requested"] = False
+    stamp["weighted_effective"] = False
+    stamp["uniform_with_replacement"] = False
+    stamp["positive_with_replacement"] = False
+    for _weighted_only_key in (
+        "positive_destination_policy", "negative_sampling", "rng_stream_policy",
+        "host_prefetch", "endpoint_forward", "weight_sampler", "weight_uniform_dtype",
+    ):
+        stamp.pop(_weighted_only_key, None)
 
     # The x4 dose.
     dose = validate_fneg_dose(updates=DOSE_MULTIPLIER * successful_updates_for_edges(
@@ -429,6 +501,41 @@ def assert_registered_recipe(config: Mapping[str, Any]) -> dict[str, Any]:
         problems.append(f"optimizer.fneg_lo != {FNEG_LO!r}")
     if _num(("optimizer", "fneg_hi")) != FNEG_HI:
         problems.append(f"optimizer.fneg_hi != {FNEG_HI!r}")
+    # Sampling mode: must be exactly the bool False, not merely falsy. A 0/None/"" here
+    # would pass a truthiness check while carrying a different sampling semantics.
+    if _get_path(config, ("optimizer", "weighted_edge_sampling")) is not False:
+        problems.append(
+            "optimizer.weighted_edge_sampling != False (uniform sampling is the "
+            "promoted recipe)"
+        )
+
+    # Execution routing: must select the uniform device path, or the raw-array fit
+    # raises / routes off it. This is the config defect that blocked the GPU run.
+    if str(_get_path(config, ("execution", "required_pipeline"))) != "device":
+        problems.append(
+            "execution.required_pipeline != 'device' (must route to the uniform device "
+            "path; R0217's host_weighted pipeline makes core.fit raise on the stamp)"
+        )
+    if str(_get_path(config, ("execution", "gpu_resident_data"))) != "auto":
+        problems.append(
+            "execution.gpu_resident_data != 'auto' (a non-auto value routes off the "
+            "device fast path)"
+        )
+    if float(_get_path(config, ("execution", "gpu_resident_vram_budget_gb"))) != 10.0:
+        problems.append("execution.gpu_resident_vram_budget_gb != 10.0")
+
+    # expected_pipeline_stamp honesty: the config's declared stamp must itself describe a
+    # uniform run, not R0217's fuzzy-weighted sampler.
+    stamp = _get_path(config, ("execution", "expected_pipeline_stamp"))
+    if stamp.get("weighted_effective") is not False:
+        problems.append(
+            "execution.expected_pipeline_stamp.weighted_effective != False (the declared "
+            "stamp still describes R0217's fuzzy-weighted sampler)"
+        )
+    if stamp.get("positive_sampling") != "uniform":
+        problems.append(
+            "execution.expected_pipeline_stamp.positive_sampling != 'uniform'"
+        )
 
     edges = int(_get_path(config, ("dose_registration", "active_graph_edges")))
     expected_horizon = DOSE_MULTIPLIER * successful_updates_for_edges(edges)
@@ -460,6 +567,12 @@ def assert_registered_recipe(config: Mapping[str, Any]) -> dict[str, Any]:
         "fneg_weight": FNEG_WEIGHT,
         "fneg_lo": FNEG_LO,
         "fneg_hi": FNEG_HI,
+        "weighted_edge_sampling": False,
+        "required_pipeline": "device",
+        "gpu_resident_data": "auto",
+        "gpu_resident_vram_budget_gb": 10.0,
+        "expected_pipeline_stamp_weighted_effective": False,
+        "expected_pipeline_stamp_positive_sampling": "uniform",
         "dose_multiplier": DOSE_MULTIPLIER,
         "successful_positive_lr_updates": horizon,
         "base_horizon": successful_updates_for_edges(edges),
@@ -499,10 +612,10 @@ def _honest_recipe_config() -> dict[str, Any]:
 
 
 def recipe_refusal_controls() -> dict[str, Any]:
-    """Plant four recipe defects against the SHIPPED predicate; check the old one too.
+    """Plant six recipe defects against the SHIPPED predicate; check the old one too.
 
     Every control calls the shipped `assert_registered_recipe`; none re-implements it,
-    so a predicate that returned unconditionally would fail all four. Each plant also
+    so a predicate that returned unconditionally would fail all six. Each plant also
     proves the OLD predicate ACCEPTS it -- the seed/dimension shape check cannot see the
     recipe drift.
     """
@@ -551,10 +664,24 @@ def recipe_refusal_controls() -> dict[str, Any]:
         _set_path(cfg, ("optimizer", "fneg_lo"), 0.05)
         _set_path(cfg, ("optimizer", "fneg_hi"), 0.5)
 
+    def _weighted_on(cfg: dict[str, Any]) -> None:
+        # R0217's fuzzy-weight-proportional sampler turned back on -- the exact silent
+        # drift the seed-42 cross-check caught (fog 0.093 weighted vs 0.371 uniform).
+        _set_path(cfg, ("optimizer", "weighted_edge_sampling"), True)
+
+    def _routes_off_device(cfg: dict[str, Any]) -> None:
+        # R0217's host-weighted execution routing back in -- the exact config defect that
+        # blocked the GPU run: core.fit raises on required_pipeline (device != host_
+        # weighted) and gpu_resident_data=False routes off the device fast path.
+        _set_path(cfg, ("execution", "required_pipeline"), "host_weighted_minilm_mixed_2m")
+        _set_path(cfg, ("execution", "gpu_resident_data"), False)
+
     _plant("wrong_kernel", "legacy_lp kernel with a=b=1.0 -- R0217's kernel, not fneg's umap curve", _wrong_kernel)
     _plant("wrong_dose", "the x1 base horizon instead of the x4 recipe dose", _wrong_dose)
     _plant("fneg_off", "fneg_weight=0.0 -- the reweighting turned off, byte-inert on the loss", _fneg_off)
     _plant("wrong_band", "fneg_lo/hi moved to 0.05/0.5 -- a different fog band", _wrong_band)
+    _plant("weighted_sampling_on", "weighted_edge_sampling=True -- R0217's fuzzy sampler, not the promoted uniform recipe", _weighted_on)
+    _plant("routes_off_device", "execution routing back to R0217's host-weighted path -- the config defect that blocked the GPU run", _routes_off_device)
 
     honest_refused = False
     honest_error = None
@@ -578,7 +705,7 @@ def recipe_refusal_controls() -> dict[str, Any]:
         "note": (
             "every control calls the SHIPPED assert_registered_recipe; none "
             "re-implements it. A predicate that returned unconditionally would fail "
-            "all four."
+            "all six."
         ),
     }
 
@@ -806,8 +933,10 @@ __all__ = [
     "N_TARGET",
     "OLD_RECIPE_PREDICATE",
     "RECIPE_DOSE_PATHS",
+    "RECIPE_EXECUTION_PATHS",
     "RECIPE_FNEG_PATHS",
     "RECIPE_KERNEL_PATHS",
+    "RECIPE_SAMPLING_PATHS",
     "ROUND_ID",
     "Round0265FamilyError",
     "Round0265RecipeError",

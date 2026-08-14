@@ -97,16 +97,113 @@ def test_wrong_band_is_refused():
 
 def test_recipe_refusal_controls_all_fire_and_old_predicate_is_blind():
     controls = T.recipe_refusal_controls()
+    assert controls["planted"] == 6
     assert controls["every_planted_defect_was_refused"] is True
     assert controls["the_old_predicate_accepted_every_one"] is True
     assert controls["the_honest_recipe_still_passes"] is True
     assert {c["control"] for c in controls["controls"]} == {
-        "wrong_kernel", "wrong_dose", "fneg_off", "wrong_band"
+        "wrong_kernel", "wrong_dose", "fneg_off", "wrong_band",
+        "weighted_sampling_on", "routes_off_device",
     }
     # Each plant: shipped refuses, old accepts.
     for c in controls["controls"]:
         assert c["shipped_predicate_refused"] is True
         assert c["old_predicate_accepted"] is True
+
+
+def test_config_sets_uniform_sampling():
+    # The promoted recipe pins UNIFORM positive-edge sampling (weighted flag OFF).
+    cfg = _honest_config()
+    assert cfg["optimizer"]["weighted_edge_sampling"] is False
+    assert cfg["treatment"]["weighted_edge_sampling"] is False
+    recipe = T.assert_registered_recipe(cfg)
+    assert recipe["weighted_edge_sampling"] is False
+
+
+def test_weighted_sampling_on_is_refused():
+    # R0217's fuzzy sampler turned back on is not the promoted recipe.
+    cfg = _honest_config()
+    cfg["optimizer"]["weighted_edge_sampling"] = True
+    with pytest.raises(T.Round0265RecipeError):
+        T.assert_registered_recipe(cfg)
+
+
+def test_recipe_sampling_paths_membership():
+    assert T.RECIPE_SAMPLING_PATHS == (("optimizer", "weighted_edge_sampling"),)
+
+
+def test_config_routes_to_the_uniform_device_path():
+    # The execution routing that makes core.fit SELECT the uniform device path.
+    cfg = _honest_config()
+    assert cfg["execution"]["required_pipeline"] == "device"
+    assert cfg["execution"]["gpu_resident_data"] == "auto"
+    assert cfg["execution"]["gpu_resident_vram_budget_gb"] == 10.0
+    assert cfg["treatment"]["required_pipeline"] == "device"
+    assert cfg["treatment"]["gpu_resident_data"] == "auto"
+    assert cfg["treatment"]["gpu_resident_vram_budget_gb"] == 10.0
+    recipe = T.assert_registered_recipe(cfg)
+    assert recipe["required_pipeline"] == "device"
+    assert recipe["gpu_resident_data"] == "auto"
+    assert recipe["gpu_resident_vram_budget_gb"] == 10.0
+
+
+def test_recipe_execution_paths_membership():
+    assert T.RECIPE_EXECUTION_PATHS == (
+        ("execution", "required_pipeline"),
+        ("execution", "gpu_resident_data"),
+        ("execution", "gpu_resident_vram_budget_gb"),
+    )
+
+
+def test_routes_off_device_is_refused():
+    # R0217's host-weighted routing back in -- the exact config defect that blocked the
+    # GPU run (core.fit raises on required_pipeline; gpu_resident_data=False routes off
+    # the device fast path). Either half must be refused.
+    cfg = _honest_config()
+    cfg["execution"]["required_pipeline"] = "host_weighted_minilm_mixed_2m"
+    with pytest.raises(T.Round0265RecipeError):
+        T.assert_registered_recipe(cfg)
+    cfg2 = _honest_config()
+    cfg2["execution"]["gpu_resident_data"] = False
+    with pytest.raises(T.Round0265RecipeError):
+        T.assert_registered_recipe(cfg2)
+
+
+def test_expected_pipeline_stamp_is_the_honest_device_uniform_stamp():
+    # The declared stamp describes a uniform device run, not R0217's fuzzy-weighted host
+    # sampler; the weighted-only keys the device stamp never emits are dropped.
+    cfg = _honest_config()
+    stamp = cfg["execution"]["expected_pipeline_stamp"]
+    assert stamp["pipeline"] == "device"
+    assert stamp["sampler_class"] == "DeviceEdgeSampler"
+    assert stamp["positive_sampling"] == "uniform"
+    assert stamp["x_residency"] == "device_fp16"
+    assert stamp["weighted_requested"] is False
+    assert stamp["weighted_effective"] is False
+    assert stamp["uniform_with_replacement"] is False
+    assert stamp["positive_with_replacement"] is False
+    for dropped in ("positive_destination_policy", "negative_sampling",
+                    "rng_stream_policy", "host_prefetch", "endpoint_forward",
+                    "weight_sampler", "weight_uniform_dtype"):
+        assert dropped not in stamp
+    # The two seed-bearing keys stay (documentary; the 9-path invariant is unchanged).
+    assert stamp["positive_rng_seed"] == T.CANONICAL_SEED
+    # A stamp that still declared weighted is refused.
+    cfg["execution"]["expected_pipeline_stamp"]["weighted_effective"] = True
+    with pytest.raises(T.Round0265RecipeError):
+        T.assert_registered_recipe(cfg)
+
+
+def test_built_model_routes_to_the_device_path():
+    # CPU-only: constructing the model stores device="cuda" as a string and touches no
+    # CUDA (the MLP is only moved to device inside fit()). Prove the config->model bridge
+    # threads the device-uniform routing so core.fit will select the uniform device path.
+    cfg = _honest_config()
+    model = N._build_fneg_model(cfg)
+    assert model.required_input_pipeline == "device"
+    assert model.gpu_resident_data == "auto"
+    assert model.gpu_resident_vram_budget_gb == 10.0
+    assert model.weighted_edge_sampling is False
 
 
 def test_old_predicate_rejects_a_non_family_seed():

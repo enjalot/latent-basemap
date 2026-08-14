@@ -115,7 +115,6 @@ from experiments.round0230_nodes import (
     CellWatchdog,
     _open_substrate,
     _sealed_graph,
-    _weighted_rejection_accounting_mismatch,
 )
 from experiments.round0113_nodes import _new_model
 from experiments.round0238_nodes import _check_runner_abort
@@ -407,6 +406,15 @@ def _build_fneg_model(config: Mapping[str, Any]):
     needed_epochs = math.ceil(int(model.total_steps_estimate) / steps_per_epoch)
     if needed_epochs > int(model.n_epochs):
         model.n_epochs = needed_epochs
+    # The promoted recipe samples positive edges UNIFORMLY. The config carries
+    # optimizer.weighted_edge_sampling=False, so `_new_model` builds the model with the
+    # uniform sampler; assert it here so a regression in the config→model bridge (or a
+    # future _new_model change) fails closed instead of silently training weighted.
+    if model.weighted_edge_sampling is not False:
+        raise Round0265NodeError(
+            "R0265 model was built with weighted_edge_sampling="
+            f"{model.weighted_edge_sampling!r}; the promoted recipe is uniform sampling"
+        )
     return model
 
 
@@ -646,16 +654,11 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         immutable=True,
     )
 
-    from basemap.round0217_minilm_2m_pipeline import (
-        MiniLMHostFp32EndpointArray,
-        MiniLMMixedTrainingInput,
-    )
-
-    dataset = MiniLMHostFp32EndpointArray(
-        source, source_signature=substrate_signature, buffer_rows=BATCH_SIZE
-    )
-    wrapper = MiniLMMixedTrainingInput(dataset, graph, seed=seed)
-
+    # The promoted recipe trains on the RAW fp32 substrate memmap (exactly the sandbox
+    # `X = np.load(substrate, mmap_mode="r")` the P1 GO was accepted on), NOT R0217's
+    # MiniLMMixedTrainingInput wrapper. The wrapper's prepare_round0034_training path
+    # unconditionally builds the fuzzy-weighted sampler and raises on uniform sampling;
+    # passing the raw array lets core.fit select the uniform device edge sampler.
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -681,22 +684,44 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             wrapped = window.wrap(recorder)
             model.abort_poll = wrapped
             try:
+                # Match the sandbox run_arm call EXACTLY: only precomputed_edges_path +
+                # random_state. The other fit() kwargs default to the sandbox's values
+                # (resample_negatives=False, n_processes=6, low_memory=False,
+                # use_wandb=False); passing them explicitly is unnecessary and low_memory
+                # is the one that could divert the loader, so it is dropped.
                 model.fit(
-                    wrapper,
-                    low_memory=True,
-                    verbose=False,
-                    n_processes=6,
+                    source,
                     random_state=seed,
-                    resample_negatives=False,
                     precomputed_edges_path=graph["signature"]["canonical_path"],
-                    use_wandb=False,
                 )
             finally:
                 model.abort_poll = None
             wall = time.monotonic() - started
             wrapped("R0265 fit() returned")
             accounting = dict(model._train_stats)
-            runtime = wrapper.runtime_stamp()
+            # The pipeline stamp core.fit selected. On the raw-array device path the
+            # loader (DeviceEdgeSampler) has no execution_stamp, so `_pipeline_runtime_info`
+            # is never populated; the ACTUAL selected pipeline/semantics live on
+            # `_pipeline_info` (set by core._stamp_pipeline before the first update).
+            runtime = dict(getattr(model, "_pipeline_info", None) or {})
+            if not runtime:
+                raise Round0265NodeError(
+                    "R0265 fit() left no _pipeline_info stamp -- cannot prove the sampler"
+                )
+            # FAIL-CLOSED TRIPWIRE: a silent weighted regression can never seal a cell
+            # again. The promoted recipe is uniform positive-edge sampling, so the stamp
+            # must report weighted_effective=False and positive_sampling="uniform".
+            # (uniform_with_replacement is NOT asserted True: on the sealed 2M graph the
+            # device path draws a per-epoch permutation without replacement, so the real
+            # stamp carries uniform_with_replacement=False -- the weighted-vs-uniform
+            # distinction lives in weighted_effective / positive_sampling.)
+            if runtime.get("weighted_effective") is not False or runtime.get("positive_sampling") != "uniform":
+                raise Round0265NodeError(
+                    "R0265 trained a non-uniform sampler (silent weighted regression): "
+                    f"weighted_effective={runtime.get('weighted_effective')!r}, "
+                    f"positive_sampling={runtime.get('positive_sampling')!r}, "
+                    f"pipeline={runtime.get('pipeline')!r}"
+                )
             fneg_telemetry = dict(model.fneg_telemetry) if model.fneg_telemetry else None
             model_path = os.path.join(output, "model.pt")
             from basemap.output_safety import atomic_build_new_file
@@ -710,7 +735,7 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 "peak_allocated_bytes": int(torch.cuda.max_memory_allocated("cuda")),
                 "peak_reserved_bytes": int(torch.cuda.max_memory_reserved("cuda")),
             }
-            del model, wrapper, dataset
+            del model
             torch.cuda.empty_cache()
             gc.collect()
             wrapped("R0265 training objects released")
@@ -754,11 +779,18 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         raise Round0265NodeError(f"R0265 train peak RSS {peak_rss_gib:.2f} GiB exceeds {HOST_RSS_LIMIT_GIB} GiB")
     memory["peak_host_rss_gib"] = peak_rss_gib
 
-    expected_rows = updates * BATCH_SIZE
-    producer_delta = (
-        int(runtime["host_prefetch_producer_batches"]) - int(runtime["host_prefetch_consumer_batches"])
-    )
-    weighted = _weighted_rejection_accounting_mismatch(runtime, producer_delta=producer_delta, updates=updates)
+    # Uniform-sampler accounting. The device_uniform stamp does NOT carry the weighted
+    # sampler's host_prefetch producer/consumer or rejection fields, so the weighted
+    # rejection-accounting reconciliation does not apply; the uniform facts recorded on
+    # the receipt are the stamp's own sampling-mode fields, already tripwire-verified.
+    uniform_sampling = {
+        "weighted_effective": runtime.get("weighted_effective"),
+        "weighted_requested": runtime.get("weighted_requested"),
+        "positive_sampling": runtime.get("positive_sampling"),
+        "uniform_with_replacement": runtime.get("uniform_with_replacement"),
+        "sampler_pipeline": runtime.get("pipeline"),
+        "sampler_class": runtime.get("sampler_class"),
+    }
     coverage = ledger.receipt()
     receipt_body = {
         "schema": TRAIN_SCHEMA,
@@ -793,6 +825,7 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "consumed_positive_draws_per_edge": float(updates * POSITIVE_ROWS_PER_UPDATE / edges),
         "train_accounting": accounting,
         "exact_execution_receipt": runtime,
+        "uniform_sampling": uniform_sampling,
         "fneg_telemetry": fneg_telemetry,
         "train_wall_s": wall,
         "memory": memory,
@@ -817,7 +850,10 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "fneg_reweighting_was_active": fneg_telemetry is not None,
             "checkpoint_round_trips_fneg_params": checkpoint_fneg_roundtrip,
             "all_2m_coordinates_finite": transform_rows_finite == ROWS,
-            "weighted_rejection_accounting_closes": weighted is None,
+            "uniform_sampling_stamp_verified": (
+                uniform_sampling["weighted_effective"] is False
+                and uniform_sampling["positive_sampling"] == "uniform"
+            ),
             "watchdog_did_not_trip": not bool(watchdog_state["tripped"]),
             "zero_numerical_skips": (
                 int(accounting.get("amp_overflow_skips", 0)) == 0
