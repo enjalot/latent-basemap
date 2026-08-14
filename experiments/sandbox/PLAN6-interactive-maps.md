@@ -129,11 +129,44 @@ against current reality:
 5. latent-scope projector revival (parallel track, independent).
 6. Publish profile + (stretch) in-browser projection.
 
-## Open choices for the owner
+## Owner decisions (2026-08-14) — all open choices resolved
 
-- Publish target (HF Space vs static hosting) — affects the deep-points
-  tier's availability in the demo.
-- Whether the demo ships the deep-points tier (1.2 GB at 100M — HF can host
-  it; range requests make it usable).
-- The in-browser projection stretch: pursue at viewer-v1 time or defer.
-- TF-IDF labels at launch or fast-follow.
+- **Hosting: gh-pages static site, likely in latent-basemap.** Small tiers
+  (density pyramid, bin previews/terms, LOD points, model files) live on
+  gh-pages; **deep-points on GCS** with range requests. GCS needs a CORS
+  config for the gh-pages origin; egress stays modest because deep-points
+  are fetched per-viewport as byte ranges — a session touches a few MB,
+  never the whole file.
+- **In-browser projection ships in v1.** MiniLM runs officially in
+  transformers.js (Xenova ONNX export exists); the map head (~12M params)
+  exports to ONNX (R0026 precedent; a small CPU export path for
+  umap-kernel/fneg checkpoints is a build item). Type text → embed → project
+  → marker lands on the map. Model assets ~35–50 MB one-time, Cache-API
+  cached.
+- **Loading UX: explicit-ask with size labels and progress.** Instant on
+  load: density pyramid (few MB). On-interaction: bin preview JSONs. Behind
+  explicit asks with stated sizes + progress bars (content-length streams):
+  "point mode" (per-viewport GCS ranges, ~X MB as you pan), "load projection
+  models (~45 MB)", sampled-text pack. Per-click text lookups are KB-scale
+  range requests — no ask needed.
+
+## Corpus filter/color — bin AND point level (owner question, answered yes)
+
+Provenance gives every row a corpus tag (u8). Two precomputed structures
+make filtering/coloring free at runtime:
+
+- **Point level: pack corpus into the id word.** Row ids ≤100M fit 27 bits,
+  so id+corpus pack into one u32 — point record = xy(u16×2) + packed u32 =
+  **8 B/point** (revised: 100M deep-points = 800 MB, not 1.2 GB). Filtering
+  = mask on the corpus bits; coloring = palette on them. Same scheme in the
+  LOD sample tier.
+- **Bin level: per-corpus count planes.** Each density level stores counts
+  per corpus (4×u32/bin ≈ +16 MB/level at 1024²; pyramid ≈ +21 MB total).
+  The client recomposes density from any subset of planes — corpus toggles,
+  color-by-dominant-corpus, and hover previews showing bin composition
+  ("62% fineweb / 21% pile / …") all come from the same planes with no
+  server and no re-render pipeline.
+
+This also generalizes forward: projected user datasets (latent-scope
+overlays) and future register slices (PLAN5's Reddit/QA corpora) are just
+additional planes/tags in the same scheme.
