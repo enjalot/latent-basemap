@@ -83,6 +83,7 @@ from basemap.round0265_fneg_treatment import (
     CANONICAL_SEED,
     CAPABILITIES,
     DOSE_MULTIPLIER,
+    SEALED_DIRECTED_EDGES,
     FNEG_A,
     FNEG_B,
     FNEG_HI,
@@ -396,6 +397,16 @@ def _build_fneg_model(config: Mapping[str, Any]):
     model.fneg_lo = float(optimizer["fneg_lo"])
     model.fneg_hi = float(optimizer["fneg_hi"])
     model.fneg_telemetry = None
+    # `_new_model` hardcodes n_epochs=2 (fits R0217's low-dose horizon). The x4
+    # dose horizon (320652 updates) needs the loader to supply >= that many
+    # batches; at steps_per_epoch = ceil(edges/num_pos) that is 3 epochs. Scale
+    # n_epochs up to cover the horizon (the sandbox run_arm rule); the horizon
+    # break still ends training at total_steps_estimate, so the dose is unchanged.
+    num_pos = max(1, int(model.batch_size * model.pos_ratio))
+    steps_per_epoch = math.ceil(SEALED_DIRECTED_EDGES / num_pos)
+    needed_epochs = math.ceil(int(model.total_steps_estimate) / steps_per_epoch)
+    if needed_epochs > int(model.n_epochs):
+        model.n_epochs = needed_epochs
     return model
 
 
