@@ -171,21 +171,27 @@ def _run_scenario(pythonpath: Path, fneg_weight: float, tmp_path: Path,
     return res
 
 
+# The commit immediately BEFORE the fneg merge (9794b4b's parent, the R0264
+# setup fix). Pinned explicitly so this inertness baseline stays the pre-fneg
+# core regardless of where HEAD moves after the merge is committed.
+PRE_MERGE_SHA = "736d46860c849b54b0bdef719777b620a887900d"
+
+
 def _materialize_premerge(tmp_path: Path) -> Path:
     """Copy round-0208's basemap package to a temp tree and overwrite core.py
-    with the PRE-MERGE version from `git show HEAD` (no fneg). Returns the tree
-    root to place on PYTHONPATH."""
+    with the PRE-MERGE version (`git show <pre-merge SHA>`, no fneg). Returns the
+    tree root to place on PYTHONPATH."""
     tree = tmp_path / "premerge_tree"
     tree.mkdir()
     shutil.copytree(REPO_ROOT / "basemap", tree / "basemap",
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     pre_core = subprocess.run(
-        ["git", "show", f"HEAD:{CORE_REL}"], cwd=str(REPO_ROOT),
+        ["git", "show", f"{PRE_MERGE_SHA}:{CORE_REL}"], cwd=str(REPO_ROOT),
         capture_output=True, text=True)
-    assert pre_core.returncode == 0, f"git show HEAD failed: {pre_core.stderr}"
+    assert pre_core.returncode == 0, f"git show {PRE_MERGE_SHA} failed: {pre_core.stderr}"
     assert "fneg" not in pre_core.stdout, (
-        "PRE-MERGE HEAD core.py already contains fneg — the merge appears "
-        "committed; the inertness baseline must be the pre-fneg core.")
+        "pre-merge core.py already contains fneg — the pinned SHA is wrong; "
+        "the inertness baseline must be the pre-fneg core.")
     (tree / "basemap/pumap/parametric_umap/core.py").write_text(pre_core.stdout)
     return tree
 
