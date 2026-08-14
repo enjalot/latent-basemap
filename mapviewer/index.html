@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>latent-basemap · map viewer</title>
+    <meta
+      name="description"
+      content="Static pan/zoom viewer for latent-basemap map packs — density bins, corpus composition, LOD points, text reachback."
+    />
+  </head>
+  <body>
+    <div id="app">
+      <header id="topbar">
+        <div class="brand">
+          <strong>latent&#8209;basemap</strong><span class="sep">/</span
+          ><span class="muted">map viewer</span>
+        </div>
+        <label class="pick">
+          <span class="muted">map</span>
+          <select id="mapselect"></select>
+        </label>
+        <div class="spacer"></div>
+        <div id="status" class="status" title="bytes fetched this session"></div>
+      </header>
+
+      <main>
+        <div id="stage">
+          <canvas id="map"></canvas>
+          <div id="controls"></div>
+          <div id="hud"></div>
+          <div id="boot" class="boot">loading manifest…</div>
+        </div>
+        <aside id="side"></aside>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
