@@ -1506,10 +1506,19 @@ def _read_legacy_semantics(job: Mapping[str, Any]) -> dict[str, Any]:
         "legacy_collapse_floor": float(r0264_criteria[COLLAPSE_METRIC]["floor"]),
         "legacy_fog_ceiling": float(r0264_criteria[FOG_METRIC]["ceiling"]),
         "legacy_values_match_published_constants": (
+            # R0263's band constants are stored at full precision, so they compare
+            # exactly. The R0264 provisional collapse floor / fog ceiling constants are
+            # the 6-decimal DISPLAY values the round file and descriptive reference cite
+            # (0.644414 / 0.732966), while the sealed R0264 artifact stores full precision
+            # (0.6444139401628924 / 0.7329657517287256). This is a descriptive drift
+            # cross-check (it never gates a map), so it verifies the artifact matches the
+            # cited value AT THE CITED PRECISION — round to 6 decimals, mirroring the
+            # R0264 node-1 round-vs-literal fix. A drift below 1e-6 is below the display
+            # precision and not meaningful here.
             float(r0263_band["ratio_lower"]) == R0263_LEGACY_K256_BAND["ratio_lower"]
             and float(r0263_band["ratio_upper"]) == R0263_LEGACY_K256_BAND["ratio_upper"]
-            and float(r0264_criteria[COLLAPSE_METRIC]["floor"]) == R0264_PROVISIONAL_COLLAPSE_FLOOR
-            and float(r0264_criteria[FOG_METRIC]["ceiling"]) == R0264_PROVISIONAL_FOG_CEILING
+            and round(float(r0264_criteria[COLLAPSE_METRIC]["floor"]), 6) == R0264_PROVISIONAL_COLLAPSE_FLOOR
+            and round(float(r0264_criteria[FOG_METRIC]["ceiling"]), 6) == R0264_PROVISIONAL_FOG_CEILING
         ),
     }
 
