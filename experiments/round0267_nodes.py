@@ -59,6 +59,8 @@ from basemap import round0267_int8_treatment as T
 from basemap.round0267_int8_treatment import (
     CANONICAL_SEED,
     DOSE_MULTIPLIER,
+    INT8_SLICE_SUBSTRATE_CAPABILITY,
+    INT8_SLICE_SUBSTRATE_SCHEMA,
     ROUND_ID,
     ROWS,
     SEALED_DIRECTED_EDGES,
@@ -72,6 +74,7 @@ from basemap.round0267_int8_treatment import (
     exact_cell_id,
     fneg_seed_invariant_sha256,
     int8_50m_train_config,
+    int8_slice_prefix_digests,
     recipe_refusal_controls,
     runtime_closure_hashes,
     treatment_closure_controls,
@@ -309,6 +312,119 @@ def _open_50m_substrate(sealed: Mapping[str, Any]) -> np.ndarray:
     return array
 
 
+# --------------------------------------------------------------------------- #
+# the PRE-SEALED int8 substrate load (the delegate-approved fix): LOAD R0262's
+# sealed 100M int8 substrate's first-50M-row nested prefix file-backed instead of
+# encoding fp32->int8 on the fly (the multi-minute encode blocked the watchdog).
+# --------------------------------------------------------------------------- #
+
+
+def _read_int8_slice_manifest(job: Mapping[str, Any]) -> dict[str, Any]:
+    """Read + validate the sealed R0267 int8 slice substrate manifest (its SLICE LAW)."""
+    manifest_signature = dict(job["int8_substrate_manifest_signature"])
+    manifest_path = prompt_contract.verify_signature(
+        manifest_signature, label="R0267 sealed int8 slice substrate manifest"
+    )
+    manifest = prompt_contract.read_sealed(
+        manifest_path, label="R0267 sealed int8 slice substrate manifest"
+    )
+    if (
+        manifest.get("schema") != INT8_SLICE_SUBSTRATE_SCHEMA
+        or manifest.get("capability") != INT8_SLICE_SUBSTRATE_CAPABILITY
+        or manifest.get("round_id") != ROUND_ID
+        or int(manifest.get("rows", -1)) != ROWS
+        or int(manifest.get("dimension", -1)) != DIMENSION
+        or manifest.get("x_residency") != X_RESIDENCY
+    ):
+        raise Round0267NodeError("R0267 int8 slice substrate manifest contract changed")
+    return {"manifest": manifest, "manifest_signature": manifest_signature}
+
+
+def _load_verified_int8_slice(
+    sealed_manifest: Mapping[str, Any],
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """LOAD R0262's int8 nested prefix file-backed + VERIFY the sealed prefix digests.
+
+    Returns ``(i8_prefix, scales_prefix, receipt)``. The two arrays are contiguous
+    C-prefixes of the parent files served as read-only ``np.memmap`` (no copy). The
+    two prefix sha256s are RE-HASHED (streamed, never materialised) and checked
+    against the SLICE LAW in the sealed manifest -- a mismatch (the exact 50M bytes
+    are not the sealed ones) raises ``Round0267NodeError``.
+    """
+    if (
+        sealed_manifest.get("schema") != INT8_SLICE_SUBSTRATE_SCHEMA
+        or sealed_manifest.get("capability") != INT8_SLICE_SUBSTRATE_CAPABILITY
+    ):
+        raise Round0267NodeError("R0267 int8 slice substrate manifest contract changed")
+    law = dict(sealed_manifest.get("slice_law") or {})
+    rows = int(law["rows"])
+    dim = int(law["dimension"])
+    offset = int(law["offset"])
+    if offset != 0:
+        raise Round0267NodeError("R0267 int8 slice must be the offset-0 nested prefix")
+    i8_path = str(law["parent_i8_path"])
+    scales_path = str(law["parent_scales_path"])
+    expected_i8 = str(law["prefix_i8_sha256"])
+    expected_scales = str(law["prefix_scales_sha256"])
+
+    # File-backed, contiguous C-prefixes — the reshape+slice never copies the
+    # 19.2 GB int8 payload (HostInt8ArrayDataset then shares the mmap).
+    i8_full = np.memmap(i8_path, dtype=np.int8, mode="r").reshape(-1, dim)
+    sc_full = np.memmap(scales_path, dtype=np.float16, mode="r")
+    if int(i8_full.shape[0]) < rows or int(sc_full.shape[0]) < rows:
+        raise Round0267NodeError(
+            "R0267 parent int8 substrate is smaller than the sealed 50M prefix"
+        )
+    i8 = i8_full[:rows]
+    sc = sc_full[:rows]
+
+    got = int8_slice_prefix_digests(i8_path, scales_path, rows=rows, dimension=dim)
+    if got["prefix_i8_sha256"] != expected_i8 or got["prefix_scales_sha256"] != expected_scales:
+        raise Round0267NodeError(
+            "R0267 int8 nested-prefix digest mismatch (the 50M bytes are not the sealed "
+            f"ones): i8 {got['prefix_i8_sha256']} vs sealed {expected_i8}; scales "
+            f"{got['prefix_scales_sha256']} vs sealed {expected_scales}"
+        )
+    receipt = {
+        "parent_artifact": law.get("parent_artifact"),
+        "parent_round": law.get("parent_round"),
+        "parent_i8_path": i8_path,
+        "parent_scales_path": scales_path,
+        "rows": rows,
+        "dimension": dim,
+        "offset": offset,
+        "prefix_i8_bytes": int(got["prefix_i8_bytes"]),
+        "prefix_scales_bytes": int(got["prefix_scales_bytes"]),
+        "prefix_i8_sha256": got["prefix_i8_sha256"],
+        "prefix_scales_sha256": got["prefix_scales_sha256"],
+        "verified_against_sealed_manifest": True,
+        "load_mode": "pre_sealed_file_backed_nested_prefix",
+        "re_encoded_at_train_time": False,
+    }
+    return i8, sc, receipt
+
+
+def build_hostint8_dataset_from_slice(sealed_manifest: Mapping[str, Any], device: Any):
+    """Construct a file-backed ``HostInt8ArrayDataset`` from the sealed int8 prefix.
+
+    The int8 rows + fp16 scales are passed as ``encoded=``/``scales=`` so
+    ``HostInt8ArrayDataset`` uses them VERBATIM (no fp32->int8 re-encode). The
+    contiguous mmap prefixes stay file-backed through ``__init__`` (no 19.2 GB
+    anonymous copy). Returns ``(dataset, receipt)``.
+    """
+    from basemap.pumap.parametric_umap.datasets.edge_list_dataset import (
+        HostInt8ArrayDataset,
+    )
+
+    i8, sc, receipt = _load_verified_int8_slice(sealed_manifest)
+    dataset = HostInt8ArrayDataset(None, device, encoded=i8, scales=sc)
+    if getattr(dataset, "host_int8_dataset", False) is not True:
+        raise Round0267NodeError("R0267 pre-sealed int8 dataset is not a host-int8 dataset")
+    if tuple(dataset.shape) != (int(receipt["rows"]), int(receipt["dimension"])):
+        raise Round0267NodeError("R0267 pre-sealed int8 dataset geometry changed")
+    return dataset, receipt
+
+
 def _build_int8_50m_model(config: Mapping[str, Any]):
     """R0265's `_build_fneg_model` epoch-scaled to the 50M edge count, plus the int8 delta.
 
@@ -388,7 +504,10 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 
     graph = _sealed_50m_graph(job)
     substrate = _sealed_50m_substrate(job)
+    # The fp32 substrate stays bound + opened for the post-train transform (and the
+    # receipt lineage); it is NOT the training X any more (see the int8 load below).
     source = _open_50m_substrate(substrate)
+    int8_slice = _read_int8_slice_manifest(job)
     edges = graph["directed_edges"]
     config, config_sha = int8_50m_train_config(
         seed=seed,
@@ -438,6 +557,22 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     model._abort_on_first_nonfinite = True
     model._admission_artifact_path = os.path.join(output, "admission.json")
 
+    # PRE-SEALED LOAD (replaces the fp32-substrate-then-on-the-fly-encode path):
+    # load R0262's sealed 100M int8 substrate's first-50M-row nested prefix
+    # file-backed, VERIFY the two prefix sha256s against the sealed SLICE LAW, and
+    # hand the pre-constructed HostInt8ArrayDataset to model.fit so core.fit uses
+    # it directly (no re-encode). The 19.2 GB int8 payload stays file-backed
+    # through HostInt8ArrayDataset.__init__ (no anonymous copy) and is byte-for-
+    # byte the on-the-fly encode of the fp32 50M prefix (proven, 0 mismatches), so
+    # the map is IDENTICAL to what the encode produced. The digest verification
+    # (a streamed hash of the 19.2 GB prefix) runs HERE, before the liveness
+    # watchdog starts, so it can never trip it.
+    int8_dataset, int8_slice_receipt = build_hostint8_dataset_from_slice(
+        int8_slice["manifest"], model.device
+    )
+    if int(int8_dataset.shape[0]) != ROWS or int(int8_dataset.shape[1]) != DIMENSION:
+        raise Round0267NodeError("R0267 pre-sealed int8 dataset geometry is not the 50M rung")
+
     window = ledger.window(f"R0267 {capability} train stage")
     guard_ctx = _node_guard(label, anonymous_budget_bytes=R0267_ANON_BUDGET_BYTES)
     gate = _node_gate(label, training_performed=True)
@@ -452,8 +587,10 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             wrapped = window.wrap(recorder)
             model.abort_poll = wrapped
             try:
+                # X is the PRE-SEALED host-int8 dataset (loaded + verified above);
+                # core.fit's host_int8 branch uses it directly, no re-encode.
                 model.fit(
-                    source,
+                    int8_dataset,
                     random_state=seed,
                     precomputed_edges_path=graph["signature"]["canonical_path"],
                 )
@@ -493,7 +630,7 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 "peak_allocated_bytes": int(torch.cuda.max_memory_allocated("cuda")),
                 "peak_reserved_bytes": int(torch.cuda.max_memory_reserved("cuda")),
             }
-            del model
+            del model, int8_dataset
             torch.cuda.empty_cache()
             gc.collect()
             wrapped("R0267 training objects released")
@@ -571,6 +708,9 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "substrate": substrate["substrate_signature"],
         "substrate_manifest": substrate["manifest_signature"],
         "ordered_substrate_sha256": substrate["ordered_substrate_sha256"],
+        "int8_substrate_manifest": int8_slice["manifest_signature"],
+        "int8_substrate_slice": int8_slice_receipt,
+        "x_source": "pre_sealed_int8_nested_prefix_of_r0262_100m",
         "graph_manifest": graph["manifest_signature"],
         "graph": graph["signature"],
         "rows": ROWS,
@@ -605,6 +745,10 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             ),
             "fneg_reweighting_was_active": fneg_telemetry is not None,
             "checkpoint_round_trips_fneg_params": checkpoint_fneg_roundtrip,
+            "pre_sealed_int8_slice_verified": bool(
+                int8_slice_receipt.get("verified_against_sealed_manifest")
+                and int8_slice_receipt.get("re_encoded_at_train_time") is False
+            ),
             "all_50m_coordinates_finite": transform_rows_finite == ROWS,
             "host_int8_residency_stamp_verified": (
                 residency["x_residency"] == X_RESIDENCY
@@ -1290,6 +1434,7 @@ __all__ = [
     "Round0267NodeError",
     "TRAIN_ACTION",
     "TRAIN_SCHEMA",
+    "build_hostint8_dataset_from_slice",
     "read_p1_x2_asymptote_band",
     "run_gate",
     "run_job",

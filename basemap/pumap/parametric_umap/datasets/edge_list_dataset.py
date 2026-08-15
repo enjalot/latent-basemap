@@ -233,8 +233,19 @@ class HostInt8ArrayDataset:
                 enc_i, sc_i = quantize_int8_rows(blk)
                 encoded[i:end] = enc_i
                 scales[i:end] = sc_i
-        encoded = np.ascontiguousarray(encoded)
-        scales = np.ascontiguousarray(scales)
+        # Contiguity guard (R0267): a pre-sealed int8 substrate is handed in as a
+        # file-backed ``np.memmap`` prefix (``substrate.i8[:N]``), already
+        # C-contiguous. ``np.ascontiguousarray`` is a no-op for a contiguous
+        # array, but skip it explicitly when the input is already C-contiguous so
+        # no numpy version can ever materialise a 19.2/38.4 GB anonymous copy of
+        # the memmap — ``torch.from_numpy`` then shares the mmap and the payload
+        # stays file-backed. The encode-from-array path builds a fresh
+        # C-contiguous ``np.empty``, so it also skips the copy (behaviour
+        # unchanged).
+        if not encoded.flags["C_CONTIGUOUS"]:
+            encoded = np.ascontiguousarray(encoded)
+        if not scales.flags["C_CONTIGUOUS"]:
+            scales = np.ascontiguousarray(scales)
         # Same invariants HostInt8MaterializedArray enforces.
         if (encoded.ndim != 2
                 or encoded.dtype != np.dtype("int8")

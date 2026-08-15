@@ -320,6 +320,35 @@ def prepare_round0267(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
     )
     closure_signature = expected_input_signature(closure_path)
 
+    # The PRE-SEALED int8 substrate (the delegate-approved fix for the 50M host-int8
+    # setup failures): R0267 LOADS R0262's sealed 100M host-int8 substrate's first-50M
+    # nested prefix instead of encoding fp32->int8 on the fly at train time (the
+    # multi-minute encode blocked the liveness watchdog). Bind R0262's substrate.i8 +
+    # substrate-scales.f16 as a sealed input by recording a SLICE LAW manifest that
+    # pins the parent files (path + size) and — the load-bearing content binding — the
+    # 50M bytes actually trained on by prefix_i8_sha256 / prefix_scales_sha256. The
+    # per-row int8 encoder makes that prefix byte-identical to the on-the-fly encode
+    # (offline receipt, 0 mismatches), so the LOAD is map-identical.
+    for label, parent_path, parent_bytes in (
+        ("R0262 100M int8 substrate", T.R0262_PARENT_I8_PATH, T.R0262_PARENT_I8_BYTES),
+        ("R0262 100M int8 scales", T.R0262_PARENT_SCALES_PATH, T.R0262_PARENT_SCALES_BYTES),
+    ):
+        if not os.path.exists(parent_path):
+            raise RuntimeError(f"R0267 bound int8 parent absent: {label} at {parent_path}")
+        observed_bytes = int(os.stat(parent_path).st_size)
+        if observed_bytes != int(parent_bytes):
+            raise RuntimeError(
+                f"R0267 bound int8 parent size mismatch: {label} at {parent_path} is "
+                f"{observed_bytes} bytes, expected {int(parent_bytes)}"
+            )
+    int8_substrate_manifest_path = os.path.join(preflight, "int8-slice-substrate-manifest.json")
+    atomic_write_new_json(
+        int8_substrate_manifest_path,
+        prompt_contract.seal(T.int8_slice_substrate_manifest_body(release_sha=release_sha)),
+        immutable=True,
+    )
+    int8_substrate_manifest_signature = expected_input_signature(int8_substrate_manifest_path)
+
     shared_inputs = _dedupe([
         round_signature,
         graph_manifest_signature,
@@ -327,6 +356,7 @@ def prepare_round0267(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
         substrate_signature,
         graph_signature,
         expected_input_signature(identity_path),
+        int8_substrate_manifest_signature,
         closure_signature,
     ])
 
@@ -357,6 +387,7 @@ def prepare_round0267(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
             "capability": capability,
             "graph_manifest_signature": graph_manifest_signature,
             "substrate_manifest_signature": substrate_manifest_signature,
+            "int8_substrate_manifest_signature": int8_substrate_manifest_signature,
             "cell_seed_invariant_sha256": cell_seed_invariant,
             "base_horizon": base_horizon,
             "treatment_closure": closure_signature,
@@ -482,6 +513,20 @@ def prepare_round0267(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
                 "graph": T.R0237_GRAPH_CAPABILITY,
                 "exact_truth": "minilm-mixed-50000k-uniform-probe-k15-truth-v1",
                 "held_out_reserve_sha256": reserve["sha256"],
+            },
+            "x_is_a_pre_sealed_int8_nested_prefix": {
+                "why": (
+                    "the 50M host-int8 rung LOADS R0262's sealed 100M int8 substrate's "
+                    "first-50M-row nested prefix (offset 0) instead of encoding fp32->int8 "
+                    "on the fly at train time; the multi-minute on-the-fly encode blocked "
+                    "the node liveness watchdog. The per-row int8 encoder makes the prefix "
+                    "byte-identical to the encode (offline receipt: 0 mismatches vs the "
+                    "sealed 50M fp32 prefix), so the LOAD is MAP-IDENTICAL."
+                ),
+                "int8_substrate_manifest": T.INT8_SLICE_SUBSTRATE_CAPABILITY,
+                "int8_substrate_manifest_sha256": int8_substrate_manifest_signature["sha256"],
+                "parent_artifact": T.R0262_INT8_CAPABILITY,
+                "slice_law": T.slice_law_block(),
             },
             "consumes_sealed_gate_instruments": {
                 "family_floors": R0265N.GATE_CAPABILITY,

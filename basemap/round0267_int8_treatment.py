@@ -41,6 +41,8 @@ core, the int8 routing bytes, and the 50M ×2 recipe bytes all ran.
 from __future__ import annotations
 
 import copy
+import hashlib
+import os
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -120,6 +122,160 @@ TRAIN_CLOSURE_MODULES: tuple[str, ...] = (
 
 #: The scale + routing paths R0267 rewrites on top of R0265's ×4 2M template.
 INT8_RESIDENCY_PATHS: tuple[tuple[str, ...], ...] = R0266.INT8_RESIDENCY_PATHS
+
+#: The MiniLM feature dimension (the sealed 50M/100M substrates are 384-dim).
+DIMENSION = 384
+
+# --------------------------------------------------------------------------- #
+# The pre-sealed int8 substrate (the delegate-approved fix for the 50M host-int8
+# setup failures): LOAD R0262's sealed 100M host-int8 substrate's first-50M-row
+# nested prefix instead of encoding fp32->int8 on the fly at train time. The
+# multi-minute on-the-fly encode blocked the node liveness watchdog; the per-row
+# int8 encoder makes the first 50M rows a byte-exact nested prefix (offset 0) of
+# the 100M substrate, so the LOAD is MAP-IDENTICAL to the encode (offline
+# receipt: the port's quantize_int8_rows over the sealed 50M fp32 prefix equals
+# R0262's minilm-mixed-100m-int8-v1 first-50M rows bit-for-bit, 0 mismatches).
+# --------------------------------------------------------------------------- #
+
+#: R0262's sealed 100M host-int8 substrate — the nested-prefix PARENT of the 50M rung.
+R0262_ROUND_ID = "0262"
+R0262_INT8_CAPABILITY = "minilm-mixed-100m-int8-v1"
+R0262_INT8_ROOT = (
+    "/data/latent-basemap/runs/round-0262/artifacts/minilm-mixed-100m-int8-v1"
+)
+R0262_PARENT_I8_PATH = os.path.join(R0262_INT8_ROOT, "substrate.i8")
+R0262_PARENT_SCALES_PATH = os.path.join(R0262_INT8_ROOT, "substrate-scales.f16")
+R0262_PARENT_ROWS = 100_000_000
+R0262_PARENT_I8_BYTES = R0262_PARENT_ROWS * DIMENSION   # 38_400_000_000 (raw int8)
+R0262_PARENT_SCALES_BYTES = R0262_PARENT_ROWS * 2       #    200_000_000 (raw fp16)
+
+#: The 50M nested prefix (offset 0) actually trained on, pinned by CONTENT digest.
+SLICE_OFFSET = 0
+PREFIX_I8_SHA256 = (
+    "49e41c519487f732ef562af0c508a2c2d93cb2427ac3e1cfe9f6054304780d85"
+)
+PREFIX_SCALES_SHA256 = (
+    "4162242e6105ec5083588c2ab3f80c4de406a7ffebfe17300474c270d6c0e96a"
+)
+PREFIX_I8_BYTES = ROWS * DIMENSION   # 50M * 384 = 19_200_000_000
+PREFIX_SCALES_BYTES = ROWS * 2       #             100_000_000
+
+INT8_SLICE_SUBSTRATE_CAPABILITY = "minilm-mixed-50000k-hostint8-nested-prefix-of-100m-v1"
+INT8_SLICE_SUBSTRATE_SCHEMA = "round0267-hostint8-50m-nested-prefix-substrate-v1"
+
+#: Streaming chunk for the prefix hash (never materialises the 19.2 GB payload).
+_PREFIX_HASH_CHUNK = 1 << 26  # 64 MiB
+
+
+def sha256_file_prefix(path: str, nbytes: int, *, chunk: int = _PREFIX_HASH_CHUNK) -> str:
+    """SHA-256 over EXACTLY the first ``nbytes`` bytes of ``path``, streamed.
+
+    Reads in bounded chunks so the 19.2 GB int8 prefix (or the 100 MB scales
+    prefix) is never materialised as one buffer. Raises if the file is shorter
+    than ``nbytes`` (the parent must contain the full 50M prefix).
+    """
+    nbytes = int(nbytes)
+    if nbytes < 0:
+        raise ValueError("nbytes must be >= 0")
+    digest = hashlib.sha256()
+    remaining = nbytes
+    with open(path, "rb") as handle:
+        while remaining > 0:
+            block = handle.read(min(int(chunk), remaining))
+            if not block:
+                raise Round0267RecipeError(
+                    f"R0267 int8 prefix hash: {path} is shorter than {nbytes} bytes "
+                    f"({nbytes - remaining} read)"
+                )
+            digest.update(block)
+            remaining -= len(block)
+    return digest.hexdigest()
+
+
+def int8_slice_prefix_digests(
+    i8_path: str, scales_path: str, *, rows: int, dimension: int = DIMENSION
+) -> dict[str, Any]:
+    """The content digests of the first ``rows`` int8 rows and ``rows`` fp16 scales.
+
+    The int8 file is raw C-contiguous ``rows x dimension`` int8, so the first-``rows``
+    prefix is exactly the first ``rows * dimension`` bytes; the scales file is raw
+    fp16, so its prefix is the first ``rows * 2`` bytes.
+    """
+    rows = int(rows)
+    dimension = int(dimension)
+    return {
+        "rows": rows,
+        "dimension": dimension,
+        "prefix_i8_bytes": rows * dimension,
+        "prefix_scales_bytes": rows * 2,
+        "prefix_i8_sha256": sha256_file_prefix(i8_path, rows * dimension),
+        "prefix_scales_sha256": sha256_file_prefix(scales_path, rows * 2),
+    }
+
+
+def slice_law_block(
+    *,
+    i8_path: str = R0262_PARENT_I8_PATH,
+    scales_path: str = R0262_PARENT_SCALES_PATH,
+) -> dict[str, Any]:
+    """The SLICE LAW recorded in R0267's int8 substrate manifest.
+
+    Pins the parent (R0262's 100M int8 substrate) by path + size and — the
+    load-bearing content binding — pins the 50M bytes actually trained on by the
+    prefix digests. The loader re-hashes the prefix and refuses on any mismatch.
+    """
+    return {
+        "law": "nested-prefix-of-100m-int8-substrate-offset-0",
+        "parent_artifact": R0262_INT8_CAPABILITY,
+        "parent_round": R0262_ROUND_ID,
+        "parent_i8_path": str(i8_path),
+        "parent_scales_path": str(scales_path),
+        "parent_rows": R0262_PARENT_ROWS,
+        "parent_i8_bytes": R0262_PARENT_I8_BYTES,
+        "parent_scales_bytes": R0262_PARENT_SCALES_BYTES,
+        "rows": ROWS,
+        "offset": SLICE_OFFSET,
+        "dimension": DIMENSION,
+        "prefix_i8_bytes": PREFIX_I8_BYTES,
+        "prefix_scales_bytes": PREFIX_SCALES_BYTES,
+        "prefix_i8_sha256": PREFIX_I8_SHA256,
+        "prefix_scales_sha256": PREFIX_SCALES_SHA256,
+        "byte_consistency_receipt": (
+            "the port's quantize_int8_rows over the sealed R0237 50M fp32 prefix equals "
+            "R0262's minilm-mixed-100m-int8-v1 first-50M rows bit-for-bit (0 mismatches, "
+            "offline receipt); the per-row int8 encoder makes the first 50M rows a "
+            "byte-exact nested prefix (offset 0), so this LOAD is MAP-IDENTICAL to the "
+            "on-the-fly fp32->int8 encode it replaces"
+        ),
+    }
+
+
+def int8_slice_substrate_manifest_body(*, release_sha: str) -> dict[str, Any]:
+    """The R0267 int8 substrate manifest body (sealed by the prepare builder).
+
+    Records the SLICE LAW block (parent digest + the pinned 50M prefix digests)
+    so the train node can LOAD R0262's int8 nested prefix file-backed and verify
+    the exact bytes it trains on against a sealed pin.
+    """
+    return {
+        "schema": INT8_SLICE_SUBSTRATE_SCHEMA,
+        "round_id": ROUND_ID,
+        "release_sha": str(release_sha),
+        "capability": INT8_SLICE_SUBSTRATE_CAPABILITY,
+        "rows": ROWS,
+        "dimension": DIMENSION,
+        "x_residency": X_RESIDENCY,
+        "slice_law": slice_law_block(),
+        "how_to_read_this": (
+            "R0267 trains on the FIRST 50M rows of R0262's sealed 100M host-int8 substrate "
+            "instead of re-encoding fp32->int8 on the fly at train time (the multi-minute "
+            "on-the-fly encode blocked the liveness watchdog). Because the int8 encoder is "
+            "per-row, the first 50M rows are a byte-exact nested prefix (offset 0) of the "
+            "100M substrate, so this LOAD is map-identical to the encode. The 50M bytes "
+            "trained on are pinned by prefix_i8_sha256 / prefix_scales_sha256; the loader "
+            "re-hashes the prefix and refuses on any mismatch (Round0267NodeError)."
+        ),
+    }
 
 
 class Round0267RecipeError(RuntimeError):
@@ -663,8 +819,22 @@ __all__ = [
     "CAPABILITIES",
     "CAPABILITY_TEMPLATE",
     "CLOSURE_SCHEMA",
+    "DIMENSION",
     "DOSE_MULTIPLIER",
     "HORIZON",
+    "INT8_SLICE_SUBSTRATE_CAPABILITY",
+    "INT8_SLICE_SUBSTRATE_SCHEMA",
+    "PREFIX_I8_SHA256",
+    "PREFIX_SCALES_SHA256",
+    "R0262_INT8_CAPABILITY",
+    "R0262_PARENT_I8_PATH",
+    "R0262_PARENT_SCALES_PATH",
+    "R0262_ROUND_ID",
+    "SLICE_OFFSET",
+    "int8_slice_prefix_digests",
+    "int8_slice_substrate_manifest_body",
+    "sha256_file_prefix",
+    "slice_law_block",
     "INT8_RECIPE_SCHEMA",
     "INT8_RESIDENCY_PATHS",
     "INT8_TRAIN_CONFIG_SCHEMA",

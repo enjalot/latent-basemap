@@ -15,6 +15,7 @@ import os
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
+import numpy as np
 import pytest
 
 from basemap import round0267_int8_treatment as T
@@ -387,6 +388,182 @@ def test_gate_end_to_end_from_sealed_inputs():
     assert bs["any_gate_straddles"] is False
     # σ_fam is the sealed family value, not a literal.
     assert sigma["sigma_fam_collapse"] == pytest.approx(0.057774, abs=1e-6)
+
+
+# --------------------------------------------------------------------------- #
+# 4b. the PRE-SEALED int8 substrate LOAD (delegate-approved fix): the SLICE LAW +
+#     prefix-digest binding, the loader's verification, the core hook selecting a
+#     pre-built HostInt8ArrayDataset without re-encoding, and the file-backed /
+#     no-large-copy contract. CPU-only, small synthetic int8 mmaps (no GPU).
+# --------------------------------------------------------------------------- #
+
+
+def _write_synthetic_int8_slice(tmp_path, rows=4, dim=384):
+    """A tiny raw int8 substrate + fp16 scales + a sealed-shape slice-law manifest."""
+    i8 = (((np.arange(rows * dim) % 255) - 127).astype(np.int8)).reshape(rows, dim)
+    sc = np.full(rows, 0.5, dtype=np.float16)
+    i8_path = str(tmp_path / "substrate.i8")
+    sc_path = str(tmp_path / "substrate-scales.f16")
+    i8.tofile(i8_path)
+    sc.tofile(sc_path)
+    digests = T.int8_slice_prefix_digests(i8_path, sc_path, rows=rows, dimension=dim)
+    manifest = {
+        "schema": T.INT8_SLICE_SUBSTRATE_SCHEMA,
+        "capability": T.INT8_SLICE_SUBSTRATE_CAPABILITY,
+        "round_id": T.ROUND_ID,
+        "rows": rows,
+        "dimension": dim,
+        "x_residency": T.X_RESIDENCY,
+        "slice_law": {
+            "law": "nested-prefix-of-100m-int8-substrate-offset-0",
+            "parent_artifact": T.R0262_INT8_CAPABILITY,
+            "parent_round": T.R0262_ROUND_ID,
+            "parent_i8_path": i8_path,
+            "parent_scales_path": sc_path,
+            "rows": rows,
+            "offset": 0,
+            "dimension": dim,
+            "prefix_i8_sha256": digests["prefix_i8_sha256"],
+            "prefix_scales_sha256": digests["prefix_scales_sha256"],
+        },
+    }
+    return i8, sc, manifest, i8_path, sc_path
+
+
+def test_slice_law_records_the_pinned_prefix_digests():
+    law = T.slice_law_block()
+    assert law["rows"] == 50_000_000
+    assert law["offset"] == 0
+    assert law["dimension"] == 384
+    assert law["parent_artifact"] == "minilm-mixed-100m-int8-v1"
+    assert law["parent_rows"] == 100_000_000
+    assert law["prefix_i8_bytes"] == 50_000_000 * 384
+    assert law["prefix_scales_bytes"] == 50_000_000 * 2
+    assert law["prefix_i8_sha256"] == (
+        "49e41c519487f732ef562af0c508a2c2d93cb2427ac3e1cfe9f6054304780d85"
+    )
+    assert law["prefix_scales_sha256"] == (
+        "4162242e6105ec5083588c2ab3f80c4de406a7ffebfe17300474c270d6c0e96a"
+    )
+    body = T.int8_slice_substrate_manifest_body(release_sha="0" * 40)
+    assert body["schema"] == T.INT8_SLICE_SUBSTRATE_SCHEMA
+    assert body["capability"] == T.INT8_SLICE_SUBSTRATE_CAPABILITY
+    assert body["rows"] == 50_000_000 and body["dimension"] == 384
+    assert body["x_residency"] == "host_int8"
+    # the load-bearing content pin is carried into the manifest verbatim.
+    assert body["slice_law"]["prefix_i8_sha256"] == law["prefix_i8_sha256"]
+    assert body["slice_law"]["prefix_scales_sha256"] == law["prefix_scales_sha256"]
+
+
+def test_loader_verifies_prefix_digests_and_raises_on_mismatch(tmp_path):
+    i8, sc, manifest, i8_path, sc_path = _write_synthetic_int8_slice(tmp_path)
+    got_i8, got_sc, receipt = N._load_verified_int8_slice(manifest)
+    assert got_i8.shape == (4, 384)
+    assert got_sc.shape == (4,)
+    np.testing.assert_array_equal(np.asarray(got_i8), i8)
+    np.testing.assert_array_equal(np.asarray(got_sc), sc)
+    assert receipt["verified_against_sealed_manifest"] is True
+    assert receipt["re_encoded_at_train_time"] is False
+    assert receipt["offset"] == 0
+    # mutate the i8 prefix digest on the manifest -> the loader refuses.
+    bad_i8 = copy.deepcopy(manifest)
+    bad_i8["slice_law"]["prefix_i8_sha256"] = "0" * 64
+    with pytest.raises(N.Round0267NodeError):
+        N._load_verified_int8_slice(bad_i8)
+    # mutate the scales prefix digest -> the loader refuses.
+    bad_sc = copy.deepcopy(manifest)
+    bad_sc["slice_law"]["prefix_scales_sha256"] = "0" * 64
+    with pytest.raises(N.Round0267NodeError):
+        N._load_verified_int8_slice(bad_sc)
+    # a non-zero offset (not a true nested prefix) -> refused.
+    bad_off = copy.deepcopy(manifest)
+    bad_off["slice_law"]["offset"] = 1
+    with pytest.raises(N.Round0267NodeError):
+        N._load_verified_int8_slice(bad_off)
+
+
+def test_build_hostint8_dataset_from_slice_does_not_reencode(tmp_path, monkeypatch):
+    from basemap.pumap.parametric_umap.datasets import edge_list_dataset as E
+
+    calls = {"n": 0}
+    orig = E.quantize_int8_rows
+
+    def spy(block):
+        calls["n"] += 1
+        return orig(block)
+
+    monkeypatch.setattr(E, "quantize_int8_rows", spy)
+    i8, sc, manifest, i8_path, sc_path = _write_synthetic_int8_slice(tmp_path)
+    ds, receipt = N.build_hostint8_dataset_from_slice(manifest, "cpu")
+    assert ds.host_int8_dataset is True
+    assert ds.shape == (4, 384)
+    # the pre-sealed load path constructs the dataset from the int8 bytes verbatim.
+    assert calls["n"] == 0
+
+
+def test_core_hook_uses_prebuilt_hostint8_dataset_without_reencode(tmp_path, monkeypatch):
+    """x_residency=host_int8 + a pre-built HostInt8ArrayDataset X: core.fit uses it
+    directly (the returned dataset IS the one passed in) and never re-encodes."""
+    from basemap.pumap.parametric_umap.datasets import edge_list_dataset as E
+    from basemap.pumap.parametric_umap import ParametricUMAP
+
+    calls = {"n": 0}
+    orig = E.quantize_int8_rows
+
+    def spy(block):
+        calls["n"] += 1
+        return orig(block)
+
+    monkeypatch.setattr(E, "quantize_int8_rows", spy)
+    i8, sc, manifest, i8_path, sc_path = _write_synthetic_int8_slice(tmp_path, rows=4, dim=384)
+    ds, _receipt = N.build_hostint8_dataset_from_slice(manifest, "cpu")
+
+    n = 4
+    src = np.array([0, 1, 2, 3, 0, 1], dtype=np.int32)
+    dst = np.array([1, 2, 3, 0, 2, 3], dtype=np.int32)
+    npz = str(tmp_path / "edges.npz")
+    np.savez(npz, sources=src, targets=dst, n_nodes=np.int64(n))
+
+    model = ParametricUMAP(
+        device="cpu",
+        x_residency="host_int8",
+        require_graph_manifest=False,
+        positive_target_mode="binary",
+        weighted_edge_sampling=False,
+        batch_size=4,
+        pos_ratio=0.5,
+    )
+    dataset, loader, n_pos = model._prepare_edge_list_training(ds, npz, n, False, 0)
+    # THE HOOK: the pre-built dataset is used directly, not re-wrapped/re-encoded.
+    assert dataset is ds
+    assert model._X_dev is ds
+    assert model._pipeline_info["x_residency"] == "host_int8"
+    assert model._pipeline_info["pipeline"] == "host_int8"
+    assert calls["n"] == 0
+
+
+def test_hostint8_dataset_stays_file_backed_no_large_copy(tmp_path):
+    """A C-contiguous int8 mmap prefix handed in as encoded= stays file-backed:
+    the torch buffer shares memory with the mmap (no 19.2 GB anonymous copy)."""
+    from basemap.pumap.parametric_umap.datasets.edge_list_dataset import (
+        HostInt8ArrayDataset,
+    )
+
+    rows, dim = 8, 384
+    i8 = (((np.arange(rows * dim) % 255) - 127).astype(np.int8)).reshape(rows, dim)
+    sc = np.full(rows, 0.5, dtype=np.float16)
+    i8_path = str(tmp_path / "s.i8")
+    sc_path = str(tmp_path / "s.f16")
+    i8.tofile(i8_path)
+    sc.tofile(sc_path)
+    mm_i8 = np.memmap(i8_path, dtype=np.int8, mode="r").reshape(-1, dim)[:rows]
+    mm_sc = np.memmap(sc_path, dtype=np.float16, mode="r")[:rows]
+    assert mm_i8.flags["C_CONTIGUOUS"] and mm_sc.flags["C_CONTIGUOUS"]
+    ds = HostInt8ArrayDataset(None, "cpu", encoded=mm_i8, scales=mm_sc)
+    # no copy was made: the dataset's int8/scale buffers share memory with the mmap
+    # prefixes we passed in (a materialising copy would break shares_memory).
+    assert np.shares_memory(ds._i8.numpy(), mm_i8)
+    assert np.shares_memory(ds._scales.numpy(), mm_sc)
 
 
 # --------------------------------------------------------------------------- #

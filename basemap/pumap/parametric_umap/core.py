@@ -690,7 +690,12 @@ class ParametricUMAP:
                 "host_int8", "DeviceEdgeSampler", weighted_ok=True,
                 x_residency="host_int8",
                 uniform_with_replacement=device_uniform_replacement)
-            hi8 = HostInt8ArrayDataset(X, self.device)
+            # R0267: a caller may hand in an ALREADY-CONSTRUCTED host-int8 dataset
+            # as X (a pre-sealed int8 substrate loaded file-backed off disk),
+            # instead of an fp32 X to encode on the fly. Use it directly then —
+            # no re-encode. Every other X (fp32 array / memmap) is encoded as
+            # before, so the 2M encode-from-array path is byte-identical.
+            hi8 = X if isinstance(X, HostInt8ArrayDataset) else HostInt8ArrayDataset(X, self.device)
             self._X_dev = hi8
             self._fast_device_path = True
             loader = DeviceEdgeSampler(
