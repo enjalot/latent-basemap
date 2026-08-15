@@ -1,0 +1,524 @@
+#!/usr/bin/env python3
+"""Prepare, but never launch, the R0267 queue — the 50M ×2 host-int8 staging rung.
+
+Five nodes in one queue, in this order:
+
+1-3. `train_minilm_fneg_50m_x2_hostint8` × 3 (GPU, seeds 42/43/44) — the promoted fneg
+     recipe at N=50M, dose ×2, on the host-int8 X path P5 (R0266) validated, built from
+     R0265's template retargeted to the sealed R0237 50M substrate + k15 graph and proved
+     by `round0267_int8_treatment.assert_registered_50m_int8_recipe`.
+4.   `score_minilm_fneg_50m_x2_panel` (GPU) — the three maps scored on R0265's instruments
+     (held-out FFR against the sealed R0237 exact k15 truth, purity k256/k1024 against
+     R0218's frozen reference, collapse, fog).
+5.   `register_fneg_50m_x2_seedmean_gate` (CPU) — the pre-registered 50M gate: the SEED-MEAN
+     collapse inside P1's ×2 asymptote band widened by z·σ_fam/√n, plus per-seed backstops.
+     Every band/floor/σ_fam/P1-edge is bound by sha256 and read/recomputed at gate time.
+
+This builder REFUSES until the round file is issued (status: issued, base_commit an
+ancestor of the release) and every bound input exists — including the sealed R0237 50M
+substrate + graph manifests, the R0237 reserve + exact truth, R0218's frozen panel, R0265's
+sealed family floors + n=13 panel, and the sealed P1 analysis-v2 result. It builds and
+proves the three ×2 configs HERE, seals the import-source closure (R0266's + the R0267 50M
+recipe module), and binds every sealed cross-round input by real sha256 + bytes.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+from typing import Any
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from basemap.artifact_identity import expected_input_signature
+from basemap.output_safety import (
+    atomic_write_new_json,
+    create_fresh_directory,
+    ensure_data_directory,
+)
+from basemap import round0113_prompt_contrast as prompt_contract
+from basemap.round0218_minilm_2m_panel import CAPABILITY as R0218_PANEL_CAPABILITY, CENTROID_KS
+from basemap.round0247_registry import registry_fingerprint
+from basemap.round0254_dispatch import (
+    SCOPE_MODULES,
+    assert_derived_entries_install,
+    dispatch_census,
+    entry_tuples,
+    gate_census,
+    scope_residual,
+)
+from basemap import round0267_int8_treatment as T
+from basemap.round0267_int8_treatment import (
+    CANONICAL_SEED,
+    CLOSURE_SCHEMA,
+    ROUND_ID,
+    ROWS,
+    SEALED_DIRECTED_EDGES,
+    SEEDS,
+    TRAIN_CLOSURE_MODULES,
+    assert_registered_50m_int8_recipe,
+    capability_for_seed,
+    fneg_seed_invariant_sha256,
+    int8_50m_train_config,
+    runtime_closure_hashes,
+)
+from basemap.round0217_minilm_2m_seed_family import successful_updates_for_edges
+from experiments.round0267_nodes import (
+    GATE_ACTION,
+    GATE_CAPABILITY,
+    PANEL_ACTION,
+    PANEL_CAPABILITY,
+    TRAIN_ACTION,
+)
+import experiments.round0265_nodes as R0265N
+from experiments.prepare_round0020_0022_queues import LAB_ROOT, _base_manifest, _dedupe
+from experiments.prepare_round0138_queue import _frontmatter, _frontmatter_list
+# Reuse R0265/R0266's data anchors for the 2M frozen panel + the R0265 sealed instruments.
+from experiments.prepare_round0265_queue import R0218_PANEL
+from experiments.prepare_round0266_queue import (
+    R0265_FLOORS,
+    R0265_PANEL,
+)
+
+
+ROUND_ROOT = "/data/latent-basemap/runs/round-0267"
+QUEUE_ROOT = os.path.join(ROUND_ROOT, "queue")
+RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
+ROUND_FILE = os.path.join(LAB_ROOT, "round-0267-2026-08-15.md")
+
+#: The sealed R0237 50M substrate + graph manifests (the nested-prefix ladder's carve).
+R0237_SUBSTRATE_MANIFEST = (
+    "/data/latent-basemap/runs/round-0237/queue/artifacts/"
+    "minilm-mixed-50000k-nested-substrate-and-reserves-v1/substrate.json"
+)
+R0237_GRAPH_MANIFEST = (
+    "/data/latent-basemap/runs/round-0237/queue-correction-1/artifacts/"
+    "minilm-mixed-50000k-cluster-spill-k15-fuzzy-graph-v1/qualified-graph.json"
+)
+#: The sealed R0237 50M exact k15 truth (uniform 1M probe rows into the substrate + ids).
+R0237_TRUTH_QUERY_ROWS = (
+    "/data/latent-basemap/runs/round-0237/queue/artifacts/"
+    "minilm-mixed-50000k-uniform-probe-k15-truth-v1/probe-query-rows.i64.npy"
+)
+R0237_TRUTH_IDS = (
+    "/data/latent-basemap/runs/round-0237/queue/artifacts/"
+    "minilm-mixed-50000k-uniform-probe-k15-truth-v1/truth-k15-ids.i32.npy"
+)
+#: The sealed R0237 200k held-out reserve embeddings (held-out reserve lineage).
+R0237_RESERVE = (
+    "/data/latent-basemap/runs/round-0237/queue/artifacts/"
+    "minilm-mixed-50000k-nested-substrate-and-reserves-v1/reserve.f32.npy"
+)
+#: The frozen P1 analysis-v2 result — the ×2 collapse asymptote band (plain JSON).
+P1_ASYMPTOTE = "/data/latent-basemap/sandbox/logs/analysis_v2_result.json"
+
+#: Three 50M ×2 host-int8 trains (~5 GPU-h each) + a three-map 50M panel + the CPU gate;
+#: the cap sits above the ~15 GPU-h train estimate + panel/reference (plan costs).
+GPU_HOURS_CAP = 24.0
+TRAIN_P90_WALL_S = 21_600.0
+PANEL_P90_WALL_S = 7_200.0
+GATE_P90_WALL_S = 600.0
+
+
+def _issued_round(release_sha: str) -> tuple[dict[str, Any], list[str]]:
+    frontmatter = _frontmatter(ROUND_FILE)
+    base_commit = str(frontmatter.get("base_commit") or "")
+    descendant = subprocess.run(
+        ["git", "-C", RELEASE_ROOT, "merge-base", "--is-ancestor", base_commit, release_sha],
+        check=False,
+    ).returncode == 0
+    if (
+        frontmatter.get("round_id") != ROUND_ID
+        or frontmatter.get("status") != "issued"
+        or not descendant
+    ):
+        raise RuntimeError(
+            "R0267 round is not issued for this release. EXPECTED until the round file is "
+            "issued and its base_commit is an ancestor of the release."
+        )
+    reviews = _frontmatter_list(frontmatter, "required_reviews")
+    if not reviews:
+        raise RuntimeError("R0267 round must declare its required reviews")
+    return expected_input_signature(ROUND_FILE), reviews
+
+
+def _upstream_review_state(required: list[str]) -> dict[str, Any]:
+    import glob
+
+    state: dict[str, Any] = {}
+    contingent: list[str] = []
+    for round_id in required:
+        reviews = []
+        for path in sorted(glob.glob(os.path.join(LAB_ROOT, f"review-{round_id}-*.md"))):
+            frontmatter = _frontmatter(path)
+            reviews.append({
+                "file": os.path.basename(path),
+                "status": frontmatter.get("status"),
+                "sha256": expected_input_signature(path)["sha256"],
+            })
+        accepted = [item for item in reviews if item["status"] == "accepted"]
+        state[round_id] = {"reviews_present": reviews, "accepted_reviews": len(accepted)}
+        if not accepted:
+            contingent.append(round_id)
+    return {
+        "required_reviews": list(required),
+        "by_round": state,
+        "rounds_without_an_accepted_review": contingent,
+        "claims_contingent_on": contingent,
+        "note": (
+            "Review is post-hoc: it blocks the downstream claim, not the launch. The 50M "
+            "PASS/FAIL this round registers is registered-and-contingent until its required "
+            "upstream reviews are accepted; the 100M ×2 commit is gated on a 50M pass."
+        ),
+    }
+
+
+def _signature(path: str, label: str) -> dict[str, Any]:
+    if not os.path.exists(path):
+        raise RuntimeError(f"R0267 bound input absent: {label} at {path}")
+    return expected_input_signature(path)
+
+
+def _treatment_closure_seal(release_sha: str) -> dict[str, Any]:
+    """SHA-256 of every R0267 training-closure source (R0266's closure + the 50M module)."""
+    observed = runtime_closure_hashes(TRAIN_CLOSURE_MODULES)
+    files: dict[str, Any] = {}
+    for name, entry in observed.items():
+        relative = os.path.relpath(
+            entry["path"], os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        files[name] = {
+            "module": name,
+            "path": relative,
+            "bytes_at_release": entry["bytes"],
+            "sha256_at_release": entry["sha256"],
+        }
+    return prompt_contract.seal({
+        "schema": CLOSURE_SCHEMA,
+        "round_id": ROUND_ID,
+        "release_sha": release_sha,
+        "modules": list(TRAIN_CLOSURE_MODULES),
+        "files": files,
+        "how_to_read_this": (
+            "R0267 is R0265's fneg recipe at 50M ×2 on R0266's host-int8 path. This seals "
+            "the R0267 training import closure: R0266's closure (the fneg-merged core + the "
+            "int8 routing module) PLUS the round0267 50M ×2 recipe module. A node that ran "
+            "different bytes for any of them would refuse."
+        ),
+    })
+
+
+def prepare_round0267(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
+    if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
+        raise ValueError("R0267 release SHA must be one full commit")
+    round_signature, required_reviews = _issued_round(release_sha)
+    review_state = _upstream_review_state(list(required_reviews))
+
+    # Bind the sealed R0237 50M substrate + graph manifests, read their inner signatures.
+    substrate_manifest_signature = _signature(R0237_SUBSTRATE_MANIFEST, "R0237 50M substrate manifest")
+    graph_manifest_signature = _signature(R0237_GRAPH_MANIFEST, "R0237 50M graph manifest")
+    substrate_manifest = prompt_contract.read_sealed(
+        substrate_manifest_signature["canonical_path"], label="R0237 50M substrate manifest"
+    )
+    graph_manifest = prompt_contract.read_sealed(
+        graph_manifest_signature["canonical_path"], label="R0237 50M graph manifest"
+    )
+    if (
+        substrate_manifest.get("capability") != T.R0237_SUBSTRATE_CAPABILITY
+        or int(substrate_manifest.get("rows", -1)) != ROWS
+        or str(substrate_manifest.get("ordered_substrate_sha256")) != T.R0237_SUBSTRATE_ORDERED_SHA256
+    ):
+        raise RuntimeError("R0267 --substrate manifest is not the sealed R0237 50M substrate")
+    if (
+        graph_manifest.get("capability") != T.R0237_GRAPH_CAPABILITY
+        or int(graph_manifest.get("rows", -1)) != ROWS
+        or int(graph_manifest.get("directed_edges", -1)) != SEALED_DIRECTED_EDGES
+    ):
+        raise RuntimeError("R0267 --graph manifest is not the sealed R0237 50M k15 graph")
+    substrate_signature = dict(substrate_manifest["substrate"])
+    graph_signature = dict(graph_manifest["graph"])
+    edges = int(graph_manifest["directed_edges"])
+    base_horizon = successful_updates_for_edges(edges)
+
+    # Build and prove the three ×2 cell configs HERE (needs no train artifacts). All three
+    # share ONE masked seed-invariant digest (the recipe outside the seed).
+    invariants: set[str] = set()
+    per_seed_config_sha: dict[str, str] = {}
+    recipe = None
+    for seed in SEEDS:
+        config, config_sha = int8_50m_train_config(
+            seed=seed,
+            graph_signature=graph_signature,
+            graph_manifest_signature=graph_manifest_signature,
+            substrate_signature=substrate_signature,
+            graph_edges=edges,
+            rows=ROWS,
+        )
+        recipe = assert_registered_50m_int8_recipe(config)
+        invariants.add(fneg_seed_invariant_sha256(config))
+        per_seed_config_sha[str(seed)] = config_sha
+    if len(invariants) != 1:
+        raise RuntimeError("R0267 three cells do not share one masked recipe digest")
+    cell_seed_invariant = sorted(invariants)[0]
+
+    # Bind every sealed cross-round input by real sha256 + bytes.
+    r0218_panel = _signature(R0218_PANEL, "R0218 frozen panel")
+    truth_query_rows = _signature(R0237_TRUTH_QUERY_ROWS, "R0237 50M truth query rows")
+    truth_ids = _signature(R0237_TRUTH_IDS, "R0237 50M truth ids")
+    reserve = _signature(R0237_RESERVE, "R0237 50M held-out reserve")
+    r0265_floors = _signature(R0265_FLOORS, "R0265 sealed family floors")
+    r0265_panel = _signature(R0265_PANEL, "R0265 sealed n=13 panel")
+    p1_asymptote = _signature(P1_ASYMPTOTE, "P1 analysis-v2 ×2 asymptote band")
+
+    # Cross-check the bound sealed R0265 instruments + the P1 band at prepare, not only at
+    # gate time, so a swapped input is caught early.
+    floors_sealed = prompt_contract.read_sealed(r0265_floors["canonical_path"], label="R0265 floors")
+    if floors_sealed.get("capability") != R0265N.GATE_CAPABILITY or floors_sealed.get("gate_registered") is not True:
+        raise RuntimeError("R0267 --r0265-floors is not the sealed R0265 family floors gate")
+    panel_sealed = prompt_contract.read_sealed(r0265_panel["canonical_path"], label="R0265 panel")
+    if panel_sealed.get("capability") != R0265N.PANEL_CAPABILITY or int(panel_sealed.get("n", -1)) != R0265N.N_FAMILY:
+        raise RuntimeError("R0267 --r0265-panel is not the sealed n=13 panel")
+    with open(p1_asymptote["canonical_path"], encoding="utf-8") as handle:
+        p1_json = json.load(handle)
+    if "yinf_x2" not in dict(p1_json.get("bands") or {}) or p1_json.get("verdict") != "GO":
+        raise RuntimeError("R0267 --p1-asymptote is not the frozen GO analysis-v2 result")
+
+    census = dispatch_census()
+    guard = assert_derived_entries_install(SCOPE_MODULES, census)
+    gates = gate_census(entry_tuples(guard["derived"]))
+    residual = scope_residual(census, SCOPE_MODULES)
+
+    ensure_data_directory(ROUND_ROOT, label="R0267 round root")
+    queue_root = create_fresh_directory(queue_root, label="R0267 GPU queue")
+    preflight = ensure_data_directory(os.path.join(queue_root, "preflight"))
+    closure_path = os.path.join(preflight, "treatment-source-closure.json")
+    atomic_write_new_json(closure_path, _treatment_closure_seal(release_sha), immutable=True)
+    identity_path = os.path.join(preflight, "fneg-50m-x2-cell-identity.json")
+    atomic_write_new_json(
+        identity_path,
+        prompt_contract.seal({
+            "schema": "round0267-fneg-50m-x2-cell-identity-v1",
+            "round_id": ROUND_ID,
+            "release_sha": release_sha,
+            "sealed_directed_edges": edges,
+            "base_horizon": base_horizon,
+            "x2_horizon": int(T.DOSE_MULTIPLIER * base_horizon),
+            "seeds": list(SEEDS),
+            "x_residency": T.X_RESIDENCY,
+            "dose_multiplier": T.DOSE_MULTIPLIER,
+            "rows": ROWS,
+            "recipe": recipe,
+            "cell_seed_invariant_sha256": cell_seed_invariant,
+            "per_seed_config_sha256": per_seed_config_sha,
+            "registry_fingerprint": registry_fingerprint(),
+        }),
+        immutable=True,
+    )
+    closure_signature = expected_input_signature(closure_path)
+
+    shared_inputs = _dedupe([
+        round_signature,
+        graph_manifest_signature,
+        substrate_manifest_signature,
+        substrate_signature,
+        graph_signature,
+        expected_input_signature(identity_path),
+        closure_signature,
+    ])
+
+    artifacts = ensure_data_directory(os.path.join(queue_root, "artifacts"))
+    p90: dict[str, float] = {}
+    jobs: list[dict[str, Any]] = []
+
+    # 1-3. the three host-int8 trains (seeds 42, 43, 44).
+    train_outputs: dict[int, str] = {}
+    train_ids: list[str] = []
+    for seed in SEEDS:
+        capability = capability_for_seed(seed)
+        train_node = f"{TRAIN_ACTION}_seed{seed}"
+        train_output = os.path.join(artifacts, capability)
+        train_outputs[seed] = train_output
+        train_ids.append(train_node)
+        jobs.append({
+            "id": train_node,
+            "action": TRAIN_ACTION,
+            "handler_module": "experiments.round0267_nodes",
+            "handler_callable": "run_job",
+            "deps": [],
+            "outputs": [train_output],
+            "done_marker": os.path.join(artifacts, f"{train_node}.done.json"),
+            "expected_inputs": shared_inputs,
+            "p90_wall_s": TRAIN_P90_WALL_S,
+            "training_seed": int(seed),
+            "capability": capability,
+            "graph_manifest_signature": graph_manifest_signature,
+            "substrate_manifest_signature": substrate_manifest_signature,
+            "cell_seed_invariant_sha256": cell_seed_invariant,
+            "base_horizon": base_horizon,
+            "treatment_closure": closure_signature,
+            "node_policy": {"gpu_required": True, "training_performed": True, "cpu_heavy": False},
+        })
+        p90[train_node] = TRAIN_P90_WALL_S
+
+    # 4. the three-cell panel.
+    panel_node = PANEL_ACTION
+    panel_output = os.path.join(artifacts, PANEL_CAPABILITY)
+    jobs.append({
+        "id": panel_node,
+        "action": PANEL_ACTION,
+        "handler_module": "experiments.round0267_nodes",
+        "handler_callable": "run_job",
+        "deps": list(train_ids),
+        "outputs": [panel_output],
+        "done_marker": os.path.join(artifacts, f"{panel_node}.done.json"),
+        "expected_inputs": _dedupe([
+            *shared_inputs, r0218_panel, truth_query_rows, truth_ids, reserve,
+        ]),
+        "p90_wall_s": PANEL_P90_WALL_S,
+        "graph_manifest_signature": graph_manifest_signature,
+        "substrate_manifest_signature": substrate_manifest_signature,
+        "panel_evidence": R0218_PANEL,
+        "centroid_ks": list(CENTROID_KS),
+        "truth_query_rows": truth_query_rows,
+        "truth_ids": truth_ids,
+        "heldout_reserve": reserve,
+        "cells": [
+            {
+                "seed": int(seed),
+                "capability": capability_for_seed(seed),
+                "train_receipt": {"kind": "file", "canonical_path": os.path.join(train_outputs[seed], "train-receipt.json")},
+            }
+            for seed in SEEDS
+        ],
+        "gate_registerable_here": False,
+        "upstream_review_state": review_state,
+        "node_policy": {"gpu_required": True, "training_performed": False, "cpu_heavy": False},
+    })
+    p90[panel_node] = PANEL_P90_WALL_S
+
+    # 5. the seed-mean gate (CPU).
+    gate_node = GATE_ACTION
+    jobs.append({
+        "id": gate_node,
+        "action": GATE_ACTION,
+        "handler_module": "experiments.round0267_nodes",
+        "handler_callable": "run_job",
+        "deps": [panel_node],
+        "outputs": [os.path.join(artifacts, GATE_CAPABILITY)],
+        "done_marker": os.path.join(artifacts, f"{gate_node}.done.json"),
+        "expected_inputs": _dedupe([
+            *shared_inputs, r0265_floors, r0265_panel, p1_asymptote,
+        ]),
+        "p90_wall_s": GATE_P90_WALL_S,
+        "panel": {"kind": "file", "canonical_path": os.path.join(panel_output, "fneg-50m-x2-panel.json")},
+        "r0265_floors": r0265_floors,
+        "r0265_panel": r0265_panel,
+        "p1_asymptote": p1_asymptote,
+        "upstream_review_state": review_state,
+        "node_policy": {"gpu_required": False, "training_performed": False, "cpu_heavy": True},
+    })
+    p90[gate_node] = GATE_P90_WALL_S
+    p90["total"] = sum(value for key, value in p90.items() if key != "total")
+
+    queue = _base_manifest(
+        round_id=ROUND_ID,
+        release_sha=release_sha,
+        round_file=ROUND_FILE,
+        queue_root=queue_root,
+        gpu_hours_cap=GPU_HOURS_CAP,
+        execution_authority="autonomous-gpu",
+        gpu=True,
+    )
+    queue.update({
+        "schema": "round0267-fneg-50m-x2-seedmean-queue-v1",
+        "repo_root": RELEASE_ROOT,
+        "queue_class": "gpu-training",
+        "required_reviews": list(required_reviews),
+        "capability_dependencies": [
+            T.R0237_SUBSTRATE_CAPABILITY,
+            T.R0237_GRAPH_CAPABILITY,
+            R0218_PANEL_CAPABILITY,
+            R0265N.GATE_CAPABILITY,
+            R0265N.PANEL_CAPABILITY,
+        ],
+        "capabilities_produced": [*T.CAPABILITIES, PANEL_CAPABILITY, GATE_CAPABILITY],
+        "jobs": jobs,
+        "p90_wall_s": p90,
+        "scope_modules": list(SCOPE_MODULES),
+        "stop_hook_install_guard": {
+            "derived_entries": guard["derived"],
+            "every_derived_entry_installs": guard["audit"]["every_entry_installs_effectively"],
+            "gate_census": gates,
+            "scope_residual": residual,
+        },
+        "registered": {
+            "what_this_round_is": (
+                "train THREE 50M cells (seeds 42/43/44) of the promoted fneg recipe at dose "
+                "×2 on the host-int8 X path (R0266-validated), score them on R0265's "
+                "instruments, and register the pre-registered 50M gate: the SEED-MEAN "
+                "collapse inside P1's ×2 asymptote band widened by 1.96·σ_fam/√3, plus "
+                "per-seed backstops on collapse/fog/FFR/purity. Every band/floor/σ_fam/"
+                "P1-edge is read from a sealed artifact bound by sha256 — never a literal."
+            ),
+            "seeds": list(SEEDS),
+            "x_residency": T.X_RESIDENCY,
+            "dose_multiplier": T.DOSE_MULTIPLIER,
+            "cell_seed_invariant_sha256": cell_seed_invariant,
+            "base_horizon": base_horizon,
+            "x2_horizon": int(T.DOSE_MULTIPLIER * base_horizon),
+            "sealed_directed_edges": edges,
+            "rows": ROWS,
+            "dose_is_derived_from_the_sealed_edge_count": (
+                f"successful_positive_lr_updates = {T.DOSE_MULTIPLIER} * "
+                f"successful_updates_for_edges({edges}) = {T.DOSE_MULTIPLIER} * "
+                f"{base_horizon} = {int(T.DOSE_MULTIPLIER * base_horizon)}"
+            ),
+            "consumes_sealed_r0237_inputs": {
+                "substrate": T.R0237_SUBSTRATE_CAPABILITY,
+                "graph": T.R0237_GRAPH_CAPABILITY,
+                "exact_truth": "minilm-mixed-50000k-uniform-probe-k15-truth-v1",
+                "held_out_reserve_sha256": reserve["sha256"],
+            },
+            "consumes_sealed_gate_instruments": {
+                "family_floors": R0265N.GATE_CAPABILITY,
+                "n13_panel_for_sigma_fam": R0265N.PANEL_CAPABILITY,
+                "p1_x2_asymptote_band_sha256": p1_asymptote["sha256"],
+            },
+            "gate_registerable_here": True,
+            "acceptance_rule": (
+                "the round trains the three cells, scores them, and registers the gate. NO "
+                "NUMERICAL OUTCOME makes it a failure: the 50M PASS/FAIL is a MEASUREMENT "
+                "reported either way, contingent on review; the 100M ×2 commit is gated on "
+                "a 50M pass."
+            ),
+        },
+    })
+    manifest_path = os.path.join(queue_root, "queue.json")
+    atomic_write_new_json(manifest_path, queue, immutable=True)
+    return manifest_path
+
+
+def file_sha256_manifest(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="prepare the R0267 queue")
+    parser.add_argument("--release-sha", required=True)
+    parser.add_argument("--queue-root", default=None)
+    args = parser.parse_args(argv)
+    path = prepare_round0267(release_sha=args.release_sha, queue_root=(args.queue_root or QUEUE_ROOT))
+    print(json.dumps({"queue": path, "sha256": file_sha256_manifest(path)}))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
