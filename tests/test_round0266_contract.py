@@ -85,27 +85,35 @@ def test_honest_int8_recipe_passes_and_carries_host_int8():
     assert cfg["treatment"]["x_residency"] == "host_int8"
 
 
-def test_int8_is_only_the_x_residency_delta_over_r0265_seed42():
-    """R0266's config is R0265's seed-42 config plus exactly the two x_residency fields."""
+def test_int8_is_only_the_residency_and_routing_delta_over_r0265_seed42():
+    """R0266's config is R0265's seed-42 config plus exactly the residency + routing
+    delta: x_residency (+ its stamp mirror) and required_pipeline (+ its stamp mirror),
+    all device -> host_int8. Nothing else differs."""
     int8 = _honest_config()
     fp32 = _r0265_seed42_config()
 
     # Normalise the identity fields that legitimately differ (round_id / schema /
-    # treatment metadata) and the x_residency delta; everything else must be identical.
+    # treatment metadata) and the residency+routing delta; everything else identical.
     def _strip(cfg):
         c = copy.deepcopy(cfg)
         c.pop("round_id", None)
         c.pop("schema", None)
         c.pop("treatment", None)
         c["execution"].pop("x_residency", None)
+        c["execution"].pop("required_pipeline", None)
         c["execution"]["expected_pipeline_stamp"].pop("x_residency", None)
+        c["execution"]["expected_pipeline_stamp"].pop("pipeline", None)
         return c
 
     assert _strip(int8) == _strip(fp32)
-    # And the delta really is present in int8 and absent-or-fp32 in fp32.
+    # The delta is present in int8 and device/absent in fp32.
     assert int8["execution"]["x_residency"] == "host_int8"
+    assert int8["execution"]["required_pipeline"] == "host_int8"
+    assert int8["execution"]["expected_pipeline_stamp"]["pipeline"] == "host_int8"
     assert "x_residency" not in fp32["execution"]
+    assert fp32["execution"]["required_pipeline"] == "device"
     assert fp32["execution"]["expected_pipeline_stamp"]["x_residency"] == "device_fp16"
+    assert fp32["execution"]["expected_pipeline_stamp"]["pipeline"] == "device"
 
 
 def test_x_residency_device_fp16_is_refused():
@@ -144,11 +152,12 @@ def test_base_r0265_recipe_defect_is_refused_through_the_int8_guard():
 
 def test_int8_recipe_refusal_controls_all_fire():
     controls = T.int8_recipe_refusal_controls()
-    assert controls["planted"] == 5
+    assert controls["planted"] == 7
     assert controls["every_planted_defect_was_refused"] is True
     assert controls["the_honest_recipe_still_passes"] is True
     assert {c["control"] for c in controls["controls"]} == {
         "x_residency_device_fp16", "x_residency_auto", "stamp_x_residency_device_fp16",
+        "required_pipeline_device", "stamp_pipeline_device",
         "base_recipe_fneg_off", "base_recipe_weighted_sampling_on",
     }
     for c in controls["controls"]:
@@ -159,6 +168,8 @@ def test_int8_residency_paths_membership():
     assert T.INT8_RESIDENCY_PATHS == (
         ("execution", "x_residency"),
         ("execution", "expected_pipeline_stamp", "x_residency"),
+        ("execution", "required_pipeline"),
+        ("execution", "expected_pipeline_stamp", "pipeline"),
     )
 
 
@@ -223,12 +234,14 @@ def test_empty_closure_is_refused():
 # --------------------------------------------------------------------------- #
 
 
-def test_built_model_carries_host_int8_and_routes_device():
+def test_built_model_carries_host_int8_and_routes_host_int8():
     cfg = _honest_config()
     model = N._build_int8_model(cfg)
     assert model.x_residency == "host_int8"
     assert model.weighted_edge_sampling is False
-    assert model.required_input_pipeline == "device"
+    # The host-int8 path stamps pipeline="host_int8", so required_input_pipeline must
+    # fail-closed to "host_int8" (R0265's "device" pin would make core.fit refuse it).
+    assert model.required_input_pipeline == "host_int8"
     assert model.gpu_resident_data == "auto"
 
 

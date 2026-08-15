@@ -84,13 +84,25 @@ X_RESIDENCY = "host_int8"
 #: the control plants back. NOT a gate constant; the recipe is proved by delegation.
 FP32_X_RESIDENCY = "device_fp16"
 
+#: The host-int8 path stamps pipeline="host_int8" (core.py's guarded branch), so the
+#: execution routing must fail-closed to "host_int8", NOT R0265's "device" pin --
+#: else core.fit's required_input_pipeline check refuses ("device" != "host_int8").
+#: This is the second half of the routing delta, alongside x_residency.
+INT8_REQUIRED_PIPELINE = "host_int8"
+#: R0265's device routing -- the values the delta replaces and the R0265 proof needs
+#: restored on a probe copy (R0265 pins required_pipeline="device").
+FP32_REQUIRED_PIPELINE = "device"
+
 CAPABILITY = "minilm-mixed-2m-fneg-x4-md000-hostint8-seed42-r0266-v1"
 
-#: The path the recipe overwrites on top of R0265's seed-42 config, other than the
-#: expected_pipeline_stamp mirror. Named so the delta has an auditable membership.
+#: The paths the recipe overwrites on top of R0265's seed-42 config. The x_residency
+#: pair plus the routing pair (required_pipeline + stamp.pipeline device -> host_int8).
+#: Named so the delta has an auditable membership.
 INT8_RESIDENCY_PATHS: tuple[tuple[str, ...], ...] = (
     ("execution", "x_residency"),
     ("execution", "expected_pipeline_stamp", "x_residency"),
+    ("execution", "required_pipeline"),
+    ("execution", "expected_pipeline_stamp", "pipeline"),
 )
 
 #: R0266's training import closure: R0265's closure PLUS this module. Reuses R0265's
@@ -195,6 +207,13 @@ def int8_train_config(
     _set_path_new(config, ("execution", "x_residency"), X_RESIDENCY)
     _set_path(config, ("execution", "expected_pipeline_stamp", "x_residency"), X_RESIDENCY)
 
+    # The routing half of the delta: the host-int8 path stamps pipeline="host_int8",
+    # so required_pipeline must fail-closed to "host_int8" (not R0265's "device" pin,
+    # which core.fit's required_input_pipeline check would refuse against the host_int8
+    # stamp), and the declared stamp pipeline mirror moves with it.
+    _set_path(config, ("execution", "required_pipeline"), INT8_REQUIRED_PIPELINE)
+    _set_path(config, ("execution", "expected_pipeline_stamp", "pipeline"), INT8_REQUIRED_PIPELINE)
+
     return config, sha256_bytes(canonical_json(config))
 
 
@@ -212,7 +231,15 @@ def assert_registered_int8_recipe(config: Mapping[str, Any]) -> dict[str, Any]:
     the int8 delta is checked: both the execution field and the declared stamp mirror must
     be exactly `"host_int8"`. There is one way to hold.
     """
-    base = R0265.assert_registered_recipe(config)  # raises Round0265RecipeError on any drift
+    # R0266's routing moves off R0265's device pin (required_pipeline + stamp.pipeline
+    # device -> host_int8). R0265's proof pins required_pipeline=="device", so run it on
+    # a probe copy with the routing restored to R0265's device values -- this proves the
+    # kernel/dose/fneg/sampling/x_residency-mirror fields are byte-for-byte R0265's --
+    # then check the ACTUAL config carries the host_int8 routing below.
+    probe = copy.deepcopy(dict(config))
+    _set_path(probe, ("execution", "required_pipeline"), FP32_REQUIRED_PIPELINE)
+    _set_path(probe, ("execution", "expected_pipeline_stamp", "pipeline"), FP32_REQUIRED_PIPELINE)
+    base = R0265.assert_registered_recipe(probe)  # raises Round0265RecipeError on any drift
 
     problems: list[str] = []
     if str(_get_path(config, ("execution", "x_residency"))) != X_RESIDENCY:
@@ -220,11 +247,22 @@ def assert_registered_int8_recipe(config: Mapping[str, Any]) -> dict[str, Any]:
             f"execution.x_residency != {X_RESIDENCY!r} (a device_fp16/auto value silently "
             "runs the fp32 device path this cell exists to escape)"
         )
+    if str(_get_path(config, ("execution", "required_pipeline"))) != INT8_REQUIRED_PIPELINE:
+        problems.append(
+            f"execution.required_pipeline != {INT8_REQUIRED_PIPELINE!r} (R0265's 'device' pin "
+            "makes core.fit refuse the host_int8 stamp; the host-int8 path must fail-closed "
+            "to 'host_int8')"
+        )
     stamp = _get_path(config, ("execution", "expected_pipeline_stamp"))
     if not isinstance(stamp, Mapping) or stamp.get("x_residency") != X_RESIDENCY:
         problems.append(
             "execution.expected_pipeline_stamp.x_residency != "
             f"{X_RESIDENCY!r} (the declared stamp still describes the fp32 residency)"
+        )
+    if not isinstance(stamp, Mapping) or stamp.get("pipeline") != INT8_REQUIRED_PIPELINE:
+        problems.append(
+            "execution.expected_pipeline_stamp.pipeline != "
+            f"{INT8_REQUIRED_PIPELINE!r} (the declared stamp still names the fp32 device path)"
         )
     if problems:
         raise Round0266RecipeError(
@@ -237,7 +275,10 @@ def assert_registered_int8_recipe(config: Mapping[str, Any]) -> dict[str, Any]:
     recipe["base_recipe_schema"] = R0265.FNEG_RECIPE_SCHEMA
     recipe["x_residency"] = X_RESIDENCY
     recipe["expected_pipeline_stamp_x_residency"] = X_RESIDENCY
-    recipe["int8_delta_over_r0265"] = "x_residency: device_fp16 -> host_int8 (one field)"
+    recipe["int8_delta_over_r0265"] = (
+        "residency + routing: x_residency device_fp16->host_int8, required_pipeline "
+        "device->host_int8, expected_pipeline_stamp {x_residency, pipeline} device->host_int8"
+    )
     return recipe
 
 
@@ -297,6 +338,18 @@ def int8_recipe_refusal_controls() -> dict[str, Any]:
         lambda c: _set_path(
             c, ("execution", "expected_pipeline_stamp", "x_residency"), FP32_X_RESIDENCY
         ),
+    )
+    _plant(
+        "required_pipeline_device",
+        "execution.required_pipeline left at R0265's 'device' pin -- core.fit refuses the "
+        "host_int8 stamp (the exact defect that blocked the first R0266 launch)",
+        lambda c: _set_path(c, ("execution", "required_pipeline"), FP32_REQUIRED_PIPELINE),
+    )
+    _plant(
+        "stamp_pipeline_device",
+        "declared expected_pipeline_stamp.pipeline still 'device' -- dishonest routing stamp",
+        lambda c: _set_path(c, ("execution", "expected_pipeline_stamp", "pipeline"),
+                            FP32_REQUIRED_PIPELINE),
     )
     _plant(
         "base_recipe_fneg_off",
