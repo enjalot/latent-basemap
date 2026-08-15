@@ -55,7 +55,10 @@ from typing import Any
 
 import numpy as np
 
-from basemap.artifact_identity import expected_input_signature
+from basemap.artifact_identity import (
+    expected_input_signature,
+    matches_cited_display_value,
+)
 from basemap.output_safety import create_fresh_directory
 from basemap import round0113_prompt_contrast as prompt_contract
 from basemap import round0234_calibration as calibration
@@ -561,7 +564,9 @@ def _calibration_receipt(job: Mapping[str, Any]) -> dict[str, Any]:
         "k7_healthy": {
             "reproduced_value": computed_k7,
             "published_anchor": SEALED_K7_HEALTHY_ROUNDED,
-            "rounds_to_the_published_anchor": round(computed_k7, 5) == SEALED_K7_HEALTHY_ROUNDED,
+            "rounds_to_the_published_anchor": matches_cited_display_value(
+                computed_k7, SEALED_K7_HEALTHY_ROUNDED, decimals=5
+            ),
             "why_soft": WHY_K7_IS_SOFT,
         },
         "identity_bound_at_n29": identity_bound(N_EXACT),
@@ -1107,10 +1112,11 @@ def run_register(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         # Reproduce the published anchors at THEIR precision (6 decimals):
         # SEALED_* are the REPORT §6 values 0.644414 / 0.732966, so the computed
         # floor/ceiling must round to 6 places, not 4 (a round-to-4 computed value
-        # can never equal a 6-decimal literal — the R0264 setup-fix bug).
+        # can never equal a 6-decimal literal — the R0264 setup-fix bug). Uses the
+        # shared round-vs-literal helper so the convention lives in one place.
         bands_reproduce_published = (
-            round(collapse_floor, 6) == SEALED_COLLAPSE_FLOOR
-            and round(fog_ceiling, 6) == SEALED_FOG_CEILING
+            matches_cited_display_value(collapse_floor, SEALED_COLLAPSE_FLOOR, decimals=6)
+            and matches_cited_display_value(fog_ceiling, SEALED_FOG_CEILING, decimals=6)
         )
         measurements_cross_check = _measurements_cross_check(job)
         wrapped("R0264 provisional bands fitted on the healthy family")

@@ -99,6 +99,9 @@ from experiments.prepare_round0138_queue import _frontmatter, _frontmatter_list
 
 ROUND_ROOT = "/data/latent-basemap/runs/round-0265"
 QUEUE_ROOT = os.path.join(ROUND_ROOT, "queue")
+#: The sanctioned gate-only re-seal queue: a NEW dir so the failed correction-3 terminal
+#: and its artifacts stay in the record untouched (reviewer ruling condition 5).
+GATE_ONLY_QUEUE_ROOT = os.path.join(ROUND_ROOT, "queue-gate-only-1")
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE = os.path.join(LAB_ROOT, "round-0265-2026-08-14.md")
 
@@ -474,6 +477,215 @@ def prepare_round0265(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
     return manifest_path
 
 
+def prepare_round0265_gate_only(
+    *,
+    release_sha: str,
+    bind_panel: str,
+    source_run: str,
+    source_release: str,
+    queue_root: str = GATE_ONLY_QUEUE_ROOT,
+) -> str:
+    """Prepare a SANCTIONED gate-only re-seal queue for R0265 (reviewer ruling).
+
+    correction-3 trained all thirteen maps + the panel cleanly (valid sealed artifacts)
+    but the CPU gate node raised on a trivial DESCRIPTIVE drift-check precision bug (now
+    fixed at this release). Re-running thirteen bit-identical trains only to re-execute a
+    CPU check that never gates is wasteful, so this builds a queue with ONLY the gate
+    node, run against the already-sealed correction-3 panel at the fixed release, with
+    full provenance.
+
+    The queue binds the correction-3 panel by CONTENT DIGEST (real sha256 + bytes,
+    verified at prepare time) rather than as a same-queue file — so its identity is
+    pinned exactly as any cross-round sealed input, and the gate node re-verifies the
+    same digest again at gate-node start. ALL other gate inputs (R0234 n=13, R0263 band,
+    R0264 provisional bands, held-out) are bound exactly as the full-queue gate binds
+    them, and every prepare validation (issued round + base_commit ancestor-of
+    release_sha, treatment-closure seal, and the thirteen-config recipe proof) still
+    runs — the recipe proof needs no train artifacts, only the configs.
+    """
+    if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
+        raise ValueError("R0265 release SHA must be one full commit")
+    round_signature, required_reviews = _issued_round(release_sha)
+    review_state = _upstream_review_state(list(required_reviews))
+    graph_manifest_signature, graph_manifest, edges = _sealed_graph()
+    base_horizon = successful_updates_for_edges(edges)
+    # Recipe/dose proof: unchanged from the full queue, and it does not touch the trains.
+    dose = validate_fneg_dose(updates=DOSE_MULTIPLIER * base_horizon, edge_count=edges)
+    substrate_signature = dict(graph_manifest["substrate"])
+    graph_signature = dict(graph_manifest["graph"])
+    configs: dict[int, dict[str, Any]] = {}
+    for seed in SEEDS:
+        config, _sha = fneg_train_config(
+            seed=seed,
+            graph_signature=graph_signature,
+            graph_manifest_signature=graph_manifest_signature,
+            substrate_signature=substrate_signature,
+            graph_edges=edges,
+            rows=ROWS,
+        )
+        configs[seed] = config
+    family = assert_family_shares_one_recipe(configs)
+
+    # Bind the sealed cross-round gate inputs exactly as the full-queue gate node binds
+    # them (real sha256 + bytes at prepare time).
+    r0234_n13 = _signature(R0234_GATE, "R0234 sealed n=13 calibration")
+    r0263_gate = _signature(R0263_GATE, "R0263 sealed two-sided k256 band")
+    r0264_gate = _signature(R0264_GATE, "R0264 sealed provisional collapse/fog bands")
+
+    # Bind the correction-3 panel by CONTENT DIGEST — NOT a same-queue file binding.
+    panel_signature = _signature(bind_panel, "R0265 correction-3 sealed n=13 panel")
+    panel = prompt_contract.read_sealed(
+        panel_signature["canonical_path"], label="R0265 correction-3 sealed n=13 panel"
+    )
+    if (
+        panel.get("capability") != PANEL_CAPABILITY
+        or int(panel.get("n", -1)) != len(SEEDS)
+    ):
+        raise RuntimeError(
+            "R0265 --bind-panel is not a sealed n=13 fneg family panel: "
+            f"capability={panel.get('capability')!r} n={panel.get('n')!r}"
+        )
+
+    census = dispatch_census()
+    guard = assert_derived_entries_install(SCOPE_MODULES, census)
+    gates = gate_census(entry_tuples(guard["derived"]))
+    residual = scope_residual(census, SCOPE_MODULES)
+
+    ensure_data_directory(ROUND_ROOT, label="R0265 round root")
+    queue_root = create_fresh_directory(queue_root, label="R0265 gate-only queue")
+    preflight = ensure_data_directory(os.path.join(queue_root, "preflight"))
+    closure_path = os.path.join(preflight, "treatment-source-closure.json")
+    atomic_write_new_json(closure_path, _treatment_closure_seal(release_sha), immutable=True)
+    family_path = os.path.join(preflight, "fneg-family-identity.json")
+    atomic_write_new_json(
+        family_path,
+        prompt_contract.seal({
+            "schema": "round0265-fneg-family-identity-v1",
+            "round_id": ROUND_ID,
+            "release_sha": release_sha,
+            "sealed_directed_edges": edges,
+            "base_horizon": base_horizon,
+            "dose_registration": dose,
+            "family": family,
+            "seeds": list(SEEDS),
+            "n_pooled": len(SEEDS),
+            "registry_fingerprint": registry_fingerprint(),
+            "configs": {str(seed): configs[seed] for seed in SEEDS},
+        }),
+        immutable=True,
+    )
+    closure_signature = expected_input_signature(closure_path)
+
+    shared_inputs = _dedupe([
+        round_signature,
+        graph_manifest_signature,
+        substrate_signature,
+        graph_signature,
+        expected_input_signature(family_path),
+        closure_signature,
+    ])
+
+    artifacts = ensure_data_directory(os.path.join(queue_root, "artifacts"))
+
+    provenance = {
+        "gate_only": True,
+        "source_run": source_run,
+        "source_release_sha": source_release,
+        "bound_panel_sha256": panel_signature["sha256"],
+        "gate_release_sha": release_sha,
+    }
+
+    gate_node = GATE_ACTION
+    jobs = [{
+        "id": gate_node,
+        "action": GATE_ACTION,
+        "handler_module": "experiments.round0265_nodes",
+        "handler_callable": "run_job",
+        "deps": [],
+        "outputs": [os.path.join(artifacts, GATE_CAPABILITY)],
+        "done_marker": os.path.join(artifacts, f"{gate_node}.done.json"),
+        "expected_inputs": _dedupe([
+            *shared_inputs, r0234_n13, r0263_gate, r0264_gate, panel_signature,
+        ]),
+        "p90_wall_s": GATE_P90_WALL_S,
+        # bound by CONTENT DIGEST (sha256 + bytes), re-verified at gate-node start.
+        "panel_n13": panel_signature,
+        "r0234_n13": r0234_n13,
+        "r0263_gate": r0263_gate,
+        "r0264_gate": r0264_gate,
+        "upstream_review_state": review_state,
+        "gate_only_provenance": provenance,
+        "node_policy": {"gpu_required": False, "training_performed": False, "cpu_heavy": True},
+    }]
+    p90 = {gate_node: GATE_P90_WALL_S, "total": GATE_P90_WALL_S}
+
+    queue = _base_manifest(
+        round_id=ROUND_ID,
+        release_sha=release_sha,
+        round_file=ROUND_FILE,
+        queue_root=queue_root,
+        gpu_hours_cap=GPU_HOURS_CAP,
+        execution_authority="autonomous-gpu",
+        gpu=False,
+    )
+    queue.update({
+        "schema": "round0265-fneg-family-floors-n13-gate-only-queue-v1",
+        "repo_root": RELEASE_ROOT,
+        "queue_class": "cpu-gate-reseal",
+        "required_reviews": list(required_reviews),
+        "capability_dependencies": [
+            R0216_CAPABILITY,
+            R0218_PANEL_CAPABILITY,
+            R0263_GATE_CAPABILITY,
+            R0264_GATE_CAPABILITY,
+            "minilm-mixed-2m-calibrated-robust-floors-n13-v1",
+            PANEL_CAPABILITY,
+        ],
+        "capabilities_produced": [GATE_CAPABILITY],
+        "jobs": jobs,
+        "p90_wall_s": p90,
+        "scope_modules": list(SCOPE_MODULES),
+        "stop_hook_install_guard": {
+            "derived_entries": guard["derived"],
+            "every_derived_entry_installs": guard["audit"]["every_entry_installs_effectively"],
+            "gate_census": gates,
+            "scope_residual": residual,
+        },
+        "gate_only_provenance": provenance,
+        "registered": {
+            "what_this_round_is": (
+                "SANCTIONED gate-only re-seal of R0265: re-run ONLY the CPU gate node "
+                "(register_fneg_family_floors_n13) against the already-sealed "
+                "correction-3 n=13 panel, at the fixed release, with full provenance. No "
+                "train nodes and no panel node: correction-3 already trained all thirteen "
+                "maps + the panel cleanly; the gate node had raised on a trivial "
+                "DESCRIPTIVE drift-check precision bug (now fixed). The panel is bound by "
+                "content digest and re-verified at gate-node start; the recipe proof still "
+                "runs to prove the recipe is unchanged."
+            ),
+            "gate_only": True,
+            "source_run": source_run,
+            "source_release_sha": source_release,
+            "bound_panel_sha256": panel_signature["sha256"],
+            "gate_release_sha": release_sha,
+            "seeds": list(SEEDS),
+            "n_pooled": len(SEEDS),
+            "seed_invariant_sha256": family["seed_invariant_sha256"],
+            "sealed_directed_edges": edges,
+            "rows": ROWS,
+            "n13_multiplier_source": R0234_N13_TWO_SIDED_KEY,
+            "gate_registerable_here": True,
+            "correction_3_terminal_preserved": (
+                "the failed correction-3 terminal and its artifacts stay in the record; "
+                "this queue is a NEW directory and overwrites nothing"
+            ),
+        },
+    })
+    manifest_path = os.path.join(queue_root, "queue.json")
+    atomic_write_new_json(manifest_path, queue, immutable=True)
+    return manifest_path
+
+
 def file_sha256_manifest(path: str) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -485,9 +697,35 @@ def file_sha256_manifest(path: str) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="prepare the R0265 queue")
     parser.add_argument("--release-sha", required=True)
-    parser.add_argument("--queue-root", default=QUEUE_ROOT)
+    parser.add_argument("--queue-root", default=None)
+    parser.add_argument(
+        "--gate-only",
+        action="store_true",
+        help="build a one-node queue that re-runs ONLY the gate against an already-sealed panel",
+    )
+    parser.add_argument("--bind-panel", help="path to the already-sealed n=13 panel JSON to bind (gate-only)")
+    parser.add_argument("--source-run", help="the source correction-run queue dir, for provenance (gate-only)")
+    parser.add_argument("--source-release", help="the source run's release_sha, for provenance (gate-only)")
     args = parser.parse_args(argv)
-    path = prepare_round0265(release_sha=args.release_sha, queue_root=args.queue_root)
+    if args.gate_only:
+        missing = [
+            name for name, value in (
+                ("--bind-panel", args.bind_panel),
+                ("--source-run", args.source_run),
+                ("--source-release", args.source_release),
+            ) if not value
+        ]
+        if missing:
+            parser.error(f"--gate-only requires {', '.join(missing)}")
+        path = prepare_round0265_gate_only(
+            release_sha=args.release_sha,
+            bind_panel=args.bind_panel,
+            source_run=args.source_run,
+            source_release=args.source_release,
+            queue_root=(args.queue_root or GATE_ONLY_QUEUE_ROOT),
+        )
+    else:
+        path = prepare_round0265(release_sha=args.release_sha, queue_root=(args.queue_root or QUEUE_ROOT))
     print(json.dumps({"queue": path, "sha256": file_sha256_manifest(path)}))
     return 0
 

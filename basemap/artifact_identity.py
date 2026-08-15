@@ -73,6 +73,32 @@ def canonical_json(value) -> bytes:
                       ensure_ascii=False).encode("utf-8")
 
 
+def matches_cited_display_value(sealed_value: float, cited_constant: float,
+                               *, decimals: int = 6) -> bool:
+    """Compare a full-precision sealed value against a cited DISPLAY constant.
+
+    The display-precision convention (a recurring cross-check pitfall in this
+    program): a round file / REPORT / descriptive reference cites a metric to a
+    fixed number of decimals (e.g. ``0.644414``), while the sealed artifact stores
+    the same quantity at full float precision (``0.6444139401628924``).  A drift
+    cross-check that compares them must round the SEALED value to the CITED
+    precision *before* the equality test — comparing full precision directly
+    against a 6-decimal literal can never be equal even when nothing has drifted.
+
+    This is the round-vs-literal display-precision rule.  It first surfaced as the
+    R0264 node-1 setup-fix bug (a computed floor rounded to 4 places compared
+    against a 6-decimal literal), then again in the R0265 gate's R0264 legacy
+    drift-check.  Centralising it here — a single ``round(sealed, decimals) ==
+    cited`` — so a third round does not rediscover it.  A drift below
+    ``10 ** -decimals`` is below the display precision and not meaningful for this
+    kind of descriptive cross-check.
+
+    Returns True when the sealed value, rounded to ``decimals`` places, equals the
+    cited constant exactly.
+    """
+    return round(float(sealed_value), int(decimals)) == cited_constant
+
+
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 

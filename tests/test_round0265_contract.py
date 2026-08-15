@@ -9,6 +9,7 @@ number here is synthetic or read from an already-sealed on-disk artifact.
 """
 import math
 import os
+import re
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
@@ -609,3 +610,136 @@ def test_gated_metrics_exclude_the_descriptive_ones():
         "heldout_ffr", N.PURITY_K256_METRIC, N.PURITY_K1024_METRIC,
         N.COLLAPSE_METRIC, N.FOG_METRIC,
     }
+
+
+# --------------------------------------------------------------------------- #
+# 10. the shared round-vs-literal display-precision helper
+# --------------------------------------------------------------------------- #
+
+
+def test_matches_cited_display_value_round_vs_literal():
+    from basemap.artifact_identity import matches_cited_display_value
+
+    # Full-precision sealed values vs the 6-decimal cited display constants (R0264's
+    # provisional collapse floor / fog ceiling): they MATCH at the cited precision.
+    assert matches_cited_display_value(0.6444139401628924, 0.644414, decimals=6) is True
+    assert matches_cited_display_value(0.7329657517287256, 0.732966, decimals=6) is True
+    # Default precision is 6.
+    assert matches_cited_display_value(0.6444139401628924, 0.644414) is True
+    # The naive full-precision equality (the round-vs-literal BUG) would be False even
+    # though nothing drifted — which is exactly why the helper rounds first.
+    assert (0.6444139401628924 == 0.644414) is False
+    # A real drift ABOVE the display precision (>1e-6) fails.
+    assert matches_cited_display_value(0.6444139401628924 + 1e-3, 0.644414, decimals=6) is False
+    assert matches_cited_display_value(0.644415, 0.644414, decimals=6) is False
+    # `decimals` is honoured (R0264's k7 healthy anchor is a 5-decimal display value).
+    assert matches_cited_display_value(6.0551303, 6.05513, decimals=5) is True
+    assert matches_cited_display_value(6.055139, 6.05513, decimals=5) is False
+
+
+# --------------------------------------------------------------------------- #
+# 11. the SANCTIONED gate-only re-seal queue
+# --------------------------------------------------------------------------- #
+
+CORR3_RUN = "/data/latent-basemap/runs/round-0265/queue-correction-3"
+CORR3_PANEL = os.path.join(
+    CORR3_RUN, "artifacts", "minilm-fneg-2m-family-panel-n13-v1",
+    "fneg-family-panel-n13.json",
+)
+CORR3_RELEASE_SHA = "7e3f5757e6c8d45893c866d886e9378d49f326b2"
+
+_GATE_ONLY_INPUTS = [
+    P.GRAPH_MANIFEST, P.R0234_GATE, P.R0263_GATE, P.R0264_GATE, P.ROUND_FILE, CORR3_PANEL,
+]
+_GATE_ONLY_READY = (
+    all(os.path.exists(path) for path in _GATE_ONLY_INPUTS)
+    # `.git` is a directory in a normal clone and a file in a linked worktree.
+    and os.path.exists(os.path.join(P.RELEASE_ROOT, ".git"))
+)
+
+
+def _release_head() -> str:
+    import subprocess
+
+    proc = subprocess.run(
+        ["git", "-C", P.RELEASE_ROOT, "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    )
+    return proc.stdout.strip()
+
+
+def _rmtree_ro(root: str) -> None:
+    import shutil
+
+    def _onerror(func, path, _exc):
+        try:
+            os.chmod(path, 0o700)
+            func(path)
+        except OSError:
+            pass
+
+    shutil.rmtree(root, onerror=_onerror)
+
+
+@pytest.mark.skipif(not _GATE_ONLY_READY, reason="gate-only re-seal inputs absent")
+def test_gate_only_prepare_builds_a_one_node_gate_queue():
+    import json
+    import time
+
+    from basemap.artifact_identity import expected_input_signature
+
+    release_sha = _release_head()
+    assert re.fullmatch(r"[0-9a-f]{40}", release_sha)
+    # A distinct /data dir — NOT the real queue-gate-only-1, so nothing in the record is
+    # touched; cleaned up in the finally.
+    queue_root = os.path.join(
+        P.ROUND_ROOT, f"queue-gate-only-pytest-{os.getpid()}-{int(time.time() * 1000) % 100000}"
+    )
+    try:
+        manifest_path = P.prepare_round0265_gate_only(
+            release_sha=release_sha,
+            bind_panel=CORR3_PANEL,
+            source_run=CORR3_RUN,
+            source_release=CORR3_RELEASE_SHA,
+            queue_root=queue_root,
+        )
+        with open(manifest_path, encoding="utf-8") as handle:
+            queue = json.load(handle)
+
+        # exactly ONE node — the gate — with no in-queue dependency (no panel node).
+        assert len(queue["jobs"]) == 1
+        gate = queue["jobs"][0]
+        assert gate["id"] == N.GATE_ACTION and gate["action"] == N.GATE_ACTION
+        assert gate["deps"] == []
+        assert queue["capabilities_produced"] == [N.GATE_CAPABILITY]
+        assert queue["schema"] == "round0265-fneg-family-floors-n13-gate-only-queue-v1"
+
+        # the panel is bound by CONTENT DIGEST (sha256 + bytes), not a same-queue file.
+        panel_sig = expected_input_signature(CORR3_PANEL)
+        assert gate["panel_n13"]["sha256"] == panel_sig["sha256"]
+        assert gate["panel_n13"]["bytes"] == panel_sig["bytes"]
+        assert gate["panel_n13"]["canonical_path"] == panel_sig["canonical_path"]
+        # and it is a preflight-verified expected input.
+        assert any(
+            item.get("sha256") == panel_sig["sha256"] for item in gate["expected_inputs"]
+        )
+
+        # provenance block, on both the queue and the gate job.
+        prov = queue["gate_only_provenance"]
+        assert prov["gate_only"] is True
+        assert prov["source_run"] == CORR3_RUN
+        assert prov["source_release_sha"] == CORR3_RELEASE_SHA
+        assert prov["bound_panel_sha256"] == panel_sig["sha256"]
+        assert prov["gate_release_sha"] == release_sha
+        assert gate["gate_only_provenance"] == prov
+
+        # the recipe proof still holds — thirteen distinct cells, one recipe, no trains.
+        fam_path = os.path.join(queue_root, "preflight", "fneg-family-identity.json")
+        with open(fam_path, encoding="utf-8") as handle:
+            family = json.load(handle)["family"]
+        assert family["all_thirteen_share_one_recipe_digest"] is True
+        assert family["thirteen_distinct_cell_configs"] is True
+        assert family["cells"] == 13
+    finally:
+        if os.path.isdir(queue_root):
+            _rmtree_ro(queue_root)

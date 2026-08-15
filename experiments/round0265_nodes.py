@@ -36,7 +36,11 @@ from typing import Any
 
 import numpy as np
 
-from basemap.artifact_identity import expected_input_signature, ordered_array_sha256
+from basemap.artifact_identity import (
+    expected_input_signature,
+    matches_cited_display_value,
+    ordered_array_sha256,
+)
 from basemap.output_safety import (
     atomic_save_new_npy,
     atomic_write_new_json,
@@ -1512,13 +1516,21 @@ def _read_legacy_semantics(job: Mapping[str, Any]) -> dict[str, Any]:
             # (0.644414 / 0.732966), while the sealed R0264 artifact stores full precision
             # (0.6444139401628924 / 0.7329657517287256). This is a descriptive drift
             # cross-check (it never gates a map), so it verifies the artifact matches the
-            # cited value AT THE CITED PRECISION — round to 6 decimals, mirroring the
-            # R0264 node-1 round-vs-literal fix. A drift below 1e-6 is below the display
-            # precision and not meaningful here.
+            # cited value AT THE CITED PRECISION via the shared round-vs-literal helper
+            # (round to 6 decimals) — the same convention as the R0264 node-1 fix. A drift
+            # below 1e-6 is below the display precision and not meaningful here.
             float(r0263_band["ratio_lower"]) == R0263_LEGACY_K256_BAND["ratio_lower"]
             and float(r0263_band["ratio_upper"]) == R0263_LEGACY_K256_BAND["ratio_upper"]
-            and round(float(r0264_criteria[COLLAPSE_METRIC]["floor"]), 6) == R0264_PROVISIONAL_COLLAPSE_FLOOR
-            and round(float(r0264_criteria[FOG_METRIC]["ceiling"]), 6) == R0264_PROVISIONAL_FOG_CEILING
+            and matches_cited_display_value(
+                r0264_criteria[COLLAPSE_METRIC]["floor"],
+                R0264_PROVISIONAL_COLLAPSE_FLOOR,
+                decimals=6,
+            )
+            and matches_cited_display_value(
+                r0264_criteria[FOG_METRIC]["ceiling"],
+                R0264_PROVISIONAL_FOG_CEILING,
+                decimals=6,
+            )
         ),
     }
 
@@ -1554,8 +1566,29 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         wrapped("R0265 n=13 multiplier read")
 
         # 2. the family panel.
+        panel_path = _bound_path(job, "panel_n13", label="R0265 sealed n=13 panel")
+        # Re-verify the bound panel's CONTENT DIGEST again at gate-node start. In the
+        # full queue the panel is a same-queue file (no sha256 in the binding, so this is
+        # a no-op); in the gate-only re-seal path the panel is bound by sha256 against an
+        # already-sealed panel from another queue, so recompute the digest and require it
+        # equals the binding. `read_sealed` already checks the file's own identity_sha256;
+        # this adds the binding-sha256 check on top so a swapped-but-self-consistent panel
+        # is refused. Belt-and-suspenders beside `_bound_path`'s verify_signature.
+        panel_binding = job.get("panel_n13")
+        bound_panel_sha256 = (
+            str(panel_binding["sha256"])
+            if isinstance(panel_binding, Mapping) and panel_binding.get("sha256")
+            else None
+        )
+        if bound_panel_sha256 is not None:
+            recomputed_panel_sha256 = expected_input_signature(panel_path)["sha256"]
+            if recomputed_panel_sha256 != bound_panel_sha256:
+                raise Round0265NodeError(
+                    "R0265 bound panel content digest drifted at gate-node start: "
+                    f"binding {bound_panel_sha256} != recomputed {recomputed_panel_sha256}"
+                )
         panel = prompt_contract.read_sealed(
-            _bound_path(job, "panel_n13", label="R0265 sealed n=13 panel"),
+            panel_path,
             label="R0265 sealed n=13 panel",
         )
         if panel.get("capability") != PANEL_CAPABILITY or int(panel.get("n", -1)) != N_FAMILY:
@@ -1665,6 +1698,16 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 
     peak_rss_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
     coverage = ledger.receipt()
+    # Provenance for the gate-only re-seal path (absent on the full queue). Records the
+    # source correction run + release, the panel sha256 that was bound and re-verified at
+    # gate-node start, and this gate's own release — so the RESULT artifact carries the
+    # full provenance of the sanctioned gate-only re-seal, not just the queue manifest.
+    gate_only_provenance = dict(job.get("gate_only_provenance") or {})
+    if gate_only_provenance or bound_panel_sha256 is not None:
+        gate_only_provenance.setdefault("gate_release_sha", str(active["manifest"]["release_sha"]))
+        if bound_panel_sha256 is not None:
+            gate_only_provenance["bound_panel_sha256"] = bound_panel_sha256
+            gate_only_provenance["bound_panel_content_digest_reverified_at_gate_start"] = True
     body = dict(_receipt_envelope(active["manifest"]))
     body.update({
         "schema": GATE_SCHEMA,
@@ -1754,6 +1797,7 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "gated_metrics": list(GATED_METRICS),
         "descriptive_metrics": list(DESCRIPTIVE_METRICS),
         "gate_status": "registered-and-contingent-pending-review",
+        "gate_only_provenance": gate_only_provenance or None,
         "gate_registered": True,
         "evaluation_performed": True,
         "training_performed": False,
