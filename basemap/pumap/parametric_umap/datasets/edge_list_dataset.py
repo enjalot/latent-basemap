@@ -154,6 +154,16 @@ class DeviceArrayDataset:
 #: so ``-128`` is never produced and ``|q| <= 127`` always holds.
 INT8_DIVISOR = 127.0
 
+#: Above this int8-payload size, HostInt8ArrayDataset does NOT pin the whole array up
+#: front. Pinning is a host-thread-blocking cudaHostRegister; at 2M (0.77 GB) it is
+#: fast, but at 50M (19.2 GB) / 100M (38.4 GB) it blocks the main thread for minutes
+#: with no cooperative-abort poll and trips the node liveness watchdog (R0267 seed-42
+#: SIGINT at 4.1 min inside pin_memory). Above the threshold the per-batch gathers
+#: (~8192 rows ≈ 3 MB) transfer synchronously, which is negligible; the int8 DATA — and
+#: therefore the trained map — is byte-identical whether or not the array is pinned
+#: (pinning only changes the host memory location / transfer async, never the values).
+_HOSTINT8_PIN_BYTES_MAX = 4 * 1024 ** 3  # 4 GiB — 2M pins (unchanged), 50M/100M skip
+
 
 def quantize_int8_rows(block):
     """Encode fp32 rows as int8 + exact per-row fp16 scale (R0262 encoder).
@@ -236,9 +246,13 @@ class HostInt8ArrayDataset:
                 "HostInt8ArrayDataset requires int8 rows and finite positive "
                 "fp16 scales")
         self.device = device
-        self._pin = "cuda" in str(device)
         self._i8 = torch.from_numpy(encoded)
         self._scales = torch.from_numpy(scales)
+        # Pin the whole array up front only when it is small enough to pin quickly;
+        # above _HOSTINT8_PIN_BYTES_MAX skip the pin (per-batch transfer is synchronous)
+        # so a 19.2/38.4 GB pin cannot stall the main thread past the liveness watchdog.
+        self._pin = bool("cuda" in str(device)
+                         and int(encoded.nbytes) <= _HOSTINT8_PIN_BYTES_MAX)
         if self._pin:
             self._i8 = self._i8.pin_memory()
             self._scales = self._scales.pin_memory()
@@ -251,7 +265,10 @@ class HostInt8ArrayDataset:
 
     def to(self, device):  # int8 rows stay on host; only the dequant target moves
         self.device = device
-        self._pin = "cuda" in str(device)
+        # Same size guard as __init__: never pin a large array here either (avoids the
+        # main-thread pin stall / watchdog trip at 50M/100M).
+        self._pin = bool("cuda" in str(device)
+                         and int(self._i8.nbytes) <= _HOSTINT8_PIN_BYTES_MAX)
         if self._pin and not self._i8.is_pinned():
             self._i8 = self._i8.pin_memory()
             self._scales = self._scales.pin_memory()
