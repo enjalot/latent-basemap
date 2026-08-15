@@ -143,6 +143,14 @@ COLLAPSE_SEEDMEAN_N = 3
 
 DEVICE_BUDGET_BYTES = 30 * (1 << 30)
 HOST_RSS_LIMIT_GIB = 60.0
+
+#: The R0244 host-watchdog anonymous-memory budget for the 50M host-int8 rung. The 2M
+#: default (16 GiB, round0265) is too small here: the host-int8 X lives in host RAM as
+#: an int8 array (50M×384 = 19.2 GB) plus the transient edge-list load and samplers, so
+#: the anonymous peak is ~20+ GB (R0267 seed-42 first tripped 16 GiB at 17.2 GB). 40 GiB
+#: covers it with headroom and sits far under the box's ~111 GB MemAvailable. (100M would
+#: need ~56 GiB — a later per-rung concern.)
+R0267_ANON_BUDGET_BYTES = 40 * (1 << 30)
 POSITIVE_ROWS_PER_UPDATE = 409
 
 SAFETY_NOTE = (
@@ -431,7 +439,7 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     model._admission_artifact_path = os.path.join(output, "admission.json")
 
     window = ledger.window(f"R0267 {capability} train stage")
-    guard_ctx = _node_guard(label)
+    guard_ctx = _node_guard(label, anonymous_budget_bytes=R0267_ANON_BUDGET_BYTES)
     gate = _node_gate(label, training_performed=True)
     watchdog = CellWatchdog()
     watchdog.start()
@@ -723,7 +731,7 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     reset_process_cuda_peak()
 
     window = ledger.window("R0267 50M panel scoring stage")
-    guard_ctx = _node_guard(label)
+    guard_ctx = _node_guard(label, anonymous_budget_bytes=R0267_ANON_BUDGET_BYTES)
     gate = _node_gate(label, training_performed=False)
     with guard_ctx:
         gate.start()
@@ -1092,7 +1100,7 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     output = create_fresh_directory(str(job["outputs"][0]), label="R0267 gate")
 
     window = ledger.window("R0267 gate stage")
-    guard_ctx = _node_guard(label)
+    guard_ctx = _node_guard(label, anonymous_budget_bytes=R0267_ANON_BUDGET_BYTES)
     gate = _node_gate(label, training_performed=False)
     with guard_ctx:
         gate.start()

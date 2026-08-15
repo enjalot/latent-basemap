@@ -287,9 +287,12 @@ def _start_node(label: str) -> dict[str, Any]:
     return require_enforceable_abort_flag(label=label)
 
 
-def _node_guard(label: str, *, interval_s: float = 0.05) -> EnforcedHostWatchdog:
+def _node_guard(label: str, *, interval_s: float = 0.05,
+                anonymous_budget_bytes: int = NODE_ANON_BUDGET_BYTES) -> EnforcedHostWatchdog:
+    # anonymous_budget_bytes defaults to the 2M value (16 GiB) — R0265/R0266 unchanged.
+    # A larger-N host-int8 rung passes a bigger budget (its int8 X lives in host RAM).
     return EnforcedHostWatchdog(
-        anonymous_budget_bytes=NODE_ANON_BUDGET_BYTES,
+        anonymous_budget_bytes=int(anonymous_budget_bytes),
         interval_s=float(interval_s),
         label=label,
     )
