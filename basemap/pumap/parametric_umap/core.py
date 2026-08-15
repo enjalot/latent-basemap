@@ -112,6 +112,14 @@ class ParametricUMAP:
         weighted_edge_sampling=False,
         gpu_resident_data="auto",
         gpu_resident_vram_budget_gb=10.0,
+        # Feature-matrix residency for the edge-list path (opt-in). "auto"
+        # (default) = the historical behavior: DeviceArrayDataset (fp16 on CUDA)
+        # / LazyArrayDataset / VariableDataset, selected by _decide_gpu_resident.
+        # "host_int8" = keep X in host RAM as int8 rows + fp16 scales (R0262
+        # encoding) and dequantise per-batch on device, so a >~20M-row map whose
+        # fp16/fp32 X will not fit VRAM can still train. Guarded so that
+        # "auto"/unset leaves every existing fp32/fp16 path byte-identical.
+        x_residency="auto",
         graph_manifest_path=None,
         graph_manifest_sha256=None,
     ):
@@ -192,6 +200,10 @@ class ParametricUMAP:
         # device (fp16 storage on CUDA, fp32 on CPU); False keeps the legacy path.
         self.gpu_resident_data = gpu_resident_data
         self.gpu_resident_vram_budget_gb = gpu_resident_vram_budget_gb
+        if str(x_residency).lower() not in ("auto", "host_int8"):
+            raise ValueError(
+                f"x_residency must be 'auto' or 'host_int8', got {x_residency!r}")
+        self.x_residency = x_residency
         self._fast_device_path = False   # set True by _prepare_edge_list_training
         self._X_dev = None               # DeviceArrayDataset when fast path active
         # Benchmark hook: stop after N successful positive-LR updates. Attempted
@@ -355,6 +367,7 @@ class ParametricUMAP:
         from .datasets.edge_list_dataset import (
             EdgeListBalancedIterator, LazyArrayDataset,
             DeviceArrayDataset, DeviceEdgeSampler, HostStreamEdgeSampler,
+            HostInt8ArrayDataset,
             load_edge_arrays, build_edge_key_set, excluded_source_edge_ranges,
         )
         from .datasets.covariates_datasets import VariableDataset
@@ -648,6 +661,51 @@ class ParametricUMAP:
         # GPU-resident fast path: upload X once (fp16 on CUDA) and do all
         # gathers + negative sampling on-device. See _decide_gpu_resident.
         n_features = int(X.shape[1])
+
+        # ── Host-int8 residency (opt-in; x_residency="host_int8") ───────────
+        # Keep X in host RAM as int8 rows + fp16 scales (R0262 encoding) and
+        # dequantise per-batch on device. Chosen for maps whose fp16/fp32 X will
+        # not fit VRAM (>~20M rows). Everything below this branch is unchanged;
+        # when x_residency=="auto" (the default) the branch is never entered, so
+        # every existing fp32/fp16 path is byte-identical.
+        if str(self.x_residency).lower() == "host_int8":
+            if edge_set is not None:
+                raise RuntimeError(
+                    "x_residency='host_int8' is incompatible with reject_neighbors "
+                    "(the host-int8 path uses the on-device edge sampler, which has "
+                    "no neighbour-rejection set).")
+            per_batch_threshold = int(os.environ.get(
+                "PER_BATCH_EDGE_THRESHOLD", 400_000_000))
+            # The capped-multiplicity device sampler requires uniform-with-
+            # replacement; otherwise let DeviceEdgeSampler pick per-batch mode by
+            # its own edge-count threshold. The stamp records the effective
+            # positive-with-replacement behavior either way.
+            uwr = positive_source_rows is not None
+            device_uniform_replacement = bool(
+                uwr or (not self.weighted_edge_sampling
+                        and n_pos_edges > per_batch_threshold))
+            reason = "x_residency=host_int8 (int8 X on host, dequant per batch)"
+            logging.info("Edge-list mode: HOST-INT8 residency (%s).", reason)
+            _stamp_pipeline(
+                "host_int8", "DeviceEdgeSampler", weighted_ok=True,
+                x_residency="host_int8",
+                uniform_with_replacement=device_uniform_replacement)
+            hi8 = HostInt8ArrayDataset(X, self.device)
+            self._X_dev = hi8
+            self._fast_device_path = True
+            loader = DeviceEdgeSampler(
+                hi8, sources, targets, weights, n_nodes=n_train,
+                pos_ratio=self.pos_ratio, batch_size=self.batch_size,
+                shuffle=True, random_state=random_state,
+                positive_target_mode=self.positive_target_mode,
+                weighted_edge_sampling=self.weighted_edge_sampling,
+                uniform_with_replacement=uwr,
+                positive_source_rows=positive_source_rows,
+                fixed_edges_per_source=fixed_edges_per_source,
+                device=self.device,
+            )
+            return hi8, loader, n_pos_edges
+
         use_fast, reason = self._decide_gpu_resident(
             n_train, n_features, resident_edge_count, edge_set, low_memory)
         if use_fast and positive_source_rows is not None and not fixed_cap_device_compatible:
@@ -1245,6 +1303,7 @@ class ParametricUMAP:
                 "fneg_hi": self.fneg_hi,
                 "gpu_resident_data": str(self.gpu_resident_data),
                 "gpu_resident_vram_budget_gb": self.gpu_resident_vram_budget_gb,
+                "x_residency": str(self.x_residency),
             }
             wandb.init(project=wandb_project, name=wandb_run_name, config=config)
             self.wandb_run = wandb.run
@@ -2314,6 +2373,7 @@ class ParametricUMAP:
             'fneg_weight': self.fneg_weight,
             'fneg_lo': self.fneg_lo,
             'fneg_hi': self.fneg_hi,
+            'x_residency': self.x_residency,
         }
         torch.save(save_dict, path)
 

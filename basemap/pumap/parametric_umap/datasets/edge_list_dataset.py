@@ -150,6 +150,133 @@ class DeviceArrayDataset:
         return self.index_select(idx)
 
 
+#: R0262 symmetric per-row int8 divisor. 127 (not 128) keeps the code symmetric
+#: so ``-128`` is never produced and ``|q| <= 127`` always holds.
+INT8_DIVISOR = 127.0
+
+
+def quantize_int8_rows(block):
+    """Encode fp32 rows as int8 + exact per-row fp16 scale (R0262 encoder).
+
+    Byte-for-byte identical to
+    ``round0262_host_int8_adapter.quantise_block_int8`` /
+    ``round0103_substrate.quantize_block`` — verified to reproduce the sealed
+    100M substrate at ``round-0262/artifacts/minilm-mixed-100m-int8-v1`` bit for
+    bit (int8 rows AND fp16 scale bits).
+
+    * ``scale = max|row| / 127`` **stored as fp16**; a genuinely all-zero row
+      gets the smallest positive fp16 normal so ``scale > 0`` always holds
+      (``HostInt8MaterializedArray`` refuses ``scale <= 0``) while the row still
+      dequantises to exactly zero.
+    * ``q = clip(rint(row / scale_fp16), -127, 127)`` as int8 — the encoding
+      divides by the **fp16** scale (cast back to fp32), the same value the
+      device multiplies by on dequant, so the round trip carries no
+      scale-representation error beyond what the stored fp16 scale implies.
+    """
+    block = np.asarray(block, dtype=np.float32)
+    absmax = np.abs(block).max(axis=1)
+    # smallest fp16 normal (6.104e-5) for all-zero rows, pre-cast
+    absmax = np.where(absmax > 0, absmax, np.float32(6.104e-5))
+    scales = (absmax / np.float32(INT8_DIVISOR)).astype(np.float16)
+    # post-cast positive floor (6.0e-8) so no scale underflows to 0 in fp16
+    scales = np.where(scales > 0, scales, np.float16(6.0e-8)).astype(np.float16)
+    encoded = np.rint(block / scales.astype(np.float32)[:, None])
+    np.clip(encoded, -127, 127, out=encoded)
+    return encoded.astype(np.int8), scales
+
+
+class HostInt8ArrayDataset:
+    """Feature matrix held in **host** RAM as int8 rows + exact per-row fp16
+    scales; dequantised to fp32 **on device** per gather.
+
+    Opt-in residency (``x_residency="host_int8"``) for maps whose fp16/fp32
+    feature matrix will not fit VRAM: at 25M x 384 the fp32 matrix is 35.76 GiB
+    and the fp16 matrix 17.9 GiB, but the int8 payload is 9.6 GiB and lives on
+    the host, so the card only ever holds the per-batch dequantised rows. The
+    encoding matches R0262 exactly (see ``quantize_int8_rows``).
+
+    Interface-compatible with ``DeviceArrayDataset``: it exposes ``__len__``,
+    ``to``, ``index_select`` (device ``LongTensor`` -> fp32 device rows) and
+    ``__getitem__``, so ``DeviceEdgeSampler`` / ``HostStreamEdgeSampler`` and the
+    fneg / density / mid-near gathers (``self._X_dev.index_select(...)``) all use
+    it unchanged. Indexing returns fp32 rows, exactly like the fp16 device store,
+    so the model sees the same dtype as every other path — the int8 storage is
+    the only precision change and it is intentional per the scale plan.
+    """
+
+    #: Marker so callers / tests can positively confirm the int8 path is active
+    #: (mirrors ``HostInt8MaterializedArray.round0034_host_int8``).
+    host_int8_dataset = True
+
+    def __init__(self, X, device, *, encoded=None, scales=None,
+                 encode_chunk=1_000_000):
+        if encoded is None:
+            # Encode row-chunks so a memmap-backed X never materialises a full
+            # host fp32 copy (respects the >=2 GB no-materialise rule); only one
+            # ``encode_chunk``-row slice is transiently held on the host.
+            n = int(X.shape[0]); d = int(X.shape[1])
+            encoded = np.empty((n, d), dtype=np.int8)
+            scales = np.empty((n,), dtype=np.float16)
+            for i in range(0, n, encode_chunk):
+                end = min(i + encode_chunk, n)
+                blk = np.asarray(X[i:end], dtype=np.float32)
+                enc_i, sc_i = quantize_int8_rows(blk)
+                encoded[i:end] = enc_i
+                scales[i:end] = sc_i
+        encoded = np.ascontiguousarray(encoded)
+        scales = np.ascontiguousarray(scales)
+        # Same invariants HostInt8MaterializedArray enforces.
+        if (encoded.ndim != 2
+                or encoded.dtype != np.dtype("int8")
+                or scales.shape != (encoded.shape[0],)
+                or scales.dtype != np.dtype("float16")
+                or not np.all(np.isfinite(scales))
+                or np.any(scales <= 0)):
+            raise ValueError(
+                "HostInt8ArrayDataset requires int8 rows and finite positive "
+                "fp16 scales")
+        self.device = device
+        self._pin = "cuda" in str(device)
+        self._i8 = torch.from_numpy(encoded)
+        self._scales = torch.from_numpy(scales)
+        if self._pin:
+            self._i8 = self._i8.pin_memory()
+            self._scales = self._scales.pin_memory()
+        self.shape = (int(encoded.shape[0]), int(encoded.shape[1]))
+        self.storage_dtype = torch.int8
+        self._n = int(encoded.shape[0])
+
+    def __len__(self):
+        return self._n
+
+    def to(self, device):  # int8 rows stay on host; only the dequant target moves
+        self.device = device
+        self._pin = "cuda" in str(device)
+        if self._pin and not self._i8.is_pinned():
+            self._i8 = self._i8.pin_memory()
+            self._scales = self._scales.pin_memory()
+        return self
+
+    def index_select(self, idx):
+        """Gather rows for a ``LongTensor`` ``idx`` as fp32 **device** rows.
+
+        Dequant is ``int8.float() * scale.float()`` on the device — the exact
+        arithmetic ``HostInt8MaterializedArray`` performs
+        (``round0034_pipeline.py:903``).
+        """
+        if not torch.is_tensor(idx):
+            idx = torch.as_tensor(np.asarray(idx), dtype=torch.long)
+        idx_cpu = idx.detach().to("cpu", dtype=torch.long)
+        rows_i8 = self._i8.index_select(0, idx_cpu)
+        sc = self._scales.index_select(0, idx_cpu)
+        rows = rows_i8.to(self.device, non_blocking=self._pin).float()
+        sc_dev = sc.to(self.device, non_blocking=self._pin).float().unsqueeze(1)
+        return rows * sc_dev
+
+    def __getitem__(self, idx):
+        return self.index_select(idx)
+
+
 class DeviceEdgeSampler:
     """Fully device-resident balanced edge sampler (GPU-resident fast path).
 
