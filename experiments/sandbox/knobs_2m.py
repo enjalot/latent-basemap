@@ -225,6 +225,13 @@ ARMS: dict[str, dict] = {
     # uwr=False as the fp32 x2 device cells — isolates X precision only.
     "umap-md000-x2-fneg10-hostint8": _umap("000", dose=2, fneg_weight=1.0,
                                            x_residency="host_int8"),
+    # PLAN7 phase A (owner-triggered 2026-08-16): the promoted recipe with a
+    # 3D output. Kernel/fneg math is dimension-general in core; collapse/fog
+    # numbers in the summary are DESCRIPTIVE ONLY for 3D (r10 normalization is
+    # the 2D packing convention — PLAN7 phase B owns the N^(1/3) re-derivation).
+    # Renders = three orthogonal projections.
+    "umap-md000-x4-fneg10-3d": _umap("000", dose=4, fneg_weight=1.0,
+                                     n_components=3),
 }
 
 
@@ -253,9 +260,10 @@ def receipt_diff(kwargs: dict, sealed_checkpoint: Path) -> list[str]:
     import torch
     ck = torch.load(sealed_checkpoint, map_location="cpu", weights_only=False)
     mismatches = []
+    # sampling mode is a treatment field (added 2026-08-14 after R0265's seed-42 cross-check)
     for key in ("a", "b", "low_dim_kernel", "correlation_weight", "learning_rate",
                 "pos_ratio", "positive_target_mode", "use_batchnorm", "use_dropout",
-                "architecture"):
+                "architecture", "weighted_edge_sampling"):
         if kwargs.get(key) != ck.get(key):
             mismatches.append(f"{key}: ours={kwargs.get(key)!r} sealed={ck.get(key)!r}")
     return mismatches
@@ -353,10 +361,21 @@ def run_arm(arm: str, dry_run: bool, seed: int = SEED, rung_name: str = "2m") ->
     radius = np.percentile(np.linalg.norm(xy - xy.mean(axis=0), axis=1), 90)
     r10 = float(np.median(dists[:, 10]) / radius)
     from map_renders import robust_extent, binned_counts, render_png
-    render_png(binned_counts(xy, robust_extent(xy)), out_dir / "density.png")
+    if xy.shape[1] == 2:
+        render_png(binned_counts(xy, robust_extent(xy)), out_dir / "density.png")
+    else:
+        # 3D arms: three orthogonal projections (PLAN7 rendering-for-the-record);
+        # the xy view doubles as density.png so the legacy page still shows it.
+        import shutil
+        for name, (i, j) in (("xy", (0, 1)), ("xz", (0, 2)), ("yz", (1, 2))):
+            proj = np.ascontiguousarray(xy[:, (i, j)])
+            render_png(binned_counts(proj, robust_extent(proj)),
+                       out_dir / f"density-{name}.png")
+        shutil.copy2(out_dir / "density-xy.png", out_dir / "density.png")
 
     summary = {
         "arm": arm, "rung": rung_name, "overrides": overrides, "seed": seed,
+        "n_components": kwargs.get("n_components", 2),
         "dose_multiplier": dose_mult, "horizon_updates": horizon,
         "draws_per_edge": dose, "wall_s": wall_s, "quick_ffr_at_0.1pct": ffr,
         "r10_over_map_radius_median": r10,
