@@ -1,7 +1,9 @@
 ---
-title: "Basemaps: Stable Parametric Projections of Embedding Space at 100M Scale on One GPU"
-# TODO(owner): title decision — alternate: "A World Map for an Embedding Space"
-# TODO(owner): author list, affiliations, contact
+title: "Latent Basemap: Learning Large UMAPs"
+author:
+  - Ian Johnson
+  - Claude
+  - ChatGPT
 bibliography: references.bib
 # Build: single source for BOTH the arXiv PDF (pandoc + tectonic, sae-papers
 # pipeline) and the interactive gh-pages version (moonshine still renders the
@@ -22,41 +24,113 @@ bibliography: references.bib
 
 # 1. Introduction
 
-<!-- [draft now] -->
+A UMAP projection is usually a byproduct: embed a dataset, run the
+optimizer, look at the picture, throw the coordinates away. The frame the
+optimizer found — which regions ended up where, what is adjacent to what —
+dies with the run. Embed a new document and there is no way to place it on
+yesterday's picture; re-run the optimizer and the picture itself changes.
+For a single analysis this is fine. For a map it is disqualifying: maps are
+useful precisely because they stay put while the world moves across them.
 
-- The frame/data separation: per-dataset UMAP runs produce throwaway frames;
-  a basemap trains the frame ONCE over a large mixed corpus, then any text
-  projects onto it in milliseconds, forever. The map becomes learnable
-  geography: stable landmarks, linkable places.
-- The cost asymmetry that makes this work: training is hours on one GPU, but
-  projection is a single forward pass of an 11.8M-param MLP — no graph, no
-  optimization, browser-feasible [@sainburg2021parametric].
-- Why scale (100M rows) matters for a general-purpose frame: coverage of the
-  encoder's semantic range; the representativeness question (§5.4).
-- Contributions: (1) a training recipe whose map quality holds flat 2M→100M
-  on one RTX 5090, incl. the fneg mechanism and host-int8 residency; (2)
-  calibrated, failable instruments + a pre-registration protocol for map
-  quality; (3) a static-file distribution format + in-browser projection.
+This paper treats the frame as the product. A *basemap* is a parametric
+projection head [@sainburg2021parametric] trained once over a large, mixed
+corpus of embeddings, then held fixed. After training, any text the encoder
+can embed lands on the same frame through a single forward pass of an
+11.8M-parameter MLP — no neighbor graph, no optimization, no access to the
+training data. The cost structure is sharply asymmetric: training the frame
+takes hours on one consumer GPU, but projection takes milliseconds and runs
+anywhere, including in a web browser alongside a quantized copy of the
+encoder itself. Under that asymmetry it becomes rational to spend heavily
+on one good frame, because the spend amortizes over every future
+projection. The frame becomes learnable geography: a place users revisit,
+link into, and navigate by memory, the way they navigate a city map rather
+than re-derive it.
+
+Two things have to hold for this to work. The frame must be *good* — a
+faithful, legible layout of the encoder's semantic range — and it must be
+good *at scale*, because a general-purpose frame has to be trained on
+enough of that range to have geography for whatever arrives later. Both
+requirements push in the same direction: large training sets. Ours grow
+from 2M to 100M embedded text chunks, and the central empirical question of
+the paper is whether map quality survives that growth. It is not obvious
+that it should. The failure modes of neighbor embeddings at scale are
+quiet: maps collapse gradually toward their centers, or fill with a fog of
+misplaced points, while still looking plausible in a thumbnail. Much of our
+method is therefore not the recipe itself but the instrumentation that
+makes these failures visible, measurable, and gateable before a
+hundred-GPU-hour run is trusted.
+
+We make three contributions. First, a **training recipe** whose map quality
+holds flat from 2M to 100M rows on a single RTX 5090: a UMAP output kernel
+fit at zero minimum distance, training budget expressed in graph-relative
+units (draws per edge), a fog-targeted reweighting of negative examples
+that clears low-density haze without inducing collapse, uniform edge
+sampling, and an int8 host-residency scheme that carries training past the
+GPU's memory ceiling with map-level fidelity we verify rather than assume.
+Second, **instruments and protocol**: cheap, calibrated statistics for
+collapse and fog with failure modes planted to prove they can fail,
+pre-registered gates fit per treatment family, and a rounds discipline —
+registration before numbers exist, sealed receipts, adversarial review —
+that we argue is what makes a hundred-GPU-hour claim trustworthy at all.
+Third, a **distribution story**: a static-file map format servable from any
+host that supports range requests, a viewer with corpus-level filtering
+down to individual points and their source text, and in-browser projection
+(~80 MB total) that turns any typed phrase into coordinates on the shared
+frame with no server round-trip.
 
 # 2. Related work
 
-<!-- [draft now] -->
+**Neighbor embeddings.** The lineage runs from t-SNE
+[@vandermaaten2008tsne] through LargeVis [@tang2016largevis] to UMAP
+[@mcinnes2018umap]: preserve a k-nearest-neighbor structure from the
+high-dimensional space while a repulsive term keeps the layout from
+collapsing. All three produce non-parametric embeddings — coordinates for
+the training points only. Parametric UMAP [@sainburg2021parametric]
+replaces the free embedding with a neural network trained on the same
+objective, which is what makes a reusable frame possible at all: the
+network is the map. Our architecture and objective are parametric UMAP's;
+our departures are the scale, the output-kernel and negative-sampling
+treatment, and the instrumentation. We also inherit a known sensitivity:
+global structure in these methods is determined largely by initialization
+[@kobak2021initialization], which for a frame meant to stay put is a
+feature to manage deliberately rather than an artifact to ignore.
 
-- Neighbor embeddings: t-SNE [@vandermaaten2008tsne], LargeVis
-  [@tang2016largevis], UMAP [@mcinnes2018umap], parametric UMAP
-  [@sainburg2021parametric]; initialization & global structure
-  [@kobak2021initialization].
-- Attraction/repulsion theory: UMAP's true loss [@damrich2021umaploss] —
-  closest kin to our fneg analysis; heavy-tailed kernels
-  [@kobak2019heavytailed]; PaCMAP's forces taxonomy [@wang2021pacmap];
-  TriMap [@amid2019trimap]; densMAP [@narayan2021densmap]; SGNS negative
-  sampling lineage [@mikolov2013distributed].
-- GPU/scale systems: cuML UMAP [@nolet2021gpuumap]; out-of-core GPU UMAP
-  [@outofcore2025umap]; FAISS [@johnson2019faiss]; openTSNE
-  [@policar2019opentsne].
-- Large-map visualization: Nomic Atlas [@atlas], latent-scope
-  [@latentscope]. Position: those systems visualize a dataset; we publish a
-  reusable frame.
+**Attraction, repulsion, and what the optimizer actually does.** Damrich
+and Hamprecht [@damrich2021umaploss] showed that UMAP's implementation
+optimizes a different loss than its theory describes, with negative
+sampling as the decisive term — a finding our fog-targeted negative
+reweighting (§3.2) builds on directly: we modify *which* negatives matter,
+at distances where misplaced points accumulate, rather than how many are
+drawn. The broader family of force modifications is well charted: heavier-
+tailed output kernels sharpen cluster separation [@kobak2019heavytailed],
+PaCMAP's taxonomy of near, mid-near, and far pairs isolates which force
+ranges shape local versus global structure [@wang2021pacmap], TriMap
+frames the problem through ordinal triplets [@amid2019trimap], and densMAP
+adds a density-preservation term [@narayan2021densmap]. We evaluate
+mid-near and density terms as ablations against our fneg mechanism and
+find neither clears fog without cost at our scales. The negative-sampling
+device itself descends from word2vec [@mikolov2013distributed].
+
+**Scale.** GPU implementations brought UMAP from hours to minutes at
+millions of points [@nolet2021gpuumap]; recent out-of-core work extends
+exact-recall graph construction and layout past device memory to the
+hundred-million regime [@outofcore2025umap]. We use the out-of-core
+NN-descent approach for graph building at 50M+ rows, and full-substrate
+cuML maps as per-rung non-parametric references up to the memory ceiling —
+the benchmark our parametric maps must match on instruments while adding
+the projection property cuML cannot: placing points it has never seen.
+Approximate-neighbor systems [@johnson2019faiss] and scalable t-SNE
+[@policar2019opentsne] solve adjacent problems in the same regime.
+
+**Embedding-map interfaces.** Nomic Atlas [@atlas] demonstrated
+web-served maps over large embedding collections; latent-scope
+[@latentscope] couples projection, clustering, and labeling into a local
+exploration workflow. Both render a map *of a dataset*. Our emphasis is
+the complement: a frame published independently of any dataset, onto which
+anyone's data — or a single typed sentence — can be projected client-side.
+The distribution format (§6) borrows the cartographic pattern of tiled,
+range-requested static files so that hosting a basemap requires no
+server-side computation at all.
 
 # 3. Method: the basemap recipe
 
