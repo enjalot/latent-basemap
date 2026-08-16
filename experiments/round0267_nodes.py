@@ -145,7 +145,16 @@ COLLAPSE_SEEDMEAN_Z = 1.96
 COLLAPSE_SEEDMEAN_N = 3
 
 DEVICE_BUDGET_BYTES = 30 * (1 << 30)
-HOST_RSS_LIMIT_GIB = 60.0
+#: The post-train peak-RSS backstop. Raised 60.0 -> 100.0 GiB after R0267 seed-42 died on
+#: this too-tight assertion AFTER a clean full-horizon train (measured peak 75.81 GiB): the
+#: file-backed int8 X (19.2 GB) plus the fp32 substrate's resident transform pages push the
+#: RSS peak past 60 GiB even though the training itself was healthy. 100 GiB covers the
+#: 75.81 measured peak with headroom and sits far under the box's ~123 GB. This is an
+#: EXECUTION-resource field (a liveness/OOM backstop), NOT a treatment field: it is absent
+#: from the config and the masked-config/treatment invariant digest, so a cell trained at
+#: limit 60 (seed42, salvaged) and cells trained at limit 100 (seeds 43/44) are
+#: treatment-identical (the constants-discipline contract test proves this invariance).
+HOST_RSS_LIMIT_GIB = 100.0
 
 #: The R0244 host-watchdog anonymous-memory budget for the 50M host-int8 rung. The 2M
 #: default (16 GiB, round0265) is too small here: the host-int8 X lives in host RAM as
@@ -155,6 +164,21 @@ HOST_RSS_LIMIT_GIB = 60.0
 #: need ~56 GiB — a later per-rung concern.)
 R0267_ANON_BUDGET_BYTES = 40 * (1 << 30)
 POSITIVE_ROWS_PER_UPDATE = 409
+
+#: The delegate-approved SALVAGE of R0267 seed42 (correction-4): seed42's correction-3 run
+#: trained the FULL ×2 horizon cleanly (4,162,228 updates, 0 AMP-skips, 0 nonfinite) and
+#: saved its map, then the node died on the too-tight 60 GiB post-hoc RSS assertion (peak
+#: 75.81 GiB). Rather than re-train the 11.9 GPU-h, its saved artifacts are BOUND as a
+#: completed cell; only seeds 43/44 re-train. seed42 has NO train-receipt (the RSS raise
+#: preempted it), so the panel/gate source seed42's provenance from the bound artifacts +
+#: an explicit salvage block. The panel independently PINS seed42's coordinates digest to
+#: the sealed correction-3 map below (defense in depth over the queue's bound signature).
+SALVAGE_SEED = 42
+SALVAGE_SOURCE_RUN = "queue-correction-3"
+SALVAGE_SEED42_COORDINATES_SHA256 = (
+    "aa7bbe678e6206c96ec6eb443aa6b6a2c4d8b589585c8c0db6f1b7eb9fc55284"
+)
+SALVAGE_REASON = "post-hoc RSS assertion after a clean full-horizon train"
 
 SAFETY_NOTE = (
     "no node in this module signals any process, starts a child process, hands cuVS "
@@ -814,9 +838,81 @@ def _authenticate_50m_map(cell: Mapping[str, Any], substrate: Mapping[str, Any])
     return {
         "seed": seed,
         "capability": capability,
+        "salvaged": False,
         "receipt": receipt,
         "receipt_signature": receipt_signature,
         "model_path": model_path,
+        "seed_invariant_sha256": str(receipt["seed_invariant_sha256"]),
+    }
+
+
+def _authenticate_salvaged_50m_map(cell: Mapping[str, Any]) -> dict[str, Any]:
+    """Authenticate seed42's BOUND correction-3 cell — no train-receipt, from artifacts.
+
+    seed42 is the delegate-approved salvage: its correction-3 artifacts trained the full ×2
+    horizon cleanly and were saved before the node died on the too-tight RSS assertion. This
+    sources seed42's per-cell provenance from the bound artifacts + the salvage block (NOT a
+    fabricated train-receipt): every bound artifact's bytes are re-verified (verify_signature
+    re-hashes), seed42's coordinates digest is PINNED to the sealed correction-3 map, and the
+    recipe invariant is read from the bound production-config.json.
+    """
+    seed = cell.get("seed")
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed not in SEEDS:
+        raise Round0267NodeError(f"R0267 salvaged cell seed {seed!r} is not a 50M rung cell")
+    if seed != SALVAGE_SEED:
+        raise Round0267NodeError(f"R0267 only seed {SALVAGE_SEED} is a salvaged cell; got {seed!r}")
+    capability = capability_for_seed(seed)
+    if str(cell.get("capability") or "") != capability:
+        raise Round0267NodeError("R0267 salvaged cell capability changed")
+    salvage = dict(cell.get("salvage") or {})
+    if (
+        salvage.get("salvaged") is not True
+        or str(salvage.get("source_run") or "") != SALVAGE_SOURCE_RUN
+        or str(salvage.get("reason") or "") != SALVAGE_REASON
+    ):
+        raise Round0267NodeError("R0267 salvaged cell provenance block changed")
+    # Re-verify every bound artifact's bytes (verify_signature re-hashes the file).
+    coordinates_path = prompt_contract.verify_signature(
+        dict(cell["coordinates"]), label="R0267 salvaged seed42 coordinates"
+    )
+    model_path = prompt_contract.verify_signature(
+        dict(cell["model"]), label="R0267 salvaged seed42 model"
+    )
+    prod_config_path = prompt_contract.verify_signature(
+        dict(cell["production_config"]), label="R0267 salvaged seed42 production-config"
+    )
+    prompt_contract.verify_signature(
+        dict(cell["admission"]), label="R0267 salvaged seed42 admission"
+    )
+    prompt_contract.verify_signature(
+        dict(cell["train_log"]), label="R0267 salvaged seed42 train log"
+    )
+    # PIN: seed42's coordinates file digest MUST be the sealed correction-3 map (raise on
+    # mismatch), independent of the queue's declared signature.
+    if str(cell["coordinates"]["sha256"]) != SALVAGE_SEED42_COORDINATES_SHA256:
+        raise Round0267NodeError(
+            "R0267 salvaged seed42 coordinates digest is not the sealed correction-3 map: "
+            f"{cell['coordinates']['sha256']} != {SALVAGE_SEED42_COORDINATES_SHA256}"
+        )
+    # Source the recipe invariant from the bound production-config (NOT a train receipt).
+    with open(prod_config_path, encoding="utf-8") as handle:
+        prod_config = json.load(handle)
+    invariant = str(prod_config.get("seed_invariant_sha256") or "")
+    if not invariant:
+        raise Round0267NodeError("R0267 salvaged seed42 production-config carries no seed invariant")
+    if str(prod_config.get("round_id")) != ROUND_ID or int(prod_config.get("seed", -1)) != seed:
+        raise Round0267NodeError("R0267 salvaged seed42 production-config is not this cell")
+    return {
+        "seed": seed,
+        "capability": capability,
+        "salvaged": True,
+        "salvage": salvage,
+        "coordinates_path": coordinates_path,
+        "coordinates_signature": dict(cell["coordinates"]),
+        "model_path": model_path,
+        "model_signature": dict(cell["model"]),
+        "production_config_signature": dict(cell["production_config"]),
+        "seed_invariant_sha256": invariant,
     }
 
 
@@ -863,12 +959,20 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     cells_in = job.get("cells")
     if not isinstance(cells_in, list):
         raise Round0267NodeError("R0267 cell input matrix changed")
-    authenticated = [_authenticate_50m_map(cell, substrate) for cell in cells_in]
+    authenticated = [
+        _authenticate_salvaged_50m_map(cell)
+        if cell.get("salvaged")
+        else _authenticate_50m_map(cell, substrate)
+        for cell in cells_in
+    ]
     if {entry["seed"] for entry in authenticated} != set(SEEDS):
         raise Round0267NodeError("R0267 three-cell input matrix changed")
-    invariants = {str(entry["receipt"]["seed_invariant_sha256"]) for entry in authenticated}
+    # The recipe invariant is sourced per-cell: 43/44 from their train-receipts, seed42
+    # (salvaged) from its bound production-config. A single pooled recipe still required.
+    invariants = {str(entry["seed_invariant_sha256"]) for entry in authenticated}
     if len(invariants) != 1:
         raise Round0267NodeError("R0267 pooled family is not one 50M recipe")
+    salvaged_seeds = sorted(entry["seed"] for entry in authenticated if entry.get("salvaged"))
 
     output = create_fresh_directory(str(job["outputs"][0]), label="R0267 50M panel")
     started = time.monotonic()
@@ -904,10 +1008,22 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         cells: dict[str, dict[str, Any]] = {}
         for entry in sorted(authenticated, key=lambda e: e["seed"]):
             seed = entry["seed"]
-            model = ParametricUMAP.load(entry["model_path"], device="cuda")
-            coordinates = _transform_50m_in_chunks(model, source, wrapped)
-            if coordinates.shape != (ROWS, 2) or not np.isfinite(coordinates).all():
-                raise Round0267NodeError(f"R0267 seed-{seed} transform is not a finite 50M map")
+            if entry.get("salvaged"):
+                # seed42: score the BOUND correction-3 coordinates directly (digest-pinned
+                # at authentication), not a re-transform. No model load, no GPU transform.
+                model = None
+                coordinates = np.asarray(
+                    np.load(entry["coordinates_path"], allow_pickle=False), dtype=np.float32
+                )
+                if coordinates.shape != (ROWS, 2) or not np.isfinite(coordinates).all():
+                    raise Round0267NodeError(
+                        f"R0267 seed-{seed} salvaged coordinates are not a finite 50M map"
+                    )
+            else:
+                model = ParametricUMAP.load(entry["model_path"], device="cuda")
+                coordinates = _transform_50m_in_chunks(model, source, wrapped)
+                if coordinates.shape != (ROWS, 2) or not np.isfinite(coordinates).all():
+                    raise Round0267NodeError(f"R0267 seed-{seed} transform is not a finite 50M map")
             panel = score_panel(
                 source,
                 coordinates,
@@ -930,16 +1046,37 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 truth_top10=truth_ids,
                 purity_ratios=purity_ratios,
             )
-            cells[str(seed)] = {
-                "seed": seed,
-                "capability": entry["capability"],
-                "train_receipt": dict(entry["receipt_signature"]),
-                "model": dict(entry["receipt"]["model"]),
-                "x_residency": X_RESIDENCY,
-                "coordinates_ordered_sha256": ordered_array_sha256(coordinates),
-                "metrics": scored_map,
-                "panel_purity_numerators": panel.get("purity_numerators"),
-            }
+            if entry.get("salvaged"):
+                # seed42: provenance is the salvage block + the bound artifacts, NOT a
+                # train-receipt (do NOT fabricate one — it has none).
+                cells[str(seed)] = {
+                    "seed": seed,
+                    "capability": entry["capability"],
+                    "salvaged": True,
+                    "salvage": dict(entry["salvage"]),
+                    "train_receipt": None,
+                    "model": dict(entry["model_signature"]),
+                    "coordinates_binding": dict(entry["coordinates_signature"]),
+                    "production_config": dict(entry["production_config_signature"]),
+                    "seed_invariant_sha256": entry["seed_invariant_sha256"],
+                    "x_residency": X_RESIDENCY,
+                    "coordinates_ordered_sha256": ordered_array_sha256(coordinates),
+                    "metrics": scored_map,
+                    "panel_purity_numerators": panel.get("purity_numerators"),
+                }
+            else:
+                cells[str(seed)] = {
+                    "seed": seed,
+                    "capability": entry["capability"],
+                    "salvaged": False,
+                    "train_receipt": dict(entry["receipt_signature"]),
+                    "model": dict(entry["receipt"]["model"]),
+                    "seed_invariant_sha256": entry["seed_invariant_sha256"],
+                    "x_residency": X_RESIDENCY,
+                    "coordinates_ordered_sha256": ordered_array_sha256(coordinates),
+                    "metrics": scored_map,
+                    "panel_purity_numerators": panel.get("purity_numerators"),
+                }
             del model, coordinates, placed
             torch.cuda.empty_cache()
             gc.collect()
@@ -973,6 +1110,10 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             for row in metric_table.values()
         ),
         "no_gate_registered_here": not job.get("gate_registerable_here", False),
+        "salvaged_cells_sourced_from_bound_artifacts": all(
+            (cells[str(s)].get("train_receipt") is None and bool(cells[str(s)].get("salvage")))
+            for s in salvaged_seeds
+        ),
     }
     if not all(execution_checks.values()):
         raise Round0267NodeError(f"R0267 panel execution checks failed: {execution_checks}")
@@ -988,6 +1129,10 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "abort_flag_precondition": abort_flag,
         "n": len(SEEDS),
         "seeds": list(SEEDS),
+        "salvaged_seeds": list(salvaged_seeds),
+        "salvage_provenance": {
+            str(s): dict(cells[str(s)]["salvage"]) for s in salvaged_seeds
+        },
         "x_residency": X_RESIDENCY,
         "seed_invariant_sha256": sorted(invariants)[0],
         "panel_metric_table": metric_table,
@@ -1232,6 +1377,24 @@ def _metric_table_from_panel(panel: Mapping[str, Any]) -> dict[str, dict[str, An
     return {str(s): dict(table[str(s)]) for s in SEEDS}
 
 
+def _salvage_provenance_from_panel(panel: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """seed42's per-cell provenance comes from the panel's salvage block, NOT a train-receipt.
+
+    Returns ``{seed_str: salvage_block}`` for every salvaged cell in the panel (seed42 in
+    correction-4). The gate records this explicitly instead of a fabricated train-receipt.
+    """
+    cells = dict(panel.get("cells") or {})
+    provenance: dict[str, dict[str, Any]] = {}
+    for seed_key, cell in cells.items():
+        if not isinstance(cell, Mapping) or not cell.get("salvaged"):
+            continue
+        salvage = dict(cell.get("salvage") or {})
+        if salvage.get("salvaged") is not True or str(salvage.get("source_run") or "") != SALVAGE_SOURCE_RUN:
+            raise Round0267NodeError(f"R0267 gate: salvaged cell {seed_key} provenance changed")
+        provenance[str(seed_key)] = salvage
+    return provenance
+
+
 def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     install_stop_hooks(label="R0267 round0267_nodes.run_gate")
     if active.get("manifest", {}).get("round_id") != ROUND_ID:
@@ -1258,6 +1421,8 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         )
         metric_table = _metric_table_from_panel(panel)
         seed_collapse = {s: float(metric_table[s][COLLAPSE_METRIC]) for s in metric_table}
+        # seed42's provenance is the salvage block (not a train-receipt); record it here.
+        salvage_provenance = _salvage_provenance_from_panel(panel)
         wrapped("R0267 three-seed 50M metrics read")
 
         # 2. σ_fam, RECOMPUTED from R0265's sealed n=13 panel.
@@ -1321,6 +1486,10 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "five_backstop_metrics_present": {r["seed"] for r in backstop_scoring["cells"]} == set(SEEDS),
         "three_seeds_scored": backstop_scoring["cells_scored"] == len(SEEDS),
         "no_typed_band_literals": True,  # every band/floor/σ_fam/P1-edge is read from a sealed input
+        "salvaged_provenance_sourced_not_fabricated": all(
+            prov.get("salvaged") is True and "train_evidence" in prov
+            for prov in salvage_provenance.values()
+        ),
     }
     if not all(execution_checks.values()):
         raise Round0267NodeError(f"R0267 gate execution checks failed: {execution_checks}")
@@ -1343,6 +1512,8 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "the owner with the drift decomposition, never an auto-proceed."
         ),
         "seed_spread_assumption": SEED_SPREAD_ASSUMPTION,
+        "salvaged_seeds": sorted(int(s) for s in salvage_provenance),
+        "salvage_provenance": salvage_provenance,
         "sigma_fam": sigma,
         "p1_x2_asymptote_band": p1,
         "criterion_1_collapse_seed_mean": criterion_1,
@@ -1432,8 +1603,13 @@ __all__ = [
     "PANEL_CAPABILITY",
     "PANEL_SCHEMA",
     "Round0267NodeError",
+    "SALVAGE_SEED",
+    "SALVAGE_SEED42_COORDINATES_SHA256",
+    "SALVAGE_SOURCE_RUN",
     "TRAIN_ACTION",
     "TRAIN_SCHEMA",
+    "_authenticate_salvaged_50m_map",
+    "_salvage_provenance_from_panel",
     "build_hostint8_dataset_from_slice",
     "read_p1_x2_asymptote_band",
     "run_gate",

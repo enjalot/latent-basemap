@@ -30,6 +30,7 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Mapping
 from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -72,6 +73,10 @@ from experiments.round0267_nodes import (
     GATE_CAPABILITY,
     PANEL_ACTION,
     PANEL_CAPABILITY,
+    SALVAGE_REASON,
+    SALVAGE_SEED,
+    SALVAGE_SEED42_COORDINATES_SHA256,
+    SALVAGE_SOURCE_RUN,
     TRAIN_ACTION,
 )
 import experiments.round0265_nodes as R0265N
@@ -115,6 +120,169 @@ R0237_RESERVE = (
 )
 #: The frozen P1 analysis-v2 result — the ×2 collapse asymptote band (plain JSON).
 P1_ASYMPTOTE = "/data/latent-basemap/sandbox/logs/analysis_v2_result.json"
+
+# --------------------------------------------------------------------------- #
+# SALVAGE (correction-4): bind seed42's clean correction-3 artifacts as a
+# completed cell instead of re-training the 11.9 GPU-h.
+#
+# seed42 (50M ×2 host-int8) trained the FULL ×2 horizon cleanly in correction-3
+# (4,162,228 updates, 0 AMP-skips, 0 nonfinite — proven by the train log) and
+# saved its map, then the node died on the too-tight 60 GiB post-hoc RSS
+# assertion (peak 75.81 GiB). The delegate ruled: raise the limit, BIND seed42's
+# saved artifacts as a completed cell, re-run only seeds 43/44. seed42 has NO
+# train-receipt (the RSS raise preempted it), so the salvage records the clean
+# full-horizon train from the log's step-accounting line in lieu of a receipt.
+# These are the SEALED correction-3 digests, verified at bind time.
+# --------------------------------------------------------------------------- #
+SALVAGE_EXPECTED_DIGESTS = {
+    "coordinates.npy": SALVAGE_SEED42_COORDINATES_SHA256,
+    "model.pt": "6151293536f80a9a2a728a6f62dc0af388d7aba6d1c3cc14675576db18a5a065",
+    "admission.json": "53e7778805647a37616847667864f29d120cff56502a8608adc9353f25241b48",
+    "production-config.json": (
+        "eebd4d8c483c1780b199fb6d45dbd5ba85853e402f64a809346ee18e7ee41544"
+    ),
+}
+SALVAGE_EXPECTED_LOG_SHA256 = (
+    "c310d487ba0f16c28027706b3cfa757c0da00fef7023390ae84eefbedffeda56"
+)
+#: The stable PREFIX that locates the step-accounting line — no literal update count, so
+#: the dose is checked by DERIVATION (validate_dose_x2), never by a magic number in a marker.
+SALVAGE_STEP_ACCOUNTING_MARKER = "Step accounting (lr_horizon):"
+#: Parses the clean-train counters out of the located line (succeeded / AMP-skips / nonfinite).
+SALVAGE_STEP_ACCOUNTING_RE = re.compile(
+    r"succeeded\s+(?P<succeeded>\d+),\s*AMP-skips\s+(?P<amp_skips>\d+),\s*"
+    r"nonfinite\s+loss/grad\s+(?P<nonfinite_loss>\d+)/(?P<nonfinite_grad>\d+)"
+)
+
+
+def _extract_clean_train_step_line(log_path: str) -> tuple[str, int]:
+    """The last step-accounting line from the (streamed) train log + its succeeded count.
+
+    Locates the line by a stable prefix (no literal update count), parses its counters, and
+    asserts a CLEAN full-horizon train: 0 AMP-skips and 0 nonfinite loss/grad. The succeeded
+    count is returned so the caller can check the ×2 dose equality by derivation
+    (validate_dose_x2), not against a marker literal. The 600 MB log is scanned line-by-line,
+    never materialised.
+    """
+    found: str | None = None
+    with open(log_path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            if SALVAGE_STEP_ACCOUNTING_MARKER in line:
+                found = line.strip()
+    if not found:
+        raise RuntimeError(
+            f"R0267 salvage: no step-accounting line in {log_path} "
+            f"(expected prefix {SALVAGE_STEP_ACCOUNTING_MARKER!r})"
+        )
+    match = SALVAGE_STEP_ACCOUNTING_RE.search(found)
+    if match is None:
+        raise RuntimeError(
+            f"R0267 salvage: step-accounting line has no succeeded/AMP-skips/nonfinite "
+            f"counters: {found!r}"
+        )
+    amp_skips = int(match.group("amp_skips"))
+    nonfinite_loss = int(match.group("nonfinite_loss"))
+    nonfinite_grad = int(match.group("nonfinite_grad"))
+    if amp_skips != 0 or nonfinite_loss != 0 or nonfinite_grad != 0:
+        raise RuntimeError(
+            f"R0267 salvage: step-accounting line is not a clean train "
+            f"(AMP-skips={amp_skips}, nonfinite loss/grad={nonfinite_loss}/{nonfinite_grad}): "
+            f"{found!r}"
+        )
+    return found, int(match.group("succeeded"))
+
+
+def bind_salvaged_seed42_cell(
+    *,
+    artifact_dir: str,
+    log_path: str,
+    expected_cell_invariant: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Bind seed42's sealed correction-3 artifacts as a completed cell (verify digests).
+
+    Returns ``(cell_record, salvaged_invariant)``. Every artifact's file digest is verified
+    against the sealed correction-3 pins (mismatch -> raise), the clean-train step-accounting
+    line is extracted from the log as the train evidence, and the recipe invariant is read
+    from the bound production-config.json (NOT a fabricated train-receipt). If
+    ``expected_cell_invariant`` is given, the salvaged invariant must equal it — proving the
+    salvaged cell is treatment-identical to the freshly-built 43/44 cells.
+    """
+    capability = T.capability_for_seed(SALVAGE_SEED)
+    signatures: dict[str, dict[str, Any]] = {}
+    for name, expected in SALVAGE_EXPECTED_DIGESTS.items():
+        sig = _signature(os.path.join(artifact_dir, name), f"R0267 salvaged seed42 {name}")
+        if sig["sha256"] != expected:
+            raise RuntimeError(
+                f"R0267 salvage digest mismatch for {name}: {sig['sha256']} != {expected}"
+            )
+        signatures[name] = sig
+    log_sig = _signature(log_path, "R0267 salvaged seed42 train log")
+    if log_sig["sha256"] != SALVAGE_EXPECTED_LOG_SHA256:
+        raise RuntimeError(
+            f"R0267 salvage log digest mismatch: {log_sig['sha256']} != "
+            f"{SALVAGE_EXPECTED_LOG_SHA256}"
+        )
+    step_line, succeeded_updates = _extract_clean_train_step_line(log_sig["canonical_path"])
+    # Requirement (b): the ×2 dose is a CHECKED EQUALITY against a DERIVED target, not the
+    # literal 4,162,228 — validate_dose_x2 raises unless the log's succeeded count equals
+    # 2 * successful_updates_for_edges(SEALED_DIRECTED_EDGES) under the quantisation bound.
+    dose_receipt = T.validate_dose_x2(
+        updates=succeeded_updates, edge_count=SEALED_DIRECTED_EDGES
+    )
+
+    with open(signatures["production-config.json"]["canonical_path"], encoding="utf-8") as handle:
+        prod_config = json.load(handle)
+    salvaged_invariant = str(prod_config.get("seed_invariant_sha256") or "")
+    if not salvaged_invariant:
+        raise RuntimeError("R0267 salvage: production-config.json carries no seed_invariant_sha256")
+    if str(prod_config.get("round_id")) != ROUND_ID or int(prod_config.get("seed", -1)) != SALVAGE_SEED:
+        raise RuntimeError("R0267 salvage: production-config.json is not the seed42 R0267 cell")
+    if expected_cell_invariant is not None and salvaged_invariant != expected_cell_invariant:
+        raise RuntimeError(
+            "R0267 salvage: seed42's saved config is NOT treatment-identical to the "
+            f"correction-4 cells: {salvaged_invariant} != {expected_cell_invariant}"
+        )
+
+    cell_record = {
+        "seed": SALVAGE_SEED,
+        "capability": capability,
+        "salvaged": True,
+        "salvage": {
+            "salvaged": True,
+            "source_run": SALVAGE_SOURCE_RUN,
+            "reason": SALVAGE_REASON,
+            "train_evidence": {
+                "train_log": log_sig,
+                "train_log_sha256": log_sig["sha256"],
+                "step_accounting_line": step_line,
+                "succeeded_updates": succeeded_updates,
+                "dose_receipt": dose_receipt,
+                "dose_checked_equality": (
+                    f"succeeded {succeeded_updates} == {T.DOSE_MULTIPLIER} * "
+                    f"successful_updates_for_edges({SEALED_DIRECTED_EDGES}) = "
+                    f"{T.DOSE_MULTIPLIER} * {dose_receipt['base_successful_updates']} = "
+                    f"{dose_receipt['successful_updates']} (validate_dose_x2, quantisation-bounded)"
+                ),
+                "in_lieu_of": (
+                    "there is no seed42 train-receipt: the too-tight RSS assertion raised "
+                    "AFTER the clean full-horizon train saved the map, preempting the "
+                    "receipt. The step-accounting line + the derived dose equality are the "
+                    "clean-train evidence."
+                ),
+            },
+            "digests": {name: sig["sha256"] for name, sig in signatures.items()},
+            "seed_invariant_sha256": salvaged_invariant,
+            "production_config_substrate_sha256": (
+                str(((prod_config.get("config") or {}).get("input") or {}).get("substrate_sha256") or "")
+            ),
+        },
+        "coordinates": signatures["coordinates.npy"],
+        "model": signatures["model.pt"],
+        "admission": signatures["admission.json"],
+        "production_config": signatures["production-config.json"],
+        "train_log": log_sig,
+    }
+    return cell_record, salvaged_invariant
 
 #: Three 50M ×2 host-int8 trains (~5 GPU-h each) + a three-map 50M panel + the CPU gate;
 #: the cap sits above the ~15 GPU-h train estimate + panel/reference (plan costs).
@@ -212,9 +380,16 @@ def _treatment_closure_seal(release_sha: str) -> dict[str, Any]:
     })
 
 
-def prepare_round0267(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
+def prepare_round0267(
+    *,
+    release_sha: str,
+    queue_root: str = QUEUE_ROOT,
+    salvage: Mapping[str, Any] | None = None,
+) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0267 release SHA must be one full commit")
+    if salvage is not None and int(salvage.get("seed", -1)) != SALVAGE_SEED:
+        raise ValueError(f"R0267 salvage supports only seed {SALVAGE_SEED}")
     round_signature, required_reviews = _issued_round(release_sha)
     review_state = _upstream_review_state(list(required_reviews))
 
@@ -264,6 +439,20 @@ def prepare_round0267(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
     if len(invariants) != 1:
         raise RuntimeError("R0267 three cells do not share one masked recipe digest")
     cell_seed_invariant = sorted(invariants)[0]
+
+    # SALVAGE mode: bind seed42's sealed correction-3 artifacts as a completed cell (verify
+    # its digests + prove treatment-identity to the freshly-built cell invariant) and omit
+    # its train node; only seeds 43/44 train. Otherwise all three seeds train.
+    salvaged_cell: dict[str, Any] | None = None
+    if salvage is not None:
+        salvaged_cell, _salvaged_invariant = bind_salvaged_seed42_cell(
+            artifact_dir=str(salvage["artifact_dir"]),
+            log_path=str(salvage["log_path"]),
+            expected_cell_invariant=cell_seed_invariant,
+        )
+        train_seeds = [seed for seed in SEEDS if int(seed) != SALVAGE_SEED]
+    else:
+        train_seeds = list(SEEDS)
 
     # Bind every sealed cross-round input by real sha256 + bytes.
     r0218_panel = _signature(R0218_PANEL, "R0218 frozen panel")
@@ -364,10 +553,11 @@ def prepare_round0267(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
     p90: dict[str, float] = {}
     jobs: list[dict[str, Any]] = []
 
-    # 1-3. the three host-int8 trains (seeds 42, 43, 44).
+    # 1-3. the host-int8 trains. In salvage mode seed42 is bound (correction-3), not
+    # trained, so only seeds 43/44 train; otherwise all three seeds (42/43/44) train.
     train_outputs: dict[int, str] = {}
     train_ids: list[str] = []
-    for seed in SEEDS:
+    for seed in train_seeds:
         capability = capability_for_seed(seed)
         train_node = f"{TRAIN_ACTION}_seed{seed}"
         train_output = os.path.join(artifacts, capability)
@@ -395,7 +585,30 @@ def prepare_round0267(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
         })
         p90[train_node] = TRAIN_P90_WALL_S
 
-    # 4. the three-cell panel.
+    # 4. the three-cell panel. seed42 is either a fresh train (train_outputs) or the bound
+    # salvaged correction-3 cell; 43/44 are always fresh correction-4 trains.
+    panel_cells: list[dict[str, Any]] = []
+    for seed in SEEDS:
+        if salvaged_cell is not None and int(seed) == SALVAGE_SEED:
+            panel_cells.append(salvaged_cell)
+        else:
+            panel_cells.append({
+                "seed": int(seed),
+                "capability": capability_for_seed(seed),
+                "salvaged": False,
+                "train_receipt": {"kind": "file", "canonical_path": os.path.join(train_outputs[seed], "train-receipt.json")},
+            })
+    # In salvage mode the panel also binds seed42's saved artifacts as gate-verified inputs.
+    salvage_inputs: list[dict[str, Any]] = []
+    if salvaged_cell is not None:
+        salvage_inputs = [
+            salvaged_cell["coordinates"],
+            salvaged_cell["model"],
+            salvaged_cell["admission"],
+            salvaged_cell["production_config"],
+            salvaged_cell["train_log"],
+        ]
+
     panel_node = PANEL_ACTION
     panel_output = os.path.join(artifacts, PANEL_CAPABILITY)
     jobs.append({
@@ -407,7 +620,7 @@ def prepare_round0267(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
         "outputs": [panel_output],
         "done_marker": os.path.join(artifacts, f"{panel_node}.done.json"),
         "expected_inputs": _dedupe([
-            *shared_inputs, r0218_panel, truth_query_rows, truth_ids, reserve,
+            *shared_inputs, r0218_panel, truth_query_rows, truth_ids, reserve, *salvage_inputs,
         ]),
         "p90_wall_s": PANEL_P90_WALL_S,
         "graph_manifest_signature": graph_manifest_signature,
@@ -417,14 +630,7 @@ def prepare_round0267(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
         "truth_query_rows": truth_query_rows,
         "truth_ids": truth_ids,
         "heldout_reserve": reserve,
-        "cells": [
-            {
-                "seed": int(seed),
-                "capability": capability_for_seed(seed),
-                "train_receipt": {"kind": "file", "canonical_path": os.path.join(train_outputs[seed], "train-receipt.json")},
-            }
-            for seed in SEEDS
-        ],
+        "cells": panel_cells,
         "gate_registerable_here": False,
         "upstream_review_state": review_state,
         "node_policy": {"gpu_required": True, "training_performed": False, "cpu_heavy": False},
@@ -496,6 +702,31 @@ def prepare_round0267(*, release_sha: str, queue_root: str = QUEUE_ROOT) -> str:
                 "P1-edge is read from a sealed artifact bound by sha256 — never a literal."
             ),
             "seeds": list(SEEDS),
+            "trained_seeds": list(train_seeds),
+            "salvaged_seed": (SALVAGE_SEED if salvaged_cell is not None else None),
+            "salvage": (
+                {
+                    "salvaged": True,
+                    "seed": SALVAGE_SEED,
+                    "source_run": SALVAGE_SOURCE_RUN,
+                    "reason": SALVAGE_REASON,
+                    "why": (
+                        "seed42 trained the FULL ×2 horizon cleanly in correction-3 "
+                        "(4,162,228 updates, 0 AMP-skips, 0 nonfinite) and saved its map, "
+                        "then the node died on the too-tight 60 GiB post-hoc RSS assertion "
+                        "(peak 75.81 GiB). Its saved artifacts are BOUND as a completed cell "
+                        "(digests verified) rather than re-training the 11.9 GPU-h; only "
+                        "seeds 43/44 re-train. seed42 is treatment-identical to 43/44 "
+                        "(same masked-config invariant); the raised RSS limit is an "
+                        "execution-resource field, not a treatment field."
+                    ),
+                    "train_evidence": salvaged_cell["salvage"]["train_evidence"],
+                    "digests": salvaged_cell["salvage"]["digests"],
+                    "seed_invariant_sha256": salvaged_cell["salvage"]["seed_invariant_sha256"],
+                }
+                if salvaged_cell is not None
+                else None
+            ),
             "x_residency": T.X_RESIDENCY,
             "dose_multiplier": T.DOSE_MULTIPLIER,
             "cell_seed_invariant_sha256": cell_seed_invariant,
@@ -559,8 +790,36 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="prepare the R0267 queue")
     parser.add_argument("--release-sha", required=True)
     parser.add_argument("--queue-root", default=None)
+    parser.add_argument(
+        "--salvage-seed", type=int, default=None,
+        help=f"bind this seed's saved artifacts as a completed cell instead of training it "
+             f"(only seed {SALVAGE_SEED} is supported)",
+    )
+    parser.add_argument(
+        "--salvage-from", default=None,
+        help="the correction-3 artifact directory holding the salvaged seed's "
+             "coordinates.npy/model.pt/admission.json/production-config.json",
+    )
+    parser.add_argument(
+        "--salvage-log", default=None,
+        help="the salvaged seed's train log (the clean full-horizon step-accounting proof, "
+             "in lieu of the train-receipt the RSS raise preempted)",
+    )
     args = parser.parse_args(argv)
-    path = prepare_round0267(release_sha=args.release_sha, queue_root=(args.queue_root or QUEUE_ROOT))
+    salvage: dict[str, Any] | None = None
+    if args.salvage_seed is not None or args.salvage_from is not None or args.salvage_log is not None:
+        if args.salvage_seed is None or not args.salvage_from or not args.salvage_log:
+            parser.error("--salvage-seed, --salvage-from and --salvage-log must be given together")
+        salvage = {
+            "seed": int(args.salvage_seed),
+            "artifact_dir": args.salvage_from,
+            "log_path": args.salvage_log,
+        }
+    path = prepare_round0267(
+        release_sha=args.release_sha,
+        queue_root=(args.queue_root or QUEUE_ROOT),
+        salvage=salvage,
+    )
     print(json.dumps({"queue": path, "sha256": file_sha256_manifest(path)}))
     return 0
 

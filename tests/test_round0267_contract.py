@@ -591,3 +591,209 @@ def test_dose_multiplier_is_two():
     assert T.DOSE_MULTIPLIER == 2
     assert N.DOSE_MULTIPLIER == 2
     assert T.SEEDS == (42, 43, 44)
+
+
+# --------------------------------------------------------------------------- #
+# 6. treatment-vs-execution: the masked-config / treatment invariant digest is
+#    INVARIANT to a change in HOST_RSS_LIMIT_GIB (and the other resource
+#    constants), so seed42 (trained at limit 60) and 43/44 (limit 100) are
+#    treatment-identical. The RSS limit is an execution-resource field, excluded
+#    from the config and the treatment digest.
+# --------------------------------------------------------------------------- #
+
+
+def test_host_rss_limit_is_raised_to_100():
+    assert N.HOST_RSS_LIMIT_GIB == 100.0
+
+
+def test_treatment_digest_excludes_execution_resource_fields(monkeypatch):
+    cfg = _honest()
+    digest = T.fneg_seed_invariant_sha256(cfg)
+
+    # The node's post-train RSS backstop (N.HOST_RSS_LIMIT_GIB, raised 60->100) and the
+    # anon/device byte budgets are EXECUTION-resource fields living in round0267_nodes, not
+    # in the config: neither the raised value nor the old value leaks into the config /
+    # treatment. (The config DOES carry a fixed R0217 pipeline-stamp field
+    # `host_rss_limit_gib: 32.0`, which is unrelated to the node backstop and is the same
+    # 32.0 for every seed, so it does not distinguish the two correction runs.)
+    blob = json.dumps(cfg)
+    for token in ("100.0", "60.0", str(N.R0267_ANON_BUDGET_BYTES), str(N.DEVICE_BUDGET_BYTES)):
+        assert token not in blob
+
+    # THE EXECUTED PROOF: changing the module's execution-resource constants leaves the
+    # treatment / masked-config invariant digest unchanged — so seed42 (trained at limit 60)
+    # and seeds 43/44 (limit 100) are treatment-identical.
+    monkeypatch.setattr(N, "HOST_RSS_LIMIT_GIB", 60.0)
+    monkeypatch.setattr(N, "R0267_ANON_BUDGET_BYTES", 7 * (1 << 30))
+    monkeypatch.setattr(N, "DEVICE_BUDGET_BYTES", 3 * (1 << 30))
+    digest_at_60 = T.fneg_seed_invariant_sha256(_honest())
+    monkeypatch.setattr(N, "HOST_RSS_LIMIT_GIB", 100.0)
+    digest_at_100 = T.fneg_seed_invariant_sha256(_honest())
+    assert digest_at_60 == digest_at_100 == digest
+
+
+# --------------------------------------------------------------------------- #
+# 7. the SALVAGE of seed42: bind the sealed correction-3 artifacts (verify
+#    digests, extract the clean-train evidence), the panel reads the bound
+#    coordinates (pin-verified) with no train-receipt, and the gate scores all
+#    three cells including the salvaged one.
+# --------------------------------------------------------------------------- #
+
+SALVAGE_DIR = (
+    "/data/latent-basemap/runs/round-0267/queue-correction-3/artifacts/"
+    "minilm-mixed-50000k-fneg-x2-md000-hostint8-seed42-r0267-v1"
+)
+SALVAGE_LOG = (
+    "/data/latent-basemap/runs/round-0267/queue-correction-3/logs/"
+    "train_minilm_fneg_50m_x2_hostint8_seed42.log"
+)
+_SALVAGE_PRESENT = os.path.exists(SALVAGE_DIR) and os.path.exists(SALVAGE_LOG)
+
+
+def test_salvage_pins_match_the_node_and_prepare_constants():
+    assert N.SALVAGE_SEED == 42
+    assert N.SALVAGE_SOURCE_RUN == "queue-correction-3"
+    assert (
+        N.SALVAGE_SEED42_COORDINATES_SHA256
+        == "aa7bbe678e6206c96ec6eb443aa6b6a2c4d8b589585c8c0db6f1b7eb9fc55284"
+    )
+    # prepare's coordinates digest is the node's pinned digest (single source of truth).
+    assert P.SALVAGE_EXPECTED_DIGESTS["coordinates.npy"] == N.SALVAGE_SEED42_COORDINATES_SHA256
+
+
+@pytest.mark.skipif(not _SALVAGE_PRESENT, reason="correction-3 seed42 artifacts absent")
+def test_salvage_bind_verifies_seed42_digests_and_clean_train():
+    cell, salvaged_inv = P.bind_salvaged_seed42_cell(
+        artifact_dir=SALVAGE_DIR, log_path=SALVAGE_LOG
+    )
+    assert cell["seed"] == 42
+    assert cell["salvaged"] is True
+    assert cell["salvage"]["source_run"] == "queue-correction-3"
+    assert cell["salvage"]["reason"] == N.SALVAGE_REASON
+    # every bound artifact matches its sealed correction-3 digest.
+    assert cell["coordinates"]["sha256"] == N.SALVAGE_SEED42_COORDINATES_SHA256
+    for name, expected in P.SALVAGE_EXPECTED_DIGESTS.items():
+        assert cell["salvage"]["digests"][name] == expected
+    assert cell["train_log"]["sha256"] == P.SALVAGE_EXPECTED_LOG_SHA256
+    # the clean full-horizon train evidence (in lieu of a train-receipt).
+    step = cell["salvage"]["train_evidence"]["step_accounting_line"]
+    assert "succeeded 4162228, AMP-skips 0, nonfinite loss/grad 0/0" in step
+    assert salvaged_inv and salvaged_inv == cell["salvage"]["seed_invariant_sha256"]
+    # treatment-identity guard: a matching invariant binds, a wrong one raises.
+    P.bind_salvaged_seed42_cell(
+        artifact_dir=SALVAGE_DIR, log_path=SALVAGE_LOG, expected_cell_invariant=salvaged_inv
+    )
+    with pytest.raises(RuntimeError):
+        P.bind_salvaged_seed42_cell(
+            artifact_dir=SALVAGE_DIR, log_path=SALVAGE_LOG, expected_cell_invariant="0" * 64
+        )
+
+
+@pytest.mark.skipif(not _SALVAGE_PRESENT, reason="correction-3 seed42 artifacts absent")
+def test_salvage_dose_is_a_derived_checked_equality_not_a_literal():
+    """Requirement (b): the log's succeeded count is checked as `== 2 * S_u_f_e(edges)`.
+
+    The bind runs the log's parsed succeeded count through validate_dose_x2 (which derives
+    the target from the sealed edge count), so the salvage carries the ×2 dose as a checked
+    equality against a derived target — not a match on the literal 4,162,228.
+    """
+    cell, _inv = P.bind_salvaged_seed42_cell(artifact_dir=SALVAGE_DIR, log_path=SALVAGE_LOG)
+    evidence = cell["salvage"]["train_evidence"]
+    receipt = evidence["dose_receipt"]
+    base = successful_updates_for_edges(T.SEALED_DIRECTED_EDGES)
+    expected = T.DOSE_MULTIPLIER * base
+    # the log's succeeded count equals the DERIVED ×2 horizon (the checked equality).
+    assert evidence["succeeded_updates"] == expected
+    assert receipt["successful_updates"] == expected
+    assert receipt["base_successful_updates"] == base
+    assert receipt["dose_multiplier"] == 2
+    assert "validate_dose_x2" in evidence["dose_checked_equality"]
+    assert str(expected) in evidence["dose_checked_equality"]
+    # published cross-check anchor: the derivation lands on 4,162,228.
+    assert expected == 4_162_228 == 2 * 2_081_114
+
+
+@pytest.mark.skipif(not _SALVAGE_PRESENT, reason="correction-3 seed42 artifacts absent")
+def test_salvage_bind_raises_on_a_mutated_digest(monkeypatch):
+    bad = dict(P.SALVAGE_EXPECTED_DIGESTS)
+    bad["model.pt"] = "0" * 64
+    monkeypatch.setattr(P, "SALVAGE_EXPECTED_DIGESTS", bad)
+    with pytest.raises(RuntimeError):
+        P.bind_salvaged_seed42_cell(artifact_dir=SALVAGE_DIR, log_path=SALVAGE_LOG)
+
+
+@pytest.mark.skipif(not _SALVAGE_PRESENT, reason="correction-3 seed42 artifacts absent")
+def test_salvage_bind_raises_on_a_mutated_log_digest(monkeypatch):
+    monkeypatch.setattr(P, "SALVAGE_EXPECTED_LOG_SHA256", "0" * 64)
+    with pytest.raises(RuntimeError):
+        P.bind_salvaged_seed42_cell(artifact_dir=SALVAGE_DIR, log_path=SALVAGE_LOG)
+
+
+@pytest.mark.skipif(not _SALVAGE_PRESENT, reason="correction-3 seed42 artifacts absent")
+def test_panel_authenticates_and_reads_the_bound_seed42_coords():
+    cell, _inv = P.bind_salvaged_seed42_cell(artifact_dir=SALVAGE_DIR, log_path=SALVAGE_LOG)
+    entry = N._authenticate_salvaged_50m_map(cell)
+    assert entry["salvaged"] is True and entry["seed"] == 42
+    # provenance is sourced from the bound production-config, NOT a train-receipt.
+    assert entry["seed_invariant_sha256"]
+    assert "receipt" not in entry
+    # the panel reads the BOUND correction-3 coordinates.
+    assert entry["coordinates_path"] == cell["coordinates"]["canonical_path"]
+    coords = np.load(entry["coordinates_path"], mmap_mode="r", allow_pickle=False)
+    assert coords.shape == (T.ROWS, 2)
+
+
+@pytest.mark.skipif(not _SALVAGE_PRESENT, reason="correction-3 seed42 artifacts absent")
+def test_panel_pin_rejects_a_wrong_seed42_coordinates_digest(monkeypatch):
+    cell, _inv = P.bind_salvaged_seed42_cell(artifact_dir=SALVAGE_DIR, log_path=SALVAGE_LOG)
+    # the bound bytes are self-consistent (verify_signature passes) but the panel's
+    # independent PIN rejects a coordinates map that is not the sealed correction-3 one.
+    monkeypatch.setattr(N, "SALVAGE_SEED42_COORDINATES_SHA256", "0" * 64)
+    with pytest.raises(N.Round0267NodeError):
+        N._authenticate_salvaged_50m_map(cell)
+
+
+def _panel_cell(seed, *, salvaged=False):
+    if salvaged:
+        return {
+            "seed": seed,
+            "salvaged": True,
+            "salvage": {
+                "salvaged": True,
+                "source_run": "queue-correction-3",
+                "reason": N.SALVAGE_REASON,
+                "train_evidence": {"step_accounting_line": "succeeded 4162228, AMP-skips 0"},
+            },
+        }
+    return {"seed": seed, "salvaged": False, "train_receipt": {"kind": "file"}}
+
+
+def test_gate_scores_three_cells_including_the_salvaged_one():
+    panel = {
+        "capability": N.PANEL_CAPABILITY,
+        "schema": N.PANEL_SCHEMA,
+        "panel_metric_table": {str(s): _seed_metrics() for s in T.SEEDS},
+        "cells": {
+            "42": _panel_cell(42, salvaged=True),
+            "43": _panel_cell(43),
+            "44": _panel_cell(44),
+        },
+    }
+    mt = N._metric_table_from_panel(panel)
+    assert {int(s) for s in mt} == set(T.SEEDS)
+    prov = N._salvage_provenance_from_panel(panel)
+    assert set(prov) == {"42"}
+    assert prov["42"]["source_run"] == "queue-correction-3"
+    assert prov["42"]["salvaged"] is True
+
+
+def test_gate_salvage_provenance_rejects_a_wrong_source_run():
+    panel = {
+        "capability": N.PANEL_CAPABILITY,
+        "schema": N.PANEL_SCHEMA,
+        "panel_metric_table": {str(s): _seed_metrics() for s in T.SEEDS},
+        "cells": {"42": _panel_cell(42, salvaged=True), "43": _panel_cell(43), "44": _panel_cell(44)},
+    }
+    panel["cells"]["42"]["salvage"]["source_run"] = "queue-correction-1"
+    with pytest.raises(N.Round0267NodeError):
+        N._salvage_provenance_from_panel(panel)
