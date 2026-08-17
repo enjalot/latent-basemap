@@ -158,6 +158,10 @@ def run_measurement_pass(
     import numpy as np
     import experiments.round0218_nodes as round0218_nodes
     from basemap.panel_v2 import reset_process_cuda_peak, score_panel
+    from experiments.round0267_nodes import (
+        two_m_prefix_reference_identity,
+        verify_nested_prefix_identity,
+    )
 
     if os.environ.get("CUDA_VISIBLE_DEVICES") in {None, "", "-1"}:
         raise RuntimeError("slim cert-production measurement pass requires CUDA")
@@ -181,7 +185,11 @@ def run_measurement_pass(
     cfg = prompt_contract.panel_config()
     (_panel_evidence, reference, _reference_signature, centroids,
      _centroid_signatures) = _load_reference_and_centroids(panel_evidence_path, centroid_ks)
-    reference_identity = {
+    # Mirror run_panel's two-pass structure so the perf receipts reflect what the panel
+    # actually does at scale (clarification rider 2026-08-17).  The MEASURED / stamped
+    # pass is the full-50M scale-exercise pass; the 2M nested-prefix purity pass is also
+    # exercised (it is < 8M, so it carries no scale_admission).
+    reference_identity_50m = {
         "data_identity": {
             "kind": "ordered_array",
             "shape": [rows, DIMENSION],
@@ -190,20 +198,26 @@ def run_measurement_pass(
         },
         "convention": dict(round0218_nodes.REFERENCE_CONVENTION),
     }
+    nested_prefix_receipt = verify_nested_prefix_identity(source, reference)
+    prefix_rows, reference_identity_2m = two_m_prefix_reference_identity(reference)
 
     reset_process_cuda_peak()
+    # PASS 1 — the measured / stamped >=8M full-50M scale-exercise pass.  hiD_reference
+    # =None (build a 50M-native reference inline) so it does not error on R0218's frozen
+    # 2M key — exactly as the real panel's full-50M pass now runs.
     panel = score_panel(
         source,
         coordinates,
         config=cfg,
         centroids_by_k=centroids,
-        hiD_reference=reference,
-        reference_identity=reference_identity,
+        hiD_reference=None,
+        reference_identity=reference_identity_50m,
         scale_admission=scale_admission,
         provenance={
             "purpose": SLIM_CERT_PRODUCTION_PURPOSE,
             "release_sha": release_sha,
             "measurement": "slim >=8M scale-performance measurement pass",
+            "pass": "full-50m-scale-exercise",
         },
     )
     if panel.get("purpose") != SLIM_CERT_PRODUCTION_PURPOSE:
@@ -212,6 +226,27 @@ def run_measurement_pass(
     out_dir = ensure_data_directory(out_dir, label="slim scale-cert measurement output")
     panel_output_path = os.path.join(out_dir, "measurement-panel.json")
     atomic_write_new_json(panel_output_path, _json_safe(panel), immutable=True)
+
+    # PASS 2 — exercise the 2M nested-prefix purity pass too (< 8M, no scale_admission),
+    # so the measurement covers both passes the panel runs.  It is NOT the stamped cert
+    # measurement (its output is written alongside for the record only).
+    purity_panel = score_panel(
+        source[:prefix_rows],
+        coordinates[:prefix_rows],
+        config=cfg,
+        centroids_by_k=centroids,
+        hiD_reference=reference,
+        reference_identity=reference_identity_2m,
+        provenance={
+            "release_sha": release_sha,
+            "measurement": "slim measurement 2M nested-prefix purity pass (not the stamped cert)",
+            "pass": "2m-nested-prefix-purity",
+            "nested_prefix": nested_prefix_receipt,
+        },
+    )
+    atomic_write_new_json(
+        os.path.join(out_dir, "measurement-purity-panel.json"),
+        _json_safe(purity_panel), immutable=True)
     return panel_output_path, row_derivation
 
 

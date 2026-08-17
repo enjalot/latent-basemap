@@ -999,20 +999,20 @@ def test_gate_bound_provenance_rejects_a_wrong_source_run():
 
 
 def test_prepare_rejects_an_unknown_or_double_completed_bind_seed():
-    # unknown completed-bind seed refused (before any round/file work).
+    # unknown completed-bind seed refused (before any round/file work). correction-5:
+    # no slim-scale-cert is required or accepted.
     with pytest.raises(ValueError):
         P.prepare_round0267(
-            release_sha="0" * 40, completed_binds={45: "/x"}, slim_scale_cert="/x"
+            release_sha="0" * 40, completed_binds={45: "/x"}
         )
 
 
 def test_cli_bind_completed_rejects_bad_specs():
     # unknown seed, double-bind, and a malformed spec all fail at the CLI boundary.
     for argv in (
-        ["--release-sha", "0" * 40, "--bind-completed", "45=/x", "--slim-scale-cert", "/x"],
-        ["--release-sha", "0" * 40, "--bind-completed", "43=/a", "--bind-completed", "43=/b",
-         "--slim-scale-cert", "/x"],
-        ["--release-sha", "0" * 40, "--bind-completed", "43", "--slim-scale-cert", "/x"],
+        ["--release-sha", "0" * 40, "--bind-completed", "45=/x"],
+        ["--release-sha", "0" * 40, "--bind-completed", "43=/a", "--bind-completed", "43=/b"],
+        ["--release-sha", "0" * 40, "--bind-completed", "43"],
     ):
         with pytest.raises(SystemExit):
             P.main(argv)
@@ -1345,3 +1345,132 @@ def test_assemble_slim_scale_cert_round_trips(slim):
             release_preflight_receipt_path=slim.rec_path,
             release_preflight_identity_sha256="a" * 64,
             out_path=str(slim.tmp_path / "bad-cert.json"))
+
+
+# --------------------------------------------------------------------------- #
+# the 2M nested-prefix purity split (clarification rider 2026-08-17):
+#   * purity k256/k1024 on the 2M nested prefix vs R0218's frozen reference;
+#   * collapse / fog / held-out FFR on the full 50M (unchanged score_one_map path);
+#   * the nested-prefix identity is VERIFIED (refusal plant), not assumed.
+# CPU-only fixtures (CUDA hidden at module top); no GPU, no real 50M.
+# --------------------------------------------------------------------------- #
+
+
+def _small_reference_fixture(prefix_n=64, extra_n=40, kc=8, seed=0):
+    """A tiny R0218-style frozen reference over `prefix_n` rows, plus a larger array
+    whose first `prefix_n` rows are byte-identical to it (a 50M-analog nested prefix)."""
+    from basemap import panel_v2 as pv
+
+    dim = N.DIMENSION
+    rng = np.random.default_rng(seed)
+    base = rng.standard_normal((prefix_n, dim)).astype("float32")
+    extra = rng.standard_normal((extra_n, dim)).astype("float32")
+    big = np.vstack([base, extra]).astype("float32")     # first prefix_n rows == base
+    centroids = {kc: rng.standard_normal((kc, dim)).astype("float32")}
+    cfg = pv.PanelV2Config(frac=0.1, n_anchors=16, k_hit=5, k_density=3,
+                           corpus_chunk=32, overselect=4)
+    anchors = pv.sample_anchors(prefix_n, cfg)
+    reference = pv.build_hiD_reference(base, anchors, cfg, centroids)
+    return {"base": base, "big": big, "centroids": centroids, "cfg": cfg,
+            "reference": reference, "prefix_n": prefix_n}
+
+
+def test_two_m_prefix_reference_identity_reproduces_the_frozen_key():
+    from basemap import panel_v2 as pv
+
+    fx = _small_reference_fixture()
+    reference, cfg, centroids = fx["reference"], fx["cfg"], fx["centroids"]
+    prefix_rows, ident = N.two_m_prefix_reference_identity(reference)
+    assert prefix_rows == fx["prefix_n"]
+    # the identity (data + convention) taken from R0218's OWN key parts reproduces the
+    # frozen key exactly, so _resolve_reference REUSES the reference (never rebuilds).
+    kf = max(cfg.k_hit, int(np.ceil(cfg.frac * prefix_rows)))
+    anchors = pv.sample_anchors(prefix_rows, cfg)
+    key, _ = pv.hiD_reference_key(fx["big"][:prefix_rows], anchors, cfg, centroids,
+                                  kf=kf, **ident)
+    assert key == reference["key"]
+    # defensive: a non-ordered_array (e.g. sharded) reference is refused.
+    shard_ref = copy.deepcopy(reference)
+    shard_ref["key_parts"]["data"] = {
+        "kind": "ordered_shards", "shape": [prefix_rows, N.DIMENSION],
+        "dtype": "<f4", "shards": []}
+    with pytest.raises(N.Round0267NodeError):
+        N.two_m_prefix_reference_identity(shard_ref)
+
+
+def test_nested_prefix_refusal_plant_fires_on_a_mismatched_first_2m():
+    fx = _small_reference_fixture()
+    reference = fx["reference"]
+    # honest: the 50M-analog's first prefix_rows rows ARE the sealed bytes -> verified.
+    receipt = N.verify_nested_prefix_identity(fx["big"], reference)
+    assert receipt["nested_prefix_verified"] is True
+    assert receipt["prefix_rows"] == fx["prefix_n"]
+    assert receipt["ordered_prefix_sha256"] == reference["key_parts"]["data"]["sha256"]
+    assert receipt["sealed_2m_ordered_substrate_sha256"] == reference["key_parts"]["data"]["sha256"]
+    # tampered: flip one value inside the first prefix rows -> the refusal plant fires.
+    bad = fx["big"].copy()
+    bad[0, 0] = np.float32(bad[0, 0] + 1.0)
+    with pytest.raises(N.Round0267NodeError):
+        N.verify_nested_prefix_identity(bad, reference)
+
+
+def test_2m_prefix_purity_equals_a_direct_2m_panel():
+    """Delegate condition 3, executed: purity scored on the 2M prefix of a larger array
+    (pool = prefix coords only) EQUALS a standalone 2M panel on the same rows + same
+    frozen reference — i.e. the split reproduces the family construction row-for-row."""
+    from basemap import panel_v2 as pv
+
+    fx = _small_reference_fixture()
+    reference, cfg, centroids = fx["reference"], fx["cfg"], fx["centroids"]
+    prefix_rows, ident = N.two_m_prefix_reference_identity(reference)
+    rng = np.random.default_rng(7)
+    coords_prefix = rng.standard_normal((prefix_rows, 2)).astype("float32")
+    coords_extra = rng.standard_normal(
+        (fx["big"].shape[0] - prefix_rows, 2)).astype("float32")
+    coords_big = np.vstack([coords_prefix, coords_extra]).astype("float32")
+
+    direct = pv.score_panel(
+        fx["base"], coords_prefix, config=cfg, centroids_by_k=centroids,
+        hiD_reference=reference, reference_identity=ident, provenance={"t": "direct"})
+    prefix = pv.score_panel(
+        fx["big"][:prefix_rows], coords_big[:prefix_rows], config=cfg,
+        centroids_by_k=centroids, hiD_reference=reference, reference_identity=ident,
+        provenance={"t": "prefix"})
+
+    assert direct["purity"] == prefix["purity"]
+    assert direct["purity_numerators"] == prefix["purity_numerators"]
+    # both REUSED the frozen reference (key reproduced), never rebuilt -> no key error.
+    assert direct["provenance"]["hiD_reference_reused"] is True
+    assert prefix["provenance"]["hiD_reference_reused"] is True
+    assert prefix["provenance"]["hiD_reference_key"] == reference["key"]
+
+
+def test_run_panel_no_8m_score_panel_and_full_50m_collapse_fog_ffr():
+    """Structural guard (correction-5, delegate ruling 2026-08-17): run_panel makes NO
+    >=8M score_panel call -- the ONLY score_panel it invokes is the 2M nested-prefix
+    purity pass (reuses the frozen reference, carries NO scale_admission).  collapse / fog
+    / held-out FFR come from score_one_map on the FULL 50M coordinates."""
+    import inspect
+
+    src = inspect.getsource(N.run_panel)
+    # collapse / fog / held-out FFR: score_one_map on the FULL 50M coordinates + truth.
+    assert "score_one_map(" in src
+    assert "coordinates=coordinates," in src
+    assert "probes_placed=placed," in src
+    assert "truth_top10=truth_ids," in src
+    assert "placed = np.asarray(coordinates[probe_rows], dtype=np.float32)" in src
+    # nested-prefix identity is verified (not assumed) before scoring purity.
+    assert "verify_nested_prefix_identity(source, reference)" in src
+    assert "two_m_prefix_reference_identity(reference)" in src
+    # run_panel makes EXACTLY ONE score_panel call -- the 2M-prefix purity pass.
+    assert src.count("score_panel(") == 1
+    # that pass reuses the frozen reference over the prefix rows/coords.
+    assert "source[:prefix_rows]" in src
+    assert "coordinates[:prefix_rows]" in src
+    assert "hiD_reference=reference," in src
+    assert 'purity_panel["purity"]' in src
+    # NO >=8M full-50M scale-exercise pass survives: no inline-reference score_panel and
+    # no scale_admission is carried anywhere in run_panel.
+    assert "hiD_reference=None," not in src
+    assert "scale_admission=" not in src
+    assert "scale_exercise" not in src

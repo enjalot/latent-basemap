@@ -47,9 +47,7 @@ from basemap.output_safety import (
 from basemap import round0113_prompt_contrast as prompt_contract
 from basemap.slim_scale_admission import (
     assert_not_slim_cert_production_panel,
-    build_slim_scale_admission,
 )
-from experiments.round0005_performance_gate import derive_scale_rows
 from basemap.round0217_minilm_2m_seed_family import (
     WARMUP_SUCCESSFUL_UPDATES,
     validate_published_map,
@@ -85,7 +83,6 @@ from basemap.round0267_int8_treatment import (
     treatment_closure_controls,
 )
 
-import experiments.round0218_nodes as round0218_nodes
 import experiments.round0265_nodes as R0265N
 import experiments.round0266_nodes as R0266N
 from experiments.round0230_nodes import CellWatchdog
@@ -1039,6 +1036,85 @@ def _authenticate_bound_completed_50m_map(
     }
 
 
+# --------------------------------------------------------------------------- #
+# the 50M panel's scoring (clarification rider 2026-08-17; correction-5 ruling):
+#   * collapse / fog / held-out FFR are measured on the FULL 50M coordinates
+#     (via R0265's score_one_map — 2D-map properties + the sealed R0237 k15 truth;
+#     they never consume the R0218 reference);
+#   * purity k256/k1024 are measured on the 2M NESTED PREFIX against R0218's FROZEN
+#     2M reference, the exact construction the R0265 family bands were fit on — the
+#     ONLY score_panel call run_panel makes (< 8M, so it carries no scale_admission).
+# The two helpers below build the 2M-prefix reference identity from R0218's OWN
+# sealed key parts (so the reused-reference key reproduces byte-for-byte) and VERIFY
+# the nested-prefix fact that makes the prefix purity valid.  (They are also reused by
+# produce_slim_scale_cert.py, the standing >=8M scale-cert producer.)
+# --------------------------------------------------------------------------- #
+
+
+def two_m_prefix_reference_identity(reference: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
+    """Build the ``reference_identity`` for the 2M nested-prefix purity pass from
+    R0218's own sealed reference key-parts.
+
+    Taking the data identity + convention straight from the frozen reference's
+    ``key_parts`` guarantees the key ``_resolve_reference`` recomputes for the prefix
+    pass reproduces R0218's baked key exactly (the remaining key parts — anchors from
+    ``sample_anchors(prefix_rows, cfg)``, config, centroids, formula, kf — match by
+    construction).  Returns ``(prefix_rows, reference_identity)``.
+    """
+    parts = reference.get("key_parts") if isinstance(reference, Mapping) else None
+    if not isinstance(parts, Mapping):
+        raise Round0267NodeError("R0267 R0218 reference is missing its sealed key parts")
+    data = parts.get("data")
+    convention = parts.get("convention")
+    if not isinstance(data, Mapping) or data.get("kind") != "ordered_array":
+        raise Round0267NodeError(
+            "R0267 R0218 reference data identity is not a single 2M ordered array; "
+            "the nested-prefix purity construction assumes an ordered_array 2M reference"
+        )
+    shape = data.get("shape")
+    if (not isinstance(shape, (list, tuple)) or len(shape) != 2
+            or int(shape[1]) != DIMENSION):
+        raise Round0267NodeError("R0267 R0218 reference data shape is not [rows, 384]")
+    prefix_rows = int(shape[0])
+    if prefix_rows <= 0 or prefix_rows > ROWS:
+        raise Round0267NodeError(
+            "R0267 R0218 reference prefix rows are not a valid nested prefix of the "
+            f"50M substrate (got {prefix_rows}, substrate rows {ROWS})"
+        )
+    if not isinstance(convention, Mapping) or not convention:
+        raise Round0267NodeError("R0267 R0218 reference convention is missing")
+    return prefix_rows, {"data_identity": dict(data), "convention": dict(convention)}
+
+
+def verify_nested_prefix_identity(
+    source: Any, reference: Mapping[str, Any]
+) -> dict[str, Any]:
+    """VERIFY (not assume) the nested-prefix fact that makes 2M-prefix purity valid.
+
+    The 50M substrate's first ``prefix_rows`` rows, hashed in row order, MUST equal the
+    sealed 2M ``ordered_substrate`` identity baked into R0218's frozen reference key.
+    A REFUSAL PLANT fires on any mismatch — without this the prefix purity would not be
+    the row-for-row R0265 family construction the bands were fit on.  The hash streams
+    the prefix in row chunks (no >=2 GB materialisation).
+    """
+    prefix_rows, _identity = two_m_prefix_reference_identity(reference)
+    sealed_sha = str(reference["key_parts"]["data"]["sha256"])
+    observed_sha = ordered_array_sha256(source[:prefix_rows])
+    if observed_sha != sealed_sha:
+        raise Round0267NodeError(
+            "R0267 nested-prefix identity mismatch: the 50M substrate's first "
+            f"{prefix_rows} rows hash to {observed_sha}, but R0218's frozen reference "
+            f"binds the sealed 2M ordered_substrate {sealed_sha}. The 2M-prefix purity "
+            "would NOT be the row-for-row R0265 family construction, so it is refused."
+        )
+    return {
+        "nested_prefix_verified": True,
+        "prefix_rows": prefix_rows,
+        "ordered_prefix_sha256": observed_sha,
+        "sealed_2m_ordered_substrate_sha256": sealed_sha,
+    }
+
+
 def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     install_stop_hooks(label="R0267 round0267_nodes.run_panel")
     import torch
@@ -1061,32 +1137,13 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 
     substrate = _sealed_50m_substrate(job)
     source = _open_50m_substrate(substrate)
-    # >=8M slim scale-performance admission (additive; scoring math unchanged). Build
-    # the row derivation from the fp32 substrate memmap this node already opened and
-    # assemble the slim scale_admission referencing the sealed slim scale-performance
-    # certificate bound as a queue input. The single score_panel(...) call below (which
-    # serves the salvaged seed-42 and the 43/44 paths) carries this admission so the
-    # >=8M guard admits the pass on slim (round0005-equivalent) evidence.
-    slim_cert_reference = job.get("slim_scale_cert")
-    if not isinstance(slim_cert_reference, Mapping):
-        raise Round0267NodeError(
-            "R0267 50M panel requires the sealed slim scale-performance certificate "
-            "bound as `slim_scale_cert`"
-        )
-    slim_cert_signature = dict(slim_cert_reference)
-    prompt_contract.verify_signature(
-        slim_cert_signature, label="R0267 slim scale-performance certificate"
-    )
-    substrate_path = str(substrate["substrate_signature"]["canonical_path"])
-    scale_row_derivation = derive_scale_rows(
-        substrate_path, dimensions=DIMENSION, loaded_matrix=source
-    )
-    scale_admission = build_slim_scale_admission(
-        release_sha=str(active["manifest"]["release_sha"]),
-        scientific_rows=ROWS,
-        row_derivation=scale_row_derivation,
-        certificate=slim_cert_signature,
-    )
+    # correction-5 (delegate ruling 2026-08-17): run_panel invokes score_panel ONLY for
+    # the 2M nested-prefix purity pass (< 8M), which carries NO scale_admission.  The
+    # gate's collapse / fog / held-out FFR come from score_one_map on the full-50M
+    # coordinates, and purity comes from the 2M-prefix pass — so no >=8M score_panel and
+    # no slim scale-performance certificate is required here.  (The >=8M slim-admission
+    # machinery remains as standing infrastructure; it is exercised by
+    # produce_slim_scale_cert.py, not by this round.)
     panel_evidence = prompt_contract.read_sealed(
         str(job["panel_evidence"]), label="R0218 MiniLM frozen panel reference"
     )
@@ -1149,16 +1206,15 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         )
         reference = load_hiD_reference(reference_path)
         _anchors = sample_anchors(ROWS, cfg)
-        reference_identity = {
-            "data_identity": {
-                "kind": "ordered_array",
-                "shape": [ROWS, DIMENSION],
-                "dtype": np.dtype("<f4").str,
-                "sha256": substrate["ordered_substrate_sha256"],
-            },
-            "convention": dict(round0218_nodes.REFERENCE_CONVENTION),
-        }
-        wrapped("R0267 frozen reference + centroids loaded")
+        # 2M nested-prefix purity: VERIFY (not assume) that the 50M substrate's first
+        # <prefix_rows> rows are byte-identical to the sealed 2M ordered_substrate that
+        # R0218's frozen reference key binds — the nested-prefix fact that makes prefix
+        # purity the row-for-row R0265 family construction.  A refusal plant fires on
+        # mismatch.  The prefix reference identity comes from the frozen reference's own
+        # sealed key parts so the reused-reference key reproduces R0218's key exactly.
+        nested_prefix_receipt = verify_nested_prefix_identity(source, reference)
+        prefix_rows, reference_identity_2m = two_m_prefix_reference_identity(reference)
+        wrapped("R0267 frozen reference + centroids loaded; nested prefix verified")
 
         cells: dict[str, dict[str, Any]] = {}
         for entry in sorted(authenticated, key=lambda e: e["seed"]):
@@ -1180,22 +1236,31 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 coordinates = _transform_50m_in_chunks(model, source, wrapped)
                 if coordinates.shape != (ROWS, 2) or not np.isfinite(coordinates).all():
                     raise Round0267NodeError(f"R0267 seed-{seed} transform is not a finite 50M map")
-            panel = score_panel(
-                source,
-                coordinates,
+            # 2M NESTED-PREFIX purity pass — the ONLY score_panel call run_panel makes
+            # (correction-5).  Xa = the substrate's first <prefix_rows> rows; Z = the
+            # cell's first <prefix_rows> coordinate rows, so the 2D neighbour pool is the
+            # PREFIX ROWS' coordinates ONLY (no 48M leakage).  Scored against R0218's
+            # FROZEN 2M reference so k256/k1024 stay commensurate with the R0265 family
+            # bands.  <prefix_rows> is < 8M, so this pass takes NO scale_admission (the
+            # >=8M guard refuses a below-scale admission).
+            purity_panel = score_panel(
+                source[:prefix_rows],
+                coordinates[:prefix_rows],
                 config=cfg,
                 centroids_by_k=centroids,
                 hiD_reference=reference,
-                reference_identity=reference_identity,
-                scale_admission=scale_admission,
+                reference_identity=reference_identity_2m,
                 provenance={
                     "round_id": ROUND_ID,
                     "seed": seed,
                     "capability": entry["capability"],
                     "treatment": "fneg-x2-md000-hostint8-50m",
+                    "pass": "2m-nested-prefix-purity",
+                    "nested_prefix": nested_prefix_receipt,
                 },
             )
-            purity_ratios = {"k256": float(panel["purity"]["k256"]), "k1024": float(panel["purity"]["k1024"])}
+            purity_ratios = {"k256": float(purity_panel["purity"]["k256"]),
+                             "k1024": float(purity_panel["purity"]["k1024"])}
             placed = np.asarray(coordinates[probe_rows], dtype=np.float32)
             scored_map = score_one_map(
                 coordinates=coordinates,
@@ -1219,7 +1284,7 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                     "x_residency": X_RESIDENCY,
                     "coordinates_ordered_sha256": ordered_array_sha256(coordinates),
                     "metrics": scored_map,
-                    "panel_purity_numerators": panel.get("purity_numerators"),
+                    "panel_purity_numerators": purity_panel.get("purity_numerators"),
                 }
             elif entry.get("bound_completed"):
                 # seed43/44: provenance is the bound train-receipt (a real receipt) + the
@@ -1238,7 +1303,7 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                     "x_residency": X_RESIDENCY,
                     "coordinates_ordered_sha256": ordered_array_sha256(coordinates),
                     "metrics": scored_map,
-                    "panel_purity_numerators": panel.get("purity_numerators"),
+                    "panel_purity_numerators": purity_panel.get("purity_numerators"),
                 }
             else:
                 cells[str(seed)] = {
@@ -1251,8 +1316,17 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                     "x_residency": X_RESIDENCY,
                     "coordinates_ordered_sha256": ordered_array_sha256(coordinates),
                     "metrics": scored_map,
-                    "panel_purity_numerators": panel.get("purity_numerators"),
+                    "panel_purity_numerators": purity_panel.get("purity_numerators"),
                 }
+            # Per-cell audit breadcrumb: which reference the purity pass used and the
+            # verified nested-prefix fact behind it.
+            cells[str(seed)]["purity_pass"] = {
+                "pass": "2m-nested-prefix-purity",
+                "prefix_rows": prefix_rows,
+                "hiD_reference_key": purity_panel["provenance"]["hiD_reference_key"],
+                "hiD_reference_reused": bool(purity_panel["provenance"]["hiD_reference_reused"]),
+                "nested_prefix": nested_prefix_receipt,
+            }
             del model, coordinates, placed
             torch.cuda.empty_cache()
             gc.collect()
@@ -1331,9 +1405,21 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "ordered_substrate_sha256": substrate["ordered_substrate_sha256"],
         },
         "purity_reference_note": (
-            "purity k256/k1024 are scored against R0218's frozen 2M reference + centroids "
-            "so the ratios stay commensurate with R0265's sealed 2M bands (the gate's "
-            "purity backstop). A native 50M purity reference is a separate panel round."
+            "purity k256/k1024 are scored on the 2M NESTED PREFIX (Xa = the substrate's "
+            "first prefix_rows rows; Z = each cell's first prefix_rows coordinate rows, so "
+            "the 2D neighbour pool is the prefix rows' coordinates ONLY) against R0218's "
+            "frozen 2M reference + centroids, so the ratios stay commensurate with R0265's "
+            "sealed 2M bands (the gate's purity backstop). collapse / fog / held-out FFR are "
+            "measured on the FULL 50M coordinates (score_one_map). run_panel invokes "
+            "score_panel ONLY for this <8M purity pass; no >=8M score_panel is run and no "
+            "slim scale-performance certificate is required (correction-5, delegate ruling "
+            "2026-08-17; rider plan-50m-stage-2026-08-15)."
+        ),
+        "nested_prefix_verification": nested_prefix_receipt,
+        "purity_pool_semantics": (
+            "prefix-only: the other rows sharing the 2D plane are deliberately excluded from "
+            "the purity neighbour pool; pool = all rows would measure a different, "
+            "incomparable quantity"
         ),
         "gap_report": gaps,
         "enforcement_poll_spacing": scored_gate,
