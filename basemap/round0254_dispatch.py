@@ -122,6 +122,7 @@ SCOPE_MODULES: tuple[str, ...] = (
     "experiments.round0265_nodes",
     "experiments.round0266_nodes",
     "experiments.round0267_nodes",
+    "experiments.round0268_nodes",
 )
 
 #: The callable the runner resolves when a module has never been dispatched yet
