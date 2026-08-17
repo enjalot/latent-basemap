@@ -70,6 +70,9 @@ from basemap.round0267_int8_treatment import (
 )
 from basemap.round0217_minilm_2m_seed_family import successful_updates_for_edges
 from experiments.round0267_nodes import (
+    COMPLETED_BIND_SEEDS,
+    COMPLETED_REASON,
+    COMPLETED_SOURCE_RUN,
     GATE_ACTION,
     GATE_CAPABILITY,
     PANEL_ACTION,
@@ -79,6 +82,7 @@ from experiments.round0267_nodes import (
     SALVAGE_SEED42_COORDINATES_SHA256,
     SALVAGE_SOURCE_RUN,
     TRAIN_ACTION,
+    TRAIN_SCHEMA,
 )
 import experiments.round0265_nodes as R0265N
 from experiments.prepare_round0020_0022_queues import LAB_ROOT, _base_manifest, _dedupe
@@ -285,6 +289,144 @@ def bind_salvaged_seed42_cell(
     }
     return cell_record, salvaged_invariant
 
+
+# --------------------------------------------------------------------------- #
+# COMPLETED-CELL BIND (correction-5): bind seeds 43/44's correction-4 artifacts
+# as completed cells instead of re-training them.
+#
+# seeds 43/44 completed their FULL ×2 host-int8 trains cleanly in correction-4 with
+# real train-receipts (all train_checks true), but were bound to the PRIOR release.
+# correction-5 rebuilds at the new release (the slim >=8M scale-perf admission commit)
+# and BINDS 43/44's correction-4 artifacts by digest rather than re-training. Unlike
+# seed42 (salvaged from a train-LOG because the RSS raise preempted its receipt), 43/44
+# HAVE first-class train-receipts, so the receipt is bound as provenance (stronger than a
+# log). Every artifact's digest is COMPUTED from the files at prepare time and SEALED into
+# the queue record (standard sealed-input tamper-evidence) — the 43/44 digests are NEVER
+# hardcoded as module constants; each cell's coordinates digest is carried as a per-cell
+# pin that the panel re-checks.
+# --------------------------------------------------------------------------- #
+#: The five bound artifacts every completed cell must carry.
+COMPLETED_CELL_ARTIFACTS: tuple[str, ...] = (
+    "coordinates.npy",
+    "model.pt",
+    "admission.json",
+    "production-config.json",
+    "train-receipt.json",
+)
+
+
+def bind_completed_seed_cell(
+    *,
+    seed: int,
+    artifact_dir: str,
+    expected_cell_invariant: str | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Bind a completed correction-4 cell (seed 43/44) as a panel cell (compute + seal digests).
+
+    Returns ``(cell_record, cell_invariant)``. Every artifact's file digest is COMPUTED here
+    (never a hardcoded constant) and sealed into the returned record; the bound train-receipt
+    is verified as first-class provenance (schema/round/seed/x_residency + all train_checks
+    true), the production-config's round_id==0267 and seed are checked, and the recipe
+    invariant (from the receipt, cross-checked against the production-config) must equal
+    ``expected_cell_invariant`` if given — proving the cell is treatment-identical to the
+    freshly-built cell invariant (the same treatment-identity check the salvage uses).
+    """
+    if int(seed) not in COMPLETED_BIND_SEEDS:
+        raise RuntimeError(
+            f"R0267 completed-bind supports only seeds {COMPLETED_BIND_SEEDS}; got {seed!r}"
+        )
+    capability = T.capability_for_seed(int(seed))
+    signatures: dict[str, dict[str, Any]] = {}
+    for name in COMPLETED_CELL_ARTIFACTS:
+        signatures[name] = _signature(
+            os.path.join(artifact_dir, name), f"R0267 completed seed{seed} {name}"
+        )
+    coordinates_sha256 = signatures["coordinates.npy"]["sha256"]
+
+    # First-class provenance: the bound train-receipt (a real receipt, not a log).
+    receipt = prompt_contract.read_sealed(
+        signatures["train-receipt.json"]["canonical_path"],
+        label=f"R0267 completed seed{seed} train receipt",
+    )
+    train_checks = receipt.get("train_checks") or {}
+    if (
+        receipt.get("schema") != TRAIN_SCHEMA
+        or str(receipt.get("round_id")) != ROUND_ID
+        or receipt.get("capability") != capability
+        or int(receipt.get("training_seed", -1)) != int(seed)
+        or receipt.get("training_performed") is not True
+        or receipt.get("x_residency") != T.X_RESIDENCY
+        or not train_checks
+        or not all(bool(value) for value in train_checks.values())
+    ):
+        raise RuntimeError(f"R0267 completed seed{seed} train-receipt contract changed")
+    # Tie the receipt to the actual coordinates file (its own coordinates digest).
+    if str((receipt.get("coordinates") or {}).get("sha256")) != coordinates_sha256:
+        raise RuntimeError(
+            f"R0267 completed seed{seed} train-receipt does not describe the bound coordinates"
+        )
+    receipt_invariant = str(receipt.get("seed_invariant_sha256") or "")
+    if not receipt_invariant:
+        raise RuntimeError(f"R0267 completed seed{seed} train-receipt carries no seed invariant")
+
+    with open(signatures["production-config.json"]["canonical_path"], encoding="utf-8") as handle:
+        prod_config = json.load(handle)
+    cell_invariant = str(prod_config.get("seed_invariant_sha256") or "")
+    if not cell_invariant:
+        raise RuntimeError(
+            f"R0267 completed seed{seed} production-config carries no seed_invariant_sha256"
+        )
+    if str(prod_config.get("round_id")) != ROUND_ID or int(prod_config.get("seed", -1)) != int(seed):
+        raise RuntimeError(
+            f"R0267 completed seed{seed} production-config is not the seed{seed} R0267 cell"
+        )
+    if cell_invariant != receipt_invariant:
+        raise RuntimeError(
+            f"R0267 completed seed{seed} production-config invariant disagrees with the receipt"
+        )
+    if expected_cell_invariant is not None and cell_invariant != expected_cell_invariant:
+        raise RuntimeError(
+            f"R0267 completed seed{seed} saved config is NOT treatment-identical to the "
+            f"freshly-built cell: {cell_invariant} != {expected_cell_invariant}"
+        )
+
+    cell_record = {
+        "seed": int(seed),
+        "capability": capability,
+        "salvaged": False,
+        "bound_completed": True,
+        # Per-cell coordinates pin sealed into the queue record (NOT a hardcoded constant);
+        # the panel re-checks the bound coordinates signature against this pin.
+        "coordinates_sha256_pin": coordinates_sha256,
+        "bound": {
+            "bound_completed": True,
+            "source_run": COMPLETED_SOURCE_RUN,
+            "reason": COMPLETED_REASON,
+            "train_receipt_provenance": {
+                "train_receipt": signatures["train-receipt.json"],
+                "train_receipt_sha256": signatures["train-receipt.json"]["sha256"],
+                "schema": receipt.get("schema"),
+                "training_seed": int(receipt.get("training_seed")),
+                "coordinates_sha256": coordinates_sha256,
+                "coordinates_ordered_sha256": str(receipt.get("coordinates_ordered_sha256") or ""),
+                "ordered_substrate_sha256": str(receipt.get("ordered_substrate_sha256") or ""),
+                "is_first_class_receipt": True,
+            },
+            "digests": {name: sig["sha256"] for name, sig in signatures.items()},
+            "seed_invariant_sha256": cell_invariant,
+            "production_config_substrate_sha256": (
+                str(((prod_config.get("config") or {}).get("input") or {}).get("substrate_sha256") or "")
+            ),
+        },
+        "coordinates": signatures["coordinates.npy"],
+        "model": signatures["model.pt"],
+        "admission": signatures["admission.json"],
+        "production_config": signatures["production-config.json"],
+        "train_receipt": signatures["train-receipt.json"],
+    }
+    return cell_record, cell_invariant
+
+
 #: Three 50M ×2 host-int8 trains (~5 GPU-h each) + a three-map 50M panel + the CPU gate;
 #: the cap sits above the ~15 GPU-h train estimate + panel/reference (plan costs).
 GPU_HOURS_CAP = 24.0
@@ -386,12 +528,21 @@ def prepare_round0267(
     release_sha: str,
     queue_root: str = QUEUE_ROOT,
     salvage: Mapping[str, Any] | None = None,
+    completed_binds: Mapping[int, str] | None = None,
     slim_scale_cert: str | None = None,
 ) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0267 release SHA must be one full commit")
     if salvage is not None and int(salvage.get("seed", -1)) != SALVAGE_SEED:
         raise ValueError(f"R0267 salvage supports only seed {SALVAGE_SEED}")
+    completed_binds = {int(s): str(d) for s, d in dict(completed_binds or {}).items()}
+    for bind_seed in completed_binds:
+        if bind_seed not in COMPLETED_BIND_SEEDS:
+            raise ValueError(
+                f"R0267 --bind-completed supports only seeds {COMPLETED_BIND_SEEDS}; got {bind_seed}"
+            )
+        if salvage is not None and bind_seed == int(salvage.get("seed", -1)):
+            raise ValueError(f"R0267 seed {bind_seed} is both salvaged and completed-bound")
     round_signature, required_reviews = _issued_round(release_sha)
     review_state = _upstream_review_state(list(required_reviews))
 
@@ -444,7 +595,10 @@ def prepare_round0267(
 
     # SALVAGE mode: bind seed42's sealed correction-3 artifacts as a completed cell (verify
     # its digests + prove treatment-identity to the freshly-built cell invariant) and omit
-    # its train node; only seeds 43/44 train. Otherwise all three seeds train.
+    # its train node. COMPLETED-BIND mode: bind seeds 43/44's correction-4 artifacts as
+    # completed cells the same way (real receipts, digests computed + sealed here). Any seed
+    # that is neither salvaged nor completed-bound trains. With 42 salvaged + 43 + 44 bound,
+    # no seed trains: the queue is panel + gate only.
     salvaged_cell: dict[str, Any] | None = None
     if salvage is not None:
         salvaged_cell, _salvaged_invariant = bind_salvaged_seed42_cell(
@@ -452,9 +606,18 @@ def prepare_round0267(
             log_path=str(salvage["log_path"]),
             expected_cell_invariant=cell_seed_invariant,
         )
-        train_seeds = [seed for seed in SEEDS if int(seed) != SALVAGE_SEED]
-    else:
-        train_seeds = list(SEEDS)
+    completed_cells: dict[int, dict[str, Any]] = {}
+    for bind_seed, artifact_dir in sorted(completed_binds.items()):
+        completed_cell, _completed_invariant = bind_completed_seed_cell(
+            seed=bind_seed,
+            artifact_dir=artifact_dir,
+            expected_cell_invariant=cell_seed_invariant,
+        )
+        completed_cells[bind_seed] = completed_cell
+    bound_seeds: set[int] = set(completed_cells)
+    if salvaged_cell is not None:
+        bound_seeds.add(SALVAGE_SEED)
+    train_seeds = [seed for seed in SEEDS if int(seed) not in bound_seeds]
 
     # Bind every sealed cross-round input by real sha256 + bytes.
     r0218_panel = _signature(R0218_PANEL, "R0218 frozen panel")
@@ -615,12 +778,15 @@ def prepare_round0267(
         })
         p90[train_node] = TRAIN_P90_WALL_S
 
-    # 4. the three-cell panel. seed42 is either a fresh train (train_outputs) or the bound
-    # salvaged correction-3 cell; 43/44 are always fresh correction-4 trains.
+    # 4. the three-cell panel. Each seed is one of: a fresh train (train_outputs), the bound
+    # salvaged seed42 cell (correction-3, log evidence), or a bound completed cell (43/44,
+    # correction-4, real receipt). When all three are bound the panel has no train deps.
     panel_cells: list[dict[str, Any]] = []
     for seed in SEEDS:
         if salvaged_cell is not None and int(seed) == SALVAGE_SEED:
             panel_cells.append(salvaged_cell)
+        elif int(seed) in completed_cells:
+            panel_cells.append(completed_cells[int(seed)])
         else:
             panel_cells.append({
                 "seed": int(seed),
@@ -628,15 +794,25 @@ def prepare_round0267(
                 "salvaged": False,
                 "train_receipt": {"kind": "file", "canonical_path": os.path.join(train_outputs[seed], "train-receipt.json")},
             })
-    # In salvage mode the panel also binds seed42's saved artifacts as gate-verified inputs.
-    salvage_inputs: list[dict[str, Any]] = []
+    # The panel binds every bound cell's saved artifacts as gate-verified inputs: seed42's
+    # salvage artifacts (incl. its train log) and each completed cell's five artifacts.
+    bound_inputs: list[dict[str, Any]] = []
     if salvaged_cell is not None:
-        salvage_inputs = [
+        bound_inputs += [
             salvaged_cell["coordinates"],
             salvaged_cell["model"],
             salvaged_cell["admission"],
             salvaged_cell["production_config"],
             salvaged_cell["train_log"],
+        ]
+    for bind_seed in sorted(completed_cells):
+        completed_cell = completed_cells[bind_seed]
+        bound_inputs += [
+            completed_cell["coordinates"],
+            completed_cell["model"],
+            completed_cell["admission"],
+            completed_cell["production_config"],
+            completed_cell["train_receipt"],
         ]
 
     panel_node = PANEL_ACTION
@@ -651,7 +827,7 @@ def prepare_round0267(
         "done_marker": os.path.join(artifacts, f"{panel_node}.done.json"),
         "expected_inputs": _dedupe([
             *shared_inputs, r0218_panel, truth_query_rows, truth_ids, reserve,
-            slim_scale_cert_signature, *salvage_inputs,
+            slim_scale_cert_signature, *bound_inputs,
         ]),
         "p90_wall_s": PANEL_P90_WALL_S,
         "graph_manifest_signature": graph_manifest_signature,
@@ -759,6 +935,38 @@ def prepare_round0267(
                 if salvaged_cell is not None
                 else None
             ),
+            "completed_bound_seeds": sorted(completed_cells),
+            "completed_binds": (
+                {
+                    str(bind_seed): {
+                        "bound_completed": True,
+                        "seed": bind_seed,
+                        "source_run": COMPLETED_SOURCE_RUN,
+                        "reason": COMPLETED_REASON,
+                        "why": (
+                            f"seed{bind_seed} completed its FULL ×2 host-int8 train cleanly "
+                            "in correction-4 (real train-receipt, all train_checks true) but "
+                            "bound to the prior release. correction-5 rebuilds at the new "
+                            "release and BINDS its correction-4 artifacts by digest (computed "
+                            "+ sealed here) rather than re-training; treatment-identical to "
+                            "the freshly-built cell invariant."
+                        ),
+                        "train_receipt_provenance": (
+                            completed_cells[bind_seed]["bound"]["train_receipt_provenance"]
+                        ),
+                        "digests": completed_cells[bind_seed]["bound"]["digests"],
+                        "coordinates_sha256_pin": (
+                            completed_cells[bind_seed]["coordinates_sha256_pin"]
+                        ),
+                        "seed_invariant_sha256": (
+                            completed_cells[bind_seed]["bound"]["seed_invariant_sha256"]
+                        ),
+                    }
+                    for bind_seed in sorted(completed_cells)
+                }
+                if completed_cells
+                else None
+            ),
             "x_residency": T.X_RESIDENCY,
             "dose_multiplier": T.DOSE_MULTIPLIER,
             "cell_seed_invariant_sha256": cell_seed_invariant,
@@ -838,6 +1046,13 @@ def main(argv: list[str] | None = None) -> int:
              "in lieu of the train-receipt the RSS raise preempted)",
     )
     parser.add_argument(
+        "--bind-completed", action="append", default=None, metavar="SEED=ARTIFACT_DIR",
+        help=f"bind a completed cell's correction-4 artifacts (coordinates.npy/model.pt/"
+             f"admission.json/production-config.json/train-receipt.json) as a panel cell "
+             f"instead of training it. Repeatable; only seeds {COMPLETED_BIND_SEEDS} are "
+             f"supported. Digests are computed + sealed at prepare time (never hardcoded).",
+    )
+    parser.add_argument(
         "--slim-scale-cert", default=None,
         help="the sealed slim >=8M scale-performance certificate JSON produced by "
              "experiments/produce_slim_scale_cert.py (required; bound as a score_panel "
@@ -853,10 +1068,29 @@ def main(argv: list[str] | None = None) -> int:
             "artifact_dir": args.salvage_from,
             "log_path": args.salvage_log,
         }
+    completed_binds: dict[int, str] = {}
+    for spec in (args.bind_completed or []):
+        if "=" not in spec:
+            parser.error(f"--bind-completed expects SEED=ARTIFACT_DIR, got {spec!r}")
+        seed_str, _, artifact_dir = spec.partition("=")
+        try:
+            bind_seed = int(seed_str)
+        except ValueError:
+            parser.error(f"--bind-completed seed is not an integer: {seed_str!r}")
+        if not artifact_dir:
+            parser.error(f"--bind-completed {spec!r} has an empty artifact dir")
+        if bind_seed not in COMPLETED_BIND_SEEDS:
+            parser.error(
+                f"--bind-completed supports only seeds {COMPLETED_BIND_SEEDS}; got {bind_seed}"
+            )
+        if bind_seed in completed_binds:
+            parser.error(f"--bind-completed seed {bind_seed} was given twice")
+        completed_binds[bind_seed] = artifact_dir
     path = prepare_round0267(
         release_sha=args.release_sha,
         queue_root=(args.queue_root or QUEUE_ROOT),
         salvage=salvage,
+        completed_binds=completed_binds,
         slim_scale_cert=args.slim_scale_cert,
     )
     print(json.dumps({"queue": path, "sha256": file_sha256_manifest(path)}))

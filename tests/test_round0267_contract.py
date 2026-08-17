@@ -800,6 +800,225 @@ def test_gate_salvage_provenance_rejects_a_wrong_source_run():
 
 
 # --------------------------------------------------------------------------- #
+# 7b. the COMPLETED-CELL BIND of seeds 43/44 (correction-5): bind their correction-4
+#     artifacts as completed cells (compute + seal digests, verify the real train-
+#     receipt as first-class provenance, prove treatment-identity), the panel
+#     authenticates + scores three BOUND cells from bound coords, and the gate scores
+#     all three including the bound-completed ones. Generalises the seed42 salvage while
+#     leaving it intact. CPU-only.
+# --------------------------------------------------------------------------- #
+
+COMPLETED_DIR = (
+    "/data/latent-basemap/runs/round-0267/queue-correction-4/artifacts/"
+    "minilm-mixed-50000k-fneg-x2-md000-hostint8-seed{seed}-r0267-v1"
+)
+_COMPLETED_PRESENT = all(
+    os.path.exists(COMPLETED_DIR.format(seed=s)) for s in (43, 44)
+)
+
+
+def test_completed_bind_pins_match_the_node_and_prepare_constants():
+    assert N.COMPLETED_BIND_SEEDS == (43, 44)
+    assert P.COMPLETED_BIND_SEEDS == (43, 44)
+    assert N.COMPLETED_SOURCE_RUN == "queue-correction-4"
+    assert N.COMPLETED_REASON == P.COMPLETED_REASON
+    assert set(P.COMPLETED_CELL_ARTIFACTS) == {
+        "coordinates.npy", "model.pt", "admission.json",
+        "production-config.json", "train-receipt.json",
+    }
+
+
+def test_completed_bind_rejects_unknown_and_salvage_seeds():
+    # only 43/44 may be completed-bound; 42 (salvage) and 45 (unknown) are refused.
+    with pytest.raises(RuntimeError):
+        P.bind_completed_seed_cell(seed=42, artifact_dir="/x")
+    with pytest.raises(RuntimeError):
+        P.bind_completed_seed_cell(seed=45, artifact_dir="/x")
+
+
+@pytest.mark.skipif(not _COMPLETED_PRESENT, reason="correction-4 seed43/44 artifacts absent")
+def test_completed_bind_verifies_43_44_digests_and_receipt():
+    cells = {}
+    invs = set()
+    for seed in (43, 44):
+        cell, inv = P.bind_completed_seed_cell(seed=seed, artifact_dir=COMPLETED_DIR.format(seed=seed))
+        cells[seed] = cell
+        invs.add(inv)
+        assert cell["seed"] == seed
+        assert cell["bound_completed"] is True and cell["salvaged"] is False
+        assert cell["bound"]["source_run"] == "queue-correction-4"
+        assert cell["bound"]["reason"] == N.COMPLETED_REASON
+        # digests are COMPUTED from the files (5 artifacts) and sealed into the record.
+        assert set(cell["bound"]["digests"]) == set(P.COMPLETED_CELL_ARTIFACTS)
+        # the per-cell coordinates pin equals the computed coordinates digest.
+        assert cell["coordinates_sha256_pin"] == cell["coordinates"]["sha256"]
+        assert cell["coordinates_sha256_pin"] == cell["bound"]["digests"]["coordinates.npy"]
+        # first-class receipt provenance (NOT a log): tied to the coordinates bytes.
+        prov = cell["bound"]["train_receipt_provenance"]
+        assert prov["is_first_class_receipt"] is True
+        assert prov["coordinates_sha256"] == cell["coordinates_sha256_pin"]
+        assert prov["train_receipt_sha256"] == cell["train_receipt"]["sha256"]
+    # 43 and 44 share ONE masked recipe invariant (the same treatment).
+    assert len(invs) == 1
+    # and the two cells' coordinates differ (two real maps).
+    assert cells[43]["coordinates_sha256_pin"] != cells[44]["coordinates_sha256_pin"]
+
+
+@pytest.mark.skipif(not _COMPLETED_PRESENT, reason="correction-4 seed43/44 artifacts absent")
+def test_completed_bind_treatment_identity_guard():
+    _cell, inv = P.bind_completed_seed_cell(seed=43, artifact_dir=COMPLETED_DIR.format(seed=43))
+    # a matching expected invariant binds; a wrong one raises (treatment-identity).
+    P.bind_completed_seed_cell(
+        seed=43, artifact_dir=COMPLETED_DIR.format(seed=43), expected_cell_invariant=inv
+    )
+    with pytest.raises(RuntimeError):
+        P.bind_completed_seed_cell(
+            seed=43, artifact_dir=COMPLETED_DIR.format(seed=43), expected_cell_invariant="0" * 64
+        )
+
+
+@pytest.mark.skipif(not _COMPLETED_PRESENT, reason="correction-4 seed43/44 artifacts absent")
+def test_completed_bind_raises_when_a_digest_does_not_describe_the_coords(tmp_path):
+    """A tampered coordinates file (its digest no longer matches the sealed receipt) raises."""
+    import shutil
+
+    src = COMPLETED_DIR.format(seed=43)
+    dst = tmp_path / "seed43"
+    dst.mkdir()
+    for name in ("admission.json", "production-config.json", "train-receipt.json"):
+        shutil.copy(os.path.join(src, name), dst / name)
+    # fake coordinates/model: their bytes (hence digests) differ from what the receipt records.
+    (dst / "coordinates.npy").write_bytes(b"not the real coordinates")
+    (dst / "model.pt").write_bytes(b"not the real model")
+    with pytest.raises(RuntimeError):
+        P.bind_completed_seed_cell(seed=43, artifact_dir=str(dst))
+
+
+@pytest.mark.skipif(not _COMPLETED_PRESENT, reason="correction-4 seed43/44 artifacts absent")
+def test_panel_authenticates_three_bound_cells_from_bound_coords():
+    """seed42 salvaged + seed43/44 completed-bound: all three authenticate, one recipe."""
+    salvaged, _ = P.bind_salvaged_seed42_cell(artifact_dir=SALVAGE_DIR, log_path=SALVAGE_LOG)
+    completed = {
+        s: P.bind_completed_seed_cell(seed=s, artifact_dir=COMPLETED_DIR.format(seed=s))[0]
+        for s in (43, 44)
+    }
+    ordered = completed[43]["bound"]["train_receipt_provenance"]["ordered_substrate_sha256"]
+    substrate = {"ordered_substrate_sha256": ordered}
+    entries = [
+        N._authenticate_salvaged_50m_map(salvaged),
+        N._authenticate_bound_completed_50m_map(completed[43], substrate),
+        N._authenticate_bound_completed_50m_map(completed[44], substrate),
+    ]
+    assert {e["seed"] for e in entries} == set(T.SEEDS)
+    # one pooled recipe invariant across the three bound cells.
+    assert len({e["seed_invariant_sha256"] for e in entries}) == 1
+    for e in entries[1:]:
+        assert e["bound_completed"] is True
+        assert e["coordinates_path"].endswith("coordinates.npy")
+        assert "receipt" not in e  # provenance is the bound receipt signature, not a fresh receipt
+
+
+@pytest.mark.skipif(not _COMPLETED_PRESENT, reason="correction-4 seed43/44 artifacts absent")
+def test_authenticate_bound_completed_rejects_a_tampered_pin_or_signature():
+    cell, _ = P.bind_completed_seed_cell(seed=43, artifact_dir=COMPLETED_DIR.format(seed=43))
+    ordered = cell["bound"]["train_receipt_provenance"]["ordered_substrate_sha256"]
+    substrate = {"ordered_substrate_sha256": ordered}
+    # honest authenticates.
+    N._authenticate_bound_completed_50m_map(cell, substrate)
+    # tamper only the per-cell coords pin (signature still valid) -> the pin check raises.
+    bad_pin = copy.deepcopy(cell)
+    bad_pin["coordinates_sha256_pin"] = "0" * 64
+    with pytest.raises(N.Round0267NodeError):
+        N._authenticate_bound_completed_50m_map(bad_pin, substrate)
+    # tamper the bound coordinates signature digest -> verify_signature raises.
+    bad_sig = copy.deepcopy(cell)
+    bad_sig["coordinates"]["sha256"] = "0" * 64
+    with pytest.raises(RuntimeError):
+        N._authenticate_bound_completed_50m_map(bad_sig, substrate)
+    # a mismatched substrate lineage -> raises.
+    with pytest.raises(N.Round0267NodeError):
+        N._authenticate_bound_completed_50m_map(cell, {"ordered_substrate_sha256": "0" * 64})
+
+
+def _completed_panel_cell(seed):
+    return {
+        "seed": seed,
+        "salvaged": False,
+        "bound_completed": True,
+        "bound": {
+            "bound_completed": True,
+            "source_run": "queue-correction-4",
+            "reason": N.COMPLETED_REASON,
+            "train_receipt_provenance": {
+                "train_receipt_sha256": "a" * 64, "is_first_class_receipt": True,
+            },
+        },
+        "train_receipt": {"kind": "file"},
+    }
+
+
+def test_gate_scores_three_bound_cells_incl_completed():
+    """42 salvaged + 43/44 completed-bound: the gate reads all three metrics and sources
+    salvage provenance for 42 and bound-receipt provenance for 43/44."""
+    panel = {
+        "capability": N.PANEL_CAPABILITY,
+        "schema": N.PANEL_SCHEMA,
+        "panel_metric_table": {str(s): _seed_metrics() for s in T.SEEDS},
+        "cells": {
+            "42": _panel_cell(42, salvaged=True),
+            "43": _completed_panel_cell(43),
+            "44": _completed_panel_cell(44),
+        },
+    }
+    mt = N._metric_table_from_panel(panel)
+    assert {int(s) for s in mt} == set(T.SEEDS)
+    salvage_prov = N._salvage_provenance_from_panel(panel)
+    assert set(salvage_prov) == {"42"}
+    bound_prov = N._bound_provenance_from_panel(panel)
+    assert set(bound_prov) == {"43", "44"}
+    for s in ("43", "44"):
+        assert bound_prov[s]["bound_completed"] is True
+        assert bound_prov[s]["source_run"] == "queue-correction-4"
+        assert "train_receipt_provenance" in bound_prov[s]
+
+
+def test_gate_bound_provenance_rejects_a_wrong_source_run():
+    panel = {
+        "capability": N.PANEL_CAPABILITY,
+        "schema": N.PANEL_SCHEMA,
+        "panel_metric_table": {str(s): _seed_metrics() for s in T.SEEDS},
+        "cells": {
+            "42": _panel_cell(42, salvaged=True),
+            "43": _completed_panel_cell(43),
+            "44": _completed_panel_cell(44),
+        },
+    }
+    panel["cells"]["43"]["bound"]["source_run"] = "queue-correction-1"
+    with pytest.raises(N.Round0267NodeError):
+        N._bound_provenance_from_panel(panel)
+
+
+def test_prepare_rejects_an_unknown_or_double_completed_bind_seed():
+    # unknown completed-bind seed refused (before any round/file work).
+    with pytest.raises(ValueError):
+        P.prepare_round0267(
+            release_sha="0" * 40, completed_binds={45: "/x"}, slim_scale_cert="/x"
+        )
+
+
+def test_cli_bind_completed_rejects_bad_specs():
+    # unknown seed, double-bind, and a malformed spec all fail at the CLI boundary.
+    for argv in (
+        ["--release-sha", "0" * 40, "--bind-completed", "45=/x", "--slim-scale-cert", "/x"],
+        ["--release-sha", "0" * 40, "--bind-completed", "43=/a", "--bind-completed", "43=/b",
+         "--slim-scale-cert", "/x"],
+        ["--release-sha", "0" * 40, "--bind-completed", "43", "--slim-scale-cert", "/x"],
+    ):
+        with pytest.raises(SystemExit):
+            P.main(argv)
+
+
+# --------------------------------------------------------------------------- #
 # 8. the slim >=8M scale-performance admission (design-slim-8m-admission-2026-08-17):
 #    the additive second accepted score_panel scale_admission form. All CPU/CUDA-
 #    hidden, small (<8M) fixtures + monkeypatch: NO real 50M cert, NO GPU.
