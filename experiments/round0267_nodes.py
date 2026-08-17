@@ -7,15 +7,20 @@ Five nodes in one queue (three trains -> panel -> gate), reusing R0265/R0266 mac
   1.0 band [0.1,0.4], UNIFORM sampling + R0266's `x_residency=host_int8` routing, at dose
   ×2 on the sealed R0237 50M substrate + exact k15 graph). The train node mirrors R0266's
   host-int8 train node, retargeted to the 50M substrate/graph binding and the ×2 horizon.
-* `score_minilm_fneg_50m_x2_panel` (GPU) — the three maps scored on R0265's instruments
-  (held-out FFR against the sealed R0237 exact k15 truth, purity k256/k1024 against
-  R0218's frozen reference, collapse, fog), via R0265's `score_one_map` / `score_panel`.
+* `score_minilm_fneg_50m_x2_panel` (GPU) — the three maps scored on R0265's instruments:
+  held-out FFR against the sealed R0237 exact k15 truth, collapse and fog (all on the FULL
+  50M coordinates via R0265's `score_one_map`), plus DESCRIPTIVE-only purity k256/k1024 on
+  the R0237 50M substrate's first-2M-row prefix against a reference + centroids built INLINE
+  on that same prefix (self-contained, no R0218 dependency; amendment 2026-08-17). Purity is
+  labelled descriptive/ungated with the lineage caveat and NEVER enters the gate.
 * `register_fneg_50m_x2_seedmean_gate` (CPU) — the pre-registered 50M gate
-  (plan-50m-stage-2026-08-15): the SEED-MEAN collapse inside P1's ×2 asymptote band
-  widened by a √n-shrunk family seed-noise allowance, plus per-seed hard backstops on
-  collapse/fog/FFR/purity. Every band, floor, σ_fam and P1 edge is READ / RECOMPUTED from
-  a SEALED artifact bound by sha256 at gate time -- never a typed literal (the
-  constants-discipline contract test mutates each and asserts the gate tracks it).
+  (plan-50m-stage-2026-08-15, amendment 2026-08-17): the go/no-go is collapse (SEED-MEAN
+  inside P1's ×2 asymptote band widened by a √n-shrunk family seed-noise allowance + per-seed
+  backstop) + fog (ceiling + escalation) + held-out FFR (floor) ONLY — criteria 1–3.
+  Purity is REMOVED from the go/no-go (descriptive-only at 50M) though its per-seed values are
+  still recorded. Every band, floor, σ_fam and P1 edge is READ / RECOMPUTED from a SEALED
+  artifact bound by sha256 at gate time -- never a typed literal (the constants-discipline
+  contract test mutates each and asserts the gate tracks it).
 
 Nothing in this module signals a process, starts a child, hands cuVS anything, or wraps a
 subprocess in a timeout. Every bulk input is a read-only np.memmap.
@@ -30,7 +35,7 @@ import random
 import resource
 import statistics
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -110,7 +115,6 @@ from experiments.round0265_nodes import (
     _bound_path,
     _build_fneg_model,
     _intra_queue_signature,
-    _load_centroids,
     _node_gate,
     _node_guard,
     _score_gate_without_raising,
@@ -134,9 +138,36 @@ PANEL_SCHEMA = "round0267-minilm-fneg-50m-x2-hostint8-panel-v1"
 GATE_CAPABILITY = "minilm-fneg-50m-x2-seedmean-gate-v1"
 GATE_SCHEMA = "round0267-minilm-fneg-50m-x2-seedmean-gate-v1"
 
-#: The five per-seed gated metrics (the plan's criteria 2-4 backstops).
+#: The three per-seed GATED metrics (amended plan criteria 1-3: held-out FFR floor +
+#: collapse backstop + fog ceiling). Purity is REMOVED from the go/no-go at 50M (amendment
+#: 2026-08-17, OWNER-authorized): it is DESCRIPTIVE-only and never enters any pass/fail.
 GATE_METRICS: tuple[str, ...] = (
-    HELDOUT_FFR_METRIC, PURITY_K256_METRIC, PURITY_K1024_METRIC, COLLAPSE_METRIC, FOG_METRIC,
+    HELDOUT_FFR_METRIC, COLLAPSE_METRIC, FOG_METRIC,
+)
+
+#: Purity k256/k1024 are RECORDED (descriptive) at 50M but never gate. They live outside
+#: GATE_METRICS so the no-straddle rule and per-seed pass/fail can never depend on them.
+DESCRIPTIVE_PURITY_METRICS: tuple[str, ...] = (
+    PURITY_K256_METRIC, PURITY_K1024_METRIC,
+)
+
+#: The first-2M-row prefix of the R0237 50M substrate — the DESCRIPTIVE purity subset. The
+#: reference AND the k256/k1024 centroids are both built INLINE on exactly these rows, so the
+#: descriptive purity number is fully self-contained on the R0237 prefix (no R0218 lineage).
+PREFIX_ROWS = 2_000_000
+
+#: The lineage caveat carried on every descriptive-purity record + the panel/gate bodies.
+#: States WHY 50M purity is not comparable to the R0265 2M family bands (a different build
+#: lineage), so the number is never mistaken for a gate.
+DESCRIPTIVE_PURITY_LINEAGE_CAVEAT = (
+    "purity k256/k1024 at 50M are DESCRIPTIVE / UNGATED. They are scored on the R0237 50M "
+    "substrate's first-2M-row prefix against a reference + k-means centroids built INLINE on "
+    "that SAME prefix (self-contained; no R0218 dependency, reference or centroids). They are "
+    "NOT commensurate with the R0265 2M family purity bands: the R0237 ladder's first-2M rows "
+    "are a DIFFERENT build lineage than R0218's frozen 2M reference the family bands were fit "
+    "on (the dry-run's nested-prefix check proved R0237-prefix cdb11377… != R0218 cb44d0a7… = "
+    "R0216-c3), so no frozen-reference purity gate exists at 50M. Purity remains a fully gated "
+    "criterion only at 2M (amendment 2026-08-17, OWNER-authorized)."
 )
 
 #: The seed-mean collapse gate parameters (plan criterion 1). z is the two-sided 95%
@@ -1037,91 +1068,62 @@ def _authenticate_bound_completed_50m_map(
 
 
 # --------------------------------------------------------------------------- #
-# the 50M panel's scoring (clarification rider 2026-08-17; correction-5 ruling):
-#   * collapse / fog / held-out FFR are measured on the FULL 50M coordinates
-#     (via R0265's score_one_map — 2D-map properties + the sealed R0237 k15 truth;
-#     they never consume the R0218 reference);
-#   * purity k256/k1024 are measured on the 2M NESTED PREFIX against R0218's FROZEN
-#     2M reference, the exact construction the R0265 family bands were fit on — the
-#     ONLY score_panel call run_panel makes (< 8M, so it carries no scale_admission).
-# The two helpers below build the 2M-prefix reference identity from R0218's OWN
-# sealed key parts (so the reused-reference key reproduces byte-for-byte) and VERIFY
-# the nested-prefix fact that makes the prefix purity valid.  (They are also reused by
-# produce_slim_scale_cert.py, the standing >=8M scale-cert producer.)
+# the 50M panel's scoring (amendment 2026-08-17, OWNER-authorized — purity is
+# DESCRIPTIVE-only at 50M):
+#   * collapse / fog / held-out FFR are the GATED metrics, measured on the FULL 50M
+#     coordinates (via R0265's score_one_map — 2D-map properties + the sealed R0237
+#     k15 truth; they never consume any hiD reference); their computation + inputs
+#     stay BYTE-IDENTICAL to the pre-amendment panel.
+#   * purity k256/k1024 are DESCRIPTIVE-only: scored on the R0237 substrate's first
+#     PREFIX_ROWS-row prefix against a reference + k-means centroids built INLINE on
+#     that SAME prefix (hiD_reference=None, centroids from the prefix), so the number is
+#     fully self-contained on the R0237 prefix with NO R0218 dependency. The prefix is
+#     < 8M, so this score_panel pass carries no scale_admission. Purity is labelled
+#     descriptive/ungated with the lineage caveat and is never a gate.
+# (The old R0218-frozen-reference binding, its 2M-prefix reference-identity helper, and
+# the verify_nested_prefix_identity refusal check are DROPPED — moot per amendment
+# 2026-08-17: the descriptive reference is built on the prefix itself, so there is no
+# cross-lineage identity claim to verify. The standing >=8M slim-cert producer that
+# reused those two helpers now carries them itself.)
 # --------------------------------------------------------------------------- #
 
 
-def two_m_prefix_reference_identity(reference: Mapping[str, Any]) -> tuple[int, dict[str, Any]]:
-    """Build the ``reference_identity`` for the 2M nested-prefix purity pass from
-    R0218's own sealed reference key-parts.
+def _build_prefix_purity_centroids(
+    source_prefix: np.ndarray, centroid_ks: Sequence[int], *, cache_dir: str
+) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
+    """Build the DESCRIPTIVE purity centroids INLINE on the R0237 prefix (GPU k-means).
 
-    Taking the data identity + convention straight from the frozen reference's
-    ``key_parts`` guarantees the key ``_resolve_reference`` recomputes for the prefix
-    pass reproduces R0218's baked key exactly (the remaining key parts — anchors from
-    ``sample_anchors(prefix_rows, cfg)``, config, centroids, formula, kf — match by
-    construction).  Returns ``(prefix_rows, reference_identity)``.
+    Reuses the frozen-centroids builder (random init + 25 Lloyd iters, seed 0) that
+    produced R0218's centroids, but fits it on the R0237 substrate's first-PREFIX_ROWS
+    rows instead — so the descriptive purity is self-contained on the prefix with no
+    R0218 centroid dependency. Each k's centroids are written immutable into ``cache_dir``
+    (a fresh sub-directory of the panel output) and returned with their signatures. The
+    fit reads the prefix memmap in 100k-row chunks (no >=2 GB materialisation). Cost at
+    PREFIX_ROWS=2M: ~a few GPU-minutes for k256+k1024 (owner note 2026-08-17).
     """
-    parts = reference.get("key_parts") if isinstance(reference, Mapping) else None
-    if not isinstance(parts, Mapping):
-        raise Round0267NodeError("R0267 R0218 reference is missing its sealed key parts")
-    data = parts.get("data")
-    convention = parts.get("convention")
-    if not isinstance(data, Mapping) or data.get("kind") != "ordered_array":
-        raise Round0267NodeError(
-            "R0267 R0218 reference data identity is not a single 2M ordered array; "
-            "the nested-prefix purity construction assumes an ordered_array 2M reference"
-        )
-    shape = data.get("shape")
-    if (not isinstance(shape, (list, tuple)) or len(shape) != 2
-            or int(shape[1]) != DIMENSION):
-        raise Round0267NodeError("R0267 R0218 reference data shape is not [rows, 384]")
-    prefix_rows = int(shape[0])
-    if prefix_rows <= 0 or prefix_rows > ROWS:
-        raise Round0267NodeError(
-            "R0267 R0218 reference prefix rows are not a valid nested prefix of the "
-            f"50M substrate (got {prefix_rows}, substrate rows {ROWS})"
-        )
-    if not isinstance(convention, Mapping) or not convention:
-        raise Round0267NodeError("R0267 R0218 reference convention is missing")
-    return prefix_rows, {"data_identity": dict(data), "convention": dict(convention)}
+    from experiments.score_complete_panel import frozen_centroids
 
-
-def verify_nested_prefix_identity(
-    source: Any, reference: Mapping[str, Any]
-) -> dict[str, Any]:
-    """VERIFY (not assume) the nested-prefix fact that makes 2M-prefix purity valid.
-
-    The 50M substrate's first ``prefix_rows`` rows, hashed in row order, MUST equal the
-    sealed 2M ``ordered_substrate`` identity baked into R0218's frozen reference key.
-    A REFUSAL PLANT fires on any mismatch — without this the prefix purity would not be
-    the row-for-row R0265 family construction the bands were fit on.  The hash streams
-    the prefix in row chunks (no >=2 GB materialisation).
-    """
-    prefix_rows, _identity = two_m_prefix_reference_identity(reference)
-    sealed_sha = str(reference["key_parts"]["data"]["sha256"])
-    observed_sha = ordered_array_sha256(source[:prefix_rows])
-    if observed_sha != sealed_sha:
-        raise Round0267NodeError(
-            "R0267 nested-prefix identity mismatch: the 50M substrate's first "
-            f"{prefix_rows} rows hash to {observed_sha}, but R0218's frozen reference "
-            f"binds the sealed 2M ordered_substrate {sealed_sha}. The 2M-prefix purity "
-            "would NOT be the row-for-row R0265 family construction, so it is refused."
+    cache_dir = create_fresh_directory(cache_dir, label="R0267 descriptive prefix centroids")
+    ks = [int(k) for k in centroid_ks]
+    built = frozen_centroids(source_prefix, ks, cache_dir, seed=0, iters=25)
+    centroids: dict[int, np.ndarray] = {}
+    signatures: dict[str, Any] = {}
+    for k in ks:
+        array = np.asarray(built[k], dtype=np.float32)
+        if array.shape != (k, DIMENSION):
+            raise Round0267NodeError(f"R0267 descriptive prefix centroids k{k} geometry changed")
+        centroids[k] = array
+        signatures[str(k)] = expected_input_signature(
+            os.path.join(cache_dir, f"centroids_k{k}.npy")
         )
-    return {
-        "nested_prefix_verified": True,
-        "prefix_rows": prefix_rows,
-        "ordered_prefix_sha256": observed_sha,
-        "sealed_2m_ordered_substrate_sha256": sealed_sha,
-    }
+    return centroids, signatures
 
 
 def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     install_stop_hooks(label="R0267 round0267_nodes.run_panel")
     import torch
     from basemap.panel_v2 import (
-        load_hiD_reference,
         reset_process_cuda_peak,
-        sample_anchors,
         score_panel,
     )
     from basemap.pumap.parametric_umap import ParametricUMAP
@@ -1137,16 +1139,15 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 
     substrate = _sealed_50m_substrate(job)
     source = _open_50m_substrate(substrate)
-    # correction-5 (delegate ruling 2026-08-17): run_panel invokes score_panel ONLY for
-    # the 2M nested-prefix purity pass (< 8M), which carries NO scale_admission.  The
-    # gate's collapse / fog / held-out FFR come from score_one_map on the full-50M
-    # coordinates, and purity comes from the 2M-prefix pass — so no >=8M score_panel and
-    # no slim scale-performance certificate is required here.  (The >=8M slim-admission
-    # machinery remains as standing infrastructure; it is exercised by
-    # produce_slim_scale_cert.py, not by this round.)
-    panel_evidence = prompt_contract.read_sealed(
-        str(job["panel_evidence"]), label="R0218 MiniLM frozen panel reference"
-    )
+    # amendment 2026-08-17 (OWNER-authorized): run_panel invokes score_panel ONLY for the
+    # DESCRIPTIVE purity pass on the R0237 first-PREFIX_ROWS prefix (< 8M, so NO
+    # scale_admission), against a reference + centroids built INLINE on that same prefix —
+    # NO R0218 dependency.  The GATED collapse / fog / held-out FFR come from score_one_map
+    # on the full-50M coordinates.  So there is no >=8M score_panel and no slim
+    # scale-performance certificate here.  (The >=8M slim-admission machinery remains as
+    # standing infrastructure; it is exercised by produce_slim_scale_cert.py, not by this
+    # round.)  The centroid granularities [256, 1024] come from the job (a config list, NOT
+    # R0218's centroid arrays); the centroids themselves are re-fit on the prefix below.
     centroid_ks = [int(k) for k in job["centroid_ks"]]
     cfg = prompt_contract.panel_config()
 
@@ -1199,22 +1200,18 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         recorder.anchor("R0267 panel stage entered")
         wrapped = window.wrap(recorder)
 
-        centroids, centroid_signatures = _load_centroids(panel_evidence, centroid_ks)
-        reference_signature = dict(panel_evidence["shared_high_d_reference"])
-        reference_path = prompt_contract.verify_signature(
-            reference_signature, label="R0218 shared high-D reference"
+        # DESCRIPTIVE purity centroids: fit INLINE on the R0237 first-PREFIX_ROWS prefix
+        # (GPU k-means, same frozen builder R0218 used) so the descriptive reference AND its
+        # centroids are self-contained on the prefix — no R0218 lineage.  ~a few GPU-minutes
+        # at PREFIX_ROWS=2M (owner note 2026-08-17).
+        prefix_rows = PREFIX_ROWS
+        if prefix_rows > ROWS:
+            raise Round0267NodeError("R0267 descriptive prefix exceeds the 50M substrate rows")
+        centroids, centroid_signatures = _build_prefix_purity_centroids(
+            source[:prefix_rows], centroid_ks,
+            cache_dir=os.path.join(output, "descriptive-prefix-centroids"),
         )
-        reference = load_hiD_reference(reference_path)
-        _anchors = sample_anchors(ROWS, cfg)
-        # 2M nested-prefix purity: VERIFY (not assume) that the 50M substrate's first
-        # <prefix_rows> rows are byte-identical to the sealed 2M ordered_substrate that
-        # R0218's frozen reference key binds — the nested-prefix fact that makes prefix
-        # purity the row-for-row R0265 family construction.  A refusal plant fires on
-        # mismatch.  The prefix reference identity comes from the frozen reference's own
-        # sealed key parts so the reused-reference key reproduces R0218's key exactly.
-        nested_prefix_receipt = verify_nested_prefix_identity(source, reference)
-        prefix_rows, reference_identity_2m = two_m_prefix_reference_identity(reference)
-        wrapped("R0267 frozen reference + centroids loaded; nested prefix verified")
+        wrapped("R0267 descriptive prefix centroids fit on the R0237 first-2M rows")
 
         cells: dict[str, dict[str, Any]] = {}
         for entry in sorted(authenticated, key=lambda e: e["seed"]):
@@ -1236,27 +1233,31 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 coordinates = _transform_50m_in_chunks(model, source, wrapped)
                 if coordinates.shape != (ROWS, 2) or not np.isfinite(coordinates).all():
                     raise Round0267NodeError(f"R0267 seed-{seed} transform is not a finite 50M map")
-            # 2M NESTED-PREFIX purity pass — the ONLY score_panel call run_panel makes
-            # (correction-5).  Xa = the substrate's first <prefix_rows> rows; Z = the
+            # DESCRIPTIVE purity pass — the ONLY score_panel call run_panel makes
+            # (amendment 2026-08-17).  Xa = the substrate's first <prefix_rows> rows; Z = the
             # cell's first <prefix_rows> coordinate rows, so the 2D neighbour pool is the
-            # PREFIX ROWS' coordinates ONLY (no 48M leakage).  Scored against R0218's
-            # FROZEN 2M reference so k256/k1024 stay commensurate with the R0265 family
-            # bands.  <prefix_rows> is < 8M, so this pass takes NO scale_admission (the
-            # >=8M guard refuses a below-scale admission).
+            # PREFIX ROWS' coordinates ONLY (no 48M leakage).  hiD_reference=None builds the
+            # reference INLINE on that same prefix, and centroids_by_k are the prefix-fit
+            # centroids — so the purity number is fully self-contained on the R0237 prefix
+            # with NO R0218 dependency.  <prefix_rows> is < 8M, so this pass takes NO
+            # scale_admission (the >=8M guard refuses a below-scale admission).  DESCRIPTIVE
+            # ONLY: the number is not commensurate with the R0265 2M family bands (see the
+            # lineage caveat) and never enters the gate.
             purity_panel = score_panel(
                 source[:prefix_rows],
                 coordinates[:prefix_rows],
                 config=cfg,
                 centroids_by_k=centroids,
-                hiD_reference=reference,
-                reference_identity=reference_identity_2m,
+                hiD_reference=None,
                 provenance={
                     "round_id": ROUND_ID,
                     "seed": seed,
                     "capability": entry["capability"],
                     "treatment": "fneg-x2-md000-hostint8-50m",
-                    "pass": "2m-nested-prefix-purity",
-                    "nested_prefix": nested_prefix_receipt,
+                    "pass": "r0237-prefix-descriptive-purity",
+                    "descriptive": True,
+                    "gated": False,
+                    "lineage_caveat": DESCRIPTIVE_PURITY_LINEAGE_CAVEAT,
                 },
             )
             purity_ratios = {"k256": float(purity_panel["purity"]["k256"]),
@@ -1318,14 +1319,20 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                     "metrics": scored_map,
                     "panel_purity_numerators": purity_panel.get("purity_numerators"),
                 }
-            # Per-cell audit breadcrumb: which reference the purity pass used and the
-            # verified nested-prefix fact behind it.
-            cells[str(seed)]["purity_pass"] = {
-                "pass": "2m-nested-prefix-purity",
+            # Per-cell DESCRIPTIVE purity record — labelled descriptive/ungated with the
+            # lineage caveat.  These k256/k1024 values are REPORTED, never gated.
+            cells[str(seed)]["descriptive_purity"] = {
+                "pass": "r0237-prefix-descriptive-purity",
+                "descriptive": True,
+                "gated": False,
                 "prefix_rows": prefix_rows,
+                "reference": "r0237-prefix-inline",
+                "k256": purity_ratios["k256"],
+                "k1024": purity_ratios["k1024"],
+                "numerators": purity_panel.get("purity_numerators"),
                 "hiD_reference_key": purity_panel["provenance"]["hiD_reference_key"],
                 "hiD_reference_reused": bool(purity_panel["provenance"]["hiD_reference_reused"]),
-                "nested_prefix": nested_prefix_receipt,
+                "lineage_caveat": DESCRIPTIVE_PURITY_LINEAGE_CAVEAT,
             }
             del model, coordinates, placed
             torch.cuda.empty_cache()
@@ -1395,9 +1402,24 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "seed_invariant_sha256": sorted(invariants)[0],
         "panel_metric_table": metric_table,
         "cells": cells,
-        "reference": reference_signature,
-        "centroids": centroid_signatures,
+        "descriptive_purity_centroids": centroid_signatures,
         "gated_metrics": list(GATE_METRICS),
+        "descriptive_metrics": list(DESCRIPTIVE_PURITY_METRICS),
+        "descriptive_purity": {
+            "descriptive": True,
+            "gated": False,
+            "prefix_rows": prefix_rows,
+            "reference": "r0237-prefix-inline",
+            "centroid_ks": list(centroid_ks),
+            "lineage_caveat": DESCRIPTIVE_PURITY_LINEAGE_CAVEAT,
+            "values": {
+                str(s): {
+                    "k256": metric_table[str(s)]["purity_fidelity_k256"],
+                    "k1024": metric_table[str(s)]["purity_fidelity_k1024"],
+                }
+                for s in SEEDS
+            },
+        },
         "heldout_reserve": dict(job.get("heldout_reserve") or {}),
         "lineage": {
             "graph_manifest": dict(substrate["manifest_signature"]),
@@ -1405,17 +1427,18 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "ordered_substrate_sha256": substrate["ordered_substrate_sha256"],
         },
         "purity_reference_note": (
-            "purity k256/k1024 are scored on the 2M NESTED PREFIX (Xa = the substrate's "
-            "first prefix_rows rows; Z = each cell's first prefix_rows coordinate rows, so "
-            "the 2D neighbour pool is the prefix rows' coordinates ONLY) against R0218's "
-            "frozen 2M reference + centroids, so the ratios stay commensurate with R0265's "
-            "sealed 2M bands (the gate's purity backstop). collapse / fog / held-out FFR are "
-            "measured on the FULL 50M coordinates (score_one_map). run_panel invokes "
-            "score_panel ONLY for this <8M purity pass; no >=8M score_panel is run and no "
-            "slim scale-performance certificate is required (correction-5, delegate ruling "
-            "2026-08-17; rider plan-50m-stage-2026-08-15)."
+            "purity k256/k1024 are DESCRIPTIVE / UNGATED at 50M (amendment 2026-08-17, "
+            "OWNER-authorized). They are scored on the R0237 substrate's first prefix_rows "
+            "rows (Xa = those rows; Z = each cell's first prefix_rows coordinate rows, so the "
+            "2D neighbour pool is the prefix rows' coordinates ONLY) against a reference + "
+            "k-means centroids built INLINE on that SAME prefix — self-contained, NO R0218 "
+            "dependency (reference or centroids).  They are NOT commensurate with the R0265 "
+            "2M family bands (a different build lineage; see lineage_caveat) and NEVER enter "
+            "the gate.  The GATED collapse / fog / held-out FFR are measured on the FULL 50M "
+            "coordinates (score_one_map).  run_panel invokes score_panel ONLY for this <8M "
+            "descriptive pass; no >=8M score_panel is run and no slim scale-performance "
+            "certificate is required."
         ),
-        "nested_prefix_verification": nested_prefix_receipt,
         "purity_pool_semantics": (
             "prefix-only: the other rows sharing the 2D plane are deliberately excluded from "
             "the purity neighbour pool; pool = all rows would measure a different, "
@@ -1443,7 +1466,7 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "observed_span_s": coverage["observed_span_s"],
         "covered_fraction": coverage["covered_fraction"],
     }))
-    del source, reference, centroids
+    del source, centroids
     gc.collect()
 
 
@@ -1554,13 +1577,18 @@ def score_per_seed_backstops(
     backstops: Mapping[str, Any],
     sigma_fam_fog: float,
 ) -> dict[str, Any]:
-    """The per-seed hard backstops (plan criteria 2-4 + the collapse floor).
+    """The per-seed hard backstops (amended plan criteria 1-3 — collapse/fog/held-out FFR).
 
-    Every seed must clear: collapse >= R0265 family floor; fog <= R0265 family ceiling
+    Every seed must clear ONLY: collapse >= R0265 family floor; fog <= R0265 family ceiling
     (with a mechanical near-ceiling escalation if fog > ceiling - 1·σ_fam,fog); held-out
-    FFR >= R0265 family floor; k1024 >= R0265 floor; k256 in the R0265 band. The
-    no-straddle rule applies to THESE gates (some seeds passing and some failing one gate
-    is ambiguity, not noise). Every floor/band is READ from the sealed R0265 floors.
+    FFR >= R0265 family floor. The no-straddle rule applies to THESE three gates (some seeds
+    passing and some failing one gate is ambiguity, not noise). Every floor is READ from the
+    sealed R0265 floors.
+
+    Purity k256/k1024 are DESCRIPTIVE-only at 50M (amendment 2026-08-17): their per-seed
+    verdicts against the sealed R0265 bands are still RECORDED under ``descriptive_purity``
+    for the report, but they DO NOT enter ``clears_every_backstop`` or the straddle set and
+    can never flip the verdict.
     """
     fog_ceiling = float(backstops["fog_ceiling"])
     near_ceiling_threshold = fog_ceiling - float(sigma_fam_fog)
@@ -1581,8 +1609,7 @@ def score_per_seed_backstops(
             float(metrics[FOG_METRIC]) > near_ceiling_threshold
             and fog_v.get("verdict") != VERDICT_NOT_MEASURABLE
         )
-        k256_v = _judge_k256_two_sided(float(metrics[PURITY_K256_METRIC]), dict(backstops["k256_band"]))
-        k1024_v = _judge_one_sided_floor(float(metrics[PURITY_K1024_METRIC]), float(backstops["k1024_floor"]))
+        # The THREE GATED metrics — the ONLY contributors to pass/fail + straddle.
         by_metric = {
             HELDOUT_FFR_METRIC: {
                 "verdict": "PASS" if ffr_pass else "FAIL", "passes": ffr_pass,
@@ -1591,6 +1618,14 @@ def score_per_seed_backstops(
             COLLAPSE_METRIC: collapse_v,
             FOG_METRIC: {**fog_v, "near_ceiling_escalation": bool(fog_near_ceiling),
                         "near_ceiling_threshold": near_ceiling_threshold},
+        }
+        # DESCRIPTIVE purity verdicts — RECORDED against the sealed R0265 bands but NEVER
+        # part of clears/straddle (purity is ungated at 50M, amendment 2026-08-17).
+        k256_v = _judge_k256_two_sided(float(metrics[PURITY_K256_METRIC]), dict(backstops["k256_band"]))
+        k1024_v = _judge_one_sided_floor(float(metrics[PURITY_K1024_METRIC]), float(backstops["k1024_floor"]))
+        descriptive_purity = {
+            "descriptive": True,
+            "gated": False,
             PURITY_K256_METRIC: k256_v,
             PURITY_K1024_METRIC: k1024_v,
         }
@@ -1599,11 +1634,13 @@ def score_per_seed_backstops(
             "cell_id": exact_cell_id(int(seed_key)),
             "seed": int(seed_key),
             "metrics": by_metric,
+            "descriptive_purity": descriptive_purity,
             "clears_every_backstop": clears,
             "fog_near_ceiling_escalation": bool(fog_near_ceiling),
             "fog_not_measurable": fog_v.get("verdict") == VERDICT_NOT_MEASURABLE,
         })
-    # No-straddle: a per-seed gate straddles if some seeds pass it and some fail it.
+    # No-straddle: a per-seed GATED gate straddles if some seeds pass it and some fail it.
+    # Iterates GATE_METRICS (collapse/fog/FFR only) — purity is excluded by construction.
     straddles: list[str] = []
     for m in GATE_METRICS:
         verdicts = {bool(row["metrics"][m]["passes"]) for row in rows}
@@ -1624,16 +1661,24 @@ def score_per_seed_backstops(
             "fog_ceiling": fog_ceiling,
             "fog_near_ceiling_threshold": near_ceiling_threshold,
             "heldout_ffr_floor": float(backstops["heldout_ffr_floor"]),
+        },
+        "descriptive_purity_bands_recorded": {
+            "gated": False,
             "k1024_floor": float(backstops["k1024_floor"]),
             "k256_band": {
                 "ratio_lower": float(backstops["k256_band"]["ratio_lower"]),
                 "ratio_upper": float(backstops["k256_band"]["ratio_upper"]),
             },
+            "note": (
+                "the R0265 purity bands are RECORDED for the descriptive purity report but do "
+                "NOT gate at 50M (amendment 2026-08-17); no per-seed purity verdict enters "
+                "clears_every_backstop or the straddle set"
+            ),
         },
         "no_straddle_rule": (
-            "applies to the per-seed backstop + fog/FFR/purity gates, NOT to the P1 "
-            "asymptote band (a single seed outside the P1 band but at/above the backstop "
-            "is expected noise, not ambiguity)"
+            "applies to the per-seed backstop + collapse/fog/FFR gates, NOT to purity "
+            "(descriptive-only at 50M) and NOT to the P1 asymptote band (a single seed "
+            "outside the P1 band but at/above the backstop is expected noise, not ambiguity)"
         ),
     }
 
@@ -1749,12 +1794,26 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             p1_upper=p1["p1_upper"],
             sigma_fam_collapse=sigma["sigma_fam_collapse"],
         )
-        # CRITERIA 2-4 + collapse backstop: per-seed hard gates.
+        # CRITERIA 1-3 per-seed backstops: collapse floor + fog ceiling + held-out FFR floor
+        # (purity is DESCRIPTIVE-only and does NOT enter pass/fail; amendment 2026-08-17).
         backstop_scoring = score_per_seed_backstops(
             metric_table=metric_table,
             backstops=backstops,
             sigma_fam_fog=sigma["sigma_fam_fog"],
         )
+        # DESCRIPTIVE purity — recorded for the report, NEVER a gate.
+        descriptive_purity = {
+            "descriptive": True,
+            "gated": False,
+            "lineage_caveat": DESCRIPTIVE_PURITY_LINEAGE_CAVEAT,
+            "values": {
+                s: {
+                    "k256": float(metric_table[s][PURITY_K256_METRIC]),
+                    "k1024": float(metric_table[s][PURITY_K1024_METRIC]),
+                }
+                for s in metric_table
+            },
+        }
         wrapped("R0267 criteria scored from sealed bands, σ_fam and the P1 band")
         gate.finish("R0267 gate stage end")
     window.close()
@@ -1763,7 +1822,10 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     gaps = gap_report(recorder.records, arm=node_id)
 
     # The 50M PASS decision (a FINDING reported either way; it feeds the 100M-commit
-    # decision, it does NOT make the round a failure).
+    # decision, it does NOT make the round a failure).  The verdict is computed from
+    # collapse (seed-mean band + per-seed backstop) + fog (ceiling + escalation) + held-out
+    # FFR (floor) ONLY — criteria 1–3.  backstop_scoring's every_seed_clears / straddle no
+    # longer depend on purity (amendment 2026-08-17), so purity can never flip the verdict.
     passes = bool(
         criterion_1["passes"]
         and backstop_scoring["every_seed_clears_every_backstop"]
@@ -1786,9 +1848,17 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             and sigma["n_family_cells"] == R0265N.N_FAMILY
         ),
         "p1_band_read_from_sealed_analysis_v2": p1["verdict"] == "GO",
-        "five_backstop_metrics_present": {r["seed"] for r in backstop_scoring["cells"]} == set(SEEDS),
+        "gated_backstops_cover_every_seed": {r["seed"] for r in backstop_scoring["cells"]} == set(SEEDS),
         "three_seeds_scored": backstop_scoring["cells_scored"] == len(SEEDS),
         "no_typed_band_literals": True,  # every band/floor/σ_fam/P1-edge is read from a sealed input
+        "purity_is_descriptive_not_gated": (
+            PURITY_K256_METRIC not in GATE_METRICS
+            and PURITY_K1024_METRIC not in GATE_METRICS
+            and all(
+                row.get("descriptive_purity", {}).get("gated") is False
+                for row in backstop_scoring["cells"]
+            )
+        ),
         "salvaged_provenance_sourced_not_fabricated": all(
             prov.get("salvaged") is True and "train_evidence" in prov
             for prov in salvage_provenance.values()
@@ -1812,11 +1882,12 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "abort_flag_precondition": abort_flag,
         "identity_bound_at_n": identity_bound(len(SEEDS)),
         "purpose": (
-            "the pre-registered 50M staging-rung gate (plan-50m-stage-2026-08-15): the "
-            "SEED-MEAN collapse inside P1's ×2 asymptote band widened by a √n-shrunk "
-            "family seed-noise allowance, plus per-seed hard backstops on collapse/fog/"
-            "FFR/purity. Feeds the 100M ×2-commit decision; a FAIL/AMBIGUOUS returns to "
-            "the owner with the drift decomposition, never an auto-proceed."
+            "the pre-registered 50M staging-rung gate (plan-50m-stage-2026-08-15, amendment "
+            "2026-08-17): the SEED-MEAN collapse inside P1's ×2 asymptote band widened by a "
+            "√n-shrunk family seed-noise allowance, plus per-seed hard backstops on collapse/"
+            "fog/FFR — criteria 1–3. Purity is DESCRIPTIVE-only at 50M and is NOT in the "
+            "go/no-go. Feeds the 100M ×2-commit decision; a FAIL/AMBIGUOUS returns to the "
+            "owner with the drift decomposition, never an auto-proceed."
         ),
         "seed_spread_assumption": SEED_SPREAD_ASSUMPTION,
         "salvaged_seeds": sorted(int(s) for s in salvage_provenance),
@@ -1826,7 +1897,10 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "sigma_fam": sigma,
         "p1_x2_asymptote_band": p1,
         "criterion_1_collapse_seed_mean": criterion_1,
-        "criteria_2_4_per_seed_backstops": backstop_scoring,
+        "criteria_1_3_per_seed_backstops": backstop_scoring,
+        "descriptive_purity": descriptive_purity,
+        "gated_metrics": list(GATE_METRICS),
+        "descriptive_metrics": list(DESCRIPTIVE_PURITY_METRICS),
         "pre_registered_pass_criteria": {
             "1": (
                 "mean(collapse over 3 seeds) ∈ [0.930 − 1.96·σ_fam/√3, 0.985 + "
@@ -1835,11 +1909,18 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             ),
             "backstops": (
                 "every seed: collapse >= R0265 floor; fog <= R0265 ceiling (near-ceiling "
-                "escalation if fog > ceiling − 1·σ_fam,fog); FFR >= R0265 floor; k1024 >= "
-                "R0265 floor; k256 ∈ R0265 band -- all READ from the sealed R0265 floors"
+                "escalation if fog > ceiling − 1·σ_fam,fog); FFR >= R0265 floor -- all READ "
+                "from the sealed R0265 floors. Purity is REMOVED from the go/no-go at 50M "
+                "(descriptive-only; amendment 2026-08-17, OWNER-authorized)."
+            ),
+            "purity_descriptive_only": (
+                "purity k256/k1024 are REPORTED against an R0237-prefix inline reference + "
+                "centroids (self-contained, no R0218 lineage) and labelled descriptive/"
+                "ungated with the lineage caveat; they NEVER enter the go/no-go"
             ),
             "no_straddle": (
-                "applies to the per-seed backstops + fog/FFR/purity, NOT to the P1 band"
+                "applies to the per-seed backstops + collapse/fog/FFR, NOT to purity "
+                "(descriptive-only) and NOT to the P1 band"
             ),
             "constants_discipline": (
                 "no band/floor/σ_fam/P1-edge is a typed literal; all are bound from sealed "
@@ -1904,10 +1985,13 @@ def run_job(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 
 
 __all__ = [
+    "DESCRIPTIVE_PURITY_LINEAGE_CAVEAT",
+    "DESCRIPTIVE_PURITY_METRICS",
     "GATE_ACTION",
     "GATE_CAPABILITY",
     "GATE_METRICS",
     "GATE_SCHEMA",
+    "PREFIX_ROWS",
     "COMPLETED_BIND_SEEDS",
     "COMPLETED_REASON",
     "COMPLETED_SOURCE_RUN",

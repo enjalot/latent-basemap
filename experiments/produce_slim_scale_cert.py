@@ -30,7 +30,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from basemap.artifact_identity import expected_input_signature
+from collections.abc import Mapping
+from typing import Any
+
+from basemap.artifact_identity import expected_input_signature, ordered_array_sha256
 from basemap.output_safety import atomic_write_new_json, ensure_data_directory
 from basemap import round0113_prompt_contrast as prompt_contract
 from basemap.release_preflight import validate_release_preflight_receipt
@@ -54,6 +57,74 @@ from experiments.round0005_performance_gate import (
 #: Where R0267's slim cert artifacts land (bound by prepare_round0267_queue afterward).
 DEFAULT_CERT_ROOT = "/data/latent-basemap/runs/round-0267/slim-scale-cert"
 DIMENSION = 384
+
+
+# --------------------------------------------------------------------------- #
+# 2M nested-prefix reference-identity helpers.  Moved here from
+# experiments.round0267_nodes (2026-08-17): R0267's panel no longer uses R0218's
+# frozen 2M reference (purity is descriptive-only at 50M against an R0237-prefix
+# inline reference), so the panel dropped these two helpers.  The standing >=8M
+# slim-cert PRODUCER still mirrors the pre-amendment two-pass structure (a full-50M
+# scale-exercise pass + a 2M nested-prefix purity pass) to measure the scorer on the
+# actual substrate, so it carries the helpers itself.  Verbatim logic; RuntimeError
+# (this module's convention) replaces Round0267NodeError, and the substrate row bound
+# is taken from the passed source rather than a hardcoded 50M constant.
+# --------------------------------------------------------------------------- #
+
+
+def two_m_prefix_reference_identity(
+    reference: Mapping[str, Any], *, substrate_rows: int
+) -> tuple[int, dict[str, Any]]:
+    """Build the ``reference_identity`` for the 2M nested-prefix purity pass from the
+    frozen reference's own sealed key-parts (so ``_resolve_reference`` reproduces the
+    baked key exactly). Returns ``(prefix_rows, reference_identity)``."""
+    parts = reference.get("key_parts") if isinstance(reference, Mapping) else None
+    if not isinstance(parts, Mapping):
+        raise RuntimeError("slim measurement: reference is missing its sealed key parts")
+    data = parts.get("data")
+    convention = parts.get("convention")
+    if not isinstance(data, Mapping) or data.get("kind") != "ordered_array":
+        raise RuntimeError(
+            "slim measurement: reference data identity is not a single 2M ordered array"
+        )
+    shape = data.get("shape")
+    if (not isinstance(shape, (list, tuple)) or len(shape) != 2
+            or int(shape[1]) != DIMENSION):
+        raise RuntimeError("slim measurement: reference data shape is not [rows, 384]")
+    prefix_rows = int(shape[0])
+    if prefix_rows <= 0 or prefix_rows > int(substrate_rows):
+        raise RuntimeError(
+            "slim measurement: reference prefix rows are not a valid nested prefix "
+            f"(got {prefix_rows}, substrate rows {substrate_rows})"
+        )
+    if not isinstance(convention, Mapping) or not convention:
+        raise RuntimeError("slim measurement: reference convention is missing")
+    return prefix_rows, {"data_identity": dict(data), "convention": dict(convention)}
+
+
+def verify_nested_prefix_identity(
+    source: Any, reference: Mapping[str, Any]
+) -> dict[str, Any]:
+    """VERIFY (not assume) that ``source``'s first ``prefix_rows`` rows hash to the sealed
+    2M ``ordered_substrate`` identity baked into the frozen reference key. Raises on
+    mismatch. The hash streams the prefix in row chunks (no >=2 GB materialisation)."""
+    prefix_rows, _identity = two_m_prefix_reference_identity(
+        reference, substrate_rows=len(source)
+    )
+    sealed_sha = str(reference["key_parts"]["data"]["sha256"])
+    observed_sha = ordered_array_sha256(source[:prefix_rows])
+    if observed_sha != sealed_sha:
+        raise RuntimeError(
+            "slim measurement: nested-prefix identity mismatch: the substrate's first "
+            f"{prefix_rows} rows hash to {observed_sha}, but the frozen reference binds the "
+            f"sealed 2M ordered_substrate {sealed_sha}."
+        )
+    return {
+        "nested_prefix_verified": True,
+        "prefix_rows": prefix_rows,
+        "ordered_prefix_sha256": observed_sha,
+        "sealed_2m_ordered_substrate_sha256": sealed_sha,
+    }
 
 
 def assemble_slim_scale_cert(
@@ -158,10 +229,6 @@ def run_measurement_pass(
     import numpy as np
     import experiments.round0218_nodes as round0218_nodes
     from basemap.panel_v2 import reset_process_cuda_peak, score_panel
-    from experiments.round0267_nodes import (
-        two_m_prefix_reference_identity,
-        verify_nested_prefix_identity,
-    )
 
     if os.environ.get("CUDA_VISIBLE_DEVICES") in {None, "", "-1"}:
         raise RuntimeError("slim cert-production measurement pass requires CUDA")
@@ -199,7 +266,8 @@ def run_measurement_pass(
         "convention": dict(round0218_nodes.REFERENCE_CONVENTION),
     }
     nested_prefix_receipt = verify_nested_prefix_identity(source, reference)
-    prefix_rows, reference_identity_2m = two_m_prefix_reference_identity(reference)
+    prefix_rows, reference_identity_2m = two_m_prefix_reference_identity(
+        reference, substrate_rows=rows)
 
     reset_process_cuda_peak()
     # PASS 1 — the measured / stamped >=8M full-50M scale-exercise pass.  hiD_reference
