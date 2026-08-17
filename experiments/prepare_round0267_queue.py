@@ -76,6 +76,7 @@ from experiments.round0267_nodes import (
     GATE_CAPABILITY,
     PANEL_ACTION,
     PANEL_CAPABILITY,
+    PANEL_SCHEMA,
     SALVAGE_REASON,
     SALVAGE_SEED,
     SALVAGE_SEED42_COORDINATES_SHA256,
@@ -96,8 +97,22 @@ from experiments.prepare_round0266_queue import (
 
 ROUND_ROOT = "/data/latent-basemap/runs/round-0267"
 QUEUE_ROOT = os.path.join(ROUND_ROOT, "queue")
+#: PIECE B — the SANCTIONED gate-only re-seal queue root. A NEW dir so correction-5's
+#: terminal + its registered 50M_FAIL_OR_AMBIGUOUS stay in the record (this supersedes,
+#: it does not erase or overwrite).
+GATE_ONLY_QUEUE_ROOT = os.path.join(ROUND_ROOT, "queue-correction-6")
 RELEASE_ROOT = "/home/enjalot/code/latent-basemap-run"
 ROUND_FILE = os.path.join(LAB_ROOT, "round-0267-2026-08-15.md")
+
+#: PIECE B — the correction-5 sealed panel (collapse/fog/purity UNCHANGED) + the sealed FFR
+#: re-score results, both bound by sha256 into the gate-only re-seal.
+CORRECTION_5_PANEL = (
+    "/data/latent-basemap/runs/round-0267/queue-correction-5/artifacts/"
+    "minilm-fneg-50m-x2-hostint8-panel-v1/fneg-50m-x2-panel.json"
+)
+FFR_RESCORE_RESULTS = (
+    "/data/latent-basemap/runs/round-0267/ffr-correction/reserve-truth-50m/rescore-results.json"
+)
 
 #: The sealed R0237 50M substrate + graph manifests (the nested-prefix ladder's carve).
 R0237_SUBSTRATE_MANIFEST = (
@@ -121,6 +136,20 @@ R0237_TRUTH_IDS = (
 R0237_RESERVE = (
     "/data/latent-basemap/runs/round-0237/queue/artifacts/"
     "minilm-mixed-50000k-nested-substrate-and-reserves-v1/reserve.f32.npy"
+)
+#: The sealed R0237 reserve query rows (the 2000 held-out probe rows INTO reserve.f32). The
+#: floor-matched FFR instrument (PIECE A) projects reserve.f32[reserve-query-rows] through
+#: each map; these are the SAME rows the sealed reserve-neighbour truth was built for.
+R0237_RESERVE_QUERY_ROWS = (
+    "/data/latent-basemap/runs/round-0237/queue/artifacts/"
+    "minilm-mixed-50000k-nested-substrate-and-reserves-v1/reserve-query-rows.i64.npy"
+)
+#: The sealed R0267 FFR-correction reserve-neighbour truth: the exact-cosine top-10
+#: substrate neighbours of reserve.f32[reserve-query-rows] (indices INTO the 50M substrate).
+#: This is the OUT-OF-SUBSTRATE truth the R0265 floor's instrument scores against — bound
+#: as a sealed panel input (PIECE A) and re-bound by the gate-only re-seal (PIECE B).
+R0267_RESERVE_NEIGHBOUR_TRUTH = (
+    "/data/latent-basemap/runs/round-0267/ffr-correction/reserve-truth-50m/truth-top10.npy"
 )
 #: The frozen P1 analysis-v2 result — the ×2 collapse asymptote band (plain JSON).
 P1_ASYMPTOTE = "/data/latent-basemap/sandbox/logs/analysis_v2_result.json"
@@ -622,6 +651,11 @@ def prepare_round0267(
     truth_query_rows = _signature(R0237_TRUTH_QUERY_ROWS, "R0237 50M truth query rows")
     truth_ids = _signature(R0237_TRUTH_IDS, "R0237 50M truth ids")
     reserve = _signature(R0237_RESERVE, "R0237 50M held-out reserve")
+    # PIECE A — the floor-matched FFR instrument's two extra sealed inputs: the reserve
+    # query rows (which reserve.f32 rows are the held-out probes) and the reserve-neighbour
+    # truth (their exact-cosine top-10 substrate neighbours).
+    reserve_query_rows = _signature(R0237_RESERVE_QUERY_ROWS, "R0237 reserve query rows")
+    reserve_truth = _signature(R0267_RESERVE_NEIGHBOUR_TRUTH, "R0267 reserve-neighbour truth")
     r0265_floors = _signature(R0265_FLOORS, "R0265 sealed family floors")
     r0265_panel = _signature(R0265_PANEL, "R0265 sealed n=13 panel")
     p1_asymptote = _signature(P1_ASYMPTOTE, "P1 analysis-v2 ×2 asymptote band")
@@ -804,6 +838,7 @@ def prepare_round0267(
         "done_marker": os.path.join(artifacts, f"{panel_node}.done.json"),
         "expected_inputs": _dedupe([
             *shared_inputs, r0218_panel, truth_query_rows, truth_ids, reserve,
+            reserve_query_rows, reserve_truth,
             *bound_inputs,
         ]),
         "p90_wall_s": PANEL_P90_WALL_S,
@@ -814,6 +849,9 @@ def prepare_round0267(
         "truth_query_rows": truth_query_rows,
         "truth_ids": truth_ids,
         "heldout_reserve": reserve,
+        # PIECE A — the floor-matched FFR instrument's sealed inputs.
+        "reserve_query_rows": reserve_query_rows,
+        "reserve_truth": reserve_truth,
         "cells": panel_cells,
         "gate_registerable_here": False,
         "upstream_review_state": review_state,
@@ -994,6 +1032,295 @@ def prepare_round0267(
     return manifest_path
 
 
+def prepare_round0267_gate_only(
+    *,
+    release_sha: str,
+    bind_panel: str = CORRECTION_5_PANEL,
+    corrected_ffr_source: str = FFR_RESCORE_RESULTS,
+    reserve_truth: str = R0267_RESERVE_NEIGHBOUR_TRUTH,
+    source_run: str = "queue-correction-5",
+    source_release: str | None = None,
+    queue_root: str = GATE_ONLY_QUEUE_ROOT,
+) -> str:
+    """Prepare the SANCTIONED gate-only re-seal queue for R0267 (PIECE B, delegate-ruled).
+
+    correction-5 trained/bound all three maps + the panel cleanly, but its 50M held-out FFR
+    was mis-specified vs the R0265 floor on TWO axes (trip 9: fixed 2000 disc instead of the
+    N-scaled 0.1%·N; trip 10: IN-SUBSTRATE coordinates[probe_rows] instead of the floor's
+    OUT-OF-SUBSTRATE reserve projection). A CPU re-score rebuilt the reserve-neighbour truth
+    and re-scored the SAME already-trained maps with the floor's own instrument, yielding
+    FFR ~0.55 (all clearing the unchanged floor 0.3991). Re-training three bit-identical
+    maps only to re-measure a CPU number is wasteful, so this builds a ONE-NODE queue with
+    only the gate, which:
+      * binds the correction-5 panel by CONTENT DIGEST for collapse/fog/purity (UNCHANGED),
+      * binds the sealed reserve-neighbour truth + the sealed FFR re-score results by digest,
+      * emits the SUPERSEDING verdict using the CORRECTED FFR in place of the panel's
+        mis-measured FFR (collapse/fog byte-identical from the panel, purity descriptive).
+    correction-5's registered 50M_FAIL_OR_AMBIGUOUS STAYS in the record; this is a NEW
+    directory (queue-correction-6) that overwrites nothing. Every prepare validation still
+    runs (issued round + base_commit ancestor-of release, the three-config recipe proof,
+    the treatment-closure seal); the recipe proof needs no train artifacts, only the configs.
+    """
+    if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
+        raise ValueError("R0267 release SHA must be one full commit")
+    round_signature, required_reviews = _issued_round(release_sha)
+    review_state = _upstream_review_state(list(required_reviews))
+
+    # Bind the sealed R0237 50M substrate + graph manifests (for the recipe proof).
+    substrate_manifest_signature = _signature(R0237_SUBSTRATE_MANIFEST, "R0237 50M substrate manifest")
+    graph_manifest_signature = _signature(R0237_GRAPH_MANIFEST, "R0237 50M graph manifest")
+    substrate_manifest = prompt_contract.read_sealed(
+        substrate_manifest_signature["canonical_path"], label="R0237 50M substrate manifest"
+    )
+    graph_manifest = prompt_contract.read_sealed(
+        graph_manifest_signature["canonical_path"], label="R0237 50M graph manifest"
+    )
+    if (
+        substrate_manifest.get("capability") != T.R0237_SUBSTRATE_CAPABILITY
+        or int(substrate_manifest.get("rows", -1)) != ROWS
+        or str(substrate_manifest.get("ordered_substrate_sha256")) != T.R0237_SUBSTRATE_ORDERED_SHA256
+    ):
+        raise RuntimeError("R0267 gate-only: substrate manifest is not the sealed R0237 50M substrate")
+    if (
+        graph_manifest.get("capability") != T.R0237_GRAPH_CAPABILITY
+        or int(graph_manifest.get("rows", -1)) != ROWS
+        or int(graph_manifest.get("directed_edges", -1)) != SEALED_DIRECTED_EDGES
+    ):
+        raise RuntimeError("R0267 gate-only: graph manifest is not the sealed R0237 50M k15 graph")
+    substrate_signature = dict(substrate_manifest["substrate"])
+    graph_signature = dict(graph_manifest["graph"])
+    edges = int(graph_manifest["directed_edges"])
+    base_horizon = successful_updates_for_edges(edges)
+
+    # The three-config recipe proof (unchanged; touches no train artifacts).
+    invariants: set[str] = set()
+    per_seed_config_sha: dict[str, str] = {}
+    recipe = None
+    for seed in SEEDS:
+        config, config_sha = int8_50m_train_config(
+            seed=seed,
+            graph_signature=graph_signature,
+            graph_manifest_signature=graph_manifest_signature,
+            substrate_signature=substrate_signature,
+            graph_edges=edges,
+            rows=ROWS,
+        )
+        recipe = assert_registered_50m_int8_recipe(config)
+        invariants.add(fneg_seed_invariant_sha256(config))
+        per_seed_config_sha[str(seed)] = config_sha
+    if len(invariants) != 1:
+        raise RuntimeError("R0267 gate-only: three cells do not share one masked recipe digest")
+    cell_seed_invariant = sorted(invariants)[0]
+
+    # Bind the sealed gate instruments exactly as the full-queue gate binds them.
+    r0265_floors = _signature(R0265_FLOORS, "R0265 sealed family floors")
+    r0265_panel = _signature(R0265_PANEL, "R0265 sealed n=13 panel")
+    p1_asymptote = _signature(P1_ASYMPTOTE, "P1 analysis-v2 ×2 asymptote band")
+    floors_sealed = prompt_contract.read_sealed(r0265_floors["canonical_path"], label="R0265 floors")
+    if floors_sealed.get("capability") != R0265N.GATE_CAPABILITY or floors_sealed.get("gate_registered") is not True:
+        raise RuntimeError("R0267 gate-only: --r0265-floors is not the sealed R0265 family floors gate")
+    panel_sealed_r0265 = prompt_contract.read_sealed(r0265_panel["canonical_path"], label="R0265 panel")
+    if panel_sealed_r0265.get("capability") != R0265N.PANEL_CAPABILITY or int(panel_sealed_r0265.get("n", -1)) != R0265N.N_FAMILY:
+        raise RuntimeError("R0267 gate-only: --r0265-panel is not the sealed n=13 panel")
+    with open(p1_asymptote["canonical_path"], encoding="utf-8") as handle:
+        p1_json = json.load(handle)
+    if "yinf_x2" not in dict(p1_json.get("bands") or {}) or p1_json.get("verdict") != "GO":
+        raise RuntimeError("R0267 gate-only: --p1-asymptote is not the frozen GO analysis-v2 result")
+    ffr_floor = float(dict(floors_sealed.get("registered_criteria") or {}).get("heldout_ffr", {}).get("floor"))
+
+    # Bind the correction-5 panel by CONTENT DIGEST and verify it IS the R0267 50M panel.
+    panel_signature = _signature(bind_panel, "R0267 correction-5 sealed 50M panel")
+    panel = prompt_contract.read_sealed(panel_signature["canonical_path"], label="R0267 correction-5 sealed 50M panel")
+    if (
+        panel.get("capability") != PANEL_CAPABILITY
+        or panel.get("schema") != PANEL_SCHEMA
+        or {int(s) for s in dict(panel.get("panel_metric_table") or {})} != set(SEEDS)
+    ):
+        raise RuntimeError("R0267 gate-only: --bind-panel is not the sealed R0267 three-seed 50M panel")
+
+    # Bind the sealed reserve-neighbour truth + the FFR re-score results by digest, and
+    # validate the re-score is the FLOOR-MATCHED instrument covering the three seeds.
+    reserve_truth_signature = _signature(reserve_truth, "R0267 reserve-neighbour truth")
+    rescore_signature = _signature(corrected_ffr_source, "R0267 FFR re-score results")
+    with open(rescore_signature["canonical_path"], encoding="utf-8") as handle:
+        rescore = json.load(handle)
+    per_map = dict(rescore.get("per_map") or {})
+    if {int(s) for s in per_map} != set(SEEDS):
+        raise RuntimeError("R0267 gate-only: FFR re-score does not cover the three fneg seeds")
+    n_scaled_disc = int(ROWS * 0.001)
+    if int(rescore.get("disc", -1)) != n_scaled_disc:
+        raise RuntimeError(
+            f"R0267 gate-only: FFR re-score disc {rescore.get('disc')} is not the N-scaled "
+            f"int(ROWS*0.001)={n_scaled_disc} (trip-9 guard)"
+        )
+    if abs(float(rescore.get("floor", 0.0)) - ffr_floor) > 1e-9:
+        raise RuntimeError("R0267 gate-only: FFR re-score floor disagrees with the sealed R0265 FFR floor")
+
+    census = dispatch_census()
+    guard = assert_derived_entries_install(SCOPE_MODULES, census)
+    gates = gate_census(entry_tuples(guard["derived"]))
+    residual = scope_residual(census, SCOPE_MODULES)
+
+    ensure_data_directory(ROUND_ROOT, label="R0267 round root")
+    queue_root = create_fresh_directory(queue_root, label="R0267 gate-only queue")
+    preflight = ensure_data_directory(os.path.join(queue_root, "preflight"))
+    closure_path = os.path.join(preflight, "treatment-source-closure.json")
+    atomic_write_new_json(closure_path, _treatment_closure_seal(release_sha), immutable=True)
+    identity_path = os.path.join(preflight, "fneg-50m-x2-cell-identity.json")
+    atomic_write_new_json(
+        identity_path,
+        prompt_contract.seal({
+            "schema": "round0267-fneg-50m-x2-cell-identity-v1",
+            "round_id": ROUND_ID,
+            "release_sha": release_sha,
+            "sealed_directed_edges": edges,
+            "base_horizon": base_horizon,
+            "x2_horizon": int(T.DOSE_MULTIPLIER * base_horizon),
+            "seeds": list(SEEDS),
+            "x_residency": T.X_RESIDENCY,
+            "dose_multiplier": T.DOSE_MULTIPLIER,
+            "rows": ROWS,
+            "recipe": recipe,
+            "cell_seed_invariant_sha256": cell_seed_invariant,
+            "per_seed_config_sha256": per_seed_config_sha,
+            "registry_fingerprint": registry_fingerprint(),
+        }),
+        immutable=True,
+    )
+    closure_signature = expected_input_signature(closure_path)
+
+    shared_inputs = _dedupe([
+        round_signature,
+        graph_manifest_signature,
+        substrate_manifest_signature,
+        substrate_signature,
+        graph_signature,
+        expected_input_signature(identity_path),
+        closure_signature,
+    ])
+    artifacts = ensure_data_directory(os.path.join(queue_root, "artifacts"))
+
+    provenance = {
+        "gate_only": True,
+        "gate_only_reseal": True,
+        "source_run": source_run,
+        "source_release_sha": source_release,
+        "superseded_verdict": "50M_FAIL_OR_AMBIGUOUS",
+        "correction_5_panel_sha256": panel_signature["sha256"],
+        "reserve_neighbour_truth_sha256": reserve_truth_signature["sha256"],
+        "rescore_results_sha256": rescore_signature["sha256"],
+        "corrected_ffr_disc": n_scaled_disc,
+        "corrected_ffr_floor": ffr_floor,
+        "per_seed_corrected_ffr": {str(s): float(per_map[str(s)]["heldout_ffr"]) for s in SEEDS},
+        "gate_release_sha": release_sha,
+        "note": (
+            "correction-5's registered 50M_FAIL_OR_AMBIGUOUS STAYS in the record; this "
+            "gate-only re-seal SUPERSEDES it with the corrected floor-matched FFR, it does "
+            "NOT erase it."
+        ),
+    }
+
+    gate_node = GATE_ACTION
+    jobs = [{
+        "id": gate_node,
+        "action": GATE_ACTION,
+        "handler_module": "experiments.round0267_nodes",
+        "handler_callable": "run_job",
+        "deps": [],
+        "outputs": [os.path.join(artifacts, GATE_CAPABILITY)],
+        "done_marker": os.path.join(artifacts, f"{gate_node}.done.json"),
+        "expected_inputs": _dedupe([
+            *shared_inputs, r0265_floors, r0265_panel, p1_asymptote,
+            panel_signature, reserve_truth_signature, rescore_signature,
+        ]),
+        "p90_wall_s": GATE_P90_WALL_S,
+        # The correction-5 panel bound by CONTENT DIGEST (re-verified at gate-node start).
+        "panel": panel_signature,
+        "r0265_floors": r0265_floors,
+        "r0265_panel": r0265_panel,
+        "p1_asymptote": p1_asymptote,
+        # PIECE B — the corrected-FFR re-score + the sealed reserve-neighbour truth.
+        "corrected_ffr_source": rescore_signature,
+        "reserve_truth": reserve_truth_signature,
+        "upstream_review_state": review_state,
+        "gate_only_provenance": provenance,
+        "node_policy": {"gpu_required": False, "training_performed": False, "cpu_heavy": True},
+    }]
+    p90 = {gate_node: GATE_P90_WALL_S, "total": GATE_P90_WALL_S}
+
+    queue = _base_manifest(
+        round_id=ROUND_ID,
+        release_sha=release_sha,
+        round_file=ROUND_FILE,
+        queue_root=queue_root,
+        gpu_hours_cap=GPU_HOURS_CAP,
+        execution_authority="autonomous-gpu",
+        gpu=False,
+    )
+    queue.update({
+        "schema": "round0267-fneg-50m-x2-seedmean-gate-only-queue-v1",
+        "repo_root": RELEASE_ROOT,
+        "queue_class": "cpu-gate-reseal",
+        "required_reviews": list(required_reviews),
+        "capability_dependencies": [
+            T.R0237_SUBSTRATE_CAPABILITY,
+            T.R0237_GRAPH_CAPABILITY,
+            R0218_PANEL_CAPABILITY,
+            R0265N.GATE_CAPABILITY,
+            R0265N.PANEL_CAPABILITY,
+            PANEL_CAPABILITY,
+        ],
+        "capabilities_produced": [GATE_CAPABILITY],
+        "jobs": jobs,
+        "p90_wall_s": p90,
+        "scope_modules": list(SCOPE_MODULES),
+        "stop_hook_install_guard": {
+            "derived_entries": guard["derived"],
+            "every_derived_entry_installs": guard["audit"]["every_entry_installs_effectively"],
+            "gate_census": gates,
+            "scope_residual": residual,
+        },
+        "gate_only_provenance": provenance,
+        "registered": {
+            "what_this_round_is": (
+                "SANCTIONED gate-only re-seal of R0267 (PIECE B): re-run ONLY the CPU gate "
+                "node against the already-sealed correction-5 panel, binding the corrected "
+                "floor-matched FFR from the sealed re-score in place of correction-5's "
+                "mis-measured FFR (trips 9/10). collapse/fog are byte-identical from the "
+                "correction-5 panel and purity stays descriptive; the recipe proof still "
+                "runs. No train nodes and no panel node. correction-5's registered "
+                "50M_FAIL_OR_AMBIGUOUS STAYS in the record; this is a NEW directory."
+            ),
+            "gate_only": True,
+            "gate_only_reseal": True,
+            "source_run": source_run,
+            "source_release_sha": source_release,
+            "supersedes": provenance,
+            "seeds": list(SEEDS),
+            "cell_seed_invariant_sha256": cell_seed_invariant,
+            "sealed_directed_edges": edges,
+            "rows": ROWS,
+            "consumes_sealed_gate_instruments": {
+                "family_floors": R0265N.GATE_CAPABILITY,
+                "n13_panel_for_sigma_fam": R0265N.PANEL_CAPABILITY,
+                "p1_x2_asymptote_band_sha256": p1_asymptote["sha256"],
+                "correction_5_panel_sha256": panel_signature["sha256"],
+                "reserve_neighbour_truth_sha256": reserve_truth_signature["sha256"],
+                "ffr_rescore_results_sha256": rescore_signature["sha256"],
+            },
+            "gate_registerable_here": True,
+            "correction_5_terminal_preserved": (
+                "correction-5's terminal, its sealed panel, and its registered "
+                "50M_FAIL_OR_AMBIGUOUS stay in the record; queue-correction-6 is a NEW "
+                "directory and overwrites nothing"
+            ),
+        },
+    })
+    manifest_path = os.path.join(queue_root, "queue.json")
+    atomic_write_new_json(manifest_path, queue, immutable=True)
+    return manifest_path
+
+
 def file_sha256_manifest(path: str) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -1028,7 +1355,44 @@ def main(argv: list[str] | None = None) -> int:
              f"instead of training it. Repeatable; only seeds {COMPLETED_BIND_SEEDS} are "
              f"supported. Digests are computed + sealed at prepare time (never hardcoded).",
     )
+    parser.add_argument(
+        "--gate-only", action="store_true",
+        help="PIECE B: build a one-node queue (queue-correction-6) that re-runs ONLY the gate "
+             "against the already-sealed correction-5 panel, binding the corrected floor-"
+             "matched FFR from the sealed re-score in place of the mis-measured FFR.",
+    )
+    parser.add_argument("--bind-panel", default=None,
+                        help="the already-sealed correction-5 50M panel to bind (gate-only)")
+    parser.add_argument("--corrected-ffr-source", default=None,
+                        help="the sealed FFR re-score results JSON to bind (gate-only)")
+    parser.add_argument("--reserve-truth", default=None,
+                        help="the sealed reserve-neighbour truth .npy to bind (gate-only)")
+    parser.add_argument("--source-run", default=None,
+                        help="the superseded source-run queue dir, for provenance (gate-only)")
+    parser.add_argument("--source-release", default=None,
+                        help="the superseded source run's release_sha, for provenance (gate-only)")
     args = parser.parse_args(argv)
+    if args.gate_only:
+        if args.salvage_seed is not None or args.bind_completed:
+            parser.error("--gate-only is incompatible with --salvage-* / --bind-completed")
+        gate_only_kwargs: dict[str, Any] = {}
+        if args.bind_panel:
+            gate_only_kwargs["bind_panel"] = args.bind_panel
+        if args.corrected_ffr_source:
+            gate_only_kwargs["corrected_ffr_source"] = args.corrected_ffr_source
+        if args.reserve_truth:
+            gate_only_kwargs["reserve_truth"] = args.reserve_truth
+        if args.source_run:
+            gate_only_kwargs["source_run"] = args.source_run
+        if args.source_release:
+            gate_only_kwargs["source_release"] = args.source_release
+        path = prepare_round0267_gate_only(
+            release_sha=args.release_sha,
+            queue_root=(args.queue_root or GATE_ONLY_QUEUE_ROOT),
+            **gate_only_kwargs,
+        )
+        print(json.dumps({"queue": path, "sha256": file_sha256_manifest(path)}))
+        return 0
     salvage: dict[str, Any] | None = None
     if args.salvage_seed is not None or args.salvage_from is not None or args.salvage_log is not None:
         if args.salvage_seed is None or not args.salvage_from or not args.salvage_log:

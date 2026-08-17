@@ -238,6 +238,28 @@ SAFETY_NOTE = (
     "attribute, set to this node's recorder and cleared in a finally."
 )
 
+#: The correction-run the gate-only re-seal (PIECE B) supersedes: correction-5's panel +
+#: registered gate carry the MIS-MEASURED FFR (~0.09). Its 50M_FAIL_OR_AMBIGUOUS verdict
+#: STAYS in the record — this re-seal SUPERSEDES it, it does not erase it.
+SUPERSEDED_SOURCE_RUN = "queue-correction-5"
+SUPERSEDED_VERDICT = "50M_FAIL_OR_AMBIGUOUS"
+
+#: The trip-9 + trip-10 diagnosis carried on the gate-only re-seal output. Two axes on which
+#: correction-5's 50M held-out FFR was mis-specified vs the R0265 floor.
+TRIP_9_10_DIAGNOSIS = (
+    "correction-5's 50M held-out FFR was mis-specified vs the R0265 floor on two axes. "
+    "TRIP 9 (discovery radius): it used the fixed 2000 disc instead of the N-scaled "
+    "disc = int(ROWS * 0.001) = 50000 (0.1%·N). TRIP 10 (probe design): it used the "
+    "IN-SUBSTRATE projection coordinates[probe_rows] instead of the floor's OUT-OF-"
+    "SUBSTRATE reserve projection model.transform(reserve). A CPU re-score rebuilt the "
+    "reserve-neighbour truth and re-scored all three already-trained maps with the floor's "
+    "own instrument (disc=50000, out-of-substrate reserve), yielding FFR ~0.55 (was ~0.09), "
+    "all three clearing the unchanged floor 0.3991. This gate-only re-seal binds that "
+    "corrected FFR (collapse/fog byte-identical from the correction-5 panel, purity "
+    "descriptive) and emits the SUPERSEDING verdict. PIECE A fixes run_panel so a full "
+    "panel is born on this floor-matched instrument (trips 9/10 cannot recur at 100M)."
+)
+
 #: The pre-registered assumption the gate records (plan criterion 1).
 SEED_SPREAD_ASSUMPTION = (
     "the 2M fneg family's seed spread (σ_fam = 1.4826·MAD_n over R0265's sealed 13 "
@@ -1156,17 +1178,38 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     centroid_ks = [int(k) for k in job["centroid_ks"]]
     cfg = prompt_contract.panel_config()
 
-    # The held-out FFR instrument: the sealed R0237 exact k15 truth for its 1M uniform
-    # probe (query rows into the 50M substrate + their exact top-k neighbour ids). The
-    # 200k held-out reserve is bound as the held-out reserve lineage (see round file).
-    probe_rows = np.load(
-        _bound_path(job, "truth_query_rows", label="R0267 50M truth query rows"), allow_pickle=False
+    # The FLOOR-MATCHED held-out FFR instrument (PIECE A, 2026-08-17). The R0265 family
+    # floor is the OUT-OF-SUBSTRATE reserve projection: the held-out reserve embeddings
+    # projected THROUGH each trained map (`model.transform(reserve)`), scored against the
+    # reserve's exact-cosine neighbour truth, at the N-scaled discovery radius
+    # disc = int(ROWS * 0.001) (0.1%·N). run_panel now measures FFR with that same
+    # instrument so a full panel is BORN matched to the floor (the two mis-specifications
+    # that produced the R0267 50M FFR — trip 9: the fixed 2000 disc instead of the N-scaled
+    # 0.1%·N; trip 10: the IN-SUBSTRATE coordinates[probe_rows] instead of the OUT-OF-
+    # SUBSTRATE reserve projection — cannot recur at 100M).
+    #   * `reserve_embeddings` = reserve.f32[reserve-query-rows] (the R0237 held-out reserve
+    #     query rows), a sealed panel input; projected per-cell below.
+    #   * `reserve_truth` = the sealed reserve-neighbour top-10 truth (indices INTO the 50M
+    #     substrate == into each cell's coordinates), a sealed panel input.
+    #   * `reserve_disc` = int(ROWS * 0.001) — N-scaled, NOT the fixed 2000.
+    reserve_all = np.load(
+        _bound_path(job, "heldout_reserve", label="R0267 50M held-out reserve"),
+        mmap_mode="r", allow_pickle=False,
+    )
+    reserve_query_rows = np.load(
+        _bound_path(job, "reserve_query_rows", label="R0267 reserve query rows"),
+        allow_pickle=False,
     ).astype(np.int64, copy=False)
-    truth_ids = np.load(
-        _bound_path(job, "truth_ids", label="R0267 50M truth ids"), allow_pickle=False
+    if reserve_all.ndim != 2 or int(reserve_all.shape[1]) != DIMENSION or reserve_query_rows.ndim != 1:
+        raise Round0267NodeError("R0267 held-out reserve geometry changed")
+    reserve_embeddings = np.asarray(reserve_all[reserve_query_rows], dtype=np.float32)
+    reserve_truth = np.load(
+        _bound_path(job, "reserve_truth", label="R0267 reserve-neighbour truth"),
+        allow_pickle=False,
     ).astype(np.int64, copy=False)
-    if probe_rows.ndim != 1 or truth_ids.ndim != 2 or truth_ids.shape[0] != probe_rows.shape[0]:
-        raise Round0267NodeError("R0267 50M truth geometry changed")
+    if reserve_truth.ndim != 2 or reserve_truth.shape[0] != reserve_embeddings.shape[0]:
+        raise Round0267NodeError("R0267 reserve-neighbour truth geometry changed")
+    reserve_disc = int(ROWS * 0.001)
 
     cells_in = job.get("cells")
     if not isinstance(cells_in, list):
@@ -1224,8 +1267,10 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             if entry.get("salvaged") or entry.get("bound_completed"):
                 # BOUND cell (seed42 salvaged from correction-3, or seed43/44 completed in
                 # correction-4): score the BOUND coordinates directly (digest-pinned at
-                # authentication), not a re-transform. No model load, no GPU transform.
-                model = None
+                # authentication), NOT a 50M re-transform. The map's model IS still loaded —
+                # only to project the small (2000-row) held-out reserve for the floor-matched
+                # FFR instrument (PIECE A); collapse/fog/purity remain measured on the bound
+                # coordinates, so the expensive 50M transform is still skipped.
                 coordinates = np.asarray(
                     np.load(entry["coordinates_path"], allow_pickle=False), dtype=np.float32
                 )
@@ -1233,9 +1278,10 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                     raise Round0267NodeError(
                         f"R0267 seed-{seed} bound coordinates are not a finite 50M map"
                     )
+                proj_model = ParametricUMAP.load(entry["model_path"], device="cuda")
             else:
-                model = ParametricUMAP.load(entry["model_path"], device="cuda")
-                coordinates = _transform_50m_in_chunks(model, source, wrapped)
+                proj_model = ParametricUMAP.load(entry["model_path"], device="cuda")
+                coordinates = _transform_50m_in_chunks(proj_model, source, wrapped)
                 if coordinates.shape != (ROWS, 2) or not np.isfinite(coordinates).all():
                     raise Round0267NodeError(f"R0267 seed-{seed} transform is not a finite 50M map")
             # DESCRIPTIVE purity pass — the ONLY score_panel call run_panel makes
@@ -1267,12 +1313,21 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             )
             purity_ratios = {"k256": float(purity_panel["purity"]["k256"]),
                              "k1024": float(purity_panel["purity"]["k1024"])}
-            placed = np.asarray(coordinates[probe_rows], dtype=np.float32)
+            # FLOOR-MATCHED held-out FFR (PIECE A): project the OUT-OF-SUBSTRATE held-out
+            # reserve THROUGH this map (`model.transform(reserve)`), score against the sealed
+            # reserve-neighbour truth at the N-scaled disc = int(ROWS * 0.001).  This is the
+            # R0265 family floor's own instrument; collapse/fog are still measured on the FULL
+            # 50M coordinates inside score_one_map (byte-identical).
+            placed = np.asarray(
+                proj_model.transform(reserve_embeddings, batch_size=FULL_TRANSFORM_BATCH),
+                dtype=np.float32,
+            )
             scored_map = score_one_map(
                 coordinates=coordinates,
                 probes_placed=placed,
-                truth_top10=truth_ids,
+                truth_top10=reserve_truth,
                 purity_ratios=purity_ratios,
+                disc=reserve_disc,
             )
             if entry.get("salvaged"):
                 # seed42: provenance is the salvage block + the bound artifacts, NOT a
@@ -1339,7 +1394,7 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 "hiD_reference_reused": bool(purity_panel["provenance"]["hiD_reference_reused"]),
                 "lineage_caveat": DESCRIPTIVE_PURITY_LINEAGE_CAVEAT,
             }
-            del model, coordinates, placed
+            del proj_model, coordinates, placed
             torch.cuda.empty_cache()
             gc.collect()
             wrapped(f"R0267 seed-{seed} scored")
@@ -1426,6 +1481,24 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             },
         },
         "heldout_reserve": dict(job.get("heldout_reserve") or {}),
+        "heldout_ffr_instrument": {
+            "floor_matched": True,
+            "probe_design": "out_of_substrate_reserve_projection",
+            "placed_is": "model.transform(reserve.f32[reserve-query-rows])",
+            "truth": "sealed reserve-neighbour exact-cosine top-10 (indices into the 50M substrate)",
+            "disc": reserve_disc,
+            "disc_rule": "int(ROWS * 0.001) — 0.1%·N, N-scaled",
+            "n_reserve_probes": int(reserve_embeddings.shape[0]),
+            "reserve_query_rows_binding": dict(job.get("reserve_query_rows") or {}),
+            "reserve_truth_binding": dict(job.get("reserve_truth") or {}),
+            "note": (
+                "PIECE A (2026-08-17): the floor-matched instrument. The R0265 family floor "
+                "is the OUT-OF-SUBSTRATE reserve projection at disc=int(ROWS*0.001); run_panel "
+                "measures FFR with that same instrument so a full panel is born matched to the "
+                "floor. Supersedes the earlier IN-SUBSTRATE coordinates[probe_rows] + fixed "
+                "2000 disc (trips 9/10)."
+            ),
+        },
         "lineage": {
             "graph_manifest": dict(substrate["manifest_signature"]),
             "substrate": dict(substrate["substrate_signature"]),
@@ -1742,6 +1815,65 @@ def _bound_provenance_from_panel(panel: Mapping[str, Any]) -> dict[str, dict[str
     return provenance
 
 
+def _corrected_ffr_from_rescore(
+    job: Mapping[str, Any], *, backstops_floor: float
+) -> dict[str, Any] | None:
+    """Read the CORRECTED per-seed FFR from the bound re-score artifact (gate-only re-seal).
+
+    Returns ``None`` on the full-queue path (no ``corrected_ffr_source`` bound), so the
+    full-queue gate is byte-identical. On the gate-only re-seal path (PIECE B) it verifies
+    the bound re-score's digest (via ``_bound_path``), checks the re-score covers the three
+    fneg seeds, is the FLOOR-MATCHED instrument (disc == int(ROWS * 0.001), N-scaled — NOT
+    the fixed 2000 that produced trip 9), and that the re-score's floor equals the sealed
+    R0265 FFR floor read from the bound floors (so the corrected FFR is judged against the
+    SAME floor). It also re-verifies the sealed reserve-neighbour truth's bound digest (the
+    truth the re-score scored against) for provenance. It returns the corrected per-seed FFR
+    plus the three superseding shas — the caller OVERRIDES the panel's mis-measured FFR in
+    the metric table with these before the per-seed backstops are scored. Collapse and fog
+    are NEVER touched here (they stay byte-identical from the correction-5 panel).
+    """
+    ref = job.get("corrected_ffr_source")
+    if not isinstance(ref, Mapping):
+        return None
+    path = _bound_path(job, "corrected_ffr_source", label="R0267 corrected FFR re-score results")
+    with open(path, encoding="utf-8") as handle:
+        rescore = json.load(handle)
+    per_map = dict(rescore.get("per_map") or {})
+    if {int(s) for s in per_map} != set(SEEDS):
+        raise Round0267NodeError("R0267 gate-only re-score does not cover the three fneg seeds")
+    disc = int(rescore["disc"])
+    n_scaled_disc = int(ROWS * 0.001)
+    if disc != n_scaled_disc:
+        raise Round0267NodeError(
+            f"R0267 gate-only re-score disc {disc} is not the N-scaled int(ROWS*0.001)="
+            f"{n_scaled_disc} (trip-9 guard)"
+        )
+    rescore_floor = float(rescore["floor"])
+    if not math.isclose(rescore_floor, float(backstops_floor), rel_tol=0.0, abs_tol=1e-9):
+        raise Round0267NodeError(
+            "R0267 gate-only re-score floor disagrees with the sealed R0265 FFR floor: "
+            f"{rescore_floor} != {float(backstops_floor)}"
+        )
+    per_seed = {str(s): float(per_map[str(s)]["heldout_ffr"]) for s in SEEDS}
+    # Re-verify the sealed reserve-neighbour truth's bound digest (provenance; the re-score
+    # scored against it). The gate does not recompute FFR from it — the re-score already did.
+    reserve_truth_sig = job.get("reserve_truth")
+    if isinstance(reserve_truth_sig, Mapping):
+        _bound_path(job, "reserve_truth", label="R0267 sealed reserve-neighbour truth")
+    return {
+        "gate_only_reseal": True,
+        "rescore_results_path": path,
+        "rescore_results_sha256": str(ref.get("sha256") or ""),
+        "reserve_neighbour_truth_sha256": str((reserve_truth_sig or {}).get("sha256") or ""),
+        "corrected_ffr_disc": disc,
+        "corrected_ffr_floor": rescore_floor,
+        "per_seed_corrected_ffr": per_seed,
+        "rescore_per_map": per_map,
+        "boot_seed": rescore.get("boot_seed"),
+        "bootstrap_B": rescore.get("B"),
+    }
+
+
 def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     install_stop_hooks(label="R0267 round0267_nodes.run_gate")
     if active.get("manifest", {}).get("round_id") != ROUND_ID:
@@ -1791,6 +1923,26 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             _bound_path(job, "r0265_floors", label="R0265 sealed family floors")
         )["bands"]
         wrapped("R0267 per-seed backstops read from the sealed R0265 floors")
+
+        # 4b. GATE-ONLY FFR RE-SEAL (PIECE B). If a corrected-FFR re-score is bound, SUPERSEDE
+        # the correction-5 panel's mis-measured FFR with the corrected FLOOR-MATCHED values
+        # BEFORE the per-seed backstops are scored. collapse (criterion 1 + backstop) and fog
+        # stay BYTE-IDENTICAL — they are read from the bound panel and never recomputed here;
+        # only the FFR column of the metric table is replaced. On the full-queue path (no
+        # corrected_ffr_source bound) this is a no-op and the gate is byte-identical.
+        ffr_correction = _corrected_ffr_from_rescore(
+            job, backstops_floor=backstops["heldout_ffr_floor"]
+        )
+        superseded_ffr = None
+        if ffr_correction is not None:
+            superseded_ffr = {
+                s: float(metric_table[s][HELDOUT_FFR_METRIC]) for s in metric_table
+            }
+            for s in SEEDS:
+                metric_table[str(s)][HELDOUT_FFR_METRIC] = (
+                    ffr_correction["per_seed_corrected_ffr"][str(s)]
+                )
+            wrapped("R0267 gate-only re-seal: corrected FFR bound from the re-score artifact")
 
         # CRITERION 1: the seed-mean collapse inside the widened P1 ×2 band.
         criterion_1 = score_collapse_seed_mean(
@@ -1873,6 +2025,55 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             for prov in bound_provenance.values()
         ),
     }
+    # GATE-ONLY re-seal (PIECE B): build the superseding provenance + its execution checks.
+    ffr_correction_provenance: dict[str, Any] | None = None
+    if ffr_correction is not None:
+        ffr_correction_provenance = {
+            "gate_only_reseal": True,
+            "diagnosis": TRIP_9_10_DIAGNOSIS,
+            "supersedes": {
+                "source_run": SUPERSEDED_SOURCE_RUN,
+                "superseded_verdict": SUPERSEDED_VERDICT,
+                "note": (
+                    "correction-5's registered 50M_FAIL_OR_AMBIGUOUS verdict STAYS in the "
+                    "record; this gate-only re-seal SUPERSEDES it with the corrected FFR, it "
+                    "does NOT erase it."
+                ),
+            },
+            "correction_5_panel_sha256": str((job.get("panel") or {}).get("sha256") or ""),
+            "reserve_neighbour_truth_sha256": ffr_correction["reserve_neighbour_truth_sha256"],
+            "rescore_results_sha256": ffr_correction["rescore_results_sha256"],
+            "corrected_ffr_disc": ffr_correction["corrected_ffr_disc"],
+            "corrected_ffr_floor": ffr_correction["corrected_ffr_floor"],
+            "per_seed_corrected_ffr": ffr_correction["per_seed_corrected_ffr"],
+            "per_seed_superseded_ffr": superseded_ffr,
+            "rescore_per_map": ffr_correction["rescore_per_map"],
+            "collapse_fog_byte_identical_from_correction_5": True,
+            "purity_descriptive": True,
+        }
+        three_shas_present = all(
+            bool(ffr_correction_provenance[key])
+            for key in (
+                "correction_5_panel_sha256",
+                "reserve_neighbour_truth_sha256",
+                "rescore_results_sha256",
+            )
+        )
+        execution_checks["corrected_ffr_sourced_from_bound_rescore"] = all(
+            metric_table[str(s)][HELDOUT_FFR_METRIC]
+            == ffr_correction["per_seed_corrected_ffr"][str(s)]
+            for s in SEEDS
+        )
+        execution_checks["collapse_fog_bound_from_correction_5_panel"] = all(
+            metric_table[str(s)][COLLAPSE_METRIC] == float(panel["panel_metric_table"][str(s)][COLLAPSE_METRIC])
+            and metric_table[str(s)][FOG_METRIC] == float(panel["panel_metric_table"][str(s)][FOG_METRIC])
+            for s in SEEDS
+        )
+        execution_checks["superseding_provenance_records_three_shas_and_fail_stays"] = bool(
+            three_shas_present
+            and ffr_correction_provenance["supersedes"]["superseded_verdict"] == SUPERSEDED_VERDICT
+            and "STAYS" in ffr_correction_provenance["supersedes"]["note"]
+        )
     if not all(execution_checks.values()):
         raise Round0267NodeError(f"R0267 gate execution checks failed: {execution_checks}")
 
@@ -1941,6 +2142,10 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             "ambiguous": ambiguous,
             "verdict": verdict,
         },
+        # GATE-ONLY re-seal provenance (PIECE B): None on the full-queue path.
+        "gate_only_reseal": ffr_correction is not None,
+        "ffr_correction": ffr_correction_provenance,
+        "gate_only_provenance": dict(job.get("gate_only_provenance") or {}) or None,
         "gate_status": "registered-and-contingent-pending-review",
         "gate_registered": True,
         "evaluation_performed": True,
@@ -1969,6 +2174,8 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "criterion_1_passes": criterion_1["passes"],
         "every_seed_clears_every_backstop": backstop_scoring["every_seed_clears_every_backstop"],
         "verdict": verdict,
+        "gate_only_reseal": ffr_correction is not None,
+        "supersedes": (SUPERSEDED_SOURCE_RUN if ffr_correction is not None else None),
         "observed_span_s": coverage["observed_span_s"],
         "covered_fraction": coverage["covered_fraction"],
     }))
@@ -2007,11 +2214,15 @@ __all__ = [
     "SALVAGE_SEED",
     "SALVAGE_SEED42_COORDINATES_SHA256",
     "SALVAGE_SOURCE_RUN",
+    "SUPERSEDED_SOURCE_RUN",
+    "SUPERSEDED_VERDICT",
+    "TRIP_9_10_DIAGNOSIS",
     "TRAIN_ACTION",
     "TRAIN_SCHEMA",
     "_authenticate_bound_completed_50m_map",
     "_authenticate_salvaged_50m_map",
     "_bound_provenance_from_panel",
+    "_corrected_ffr_from_rescore",
     "_salvage_provenance_from_panel",
     "build_hostint8_dataset_from_slice",
     "read_p1_x2_asymptote_band",

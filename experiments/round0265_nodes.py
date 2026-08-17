@@ -566,6 +566,7 @@ def score_one_map(
     probes_placed: np.ndarray,
     truth_top10: np.ndarray,
     purity_ratios: Mapping[str, float],
+    disc: int = FFR_DISC,
 ) -> dict[str, Any]:
     """The four registrable numbers for one map, assembled from the three programs.
 
@@ -573,9 +574,15 @@ def score_one_map(
     the caller against R0218's frozen reference, so they stay commensurate with R0263's
     registered band). Collapse and fog are measured here on the coordinates; held-out FFR
     from the projected probes.
+
+    `disc` is the held-out-FFR discovery radius. It defaults to this module's ``FFR_DISC``
+    (``int(ROWS * 0.001)`` = 0.1%·N at the R0265 2M substrate), so every existing caller is
+    byte-identical. A larger-N substrate (e.g. R0267's 50M rung) passes its own N-scaled
+    ``int(ROWS * 0.001)`` so the FFR instrument tracks the floor's own 0.1%·N discovery
+    radius rather than the fixed 2M value.
     """
     ffr = heldout_ffr_scores(
-        placed=probes_placed, map_coordinates=coordinates, truth_top10=truth_top10
+        placed=probes_placed, map_coordinates=coordinates, truth_top10=truth_top10, disc=disc
     )
     collapse = map_collapse(coordinates)
     fog = _map_fog(coordinates, bins=FOG_BINS)

@@ -12,6 +12,7 @@ import copy
 import json
 import math
 import os
+import re
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
@@ -1409,12 +1410,23 @@ def test_run_panel_descriptive_purity_is_prefix_inline_and_labelled():
     import inspect
 
     src = inspect.getsource(N.run_panel)
-    # collapse / fog / held-out FFR: score_one_map on the FULL 50M coordinates + truth.
+    # collapse / fog / held-out FFR: score_one_map on the FULL 50M coordinates.
     assert "score_one_map(" in src
     assert "coordinates=coordinates," in src
     assert "probes_placed=placed," in src
-    assert "truth_top10=truth_ids," in src
-    assert "placed = np.asarray(coordinates[probe_rows], dtype=np.float32)" in src
+    # PIECE A: the FLOOR-MATCHED FFR instrument — out-of-substrate reserve projection +
+    # the reserve-neighbour truth + the N-scaled disc.  The old IN-SUBSTRATE probe design
+    # (coordinates[probe_rows]) and its fixed-2000 disc are GONE.
+    assert "truth_top10=reserve_truth," in src
+    assert "proj_model.transform(reserve_embeddings" in src
+    assert "disc=reserve_disc," in src
+    assert "reserve_disc = int(ROWS * 0.001)" in src
+    assert "coordinates[probe_rows]" not in src.replace(
+        "# 0.1%·N; trip 10: the IN-SUBSTRATE coordinates[probe_rows] instead of the OUT-OF-", ""
+    ).replace(
+        '"floor. Supersedes the earlier IN-SUBSTRATE coordinates[probe_rows] + fixed "', ""
+    )
+    assert "truth_top10=truth_ids," not in src
     # run_panel makes EXACTLY ONE score_panel call -- the descriptive prefix purity pass.
     assert src.count("score_panel(") == 1
     # that pass builds the reference INLINE on the prefix (hiD_reference=None) with
@@ -1501,3 +1513,390 @@ def test_run_gate_records_descriptive_purity_and_gates_on_three_only():
     # the verdict is still the criterion-1 + gated-backstops expression (byte-identical).
     assert "backstop_scoring[\"every_seed_clears_every_backstop\"]" in src
     assert "backstop_scoring[\"any_gate_straddles\"]" in src
+
+
+# --------------------------------------------------------------------------- #
+# 9. PIECE A — the FLOOR-MATCHED FFR instrument (2026-08-17): run_panel measures
+#    held-out FFR with the R0265 floor's own instrument — the OUT-OF-SUBSTRATE
+#    reserve projection (model.transform(reserve)) against the sealed reserve-
+#    neighbour truth, at the N-scaled disc = int(ROWS * 0.001). CPU-only structural
+#    + a cheap real-scipy unit for the score_one_map disc forwarding. No 50M, no GPU.
+# --------------------------------------------------------------------------- #
+
+import experiments.round0265_nodes as R0265N
+from basemap.artifact_identity import expected_input_signature as _sig
+
+
+def test_score_one_map_forwards_disc_to_heldout_ffr():
+    """score_one_map's new `disc` kwarg threads to heldout_ffr_scores; the default is
+    R0265's FFR_DISC (byte-identical for every existing caller), a larger-N caller passes
+    its own N-scaled disc.  A cheap real-cKDTree fixture (50 coords)."""
+    rng = np.random.RandomState(0)
+    coords = rng.randn(50, 2).astype("float32")
+    placed = coords[:4] + 1e-4
+    truth = np.tile(np.arange(3, dtype=np.int64), (4, 1))  # (4, 3) indices into coords
+    out_default = R0265N.score_one_map(
+        coordinates=coords, probes_placed=placed, truth_top10=truth,
+        purity_ratios={"k256": 1.0, "k1024": 1.0},
+    )
+    assert out_default["heldout_ffr_detail"]["disc"] == R0265N.FFR_DISC == 2000
+    out_disc = R0265N.score_one_map(
+        coordinates=coords, probes_placed=placed, truth_top10=truth,
+        purity_ratios={"k256": 1.0, "k1024": 1.0}, disc=7,
+    )
+    assert out_disc["heldout_ffr_detail"]["disc"] == 7
+    # the disc is the ONLY thing changed — collapse/fog stay identical.
+    assert out_default["collapse"] == out_disc["collapse"]
+    assert out_default["fog"] == out_disc["fog"]
+
+
+def test_run_panel_ffr_disc_is_n_scaled_not_the_fixed_2000():
+    """The R0267 held-out-FFR disc is int(ROWS * 0.001) (0.1%·N), which SCALES with the
+    substrate: 50000 at the 50M rung, NOT the fixed 2000 (trip 9)."""
+    assert int(T.ROWS * 0.001) == 50_000
+    assert int(T.ROWS * 0.001) != 2000
+    # and it tracks a larger N (the 100M panel is born on the same rule).
+    assert int(100_000_000 * 0.001) == 100_000
+    # R0265's own FFR_DISC is the 2M value (0.1%·2M = 2000) — the rule, at its own N.
+    assert R0265N.FFR_DISC == int(R0265N.ROWS * 0.001) == 2000
+
+
+def test_run_panel_ffr_uses_out_of_substrate_reserve_projection():
+    """Structural (PIECE A): run_panel projects the OUT-OF-SUBSTRATE reserve THROUGH each
+    map for the floor-matched FFR, scores against the reserve-neighbour truth at the
+    N-scaled disc, and binds the reserve + reserve-truth as sealed inputs.  The old
+    IN-SUBSTRATE probe design (coordinates[probe_rows]) + fixed disc are GONE."""
+    import inspect
+
+    src = inspect.getsource(N.run_panel)
+    # the floor-matched instrument.
+    assert "reserve_disc = int(ROWS * 0.001)" in src
+    assert "proj_model.transform(reserve_embeddings" in src
+    assert "truth_top10=reserve_truth," in src
+    assert "disc=reserve_disc," in src
+    # reserve + reserve-truth are read as sealed panel inputs.
+    assert '_bound_path(job, "heldout_reserve"' in src
+    assert '_bound_path(job, "reserve_query_rows"' in src
+    assert '_bound_path(job, "reserve_truth"' in src
+    assert "reserve_all[reserve_query_rows]" in src
+    # the OLD in-substrate probe design does not survive as executable code.
+    code_only = "\n".join(
+        line for line in src.splitlines()
+        if not line.lstrip().startswith("#") and '"' not in line.split("=", 1)[0]
+    )
+    assert "coordinates[probe_rows]" not in code_only
+    assert "truth_top10=truth_ids," not in src
+
+
+def test_prepare_binds_the_reserve_and_reserve_truth_inputs():
+    """PIECE A: prepare exposes the reserve-query-rows + reserve-neighbour-truth path
+    constants and binds them into the panel job (structural — no heavy full-queue build)."""
+    import inspect
+
+    assert P.R0237_RESERVE_QUERY_ROWS.endswith("reserve-query-rows.i64.npy")
+    assert P.R0267_RESERVE_NEIGHBOUR_TRUTH.endswith(
+        "round-0267/ffr-correction/reserve-truth-50m/truth-top10.npy"
+    )
+    src = inspect.getsource(P.prepare_round0267)
+    assert '_signature(R0237_RESERVE_QUERY_ROWS' in src
+    assert '_signature(R0267_RESERVE_NEIGHBOUR_TRUTH' in src
+    assert '"reserve_query_rows": reserve_query_rows,' in src
+    assert '"reserve_truth": reserve_truth,' in src
+
+
+# --------------------------------------------------------------------------- #
+# 10. PIECE B — the GATE-ONLY FFR RE-SEAL (queue-correction-6): the gate reads the
+#     CORRECTED floor-matched FFR from the bound re-score and SUPERSEDES correction-5's
+#     mis-measured FFR, with collapse/fog byte-identical from the correction-5 panel and
+#     purity descriptive; full superseding provenance (3 shas + trip-9/10 diagnosis +
+#     "correction-5 FAIL stays"). CPU-only fixtures; no 50M, no GPU.
+# --------------------------------------------------------------------------- #
+
+_FLOOR = 0.39905871498653556  # the sealed R0265 held-out-FFR floor (unchanged)
+#: The correction-5 panel's real collapse/fog + its mis-measured (~0.09) FFR, and the
+#: corrected (~0.55) FFR from the sealed re-score.
+_C5_COLLAPSE = {"42": 1.0860159998405134, "43": 1.0326237205997602, "44": 0.9233916709564777}
+_C5_FOG = {"42": 0.2472015948320957, "43": 0.11650973419621417, "44": 0.16312232184635772}
+_C5_OLD_FFR = {"42": 0.0920146, "43": 0.09308386666666667, "44": 0.0884056}
+_C6_CORRECTED_FFR = {"42": 0.55935, "43": 0.5539, "44": 0.54945}
+
+
+def _write_rescore(tmp_path, *, per_seed, disc=None, floor=_FLOOR, name="rescore-results.json"):
+    disc = int(T.ROWS * 0.001) if disc is None else disc
+    body = {
+        "disc": disc, "floor": floor, "B": 1000, "boot_seed": 20260817,
+        "per_map": {
+            str(s): {"heldout_ffr": float(per_seed[str(s)]), "regressor_ffr": 0.49,
+                     "net": 0.06, "verdict": "PASS"}
+            for s in T.SEEDS
+        },
+    }
+    path = str(tmp_path / name)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(body, handle)
+    return path, _sig(path)
+
+
+def _write_reserve_truth(tmp_path, name="truth-top10.npy"):
+    arr = np.zeros((2000, 10), dtype=np.int64)
+    path = str(tmp_path / name)
+    np.save(path, arr)
+    return path, _sig(path)
+
+
+def _c5_mt(ffr_map):
+    return {
+        s: _seed_metrics(collapse=_C5_COLLAPSE[s], fog=_C5_FOG[s], ffr=ffr_map[s],
+                         k256=1.09, k1024=0.92)
+        for s in (str(x) for x in T.SEEDS)
+    }
+
+
+def test_corrected_ffr_from_rescore_reads_bound_values(tmp_path):
+    _, rescore_sig = _write_rescore(tmp_path, per_seed=_C6_CORRECTED_FFR)
+    _, truth_sig = _write_reserve_truth(tmp_path)
+    job = {"corrected_ffr_source": rescore_sig, "reserve_truth": truth_sig}
+    out = N._corrected_ffr_from_rescore(job, backstops_floor=_FLOOR)
+    assert out is not None
+    assert out["gate_only_reseal"] is True
+    assert out["corrected_ffr_disc"] == 50_000
+    assert out["corrected_ffr_floor"] == pytest.approx(_FLOOR)
+    for s in T.SEEDS:
+        assert out["per_seed_corrected_ffr"][str(s)] == pytest.approx(_C6_CORRECTED_FFR[str(s)])
+    assert out["rescore_results_sha256"] == rescore_sig["sha256"]
+    assert out["reserve_neighbour_truth_sha256"] == truth_sig["sha256"]
+
+
+def test_corrected_ffr_full_queue_path_returns_none():
+    # No corrected_ffr_source bound => full-queue gate is byte-identical (helper is a no-op).
+    assert N._corrected_ffr_from_rescore({}, backstops_floor=_FLOOR) is None
+
+
+def test_corrected_ffr_trip9_disc_guard_fires(tmp_path):
+    # a re-score at the FIXED 2000 disc (trip 9) is refused.
+    _, rescore_sig = _write_rescore(tmp_path, per_seed=_C6_CORRECTED_FFR, disc=2000)
+    with pytest.raises(N.Round0267NodeError):
+        N._corrected_ffr_from_rescore({"corrected_ffr_source": rescore_sig}, backstops_floor=_FLOOR)
+
+
+def test_corrected_ffr_floor_guard_fires(tmp_path):
+    # a re-score whose floor disagrees with the sealed R0265 floor is refused.
+    _, rescore_sig = _write_rescore(tmp_path, per_seed=_C6_CORRECTED_FFR, floor=0.10)
+    with pytest.raises(N.Round0267NodeError):
+        N._corrected_ffr_from_rescore({"corrected_ffr_source": rescore_sig}, backstops_floor=_FLOOR)
+
+
+def test_corrected_ffr_requires_the_three_seeds(tmp_path):
+    body = {"disc": int(T.ROWS * 0.001), "floor": _FLOOR,
+            "per_map": {"42": {"heldout_ffr": 0.55}, "43": {"heldout_ffr": 0.55}}}
+    path = str(tmp_path / "partial.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(body, handle)
+    with pytest.raises(N.Round0267NodeError):
+        N._corrected_ffr_from_rescore({"corrected_ffr_source": _sig(path)}, backstops_floor=_FLOOR)
+
+
+def test_corrected_ffr_tamper_evident(tmp_path):
+    _, rescore_sig = _write_rescore(tmp_path, per_seed=_C6_CORRECTED_FFR)
+    with open(rescore_sig["canonical_path"], "a", encoding="utf-8") as handle:
+        handle.write("  ")  # mutate the bytes -> the bound digest no longer matches
+    with pytest.raises(Exception):
+        N._corrected_ffr_from_rescore({"corrected_ffr_source": rescore_sig}, backstops_floor=_FLOOR)
+
+
+def test_gate_only_verdict_is_pass_with_corrected_ffr_and_fail_with_the_old():
+    """The superseding decision: correction-5's collapse/fog are healthy but its
+    mis-measured FFR ~0.09 FAILS the floor (verdict FAIL); the corrected ~0.55 FFR CLEARS
+    it, so the reconstructed 50M verdict is PASS.  Uses the synthetic bands + real
+    correction-5 collapse/fog + real corrected/old FFR."""
+    # collapse seed-mean is inside the widened P1 band (collapse is byte-identical either way).
+    c1 = N.score_collapse_seed_mean(
+        seed_collapse=_C5_COLLAPSE, p1_lower=0.930, p1_upper=0.985, sigma_fam_collapse=0.06)
+    assert c1["passes"] is True
+
+    # OLD (mis-measured ~0.09) FFR -> every seed FAILS the FFR floor -> FAIL.
+    bs_old = N.score_per_seed_backstops(
+        metric_table=_c5_mt(_C5_OLD_FFR), backstops=_SYNTH_BACKSTOPS, sigma_fam_fog=0.02)
+    for row in bs_old["cells"]:
+        assert row["metrics"]["heldout_ffr"]["passes"] is False
+    assert bs_old["every_seed_clears_every_backstop"] is False
+    verdict_old = ("50M_PASS" if (c1["passes"]
+                   and bs_old["every_seed_clears_every_backstop"]
+                   and not bs_old["any_gate_straddles"]
+                   and not bs_old["any_fog_near_ceiling_escalation"])
+                   else "50M_FAIL_OR_AMBIGUOUS")
+    assert verdict_old == "50M_FAIL_OR_AMBIGUOUS"
+
+    # CORRECTED (~0.55) FFR -> every seed CLEARS -> PASS. collapse/fog UNCHANGED.
+    bs_new = N.score_per_seed_backstops(
+        metric_table=_c5_mt(_C6_CORRECTED_FFR), backstops=_SYNTH_BACKSTOPS, sigma_fam_fog=0.02)
+    for row in bs_new["cells"]:
+        assert row["metrics"]["heldout_ffr"]["passes"] is True
+    assert bs_new["every_seed_clears_every_backstop"] is True
+    assert bs_new["any_gate_straddles"] is False
+    assert bs_new["any_fog_near_ceiling_escalation"] is False
+    verdict_new = ("50M_PASS" if (c1["passes"]
+                   and bs_new["every_seed_clears_every_backstop"]
+                   and not bs_new["any_gate_straddles"]
+                   and not bs_new["any_fog_near_ceiling_escalation"])
+                   else "50M_FAIL_OR_AMBIGUOUS")
+    assert verdict_new == "50M_PASS"
+    # collapse & fog are byte-identical between the two runs (only FFR moved).
+    for s in (str(x) for x in T.SEEDS):
+        assert _c5_mt(_C5_OLD_FFR)[s]["collapse"] == _c5_mt(_C6_CORRECTED_FFR)[s]["collapse"]
+        assert _c5_mt(_C5_OLD_FFR)[s]["fog"] == _c5_mt(_C6_CORRECTED_FFR)[s]["fog"]
+
+
+def test_gate_only_override_then_backstops_flip_to_pass(tmp_path):
+    """End-to-end of the gate's override step: read the corrected FFR from the bound
+    re-score, OVERRIDE the panel's mis-measured FFR column, re-score the backstops -> PASS.
+    Mirrors run_gate's supersede-then-score sequence without a real panel/GPU."""
+    _, rescore_sig = _write_rescore(tmp_path, per_seed=_C6_CORRECTED_FFR, floor=_SYNTH_BACKSTOPS["heldout_ffr_floor"])
+    corr = N._corrected_ffr_from_rescore(
+        {"corrected_ffr_source": rescore_sig},
+        backstops_floor=_SYNTH_BACKSTOPS["heldout_ffr_floor"])
+    mt = _c5_mt(_C5_OLD_FFR)
+    # the gate's override: collapse/fog untouched, FFR column replaced.
+    superseded = {s: mt[s]["heldout_ffr"] for s in mt}
+    for s in T.SEEDS:
+        mt[str(s)]["heldout_ffr"] = corr["per_seed_corrected_ffr"][str(s)]
+    assert all(superseded[str(s)] < 0.1 for s in T.SEEDS)          # was mis-measured
+    assert all(mt[str(s)]["heldout_ffr"] > 0.5 for s in T.SEEDS)   # now corrected
+    bs = N.score_per_seed_backstops(metric_table=mt, backstops=_SYNTH_BACKSTOPS, sigma_fam_fog=0.02)
+    assert bs["every_seed_clears_every_backstop"] is True
+
+
+def test_trip_9_10_diagnosis_states_both_trips_and_both_fixes():
+    d = N.TRIP_9_10_DIAGNOSIS.lower()
+    # trip 9 — the discovery-radius axis (fixed 2000 vs N-scaled 0.1%·N).
+    assert "trip 9" in d and "disc" in d and "2000" in d and "50000" in d
+    # trip 10 — the probe-design axis (in-substrate vs out-of-substrate reserve).
+    assert "trip 10" in d and "out-of-" in d and "coordinates[probe_rows]" in d
+    assert "reserve" in d
+    # and the two fixes: the gate-only supersede + PIECE A born-correct.
+    assert "supersed" in d and "piece a" in d
+    assert N.SUPERSEDED_SOURCE_RUN == "queue-correction-5"
+    assert N.SUPERSEDED_VERDICT == "50M_FAIL_OR_AMBIGUOUS"
+
+
+def test_run_gate_records_superseding_provenance_and_binds_corrected_ffr():
+    """Structural (PIECE B): run_gate reads the corrected FFR from the bound re-score,
+    OVERRIDES the panel's FFR column (collapse/fog untouched), and records the superseding
+    provenance — the three shas, the trip-9/10 diagnosis, and that correction-5's FAIL
+    STAYS.  The criterion-1 + gated-backstop verdict arithmetic is byte-identical."""
+    import inspect
+
+    src = inspect.getsource(N.run_gate)
+    # the corrected FFR is read from the bound re-score and overrides only the FFR column.
+    assert "_corrected_ffr_from_rescore(" in src
+    assert "metric_table[str(s)][HELDOUT_FFR_METRIC] = (" in src
+    # collapse/fog are NOT recomputed — they come from the bound panel (byte-identical).
+    assert "collapse_fog_bound_from_correction_5_panel" in src
+    assert "corrected_ffr_sourced_from_bound_rescore" in src
+    # the superseding provenance: three shas + diagnosis + FAIL-stays.
+    assert "TRIP_9_10_DIAGNOSIS" in src
+    assert '"correction_5_panel_sha256"' in src
+    assert '"reserve_neighbour_truth_sha256"' in src
+    assert '"rescore_results_sha256"' in src
+    assert "SUPERSEDED_SOURCE_RUN" in src and "SUPERSEDED_VERDICT" in src
+    assert "STAYS" in src
+    assert "superseding_provenance_records_three_shas_and_fail_stays" in src
+    # the verdict arithmetic (criterion 1 + gated backstops + no-straddle) is unchanged.
+    assert "criterion_1[\"passes\"]" in src
+    assert "backstop_scoring[\"every_seed_clears_every_backstop\"]" in src
+    assert "backstop_scoring[\"any_gate_straddles\"]" in src
+
+
+# ---- the gate-only re-seal QUEUE build (queue-correction-6) ---------------- #
+
+_GATE_ONLY_B_INPUTS = [
+    P.CORRECTION_5_PANEL, P.FFR_RESCORE_RESULTS, P.R0267_RESERVE_NEIGHBOUR_TRUTH,
+    P.R0237_SUBSTRATE_MANIFEST, P.R0237_GRAPH_MANIFEST, P.R0265_FLOORS, P.R0265_PANEL,
+    P.P1_ASYMPTOTE, P.ROUND_FILE,
+]
+_GATE_ONLY_B_READY = (
+    all(os.path.exists(path) for path in _GATE_ONLY_B_INPUTS)
+    and os.path.exists(os.path.join(P.RELEASE_ROOT, ".git"))
+)
+
+
+def _release_head_b() -> str:
+    import subprocess
+
+    proc = subprocess.run(
+        ["git", "-C", P.RELEASE_ROOT, "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    )
+    return proc.stdout.strip()
+
+
+def _rmtree_ro_b(root: str) -> None:
+    import shutil
+
+    def _onerror(func, path, _exc):
+        try:
+            os.chmod(path, 0o700)
+            func(path)
+        except OSError:
+            pass
+
+    shutil.rmtree(root, onerror=_onerror)
+
+
+@pytest.mark.skipif(not _GATE_ONLY_B_READY, reason="gate-only re-seal inputs absent")
+def test_gate_only_prepare_builds_a_one_node_gate_queue_correction_6():
+    import time
+
+    release_sha = _release_head_b()
+    assert re.fullmatch(r"[0-9a-f]{40}", release_sha)
+    # A distinct /data dir — NOT the real queue-correction-6, so nothing in the record is
+    # touched; cleaned up in the finally.
+    queue_root = os.path.join(
+        P.ROUND_ROOT, f"queue-corr6-pytest-{os.getpid()}-{int(time.time() * 1000) % 100000}"
+    )
+    try:
+        manifest_path = P.prepare_round0267_gate_only(
+            release_sha=release_sha,
+            source_run="queue-correction-5",
+            source_release="0" * 40,
+            queue_root=queue_root,
+        )
+        with open(manifest_path, encoding="utf-8") as handle:
+            queue = json.load(handle)
+
+        # exactly ONE node — the gate — with no in-queue dependency (no train/panel node).
+        assert len(queue["jobs"]) == 1
+        gate = queue["jobs"][0]
+        assert gate["id"] == N.GATE_ACTION and gate["action"] == N.GATE_ACTION
+        assert gate["deps"] == []
+        assert queue["capabilities_produced"] == [N.GATE_CAPABILITY]
+        assert queue["schema"] == "round0267-fneg-50m-x2-seedmean-gate-only-queue-v1"
+
+        # the three superseding inputs are bound by CONTENT DIGEST (sha256 + bytes).
+        panel_sig = _sig(P.CORRECTION_5_PANEL)
+        truth_sig = _sig(P.R0267_RESERVE_NEIGHBOUR_TRUTH)
+        rescore_sig = _sig(P.FFR_RESCORE_RESULTS)
+        assert gate["panel"]["sha256"] == panel_sig["sha256"]
+        assert gate["reserve_truth"]["sha256"] == truth_sig["sha256"]
+        assert gate["corrected_ffr_source"]["sha256"] == rescore_sig["sha256"]
+        # all three are in expected_inputs (tamper-evident at run).
+        expected_shas = {inp["sha256"] for inp in gate["expected_inputs"]}
+        assert {panel_sig["sha256"], truth_sig["sha256"], rescore_sig["sha256"]} <= expected_shas
+
+        # the provenance records the three shas, the superseded verdict, and FAIL-stays.
+        prov = queue["gate_only_provenance"]
+        assert prov["gate_only_reseal"] is True
+        assert prov["correction_5_panel_sha256"] == panel_sig["sha256"]
+        assert prov["reserve_neighbour_truth_sha256"] == truth_sig["sha256"]
+        assert prov["rescore_results_sha256"] == rescore_sig["sha256"]
+        assert prov["superseded_verdict"] == "50M_FAIL_OR_AMBIGUOUS"
+        assert "STAYS" in prov["note"]
+        assert prov["corrected_ffr_disc"] == 50_000
+        # the corrected per-seed FFR carried for provenance matches the sealed re-score.
+        rescore = json.load(open(P.FFR_RESCORE_RESULTS))
+        for s in T.SEEDS:
+            assert prov["per_seed_corrected_ffr"][str(s)] == pytest.approx(
+                float(rescore["per_map"][str(s)]["heldout_ffr"]))
+    finally:
+        if os.path.isdir(queue_root):
+            _rmtree_ro_b(queue_root)
