@@ -631,7 +631,11 @@ def test_run_job_rejects_an_unknown_action():
 
 def test_host_rss_limit_is_the_analytic_115():
     assert N.HOST_RSS_LIMIT_GIB == 115.0
-    assert N.PANEL_RSS_LIMIT_GIB == 115.0
+    # PANEL RSS limit refined from the throwaway-map dry-run (plan §3; delegate option-A
+    # approval 2026-08-17): 120.0 = measured ru_maxrss peak 115.46 GiB + ~4.5 GiB margin,
+    # still 3.4 GiB under physical (123.4) so it fires on genuine RAM exhaustion. The train
+    # HOST_RSS analytic limit (115) is unchanged; the 64 GiB anon guard is the real OOM tripwire.
+    assert N.PANEL_RSS_LIMIT_GIB == 120.0
     # the analytic basis is a number with its derivation, emitted into the receipt.
     basis = N.HOST_RSS_ANALYTIC_BASIS
     assert basis["limit_gib"] == 115.0

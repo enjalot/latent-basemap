@@ -218,12 +218,19 @@ HOST_RSS_ANALYTIC_BASIS = {
     "oom_risk_lives_with": "anon budget (measured 50M anon 9.72 GiB « 64 GiB)",
 }
 
-#: The PANEL RSS limit. Set from the dry-run LATER (plan §3); defaulted to the same 115 for
-#: now. TODO(owner): refine PANEL_RSS_LIMIT_GIB from the throwaway-map panel dry-run's
-#: measured peak before the real panel runs. The panel's FFR arrays scale with the PROBE
-#: count + disc (not N): 2000 reserve probes × disc=100,000 int64+float64 ≈ 3.2 GB, so the
-#: 100M panel RSS is expected LOWER than 50M's 36.26 GiB measured peak.
-PANEL_RSS_LIMIT_GIB = 115.0
+#: The PANEL RSS limit, REFINED from the throwaway-map panel dry-run (plan §3; delegate
+#: option-A approval 2026-08-17 at 120.0). The dry-run END-TO-END 100M panel (R0267 50M-seed42
+#: model → full 100M R0238 substrate) measured ru_maxrss peak 115.46 GiB — which counts the
+#: RECLAIMABLE file-backed page cache from reading the 153.6 GB substrate memmap, NOT the
+#: process's need. That RSS climbs linearly with the transform then PLATEAUS ~113 GiB once the
+#: kernel reclaims (physical RAM 123.4 GiB; MemAvailable held ~118 GiB throughout) — it is
+#: physical-RAM-bound, not N-bound, and does not worsen across the 3 seeds (shared page cache,
+#: anon freed between cells). The real OOM-relevant quantity is ANONYMOUS RSS (coords 0.8 GB +
+#: FFR arrays ~3 GB + transient concat ~1.6 GB ≈ single-digit GiB), already bounded by
+#: `R0268_ANON_BUDGET_BYTES = 64 GiB`. So this ru_maxrss limit is a TRUE-RAM-EXHAUSTION backstop:
+#: 120.0 = measured 115.46 + ~4.5 GiB margin, and physical 123.4 − 3.4 GiB so it still fires on
+#: genuine exhaustion. The 64 GiB anon guard remains the real OOM tripwire.
+PANEL_RSS_LIMIT_GIB = 120.0
 
 #: The R0244 host-watchdog anonymous-memory budget for the 100M host-int8 flagship. The 50M
 #: rung used 64 GiB (R0267 R3 dry-run measured panel anon 36.26 GiB); the 100M anon peak
