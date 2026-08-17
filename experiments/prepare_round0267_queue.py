@@ -42,6 +42,7 @@ from basemap.output_safety import (
     ensure_data_directory,
 )
 from basemap import round0113_prompt_contrast as prompt_contract
+from basemap.slim_scale_admission import SLIM_SCALE_CERT_KIND, SLIM_SCALE_CERT_SCHEMA
 from basemap.round0218_minilm_2m_panel import CAPABILITY as R0218_PANEL_CAPABILITY, CENTROID_KS
 from basemap.round0247_registry import registry_fingerprint
 from basemap.round0254_dispatch import (
@@ -385,6 +386,7 @@ def prepare_round0267(
     release_sha: str,
     queue_root: str = QUEUE_ROOT,
     salvage: Mapping[str, Any] | None = None,
+    slim_scale_cert: str | None = None,
 ) -> str:
     if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
         raise ValueError("R0267 release SHA must be one full commit")
@@ -475,6 +477,34 @@ def prepare_round0267(
         p1_json = json.load(handle)
     if "yinf_x2" not in dict(p1_json.get("bands") or {}) or p1_json.get("verdict") != "GO":
         raise RuntimeError("R0267 --p1-asymptote is not the frozen GO analysis-v2 result")
+
+    # The slim >=8M scale-performance certificate (produced by
+    # experiments/produce_slim_scale_cert.py after review): R0267's 50M panel is the
+    # first >=8M slim panel, so score_panel needs a slim scale_admission backed by a
+    # sealed cert. Bind it as a digest-verified score_panel-node input and cross-check
+    # it is the slim cert for THIS release + the 50M substrate at prepare time.
+    if not slim_scale_cert:
+        raise RuntimeError(
+            "R0267 requires --slim-scale-cert (the sealed slim scale-performance "
+            "certificate for this release + the 50M substrate). Produce it with "
+            "experiments/produce_slim_scale_cert.py after review, then build the queue."
+        )
+    slim_scale_cert_signature = _signature(slim_scale_cert, "R0267 slim scale-performance certificate")
+    slim_cert_sealed = prompt_contract.read_sealed(
+        slim_scale_cert_signature["canonical_path"], label="R0267 slim scale-performance certificate"
+    )
+    if (
+        slim_cert_sealed.get("schema") != SLIM_SCALE_CERT_SCHEMA
+        or slim_cert_sealed.get("kind") != SLIM_SCALE_CERT_KIND
+        or str(slim_cert_sealed.get("release_sha")) != release_sha
+        or int(slim_cert_sealed.get("scientific_rows", -1)) != ROWS
+        or dict(slim_cert_sealed.get("row_derivation") or {}).get("embedding_input", {}).get("sha256")
+        != substrate_signature.get("sha256")
+    ):
+        raise RuntimeError(
+            "R0267 --slim-scale-cert is not the sealed slim scale-performance certificate "
+            "for this release + the sealed 50M fp32 substrate"
+        )
 
     census = dispatch_census()
     guard = assert_derived_entries_install(SCOPE_MODULES, census)
@@ -620,7 +650,8 @@ def prepare_round0267(
         "outputs": [panel_output],
         "done_marker": os.path.join(artifacts, f"{panel_node}.done.json"),
         "expected_inputs": _dedupe([
-            *shared_inputs, r0218_panel, truth_query_rows, truth_ids, reserve, *salvage_inputs,
+            *shared_inputs, r0218_panel, truth_query_rows, truth_ids, reserve,
+            slim_scale_cert_signature, *salvage_inputs,
         ]),
         "p90_wall_s": PANEL_P90_WALL_S,
         "graph_manifest_signature": graph_manifest_signature,
@@ -630,6 +661,7 @@ def prepare_round0267(
         "truth_query_rows": truth_query_rows,
         "truth_ids": truth_ids,
         "heldout_reserve": reserve,
+        "slim_scale_cert": slim_scale_cert_signature,
         "cells": panel_cells,
         "gate_registerable_here": False,
         "upstream_review_state": review_state,
@@ -805,6 +837,12 @@ def main(argv: list[str] | None = None) -> int:
         help="the salvaged seed's train log (the clean full-horizon step-accounting proof, "
              "in lieu of the train-receipt the RSS raise preempted)",
     )
+    parser.add_argument(
+        "--slim-scale-cert", default=None,
+        help="the sealed slim >=8M scale-performance certificate JSON produced by "
+             "experiments/produce_slim_scale_cert.py (required; bound as a score_panel "
+             "input so the 50M panel is admitted on slim round0005-equivalent evidence)",
+    )
     args = parser.parse_args(argv)
     salvage: dict[str, Any] | None = None
     if args.salvage_seed is not None or args.salvage_from is not None or args.salvage_log is not None:
@@ -819,6 +857,7 @@ def main(argv: list[str] | None = None) -> int:
         release_sha=args.release_sha,
         queue_root=(args.queue_root or QUEUE_ROOT),
         salvage=salvage,
+        slim_scale_cert=args.slim_scale_cert,
     )
     print(json.dumps({"queue": path, "sha256": file_sha256_manifest(path)}))
     return 0

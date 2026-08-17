@@ -45,6 +45,11 @@ from basemap.output_safety import (
     create_fresh_directory,
 )
 from basemap import round0113_prompt_contrast as prompt_contract
+from basemap.slim_scale_admission import (
+    assert_not_slim_cert_production_panel,
+    build_slim_scale_admission,
+)
+from experiments.round0005_performance_gate import derive_scale_rows
 from basemap.round0217_minilm_2m_seed_family import (
     WARMUP_SUCCESSFUL_UPDATES,
     validate_published_map,
@@ -938,6 +943,32 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
 
     substrate = _sealed_50m_substrate(job)
     source = _open_50m_substrate(substrate)
+    # >=8M slim scale-performance admission (additive; scoring math unchanged). Build
+    # the row derivation from the fp32 substrate memmap this node already opened and
+    # assemble the slim scale_admission referencing the sealed slim scale-performance
+    # certificate bound as a queue input. The single score_panel(...) call below (which
+    # serves the salvaged seed-42 and the 43/44 paths) carries this admission so the
+    # >=8M guard admits the pass on slim (round0005-equivalent) evidence.
+    slim_cert_reference = job.get("slim_scale_cert")
+    if not isinstance(slim_cert_reference, Mapping):
+        raise Round0267NodeError(
+            "R0267 50M panel requires the sealed slim scale-performance certificate "
+            "bound as `slim_scale_cert`"
+        )
+    slim_cert_signature = dict(slim_cert_reference)
+    prompt_contract.verify_signature(
+        slim_cert_signature, label="R0267 slim scale-performance certificate"
+    )
+    substrate_path = str(substrate["substrate_signature"]["canonical_path"])
+    scale_row_derivation = derive_scale_rows(
+        substrate_path, dimensions=DIMENSION, loaded_matrix=source
+    )
+    scale_admission = build_slim_scale_admission(
+        release_sha=str(active["manifest"]["release_sha"]),
+        scientific_rows=ROWS,
+        row_derivation=scale_row_derivation,
+        certificate=slim_cert_signature,
+    )
     panel_evidence = prompt_contract.read_sealed(
         str(job["panel_evidence"]), label="R0218 MiniLM frozen panel reference"
     )
@@ -1031,6 +1062,7 @@ def run_panel(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 centroids_by_k=centroids,
                 hiD_reference=reference,
                 reference_identity=reference_identity,
+                scale_admission=scale_admission,
                 provenance={
                     "round_id": ROUND_ID,
                     "seed": seed,
@@ -1369,6 +1401,11 @@ def score_per_seed_backstops(
 
 
 def _metric_table_from_panel(panel: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    # Consumption-side ENFORCEMENT: a scientific panel must never carry the slim
+    # cert-production purpose stamp (that output is a perf-receipt pass, budgets
+    # unchecked).  Refuse it here rather than scoring it.
+    assert_not_slim_cert_production_panel(
+        panel, label="R0267 50M panel", error_cls=Round0267NodeError)
     if panel.get("capability") != PANEL_CAPABILITY or panel.get("schema") != PANEL_SCHEMA:
         raise Round0267NodeError("R0267 50M panel contract changed")
     table = dict(panel["panel_metric_table"])
@@ -1419,6 +1456,10 @@ def run_gate(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         panel = prompt_contract.read_sealed(
             _bound_path(job, "panel", label="R0267 50M panel"), label="R0267 50M panel"
         )
+        # Defense in depth: refuse a bound panel carrying the cert-production stamp
+        # BEFORE any scoring (the panel-reading helper refuses it again).
+        assert_not_slim_cert_production_panel(
+            panel, label="R0267 gate: bound 50M panel", error_cls=Round0267NodeError)
         metric_table = _metric_table_from_panel(panel)
         seed_collapse = {s: float(metric_table[s][COLLAPSE_METRIC]) for s in metric_table}
         # seed42's provenance is the salvage block (not a train-receipt); record it here.

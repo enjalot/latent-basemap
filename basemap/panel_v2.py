@@ -1789,6 +1789,20 @@ def _require_score_panel_scale_admission(X, scale_admission):
                 "Round 0169 prompted-diverse view carries its own exact identity"
             )
         return identity
+    # Slim-runner (>=8M) scale-performance admission — an ADDITIVE second accepted
+    # form for the slim protocol (first consumer: R0267's 50M panel).  The v1
+    # production-controller path below is byte-identical.  Both forms self-identify
+    # by an explicit ``kind``; the v1 admission dict never carries that key, so the
+    # slim branches never intercept it.  Delayed import mirrors the v1 path (avoids a
+    # module cycle; runs before any torch/CUDA query in the evaluator).
+    if isinstance(scale_admission, dict) and scale_admission.get("kind") == "slim-scale-cert":
+        from .slim_scale_admission import validate_slim_scale_admission
+        return validate_slim_scale_admission(
+            scale_admission, X=X, scientific_rows=rows)
+    if isinstance(scale_admission, dict) and scale_admission.get("kind") == "slim-cert-production":
+        from .slim_scale_admission import permit_slim_cert_production
+        return permit_slim_cert_production(
+            scale_admission, X=X, scientific_rows=rows)
     required = {"performance_gate", "release_sha", "row_derivation", "scale_policy"}
     if not isinstance(scale_admission, dict) or set(scale_admission) != required:
         raise RuntimeError(
@@ -2000,6 +2014,13 @@ def score_panel(X, Z, *, config: PanelV2Config, x_ids=None, z_ids=None,
         "hiD_reference_key": ref["key"], "hiD_reference_reused": bool(ref_reused),
     }
     res["guards"] = {**_data_guards(Xa, Z), "hit_guard": guard_hit, "density_guard": guard_den}
+    # Slim cert-production marker: STAMP the output as a perf-receipt pass, never a
+    # scientific panel.  The consumption side (gate node / resultcheck) refuses this
+    # stamp, so a production-mode pass can produce receipts and nothing else.  Every
+    # other admission form (v1, slim-scale-cert, none) leaves the payload unstamped.
+    if (isinstance(scale_certificate, dict) and
+            scale_certificate.get("purpose") == "slim-scale-cert-production"):
+        res["purpose"] = "slim-scale-cert-production"
     _poll_abort(ABORT_POLL_SITE_PANEL_COMPLETE)
     return res
 

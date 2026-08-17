@@ -797,3 +797,332 @@ def test_gate_salvage_provenance_rejects_a_wrong_source_run():
     panel["cells"]["42"]["salvage"]["source_run"] = "queue-correction-1"
     with pytest.raises(N.Round0267NodeError):
         N._salvage_provenance_from_panel(panel)
+
+
+# --------------------------------------------------------------------------- #
+# 8. the slim >=8M scale-performance admission (design-slim-8m-admission-2026-08-17):
+#    the additive second accepted score_panel scale_admission form. All CPU/CUDA-
+#    hidden, small (<8M) fixtures + monkeypatch: NO real 50M cert, NO GPU.
+# --------------------------------------------------------------------------- #
+
+import types
+
+import basemap.panel_v2 as pv
+import basemap.slim_scale_admission as SLIM
+import experiments.produce_slim_scale_cert as PSC
+from basemap.artifact_identity import expected_input_signature
+from experiments.round0005_performance_gate import derive_scale_rows
+
+RELEASE_SHA = "933c31ed18265ba0d8b0dd1df33b921f760cef06"
+
+
+class _FakeBig:
+    """A stand-in matrix reporting a >=8M length so the guard reaches its scale branches."""
+
+    def __len__(self):
+        return 8_000_000
+
+
+def _write_substrate(tmp_path, rows=16, dim=4, name="substrate.f32.npy"):
+    array = np.arange(rows * dim, dtype=np.float32).reshape(rows, dim)
+    path = str(tmp_path / name)
+    np.save(path, array)
+    return path, np.load(path, mmap_mode="r", allow_pickle=False)
+
+
+def _make_production_panel(tmp_path, *, name="measurement-panel.json", wall_s=100.0,
+                          rss=50.0, allocated=1000, reserved=2000, with_purpose=True):
+    panel = {
+        "schema": "panel_v2",
+        "provenance": {
+            "wall_s": wall_s,
+            "peak_rss_gb": rss,
+            "cuda_peak": {"available": True, "allocated_bytes": allocated,
+                          "reserved_bytes": reserved},
+        },
+    }
+    if with_purpose:
+        panel["purpose"] = SLIM.SLIM_CERT_PRODUCTION_PURPOSE
+    path = str(tmp_path / name)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(panel, handle)
+    return path
+
+
+def _make_json(tmp_path, name, body):
+    path = str(tmp_path / name)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(body, handle)
+    return path
+
+
+def _build_cert(tmp_path, *, release_sha=RELEASE_SHA, scientific_rows, row_derivation,
+                panel_path, regression_path, receipt_path,
+                drop_receipt=False, name="slim-scale-cert.json"):
+    release_preflight = ({"identity_sha256": "a" * 64} if drop_receipt else
+                         {"receipt": expected_input_signature(receipt_path),
+                          "identity_sha256": "a" * 64})
+    body = {
+        "schema": SLIM.SLIM_SCALE_CERT_SCHEMA,
+        "kind": SLIM.SLIM_SCALE_CERT_KIND,
+        "release_sha": release_sha,
+        "scientific_rows": scientific_rows,
+        "row_derivation": dict(row_derivation),
+        "budgets": dict(SLIM.SLIM_BUDGETS),
+        "measurement": {"panel_output": expected_input_signature(panel_path)},
+        "regression": expected_input_signature(regression_path),
+        "release_preflight": release_preflight,
+    }
+    cert = prompt_contract.seal(body)
+    path = str(tmp_path / name)
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(cert, handle)
+    return path, cert
+
+
+@pytest.fixture
+def slim(tmp_path, monkeypatch):
+    """Honest slim admission fixture (small rows; passing inner validators)."""
+    monkeypatch.setattr(SLIM, "SLIM_SCALE_ROWS", 8)
+    monkeypatch.setattr(SLIM, "validate_regression_certificate", lambda report: {"passed": True})
+    monkeypatch.setattr(SLIM, "validate_release_preflight_receipt",
+                        lambda path, **kwargs: {"release_sha": RELEASE_SHA})
+    sub_path, src = _write_substrate(tmp_path)
+    rd = derive_scale_rows(sub_path, dimensions=4, loaded_matrix=src)
+    return types.SimpleNamespace(
+        tmp_path=tmp_path, monkeypatch=monkeypatch, src=src, rd=rd, sub_path=sub_path,
+        panel_path=_make_production_panel(tmp_path),
+        reg_path=_make_json(tmp_path, "regression.json",
+                            {"schema": "round0005_real_scorer_4x_regression.v3"}),
+        rec_path=_make_json(tmp_path, "release-preflight.json",
+                           {"schema": "round0005_release_preflight.v3",
+                            "identity_sha256": "a" * 64, "release_sha": RELEASE_SHA}),
+    )
+
+
+def _admission(cert_path, rd, *, rows=16, release_sha=RELEASE_SHA):
+    return SLIM.build_slim_scale_admission(
+        release_sha=release_sha, scientific_rows=rows, row_derivation=rd,
+        certificate=expected_input_signature(cert_path))
+
+
+# ---- positive controls ---------------------------------------------------- #
+
+
+def test_slim_admission_validates_on_a_fixture(slim):
+    cert_path, cert = _build_cert(
+        slim.tmp_path, scientific_rows=16, row_derivation=slim.rd,
+        panel_path=slim.panel_path, regression_path=slim.reg_path, receipt_path=slim.rec_path)
+    out = SLIM.validate_slim_scale_admission(
+        _admission(cert_path, slim.rd), X=slim.src, scientific_rows=16)
+    assert out["identity_sha256"] == cert["identity_sha256"]
+    assert out["kind"] == SLIM.SLIM_SCALE_CERT_KIND
+
+
+def test_v1_admission_still_routed_to_the_v1_validator():
+    """A v1-shaped admission (no `kind`) is NOT intercepted by the slim branches: it
+    reaches the byte-identical v1 origin check (proving the v1 path is untouched)."""
+    v1 = {
+        "performance_gate": "/x", "release_sha": "9" * 40,
+        "row_derivation": {"embedding_input": {"canonical_path": "/nonexistent"},
+                           "scientific_rows": 8_000_000, "dimensions": 4},
+        "scale_policy": None,
+    }
+    with pytest.raises(RuntimeError, match="reopened signed embedding input"):
+        pv._require_score_panel_scale_admission(_FakeBig(), v1)
+
+
+def test_absence_still_hard_raises_at_scale():
+    with pytest.raises(RuntimeError, match="requires exact replayable scale admission"):
+        pv._require_score_panel_scale_admission(_FakeBig(), None)
+
+
+def test_guard_routes_slim_cert_kind_at_scale(monkeypatch):
+    seen = {}
+
+    def fake(scale_admission, *, X, scientific_rows):
+        seen["rows"] = scientific_rows
+        return {"ok": True}
+
+    monkeypatch.setattr(SLIM, "validate_slim_scale_admission", fake)
+    out = pv._require_score_panel_scale_admission(_FakeBig(), {"kind": "slim-scale-cert"})
+    assert out == {"ok": True} and seen["rows"] == 8_000_000
+
+
+def test_guard_routes_production_marker_at_scale(monkeypatch):
+    seen = {}
+
+    def fake(scale_admission, *, X, scientific_rows):
+        seen["rows"] = scientific_rows
+        return {"purpose": SLIM.SLIM_CERT_PRODUCTION_PURPOSE}
+
+    monkeypatch.setattr(SLIM, "permit_slim_cert_production", fake)
+    out = pv._require_score_panel_scale_admission(_FakeBig(), {"kind": "slim-cert-production"})
+    assert out["purpose"] == SLIM.SLIM_CERT_PRODUCTION_PURPOSE and seen["rows"] == 8_000_000
+
+
+def test_permit_production_marker_binds_and_stamps(slim):
+    marker = SLIM.slim_cert_production_marker(release_sha=RELEASE_SHA, row_derivation=slim.rd)
+    rec = SLIM.permit_slim_cert_production(marker, X=slim.src, scientific_rows=16)
+    assert rec["purpose"] == SLIM.SLIM_CERT_PRODUCTION_PURPOSE
+    assert SLIM._valid_sha256(rec["identity_sha256"])
+    bad = dict(marker)
+    bad["budgets"] = {"wall_max_s": 1.0}
+    with pytest.raises(SLIM.SlimScaleAdmissionError):
+        SLIM.permit_slim_cert_production(bad, X=slim.src, scientific_rows=16)
+
+
+# ---- the SEVEN refusal plants --------------------------------------------- #
+
+
+def test_plant_a_mismatched_release_sha(slim):
+    cert_path, _ = _build_cert(
+        slim.tmp_path, scientific_rows=16, row_derivation=slim.rd,
+        panel_path=slim.panel_path, regression_path=slim.reg_path, receipt_path=slim.rec_path)
+    admission = _admission(cert_path, slim.rd, release_sha="b" * 40)
+    with pytest.raises(SLIM.SlimScaleAdmissionError):
+        SLIM.validate_slim_scale_admission(admission, X=slim.src, scientific_rows=16)
+
+
+def test_plant_b_missing_receipt(slim):
+    cert_path, _ = _build_cert(
+        slim.tmp_path, scientific_rows=16, row_derivation=slim.rd,
+        panel_path=slim.panel_path, regression_path=slim.reg_path,
+        receipt_path=slim.rec_path, drop_receipt=True)
+    with pytest.raises(SLIM.SlimScaleAdmissionError):
+        SLIM.validate_slim_scale_admission(
+            _admission(cert_path, slim.rd), X=slim.src, scientific_rows=16)
+
+
+def test_plant_c_budget_exceeding_measurement(slim):
+    bad_panel = _make_production_panel(slim.tmp_path, name="over-budget.json", wall_s=99999.0)
+    cert_path, _ = _build_cert(
+        slim.tmp_path, scientific_rows=16, row_derivation=slim.rd,
+        panel_path=bad_panel, regression_path=slim.reg_path, receipt_path=slim.rec_path)
+    with pytest.raises(SLIM.SlimScaleAdmissionError):
+        SLIM.validate_slim_scale_admission(
+            _admission(cert_path, slim.rd), X=slim.src, scientific_rows=16)
+
+
+def test_plant_d_altered_regression(slim):
+    slim.monkeypatch.setattr(SLIM, "validate_regression_certificate",
+                             lambda report: {"passed": False})
+    cert_path, _ = _build_cert(
+        slim.tmp_path, scientific_rows=16, row_derivation=slim.rd,
+        panel_path=slim.panel_path, regression_path=slim.reg_path, receipt_path=slim.rec_path)
+    with pytest.raises(SLIM.SlimScaleAdmissionError):
+        SLIM.validate_slim_scale_admission(
+            _admission(cert_path, slim.rd), X=slim.src, scientific_rows=16)
+
+
+def test_plant_e_altered_release_preflight(slim):
+    def boom(path, **kwargs):
+        raise RuntimeError("release preflight changed after publication")
+
+    slim.monkeypatch.setattr(SLIM, "validate_release_preflight_receipt", boom)
+    cert_path, _ = _build_cert(
+        slim.tmp_path, scientific_rows=16, row_derivation=slim.rd,
+        panel_path=slim.panel_path, regression_path=slim.reg_path, receipt_path=slim.rec_path)
+    with pytest.raises(SLIM.SlimScaleAdmissionError):
+        SLIM.validate_slim_scale_admission(
+            _admission(cert_path, slim.rd), X=slim.src, scientific_rows=16)
+
+
+def test_plant_f_broken_input_digest(slim):
+    cert_path, _ = _build_cert(
+        slim.tmp_path, scientific_rows=16, row_derivation=slim.rd,
+        panel_path=slim.panel_path, regression_path=slim.reg_path, receipt_path=slim.rec_path)
+    admission = _admission(cert_path, slim.rd)  # signature captured BEFORE tampering
+    with open(cert_path, "a", encoding="utf-8") as handle:
+        handle.write("  ")  # mutate the cert bytes -> the digest no longer matches
+    with pytest.raises(SLIM.SlimScaleAdmissionError):
+        SLIM.validate_slim_scale_admission(admission, X=slim.src, scientific_rows=16)
+
+
+def test_plant_g_consumption_side_refuses_a_production_panel():
+    panel = {
+        "capability": N.PANEL_CAPABILITY,
+        "schema": N.PANEL_SCHEMA,
+        "purpose": SLIM.SLIM_CERT_PRODUCTION_PURPOSE,
+        "panel_metric_table": {str(s): _seed_metrics() for s in T.SEEDS},
+        "cells": {"42": _panel_cell(42, salvaged=True), "43": _panel_cell(43), "44": _panel_cell(44)},
+    }
+    with pytest.raises(N.Round0267NodeError):
+        N._metric_table_from_panel(panel)
+    with pytest.raises(N.Round0267NodeError):
+        SLIM.assert_not_slim_cert_production_panel(
+            panel, label="gate", error_cls=N.Round0267NodeError)
+    # a scientific panel (no production stamp) is NOT refused.
+    SLIM.assert_not_slim_cert_production_panel(
+        {"schema": "panel_v2"}, label="gate", error_cls=N.Round0267NodeError)
+
+
+# ---- the stamp + the scoring-invariance guard ----------------------------- #
+
+
+def _small_panel_inputs(seed):
+    rng = np.random.RandomState(seed)
+    X = rng.randn(400, 8).astype("float32")
+    Z = rng.randn(400, 2).astype("float32")
+    cfg = pv.PanelV2Config(frac=0.02, n_anchors=60, corpus_chunk=128)
+    return X, Z, cfg
+
+
+def test_score_panel_stamps_only_the_production_pass(monkeypatch):
+    X, Z, cfg = _small_panel_inputs(5)
+    monkeypatch.setattr(pv, "_require_score_panel_scale_admission",
+                        lambda X_, sa: {"purpose": SLIM.SLIM_CERT_PRODUCTION_PURPOSE,
+                                        "identity_sha256": "a" * 64})
+    assert pv.score_panel(X, Z, config=cfg, provenance={"t": "s"}).get("purpose") == \
+        SLIM.SLIM_CERT_PRODUCTION_PURPOSE
+    monkeypatch.setattr(pv, "_require_score_panel_scale_admission",
+                        lambda X_, sa: {"identity_sha256": "a" * 64})
+    assert "purpose" not in pv.score_panel(X, Z, config=cfg, provenance={"t": "s"})
+    monkeypatch.setattr(pv, "_require_score_panel_scale_admission", lambda X_, sa: None)
+    assert "purpose" not in pv.score_panel(X, Z, config=cfg, provenance={"t": "s"})
+
+
+def test_stamp_does_not_change_any_scoring_output(monkeypatch):
+    X, Z, cfg = _small_panel_inputs(7)
+    monkeypatch.setattr(pv, "_require_score_panel_scale_admission", lambda X_, sa: None)
+    base = pv.score_panel(X, Z, config=cfg, provenance={"t": "inv"})
+    monkeypatch.setattr(pv, "_require_score_panel_scale_admission",
+                        lambda X_, sa: {"purpose": SLIM.SLIM_CERT_PRODUCTION_PURPOSE,
+                                        "identity_sha256": "a" * 64})
+    stamped = pv.score_panel(X, Z, config=cfg, provenance={"t": "inv"})
+    scoring_keys = ["schema", "formula_version", "n", "n_dims_hi", "n_dims_lo", "frac",
+                    "k_hit", "k_frac", "k_density", "anchor_seed", "n_anchors", "anchor_hash",
+                    "ffr", "recall@k", "n_ffr_anchors", "density", "n_density_anchors",
+                    "guards"]
+    assert all(base[key] == stamped[key] for key in scoring_keys)
+    assert "purpose" not in base
+    assert stamped["purpose"] == SLIM.SLIM_CERT_PRODUCTION_PURPOSE
+
+
+# ---- the cert-production assembly logic (produce_slim_scale_cert) ---------- #
+
+
+def test_assemble_slim_scale_cert_round_trips(slim):
+    slim.monkeypatch.setattr(PSC, "validate_regression_certificate",
+                             lambda report: {"passed": True})
+    slim.monkeypatch.setattr(PSC, "validate_release_preflight_receipt",
+                             lambda path, **kwargs: {"release_sha": RELEASE_SHA})
+    out_path = str(slim.tmp_path / "assembled-cert.json")
+    _out, cert = PSC.assemble_slim_scale_cert(
+        release_sha=RELEASE_SHA, scientific_rows=16, row_derivation=slim.rd,
+        panel_output_path=slim.panel_path, regression_path=slim.reg_path,
+        release_preflight_receipt_path=slim.rec_path,
+        release_preflight_identity_sha256="a" * 64, out_path=out_path)
+    assert cert["schema"] == SLIM.SLIM_SCALE_CERT_SCHEMA
+    validated = SLIM.validate_slim_scale_admission(
+        _admission(out_path, slim.rd), X=slim.src, scientific_rows=16)
+    assert validated["identity_sha256"] == cert["identity_sha256"]
+    # assemble refuses a budget-exceeding measurement (fails closed at cert-production).
+    bad_panel = _make_production_panel(slim.tmp_path, name="bad-panel.json", wall_s=99999.0)
+    with pytest.raises(RuntimeError):
+        PSC.assemble_slim_scale_cert(
+            release_sha=RELEASE_SHA, scientific_rows=16, row_derivation=slim.rd,
+            panel_output_path=bad_panel, regression_path=slim.reg_path,
+            release_preflight_receipt_path=slim.rec_path,
+            release_preflight_identity_sha256="a" * 64,
+            out_path=str(slim.tmp_path / "bad-cert.json"))
