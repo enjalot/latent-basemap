@@ -192,10 +192,15 @@ HOST_RSS_LIMIT_GIB = 100.0
 #: The R0244 host-watchdog anonymous-memory budget for the 50M host-int8 rung. The 2M
 #: default (16 GiB, round0265) is too small here: the host-int8 X lives in host RAM as
 #: an int8 array (50M×384 = 19.2 GB) plus the transient edge-list load and samplers, so
-#: the anonymous peak is ~20+ GB (R0267 seed-42 first tripped 16 GiB at 17.2 GB). 40 GiB
-#: covers it with headroom and sits far under the box's ~111 GB MemAvailable. (100M would
-#: need ~56 GiB — a later per-rung concern.)
-R0267_ANON_BUDGET_BYTES = 40 * (1 << 30)
+#: the anonymous peak is ~20+ GB (R0267 seed-42 first tripped 16 GiB at 17.2 GB). Raised
+#: 40 -> 64 GiB on the R3 throwaway-map dry-run MEASUREMENT (2026-08-17): the PANEL node's
+#: full-50M held-out-FFR builds the (~1M x 2000) neighbour arrays (int64 + float64 ~= 32 GB)
+#: inside cKDTree.query, so the panel's anonymous peak measured 36.26 GiB — only ~9% under
+#: the old 40 GiB, which fragmentation/thread-arena overhead could trip mid-panel. 64 GiB
+#: gives ~76% headroom over the measured peak and still sits far under the box's ~111 GB
+#: MemAvailable. Per-cell (freed + gc between the three cells, does not stack). An EXECUTION
+#: resource field — absent from the treatment digest (constants-discipline test proves it).
+R0267_ANON_BUDGET_BYTES = 64 * (1 << 30)
 POSITIVE_ROWS_PER_UPDATE = 409
 
 #: The delegate-approved SALVAGE of R0267 seed42 (correction-4): seed42's correction-3 run
