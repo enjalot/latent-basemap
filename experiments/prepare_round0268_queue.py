@@ -301,6 +301,7 @@ def prepare_round0268(
     graph = _sealed_graph_binding()
     graph_manifest_signature = graph["manifest_signature"]
     graph_signature = graph["graph_signature"]
+    graph_member_signatures = graph["member_signatures"]
     edges = graph["directed_edges"]
     base_horizon = successful_updates_for_edges(edges)
 
@@ -428,7 +429,10 @@ def prepare_round0268(
         graph_manifest_signature,
         substrate_manifest_signature,
         substrate_signature,
-        graph_signature,
+        # The graph is a STREAMED-MEMBER directory (R0243). Preflight checks real files, so
+        # bind the four member .npy/.npz FILES (each with bytes+sha) — NOT the edges DIRECTORY
+        # (which the config's graph_signature still carries for the node's load_edge_arrays).
+        *graph_member_signatures.values(),
         expected_input_signature(identity_path),
         int8_substrate_manifest_signature,
         r0262_identity,
