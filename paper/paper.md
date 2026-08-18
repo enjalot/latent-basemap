@@ -80,6 +80,27 @@ frame with no server round-trip.
 
 # 2. Related work
 
+<!-- PRIOR-ART SWEEP 2026-08-18 (latent-labs logs/process/2026-08-18_prior-art-sweep.md):
+     REQUIRED ADDITIONS to this section before submission —
+     (a) a "closest systems" paragraph: NOMAD Projection [@duderstadt2025nomad]
+         (100M+ map, non-parametric, multi-GPU), OpenAlex Mapper
+         [@noichl2024openalexmapper] (fixed basemap + server-side projection,
+         250K), Hackerverse [@hackerverse2024] (40M static tiles + fly-to);
+     (b) the "basemap" lineage sentence: scientometric overlay maps
+         [@rafols2010overlay] + single-cell reference atlases [@kang2021symphony];
+     (c) parametric-DR additions: NNP [@espadoto2020nnp], ParamRepulsor
+         [@huang2024paramrepulsor], OOS drift [@islam2026oosumap], PubMed
+         landscape [@gonzalezmarquez2024landscape];
+     (d) §4 must differentiate instruments from scDEED/EMBEDR [@xia2024scdeed],
+         Gap Index [@ros2026gapindex], LOO-map [@liu2024loomap], and check
+         against the Dagstuhl best-practices review [@dagstuhl2025lowdim];
+     (e) §3.2 fneg positioning: [@damrich2023contrastive; @bohm2022attraction;
+         @robinson2021hard] — band-limited + artifact-targeted + guardrailed
+         is the unclaimed combination;
+     (f) §6 mechanism precedents: PMTiles/COPC [@pmtiles], WizMap
+         [@wang2023wizmap], Embedding Atlas [@ren2025embeddingatlas]. -->
+
+
 **Neighbor embeddings.** The lineage runs from t-SNE
 [@vandermaaten2008tsne] through LargeVis [@tang2016largevis] to UMAP
 [@mcinnes2018umap]: preserve a k-nearest-neighbor structure from the
