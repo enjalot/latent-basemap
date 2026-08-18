@@ -218,3 +218,87 @@
 
 % ---------- software (cite per CITATION files at submission) ----------
 % transformers.js, onnxruntime-web, RAPIDS cuML/cuVS, PyTorch
+
+% ---------- prior-art sweep additions (2026-08-18; see latent-labs
+% logs/process/2026-08-18_prior-art-sweep.md for the differentiation map) ----------
+
+@misc{duderstadt2025nomad,
+  title = {NOMAD Projection}, author = {Duderstadt, Brandon and Nussbaum, Zach and van der Maaten, Laurens},
+  note = {arXiv:2505.15511; multi-GPU data map of Multilingual Wikipedia — closest scale competitor, non-parametric}, year = {2025}
+}
+@inproceedings{huang2024paramrepulsor,
+  title = {Navigating the Effect of Parametrization for Dimensionality Reduction},
+  author = {Huang, Haiyang and Wang, Yingfan and Rudin, Cynthia}, booktitle = {NeurIPS}, year = {2024},
+  note = {arXiv:2411.15894; parametric-DR SOTA, hard negative mining}
+}
+@article{gonzalezmarquez2024landscape,
+  title = {The landscape of biomedical research}, author = {Gonz{\'a}lez-M{\'a}rquez, Rita and Schmidt, Luca and Schmidt, Benjamin M. and Berens, Philipp and Kobak, Dmitry},
+  journal = {Patterns}, year = {2024}, note = {21M-abstract public t-SNE atlas}
+}
+@article{espadoto2020nnp,
+  title = {Deep Learning Multidimensional Projections}, author = {Espadoto, Mateus and Hirata, Nina S. T. and Telea, Alexandru C.},
+  journal = {Information Visualization}, year = {2020}, note = {arXiv:1902.07958; train-once/stability claim at small scale}
+}
+@misc{islam2026oosumap,
+  title = {On Out-of-sample Embedding in UMAP}, author = {Islam, Md Tauhidul and Fleischer, Jason W.},
+  note = {arXiv:2606.04451; peripheral drift of projected points}, year = {2026}
+}
+@article{rafols2010overlay,
+  title = {Science overlay maps: a new tool for research policy and library management},
+  author = {Rafols, Ismael and Porter, Alan L. and Leydesdorff, Loet}, journal = {JASIST}, year = {2010},
+  note = {arXiv:0912.3882; the scientometric "basemap + overlay" lineage, with Klavans & Boyack 2009}
+}
+@article{kang2021symphony,
+  title = {Efficient and precise single-cell reference atlas mapping with Symphony},
+  author = {Kang, Joyce B. and others}, journal = {Nature Communications}, year = {2021},
+  note = {with scArches (Lotfollahi 2022) and Azimuth (Hao 2021): frozen reference frame + fast query projection in genomics}
+}
+@inproceedings{damrich2023contrastive,
+  title = {From t-SNE to UMAP with contrastive learning},
+  author = {Damrich, Sebastian and B{\"o}hm, Jan Niklas and Hamprecht, Fred A. and Kobak, Dmitry},
+  booktitle = {ICLR}, year = {2023}, note = {arXiv:2206.01816}
+}
+@article{bohm2022attraction,
+  title = {Attraction-Repulsion Spectrum in Neighbor Embeddings},
+  author = {B{\"o}hm, Jan Niklas and Berens, Philipp and Kobak, Dmitry},
+  journal = {JMLR}, year = {2022}, note = {arXiv:2007.08902; [lit 0198]}
+}
+@inproceedings{robinson2021hard,
+  title = {Contrastive Learning with Hard Negative Samples},
+  author = {Robinson, Joshua and Chuang, Ching-Yao and Sra, Suvrit and Jegelka, Stefanie},
+  booktitle = {ICLR}, year = {2021}, note = {arXiv:2010.04592; distance-dependent negative up-weighting precedent for fneg}
+}
+@article{xia2024scdeed,
+  title = {Statistical method scDEED for detecting dubious 2D single-cell embeddings},
+  author = {Xia, Christy and Li, Jingyi Jessica and others}, journal = {Nature Communications}, year = {2024},
+  note = {null-calibrated embedding gating; with EMBEDR (Johnson et al., Patterns 2022)}
+}
+@misc{ros2026gapindex,
+  title = {Measuring Distortion in the Empty Regions of Dimensionality Reduction Scatterplots with the Gap Index},
+  author = {Ros, J. and Arleo, Alessio and Paulovich, Fernando}, note = {arXiv:2607.28324; empty-region distortion — fog's published cousin}, year = {2026}
+}
+@misc{liu2024loomap,
+  title = {Assessing and improving reliability of neighbor embedding methods: a map-continuity perspective},
+  author = {Liu, Zhexuan and Ma, Rong and Zhong, Yiqiao}, note = {arXiv:2410.16608}, year = {2024}
+}
+@misc{dagstuhl2025lowdim,
+  title = {Low-dimensional embeddings of high-dimensional data},
+  author = {{Dagstuhl review (21 authors incl. McInnes, Kobak, Damrich)}}, note = {arXiv:2508.15929; best-practices checklist}, year = {2025}
+}
+@inproceedings{wang2023wizmap,
+  title = {WizMap: Scalable Interactive Visualization for Exploring Large Machine Learning Embeddings},
+  author = {Wang, Zijie J. and Munechika, David and Chen, Seongmin and Chau, Duen Horng}, booktitle = {ACL demo}, year = {2023}, note = {arXiv:2306.09328}
+}
+@misc{ren2025embeddingatlas,
+  title = {Embedding Atlas}, author = {Ren, Donghao and Hohman, Fred and others},
+  note = {arXiv:2505.06386; Apple, WebGPU + DuckDB-WASM in-browser filtering}, year = {2025}
+}
+@misc{hackerverse2024, title = {Hackerverse}, author = {Lin, Wilson},
+  note = {blog.wilsonl.in/hackerverse; 40M-point tiled embedding map on static storage, semantic fly-to}, year = {2024}
+}
+@misc{noichl2024openalexmapper, title = {OpenAlex Mapper}, author = {Noichl, Maximilian},
+  note = {fixed basemap + server-side projection of new documents onto stable coordinates}, year = {2024}
+}
+@misc{pmtiles, title = {PMTiles}, author = {Liu, Brandon},
+  note = {range-request single-file tile archives; with COPC/Potree (Morton-ordered point clouds) the map-pack mechanism precedent}
+}
