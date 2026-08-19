@@ -1,137 +1,198 @@
 # latent-basemap
 
-**A basemap is a world map for an embedding space.** Train a small neural
-projection head once over a large, mixed corpus, and every text you embed
-afterwards lands on the same stable 2D frame — in milliseconds, with no
-graph construction, even in the browser. The frame is the product: you can
-learn its geography, link to places on it, and project new data onto it for
-as long as the encoder exists.
+`latent-basemap` trains a small parametric UMAP-style head as a reusable 2D
+coordinate frame for text embeddings. The current study uses
+`sentence-transformers/all-MiniLM-L6-v2` and a composition-controlled training
+set of up to 100 million text chunks.
 
-<!-- TODO(publish): hero image — the Procrustes-aligned scale ladder -->
+This is a research repository, not a packaged release. Start with the
+[`REVIEWER_GUIDE.md`](REVIEWER_GUIDE.md) for the short scientific path or the
+[`paper`](paper/paper.md) for the full argument.
 
-This repo is the home for:
+## Current result
 
-- **trained basemap heads** for `all-MiniLM-L6-v2` (384-dim) at 2M–100M
-  training rows <!-- TODO(D7): HF links when model repos are named -->
-- **the training recipe + code** to build your own basemap over any
-  embedding collection
-- **map packs + a static viewer** for exploring the maps (density, points,
-  text reachback, in-browser projection)
-- **the paper** and its interactive companions
-  <!-- TODO(D2): gh-pages links — /maps /concepts /ui /paper -->
+As of 2026-08-18:
 
-## Use a trained basemap
+| stage | status | result |
+|---|---|---|
+| 2M, 13 seeds | sealed | family thresholds for spacing, fog, held-out FFR, and purity |
+| host-int8 check | sealed | seed-paired map remains inside all fp32 family bands |
+| 50M, 3 seeds | sealed pass | mean spacing 1.0140; fog 0.1165-0.2472; FFR 0.5495-0.5594 |
+| 100M graph | sealed pass | strict recall@15 0.99590 on a fixed 500K-row probe |
+| 100M, 3 seeds | running | manuscript uses explicit `{{100M_*}}` result tokens |
+
+The final 100M run uses one RTX 5090. A session-management signal interrupted an
+early attempt after training but before a complete evidence receipt; that
+checkpoint is excluded and the seed is being retrained. See the
+[`100M incident note`](https://github.com/enjalot/latent-labs/blob/main/logs/process/2026-08-18_round0268-session-scope-incident.md).
+
+## What the model does
+
+For a versioned encoder $E$ and projection head $f$, the frame is
+
+```text
+text -> 120-token preprocessing -> MiniLM -> L2-normalized 384D vector -> 2D head
+```
+
+The head is an 11,809,282-parameter residual bottleneck MLP. Once the encoder,
+head, preprocessing, and map-coordinate transform are frozen, new text can be
+placed by inference alone. No neighbor graph or layout optimization is required
+at projection time.
+
+"Stable" means repeated inference within that fixed version. It does not mean
+that independent training runs, new corpus snapshots, or new encoder versions
+produce the same frame.
+
+## Inspect a checkpoint
+
+The selected checkpoint is not public yet. With a collaborator-provided
+checkpoint:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ./basemap/pumap
+python -m pip install sentence-transformers
+```
 
 ```python
-import numpy as np
 from sentence_transformers import SentenceTransformer
-from basemap.pumap.parametric_umap.core import ParametricUMAP
+from parametric_umap import ParametricUMAP
 
 encoder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-basemap = ParametricUMAP.load("checkpoints/basemap-minilm.pt")  # TODO(D7): HF path
+basemap = ParametricUMAP.load("/path/to/basemap-model.pt", device="cpu")
 
-texts = ["a recipe for sourdough bread", "gradient descent convergence proof"]
-xy = basemap.transform(encoder.encode(texts, normalize_embeddings=True))
-# xy: (2, 2) float32 — coordinates on the shared frame
+texts = [
+    "a recipe for sourdough bread",
+    "a proof about gradient descent convergence",
+]
+x = encoder.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
+xy = basemap.transform(x)
+print(xy.shape)  # (2, 2)
 ```
 
-`transform` batches internally and never materializes its input, so a
-memory-mapped `(N, 384)` array projects at any N. No neighbor graph, no
-refitting: projection is a single forward pass (~11.8M-param MLP).
+`transform` reads array-like inputs in batches, so a memory-mapped embedding
+matrix does not need to be copied into RAM at once. The returned coordinate array
+is materialized.
 
-The same head runs **in the browser** via ONNX (`experiments/mappack/onnx/`
-exports it; the viewer's projection panel pairs it with a quantized
-in-browser MiniLM — ~80 MB total, no server).
+## Training recipe
 
-## Explore the maps
+The promoted treatment is defined by these fields:
 
-The viewer (`mapviewer/`) renders map packs — self-contained static-file
-bundles (density tiers, Morton-sorted point tiles, LOD, text sidecars)
-served by any host that supports HTTP range requests.
+| field | value |
+|---|---|
+| graph | approximate high-recall cosine k15, exact fp32 candidate rerank, UMAP fuzzy union |
+| head | residual bottleneck MLP, 384 -> 2048 -> 1536 residual neck -> 2048 -> 2 |
+| low-dimensional kernel | UMAP curve, `a=1.9328`, `b=0.7905` (`min_dist=0`) |
+| batch | 8,192 pairs: 409 positive edges, 7,783 uniform non-self negatives |
+| positive treatment | uniform edge sampling, binary target 1 |
+| negative treatment | binary target 0; 2x BCE weight in `[0.1, 0.4]` times batch p90 radius |
+| optimizer | AdamW, lr `1e-3`, 200-update warmup, cosine decay, bf16, clip norm 1 |
+| 50M/100M dose | 2x the calibrated base update horizon, about 1.356 positive draws per directed edge |
+| large-input storage | per-row symmetric int8 values with fp16 scales in host memory |
 
-<!-- TODO(D2): live demo links once gh-pages + GCS deep points are up -->
+This is a UMAP-derived objective, not stock Parametric UMAP. Fuzzy edge weights
+define graph topology but do not weight the binary training loss.
 
-Locally: `cd mapviewer && npm install && npm run dev`, then point it at a
-pack built with `experiments/mappack/map_pack.py`.
+The R0265-R0268 production modules are included on `main`. Commit `d3ac5c4` is
+the frozen checkout used for the current 100M execution; use it when exact
+byte-level correspondence matters. Do not infer the execution config from a
+short constructor example or from package defaults.
 
-## Train your own
+## Evaluation
 
-You need two inputs:
+The scale decision uses three primary checks:
 
-1. **Embeddings** — an `(N, D)` float32 array (memmap fine). Ours are
-   384-dim MiniLM over 120-token chunks.
-2. **A k-NN graph** — exact-k15 fuzzy edges over those embeddings. We build
-   ours with GPU NN-descent (cuVS) and verify recall against brute-force
-   truth on a probe; any builder works if recall is honest.
+- **Normalized 10-neighbor spacing:** median 2D tenth-neighbor distance divided
+  by p90 map radius, multiplied by `sqrt(N_eff)`. At large rungs, `N_eff` is a
+  fixed seeded sample of 16,777,216 rows. Low values detect contraction.
+- **Fog:** fraction of points in occupied 1024x1024 bins below 1% of the peak-bin
+  count. Degenerate measurements fail closed.
+- **Held-out FFR:** fraction of a query's true high-dimensional top-10 neighbors
+  found in its closest 0.1% of the 2D map. This is a coarse placement measure,
+  not recall@10.
 
-Then:
+Purity fidelity is gated on the 2M reference family and reported descriptively at
+50M/100M because the large substrates use a different reference-row identity.
+Definitions and thresholds are in [Section 4 of the paper](paper/paper.md).
 
-```python
-from basemap.pumap.parametric_umap.core import ParametricUMAP
+## Viewer and static map packs
 
-model = ParametricUMAP(
-    n_components=2, hidden_dim=2048, n_layers=3, n_neighbors=15,
-    architecture="residual_bottleneck",
-    # the recipe (see the paper for why each field matters):
-    low_dim_kernel="umap", a=1.9328, b=0.7905,   # umap kernel at min_dist 0
-    fneg_weight=1.0,                             # fog-targeted negative reweighting
-    # dose: total optimizer updates ≈ 2× successful_updates_for_edges(E)
-)
-model.fit(X, precomputed_edges_path="edges-k15-fuzzy.npz", random_state=42)
-model.save("my-basemap.pt")
+[`mapviewer/`](mapviewer/) is a Vite and TypeScript viewer for static map packs.
+It supports multiresolution density, source-corpus filtering, level-of-detail
+points, source-text lookup, and local text projection through MiniLM plus an ONNX
+map head.
+
+```bash
+cd mapviewer
+npm install
+npm run fixtures
+npm run dev
 ```
 
-The four treatment fields that define our promoted recipe, all validated by
-pre-registered gates on 13-seed families:
+The viewer defaults to `http://localhost:5195/`. Node 24 is required. The checked
+in fixtures are synthetic; real packs and model files are not committed. See the
+[`map pack report`](experiments/mappack/REPORT.md),
+[`ONNX report`](experiments/mappack/onnx/REPORT.md), and
+[`viewer README`](mapviewer/README.md).
 
-| field | value | what it does |
-| --- | --- | --- |
-| output kernel | umap `(a=1.9328, b=0.7905)` | min_dist-0 attraction/repulsion shape |
-| dose | ×2–×4 draws/edge | training budget in graph-relative units |
-| fneg | weight 1.0, band `[0.1,0.4]`×p90 radius | clears low-density "fog" without collapse |
-| edge sampling | uniform | positives drawn uniformly over edges |
+## Repository map
 
-Cost on one RTX 5090 (32 GB), measured:
+- `paper/` contains the Markdown manuscript, bibliography, and final-result
+  checklist.
+- `basemap/pumap/parametric_umap/` contains the PyTorch projection package.
+- `basemap/panel_v2.py` contains the shared FFR and purity evaluator.
+- `experiments/metrics/` contains map-level metric tools.
+- `experiments/mappack/` contains the static pack builder and ONNX export.
+- `mapviewer/` contains the browser viewer.
+- `experiments/sandbox/` contains treatment-selection experiments.
+- `basemap/round*`, `experiments/round*`, and the companion `latent-labs` repo
+  contain the preregistered research history and evidence machinery.
 
-| rows | dose | wall |
-| ---: | :--: | ---: |
-| 2M | ×4 | ~50 min |
-| 6.25M | ×4 | ~2.5 h |
-| 12.5M | ×2 | ~2.5 h |
-| 50M | ×2 | ~12 h (host-int8) |
-| 100M | ×2 | ~24 h (est., host-int8) |
+Most readers should stay in the paper, reviewer guide, reports, and the files
+named above. The hundreds of round modules preserve decisions and execution
+contracts; they are not the shortest route to the method.
 
-Past ~20M rows fp32 no longer fits VRAM: pass `x_residency="host_int8"` to
-keep the substrate in host RAM as int8 rows + fp16 per-row scales (bit-exact
-encoding, map-level fidelity validated against fp32 siblings).
+## Checks
 
-Watch two instruments while you train (`experiments/metrics/`): **collapse**
-(`r10·√N` — healthy maps sit near ~1.0; a slide toward 0 is the failure that
-looks fine in a thumbnail) and **fog** (low-density mass — the haze of
-misplaced points between clusters). Both are cheap and catch the two ways a
-map lies to you.
+Focused model and metric tests for the reviewer-facing code:
 
-## The paper
+```bash
+PYTHONPATH=. .venv/bin/pytest -q \
+  tests/test_low_dim_kernel.py \
+  tests/test_edgelist_smoke.py \
+  tests/test_panel_v2.py \
+  tests/test_persistence.py
+```
 
-<!-- TODO(D6): PDF + interactive links + BibTeX once title/authors settle -->
+Paper build:
 
-Draft source lives in `paper/`. The experimental evidence behind every claim
-is sealed under a pre-registration protocol in the research logs
-(`latent-labs`, separate repo).
+```bash
+cd paper
+pandoc paper.md --citeproc --pdf-engine=tectonic -o /tmp/latent-basemap-paper.pdf
+```
 
-## Repo map
+Viewer build and smoke test:
 
-Supported surface:
+```bash
+cd mapviewer
+npm install
+npm run build
+npm run smoke
+```
 
-- `basemap/pumap/parametric_umap/` — the model (fit / transform / save / load)
-- `experiments/mappack/` — pack builder, text sidecars, ONNX export
-- `mapviewer/` — the viewer + in-browser projection
-- `experiments/metrics/` — collapse / fog / purity instruments
+## Evidence
 
-Research scaffolding (kept for reproducibility, not needed to train):
-`experiments/sandbox/` (the knob-sweep program), `*_modal.py` (legacy cloud
-scripts), round/receipt tooling referenced by the paper's protocol section.
+Readable result records live in
+[`enjalot/latent-labs`](https://github.com/enjalot/latent-labs). The reviewer
+guide links the specific 2M, 50M, graph, and 100M records. Large substrates,
+graphs, coordinates, and checkpoints remain in the internal artifact store; each
+record includes content digests and execution receipts.
 
-## License & citation
+## License and citation
 
-<!-- TODO(owner): license for code / models / packs; BibTeX after arXiv -->
+The root repository, model, and map-pack licenses have not been selected. The BSD
+license under `basemap/pumap/` applies to that nested upstream-derived package,
+not automatically to the whole repository. External sharing is currently for
+friendly review, not redistribution. Citation metadata will be added with the
+release tag.
