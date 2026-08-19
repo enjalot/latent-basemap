@@ -108,6 +108,8 @@ export interface PackIndexEntry {
   map_id: string;
   title?: string;
   path?: string;
+  /** absolute base URL for the whole pack (e.g. a GCS prefix); wins over path */
+  url?: string;
   N?: number;
   zmax?: number;
   synthetic?: boolean;

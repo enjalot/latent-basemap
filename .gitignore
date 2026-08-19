@@ -18,3 +18,5 @@ models/
 *.npz
 *.parquet
 experiments/cache/
+.ghpages-worktree/
+publish/

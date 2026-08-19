@@ -860,7 +860,9 @@ async function openPack(entry: PackIndexEntry) {
   panelState = { hover: null, point: null };
   bootMessage(`loading ${entry.map_id}…`);
 
-  const base = normBase(CONFIG.packsBase + (entry.path ?? entry.map_id));
+  const base = entry.url
+    ? normBase(entry.url)
+    : normBase(CONFIG.packsBase + (entry.path ?? entry.map_id));
   const manifest = await loadManifest(base);
 
   // Range-mode probe against a real binary in the pack. This is the caveat the
