@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>latent-basemap — in-browser projection POC</title>
+<style>
+  :root { --ink:#16202b; --muted:#5d6b7a; --line:#d9e0e7; --accent:#c2185b; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+         color:var(--ink); background:#fbfcfd; }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); background:#fff; }
+  h1 { font-size:16px; margin:0 0 2px; }
+  header p { margin:0; color:var(--muted); font-size:12px; }
+  main { display:flex; gap:20px; padding:20px; align-items:flex-start; flex-wrap:wrap; }
+  #mapwrap { position:relative; width:min(560px,92vw); }
+  canvas { width:100%; height:auto; border:1px solid var(--line); background:#fff; display:block; }
+  aside { flex:1 1 320px; min-width:300px; max-width:520px; }
+  textarea { width:100%; height:96px; font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;
+             padding:8px; border:1px solid var(--line); border-radius:4px; resize:vertical; }
+  button { font:13px inherit; padding:7px 12px; border:1px solid var(--line); background:#fff;
+           border-radius:4px; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .row { display:flex; gap:8px; align-items:center; margin:10px 0; flex-wrap:wrap; }
+  progress { width:100%; height:8px; }
+  #status { font-size:12px; color:var(--muted); min-height:1.3em; white-space:pre-wrap; }
+  #out { font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; background:#fff;
+         border:1px solid var(--line); border-radius:4px; padding:10px; white-space:pre-wrap; }
+  table { border-collapse:collapse; font-size:12px; margin-top:12px; width:100%; }
+  th,td { text-align:left; padding:3px 8px 3px 0; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:500; }
+  code { background:#eef2f6; padding:1px 4px; border-radius:3px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Where would my text land? — in-browser projection POC (PLAN6)</h1>
+  <p>MiniLM (ONNX, onnxruntime-web) → map head (ONNX, fp32, dynamic batch) → (x,y) on the map frame.
+     Everything local: no CDN, no backend, no GPU.</p>
+</header>
+
+<main>
+  <div id="mapwrap">
+    <canvas id="map" width="1024" height="1024"></canvas>
+    <div id="maplabel" style="font-size:12px;color:#5d6b7a;margin-top:6px"></div>
+  </div>
+
+  <aside>
+    <div class="row">
+      <select id="encoder">
+        <option value="onnx/model.onnx" selected>MiniLM fp32 (86 MB) — parity default</option>
+        <option value="onnx/model_quantized.onnx">MiniLM int8 (22 MB) — small, ~0.1% drift</option>
+      </select>
+      <button id="load" class="primary">Load models</button>
+    </div>
+    <progress id="prog" value="0" max="1" hidden></progress>
+    <div id="status">models not loaded</div>
+
+    <textarea id="text">Photosynthesis converts light energy into chemical energy in plants.</textarea>
+    <div class="row">
+      <button id="project" disabled>Project →</button>
+      <span id="timing" style="font-size:12px;color:#5d6b7a"></span>
+    </div>
+    <div id="out">(x, y) will appear here</div>
+    <table id="meta"></table>
+  </aside>
+</main>
+
+<script type="module">
+import * as ort from './vendor/ort/ort.wasm.min.mjs';
+import { env, AutoTokenizer } from './vendor/transformers/transformers.min.js';
+
+// --- runtime config: everything is served from this directory ---------------
+// absolute URL: ORT resolves wasmPaths against its own module URL, not the page
+ort.env.wasm.wasmPaths = new URL('./vendor/ort/', document.baseURI).href;
+ort.env.wasm.numThreads = 1;      // no COOP/COEP headers on a plain static host
+ort.env.wasm.proxy = false;
+ort.env.logLevel = 'error';
+
+env.allowRemoteModels = false;    // transformers.js: tokenizer only, from ./models
+env.allowLocalModels = true;
+env.localModelPath = './models/';
+env.useBrowserCache = false;
+
+const ENCODER_ID = 'Xenova/all-MiniLM-L6-v2';
+const MAX_LENGTH = 256;           // all-MiniLM-L6-v2 max_seq_length
+
+const $ = (id) => document.getElementById(id);
+const state = { tokenizer:null, encoder:null, head:null, frame:null, models:null };
+const errors = [];
+
+function status(msg) { $('status').textContent = msg; }
+
+// --- fetch with a content-length progress bar (PLAN6 "explicit ask" UX) -----
+async function fetchWithProgress(url, onProgress) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
+  const total = Number(res.headers.get('content-length')) || 0;
+  const reader = res.body.getReader();
+  const chunks = []; let done = 0;
+  for (;;) {
+    const { done: fin, value } = await reader.read();
+    if (fin) break;
+    chunks.push(value); done += value.length;
+    if (total) onProgress(done / total);
+  }
+  const buf = new Uint8Array(done); let off = 0;
+  for (const c of chunks) { buf.set(c, off); off += c.length; }
+  return buf;
+}
+
+async function session(url, label) {
+  const bytes = await fetchWithProgress(url, (f) => {
+    $('prog').value = f; status(`${label} … ${(f * 100).toFixed(0)}%`);
+  });
+  return { sess: await ort.InferenceSession.create(bytes, {
+             executionProviders:['wasm'], graphOptimizationLevel:'all' }),
+           bytes: bytes.length };
+}
+
+// --- the map frame: extent + PNG placement come from the pack manifest ------
+// models.json.frame is written by experiments/mappack/onnx/export_map_head.py and
+// mirrors experiments/map_renders.py, which is what drew density.png.
+function toUV(x, y, extent) {
+  const [x0, x1, y0, y1] = extent;
+  return { u: (x - x0) / (x1 - x0), v: (y - y0) / (y1 - y0) };
+}
+function toPixel(x, y, frame, w, h) {
+  const { u, v } = toUV(x, y, frame.extent);
+  // render_png rotates the histogram 180 degrees: x is flipped, y runs downward.
+  return { px: (1 - u) * w, py: v * h, u, v,
+           qx: Math.round(Math.min(Math.max(u,0),1) * 65535),
+           qy: Math.round(Math.min(Math.max(v,0),1) * 65535) };
+}
+
+const mapImg = new Image();
+const mapReady = new Promise((resolve, reject) => {
+  mapImg.onload = resolve;
+  mapImg.onerror = () => reject(new Error('density.png failed to load'));
+  mapImg.src = './map/density.png';
+});
+
+function draw(point) {
+  const c = $('map'), ctx = c.getContext('2d');
+  c.width = mapImg.naturalWidth || 1024; c.height = mapImg.naturalHeight || 1024;
+  ctx.drawImage(mapImg, 0, 0);
+  if (!point) return;
+  const { px, py } = point;
+  ctx.strokeStyle = '#c2185b'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(px, py, 14, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(px - 26, py); ctx.lineTo(px - 18, py);
+  ctx.moveTo(px + 18, py); ctx.lineTo(px + 26, py);
+  ctx.moveTo(px, py - 26); ctx.lineTo(px, py - 18);
+  ctx.moveTo(px, py + 18); ctx.lineTo(px, py + 26); ctx.stroke();
+  ctx.fillStyle = '#c2185b';
+  ctx.beginPath(); ctx.arc(px, py, 4, 0, Math.PI * 2); ctx.fill();
+}
+
+// --- model loading ---------------------------------------------------------
+async function loadModels() {
+  $('load').disabled = true; $('prog').hidden = false; $('prog').value = 0;
+  const t0 = performance.now();
+
+  status('tokenizer …');
+  state.tokenizer = await AutoTokenizer.from_pretrained(ENCODER_ID);
+
+  const encFile = $('encoder').value;
+  const enc = await session(`./models/${ENCODER_ID}/${encFile}`, `MiniLM (${encFile})`);
+  state.encoder = enc.sess;
+
+  const head = await session('./map/map_head.onnx', 'map head');
+  state.head = head.sess;
+
+  $('prog').hidden = true;
+  const secs = ((performance.now() - t0) / 1000).toFixed(1);
+  const mb = ((enc.bytes + head.bytes) / 1048576).toFixed(1);
+  status(`ready — ${mb} MB of model weights in ${secs}s (wasm, 1 thread)`);
+  $('project').disabled = false;
+  return true;
+}
+
+// --- embed: mean pooling over the attention mask + L2 norm (== ST) ---------
+async function embed(text) {
+  const enc = await state.tokenizer(text, { padding:true, truncation:true,
+                                            max_length:MAX_LENGTH });
+  const feeds = {};
+  for (const name of state.encoder.inputNames) {
+    const t = enc[name] ?? enc['token_type_ids'];
+    if (!t) throw new Error(`tokenizer produced no ${name}`);
+    feeds[name] = new ort.Tensor('int64', t.data, t.dims);
+  }
+  if (state.encoder.inputNames.includes('token_type_ids') && !enc.token_type_ids) {
+    const n = feeds['input_ids'].data.length;
+    feeds['token_type_ids'] = new ort.Tensor('int64', new BigInt64Array(n),
+                                             feeds['input_ids'].dims);
+  }
+  const out = await state.encoder.run(feeds);
+  const hidden = out['last_hidden_state'] ?? out[Object.keys(out)[0]];
+  const [, seq, dim] = hidden.dims;
+  const mask = enc.attention_mask.data;   // BigInt64Array, [1, seq]
+  const vec = new Float32Array(dim); let denom = 0;
+  for (let s = 0; s < seq; s++) {
+    const m = Number(mask[s]); if (!m) continue;
+    denom += m;
+    const base = s * dim;
+    for (let d = 0; d < dim; d++) vec[d] += hidden.data[base + d] * m;
+  }
+  for (let d = 0; d < dim; d++) vec[d] /= denom;
+  let norm = 0; for (let d = 0; d < dim; d++) norm += vec[d] * vec[d];
+  norm = Math.sqrt(norm) || 1;
+  for (let d = 0; d < dim; d++) vec[d] /= norm;
+  return { vec, tokens: seq };
+}
+
+async function project(text) {
+  const t0 = performance.now();
+  const { vec, tokens } = await embed(text);
+  const t1 = performance.now();
+  const spec = state.models.map_head;
+  const res = await state.head.run({
+    [spec.input.name]: new ort.Tensor('float32', vec, [1, vec.length]) });
+  const xy = res[spec.output.name].data;
+  const t2 = performance.now();
+  const c = $('map');
+  const px = toPixel(xy[0], xy[1], state.frame, c.width, c.height);
+  return { text, x: xy[0], y: xy[1], ...px, tokens, embedding: Array.from(vec),
+           embed_ms: t1 - t0, head_ms: t2 - t1 };
+}
+
+// --- wiring ----------------------------------------------------------------
+$('load').onclick = () => loadModels().catch((e) => {
+  errors.push(String(e)); status(`load failed: ${e}`); $('load').disabled = false;
+});
+
+$('project').onclick = async () => {
+  $('project').disabled = true;
+  try {
+    const r = await project($('text').value);
+    draw(r);
+    $('out').textContent =
+      `x = ${r.x.toFixed(6)}\ny = ${r.y.toFixed(6)}\n` +
+      `u,v = ${r.u.toFixed(5)}, ${r.v.toFixed(5)}   (u16: ${r.qx}, ${r.qy})\n` +
+      `pixel = ${r.px.toFixed(1)}, ${r.py.toFixed(1)}  of ${$('map').width}x${$('map').height}\n` +
+      `tokens = ${r.tokens}`;
+    $('timing').textContent = `embed ${r.embed_ms.toFixed(0)} ms · head ${r.head_ms.toFixed(1)} ms`;
+    window.__lastResult = r;
+  } catch (e) { errors.push(String(e)); $('out').textContent = `error: ${e}`; }
+  $('project').disabled = false;
+};
+
+const boot = (async () => {
+  state.models = await (await fetch('./map/models.json')).json();
+  state.frame = state.models.frame;
+  await mapReady;
+  draw(null);
+  const m = state.models;
+  $('maplabel').textContent =
+    `${m.map_id} — density.png, ${m.frame.bins}² bins, extent ` +
+    `x [${m.frame.extent[0].toFixed(2)}, ${m.frame.extent[1].toFixed(2)}] ` +
+    `y [${m.frame.extent[2].toFixed(2)}, ${m.frame.extent[3].toFixed(2)}]`;
+  $('meta').innerHTML = `
+    <tr><th>map head</th><td>${m.map_head.params.toLocaleString()} params · opset ${m.map_head.opset} · ${m.map_head.precision}</td></tr>
+    <tr><th>parity</th><td>torch vs onnxruntime max |Δ| = ${m.parity.random_unit.max_abs_diff.toExponential(2)}</td></tr>
+    <tr><th>encoder</th><td>${m.encoder.name} · mean pooling · L2</td></tr>
+    <tr><th>runtime</th><td>onnxruntime-web (wasm) — vendored, offline</td></tr>`;
+  return true;
+})();
+
+// Headless-verification surface (see verify_headless.mjs).
+window.poc = {
+  ready: boot,
+  load: () => loadModels(),
+  project: (t) => project(t),
+  setEncoder: (v) => { $('encoder').value = v; },
+  errors,
+  frame: () => state.frame,
+};
+</script>
+</body>
+</html>

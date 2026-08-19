@@ -1,0 +1,304 @@
+% Bibliography for the basemap paper. Lit-index pointers ([lit NNNN]) refer
+% to latent-labs/research/markdowns/. Entries marked TODO-verify need a
+% citation check before submission.
+
+% ---------- neighbor-embedding lineage ----------
+
+@article{mcinnes2018umap,
+  title   = {UMAP: Uniform Manifold Approximation and Projection for Dimension Reduction},
+  author  = {McInnes, Leland and Healy, John and Melville, James},
+  journal = {arXiv preprint arXiv:1802.03426},
+  year    = {2018},
+  note    = {[lit 0001]}
+}
+
+@article{sainburg2021parametric,
+  title   = {Parametric UMAP Embeddings for Representation and Semisupervised Learning},
+  author  = {Sainburg, Tim and McInnes, Leland and Gentner, Timothy Q.},
+  journal = {Neural Computation},
+  volume  = {33}, number = {11}, pages = {2881--2907},
+  year    = {2021},
+  note    = {[lit 0026]}
+}
+
+@article{vandermaaten2008tsne,
+  title   = {Visualizing Data using t-SNE},
+  author  = {van der Maaten, Laurens and Hinton, Geoffrey},
+  journal = {Journal of Machine Learning Research},
+  volume  = {9}, pages = {2579--2605},
+  year    = {2008},
+  note    = {[lit 0002]}
+}
+
+@inproceedings{tang2016largevis,
+  title     = {Visualizing Large-scale and High-dimensional Data},
+  author    = {Tang, Jian and Liu, Jingzhou and Zhang, Ming and Mei, Qiaozhu},
+  booktitle = {Proceedings of the 25th International Conference on World Wide Web},
+  year      = {2016},
+  note      = {[lit 0032]}
+}
+
+@inproceedings{damrich2021umaploss,
+  title     = {On UMAP's True Loss Function},
+  author    = {Damrich, Sebastian and Hamprecht, Fred A.},
+  booktitle = {Advances in Neural Information Processing Systems},
+  year      = {2021},
+  note      = {[lit 0199]; closest theoretical kin to the fneg mechanism}
+}
+
+@article{kobak2019heavytailed,
+  title   = {Heavy-tailed kernels reveal a finer cluster structure in t-SNE visualisations},
+  author  = {Kobak, Dmitry and Linderman, George and Steinerberger, Stefan and Kluger, Yuval and Berens, Philipp},
+  journal = {arXiv preprint arXiv:1902.05804},
+  year    = {2019},
+  note    = {[lit 0200]}
+}
+
+@article{wang2021pacmap,
+  title   = {Understanding How Dimension Reduction Tools Work: An Empirical Approach to Deciphering t-SNE, UMAP, TriMap, and PaCMAP for Data Visualization},
+  author  = {Wang, Yingfan and Huang, Haiyang and Rudin, Cynthia and Shaposhnik, Yaron},
+  journal = {Journal of Machine Learning Research},
+  volume  = {22}, number = {201}, pages = {1--73},
+  year    = {2021},
+  note    = {[lit 0027]}
+}
+
+@article{amid2019trimap,
+  title   = {TriMap: Large-scale Dimensionality Reduction Using Triplets},
+  author  = {Amid, Ehsan and Warmuth, Manfred K.},
+  journal = {arXiv preprint arXiv:1910.00204},
+  year    = {2019},
+  note    = {[lit 0028]}
+}
+
+@article{narayan2021densmap,
+  title   = {Assessing single-cell transcriptomic variability through density-preserving data visualization},
+  author  = {Narayan, Ashwin and Berger, Bonnie and Cho, Hyunghoon},
+  journal = {Nature Biotechnology},
+  volume  = {39}, pages = {765--774},
+  year    = {2021},
+  note    = {[lit 0005]}
+}
+
+@article{kobak2021initialization,
+  title   = {Initialization is critical for preserving global data structure in both t-SNE and UMAP},
+  author  = {Kobak, Dmitry and Linderman, George C.},
+  journal = {Nature Biotechnology},
+  volume  = {39}, pages = {156--157},
+  year    = {2021},
+  note    = {[lit 0003]}
+}
+
+@inproceedings{mikolov2013distributed,
+  title     = {Distributed Representations of Words and Phrases and their Compositionality},
+  author    = {Mikolov, Tomas and Sutskever, Ilya and Chen, Kai and Corrado, Greg and Dean, Jeffrey},
+  booktitle = {Advances in Neural Information Processing Systems},
+  year      = {2013},
+  note      = {negative-sampling origin; [lit 0056] covers the companion paper}
+}
+
+% ---------- GPU / scale systems ----------
+
+@article{nolet2021gpuumap,
+  title   = {Bringing UMAP Closer to the Speed of Light with GPU Acceleration},
+  author  = {Nolet, Corey J. and Lafargue, Victor and Raff, Edward and Nanditale, Thejaswi and Oates, Tim and Zedlewski, John and Patterson, Joshua},
+  journal = {Proceedings of the AAAI Conference on Artificial Intelligence},
+  year    = {2021},
+  note    = {[lit 0006]; cuML — our per-rung reference frames}
+}
+
+@misc{outofcore2025umap,
+  title = {Massive-Scale Out-Of-Core UMAP on the GPU},
+  note  = {[lit 0197] TODO-verify: full author list, venue, year before submission},
+  year  = {2025}
+}
+
+@article{johnson2019faiss,
+  title   = {Billion-scale similarity search with GPUs},
+  author  = {Johnson, Jeff and Douze, Matthijs and J{\'e}gou, Herv{\'e}},
+  journal = {IEEE Transactions on Big Data},
+  volume  = {7}, number = {3}, pages = {535--547},
+  year    = {2019},
+  note    = {[lit 0065]}
+}
+
+@article{policar2019opentsne,
+  title   = {openTSNE: a modular Python library for t-SNE dimensionality reduction and embedding},
+  author  = {Poli{\v{c}}ar, Pavlin G. and Stra{\v{z}}ar, Martin and Zupan, Bla{\v{z}}},
+  journal = {Journal of Statistical Software},
+  year    = {2024},
+  note    = {[lit 0033] TODO-verify volume/pages}
+}
+
+% ---------- substrate / embeddings ----------
+
+@inproceedings{reimers2019sbert,
+  title     = {Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks},
+  author    = {Reimers, Nils and Gurevych, Iryna},
+  booktitle = {Proceedings of EMNLP-IJCNLP},
+  year      = {2019},
+  note      = {[lit 0058]}
+}
+
+@inproceedings{wang2020minilm,
+  title     = {MiniLM: Deep Self-Attention Distillation for Task-Agnostic Compression of Pre-Trained Transformers},
+  author    = {Wang, Wenhui and Wei, Furu and Dong, Li and Bao, Hangbo and Yang, Nan and Zhou, Ming},
+  booktitle = {Advances in Neural Information Processing Systems},
+  year      = {2020},
+  note      = {cite with the all-MiniLM-L6-v2 model card (training-mix source for §5.4)}
+}
+
+@article{penedo2024fineweb,
+  title   = {The FineWeb Datasets: Decanting the Web for the Finest Text Data at Scale},
+  author  = {Penedo, Guilherme and Kydl{\'\i}{\v{c}}ek, Hynek and Lozhkov, Anton and Mitchell, Margaret and Raffel, Colin and Von Werra, Leandro and Wolf, Thomas},
+  journal = {arXiv preprint arXiv:2406.17557},
+  year    = {2024}
+}
+
+@misc{together2023redpajama,
+  title  = {RedPajama: an Open Dataset for Training Large Language Models},
+  author = {{Together Computer}},
+  year   = {2023},
+  note   = {RedPajama-Data-V2; TODO-verify: cite the 2024 NeurIPS datasets paper (arXiv:2411.12372)}
+}
+
+@article{gao2020pile,
+  title   = {The Pile: An 800GB Dataset of Diverse Text for Language Modeling},
+  author  = {Gao, Leo and Biderman, Stella and Black, Sid and Golding, Laurence and Hoppe, Travis and Foster, Charles and Phang, Jason and He, Horace and Thite, Anish and Nabeshima, Noa and Presser, Shawn and Leahy, Connor},
+  journal = {arXiv preprint arXiv:2101.00027},
+  year    = {2020}
+}
+
+% ---------- representativeness audit ----------
+
+@article{nguyen2016msmarco,
+  title   = {MS MARCO: A Human Generated MAchine Reading COmprehension Dataset},
+  author  = {Nguyen, Tri and Rosenberg, Mir and Song, Xia and Gao, Jianfeng and Tiwary, Saurabh and Majumder, Rangan and Deng, Li},
+  journal = {arXiv preprint arXiv:1611.09268},
+  year    = {2016},
+  note    = {non-commercial research license — used as eval probe only}
+}
+
+@inproceedings{volske2017tldr,
+  title     = {TL;DR: Mining Reddit to Learn Automatic Summarization},
+  author    = {V{\"o}lske, Michael and Potthast, Martin and Syed, Shahbaz and Stein, Benno},
+  booktitle = {Proceedings of the Workshop on New Frontiers in Summarization},
+  year      = {2017},
+  note      = {webis/tldr-17, CC-BY-4.0}
+}
+
+@article{khashabi2021gooaq,
+  title   = {GooAQ: Open Question Answering with Diverse Answer Types},
+  author  = {Khashabi, Daniel and Ng, Amos and Khot, Tushar and Sabharwal, Ashish and Hajishirzi, Hannaneh and Callison-Burch, Chris},
+  journal = {arXiv preprint arXiv:2104.08727},
+  year    = {2021}
+}
+
+% ---------- visualization systems / alignment ----------
+
+@misc{atlas,
+  title  = {Nomic Atlas},
+  author = {{Nomic AI}},
+  note   = {[lit 0068]; software, https://atlas.nomic.ai}
+}
+
+@misc{latentscope,
+  title  = {latent-scope},
+  author = {{enjalot}},
+  note   = {software, https://github.com/enjalot/latent-scope; TODO(owner): preferred author name form}
+}
+
+@article{schonemann1966,
+  title   = {A generalized solution of the orthogonal Procrustes problem},
+  author  = {Sch{\"o}nemann, Peter H.},
+  journal = {Psychometrika},
+  volume  = {31}, number = {1}, pages = {1--10},
+  year    = {1966}
+}
+
+% ---------- software (cite per CITATION files at submission) ----------
+% transformers.js, onnxruntime-web, RAPIDS cuML/cuVS, PyTorch
+
+% ---------- prior-art sweep additions (2026-08-18; see latent-labs
+% logs/process/2026-08-18_prior-art-sweep.md for the differentiation map) ----------
+
+@misc{duderstadt2025nomad,
+  title = {NOMAD Projection}, author = {Duderstadt, Brandon and Nussbaum, Zach and van der Maaten, Laurens},
+  note = {arXiv:2505.15511; multi-GPU data map of Multilingual Wikipedia — closest scale competitor, non-parametric}, year = {2025}
+}
+@inproceedings{huang2024paramrepulsor,
+  title = {Navigating the Effect of Parametrization for Dimensionality Reduction},
+  author = {Huang, Haiyang and Wang, Yingfan and Rudin, Cynthia}, booktitle = {NeurIPS}, year = {2024},
+  note = {arXiv:2411.15894; parametric-DR SOTA, hard negative mining}
+}
+@article{gonzalezmarquez2024landscape,
+  title = {The landscape of biomedical research}, author = {Gonz{\'a}lez-M{\'a}rquez, Rita and Schmidt, Luca and Schmidt, Benjamin M. and Berens, Philipp and Kobak, Dmitry},
+  journal = {Patterns}, year = {2024}, note = {21M-abstract public t-SNE atlas}
+}
+@article{espadoto2020nnp,
+  title = {Deep Learning Multidimensional Projections}, author = {Espadoto, Mateus and Hirata, Nina S. T. and Telea, Alexandru C.},
+  journal = {Information Visualization}, year = {2020}, note = {arXiv:1902.07958; train-once/stability claim at small scale}
+}
+@misc{islam2026oosumap,
+  title = {On Out-of-sample Embedding in UMAP}, author = {Islam, Md Tauhidul and Fleischer, Jason W.},
+  note = {arXiv:2606.04451; peripheral drift of projected points}, year = {2026}
+}
+@article{rafols2010overlay,
+  title = {Science overlay maps: a new tool for research policy and library management},
+  author = {Rafols, Ismael and Porter, Alan L. and Leydesdorff, Loet}, journal = {JASIST}, year = {2010},
+  note = {arXiv:0912.3882; the scientometric "basemap + overlay" lineage, with Klavans & Boyack 2009}
+}
+@article{kang2021symphony,
+  title = {Efficient and precise single-cell reference atlas mapping with Symphony},
+  author = {Kang, Joyce B. and others}, journal = {Nature Communications}, year = {2021},
+  note = {with scArches (Lotfollahi 2022) and Azimuth (Hao 2021): frozen reference frame + fast query projection in genomics}
+}
+@inproceedings{damrich2023contrastive,
+  title = {From t-SNE to UMAP with contrastive learning},
+  author = {Damrich, Sebastian and B{\"o}hm, Jan Niklas and Hamprecht, Fred A. and Kobak, Dmitry},
+  booktitle = {ICLR}, year = {2023}, note = {arXiv:2206.01816}
+}
+@article{bohm2022attraction,
+  title = {Attraction-Repulsion Spectrum in Neighbor Embeddings},
+  author = {B{\"o}hm, Jan Niklas and Berens, Philipp and Kobak, Dmitry},
+  journal = {JMLR}, year = {2022}, note = {arXiv:2007.08902; [lit 0198]}
+}
+@inproceedings{robinson2021hard,
+  title = {Contrastive Learning with Hard Negative Samples},
+  author = {Robinson, Joshua and Chuang, Ching-Yao and Sra, Suvrit and Jegelka, Stefanie},
+  booktitle = {ICLR}, year = {2021}, note = {arXiv:2010.04592; distance-dependent negative up-weighting precedent for fneg}
+}
+@article{xia2024scdeed,
+  title = {Statistical method scDEED for detecting dubious 2D single-cell embeddings},
+  author = {Xia, Christy and Li, Jingyi Jessica and others}, journal = {Nature Communications}, year = {2024},
+  note = {null-calibrated embedding gating; with EMBEDR (Johnson et al., Patterns 2022)}
+}
+@misc{ros2026gapindex,
+  title = {Measuring Distortion in the Empty Regions of Dimensionality Reduction Scatterplots with the Gap Index},
+  author = {Ros, J. and Arleo, Alessio and Paulovich, Fernando}, note = {arXiv:2607.28324; empty-region distortion — fog's published cousin}, year = {2026}
+}
+@misc{liu2024loomap,
+  title = {Assessing and improving reliability of neighbor embedding methods: a map-continuity perspective},
+  author = {Liu, Zhexuan and Ma, Rong and Zhong, Yiqiao}, note = {arXiv:2410.16608}, year = {2024}
+}
+@misc{dagstuhl2025lowdim,
+  title = {Low-dimensional embeddings of high-dimensional data},
+  author = {{Dagstuhl review (21 authors incl. McInnes, Kobak, Damrich)}}, note = {arXiv:2508.15929; best-practices checklist}, year = {2025}
+}
+@inproceedings{wang2023wizmap,
+  title = {WizMap: Scalable Interactive Visualization for Exploring Large Machine Learning Embeddings},
+  author = {Wang, Zijie J. and Munechika, David and Chen, Seongmin and Chau, Duen Horng}, booktitle = {ACL demo}, year = {2023}, note = {arXiv:2306.09328}
+}
+@misc{ren2025embeddingatlas,
+  title = {Embedding Atlas}, author = {Ren, Donghao and Hohman, Fred and others},
+  note = {arXiv:2505.06386; Apple, WebGPU + DuckDB-WASM in-browser filtering}, year = {2025}
+}
+@misc{hackerverse2024, title = {Hackerverse}, author = {Lin, Wilson},
+  note = {blog.wilsonl.in/hackerverse; 40M-point tiled embedding map on static storage, semantic fly-to}, year = {2024}
+}
+@misc{noichl2024openalexmapper, title = {OpenAlex Mapper}, author = {Noichl, Maximilian},
+  note = {fixed basemap + server-side projection of new documents onto stable coordinates}, year = {2024}
+}
+@misc{pmtiles, title = {PMTiles}, author = {Liu, Brandon},
+  note = {range-request single-file tile archives; with COPC/Potree (Morton-ordered point clouds) the map-pack mechanism precedent}
+}

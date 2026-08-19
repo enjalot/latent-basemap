@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Basemap viewer</title>
+<link rel="stylesheet" href="../../assets/viewer.css">
+</head>
+<body>
+<div id="app">
+  <header class="vh">
+    <div class="vh-main">
+      <a class="back" id="backLink" href="#">&larr; back to registry</a>
+      <h1 id="title">Loading map&hellip;</h1>
+      <div class="rows" id="rows"></div>
+      <div class="chips" id="prov"></div>
+    </div>
+    <div class="vh-side">
+      <div class="tabs" id="tabs">
+        <button data-tab="map" class="active">Map</button>
+        <button data-tab="metrics">Metrics</button>
+      </div>
+      <button class="icon-btn" id="themeToggle" title="Toggle light / dark">&#9680; theme</button>
+    </div>
+  </header>
+
+  <div class="stage">
+    <canvas id="plot"></canvas>
+    <div class="legend" id="legend" hidden></div>
+    <div class="zoomctl">
+      <button id="zoomIn" title="Zoom in (+)">+</button>
+      <button id="zoomOut" title="Zoom out (-)">&minus;</button>
+      <button id="zoomReset" title="Reset view (0)">&#8634;</button>
+    </div>
+    <div class="tooltip" id="tooltip" hidden></div>
+    <div class="status" id="status">
+      <div class="spinner"></div>
+      <div id="statusMsg">Loading&hellip;</div>
+      <div class="status-detail" id="statusDetail"></div>
+    </div>
+  </div>
+
+  <aside class="panel" id="panel"></aside>
+</div>
+
+<script>window.VIEWER_CONFIG = __VIEWER_CONFIG__;</script>
+<script src="../../assets/viewer.js"></script>
+</body>
+</html>

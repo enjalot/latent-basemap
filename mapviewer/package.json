@@ -1,0 +1,19 @@
+{
+  "name": "latent-basemap-mapviewer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Static pan/zoom viewer for latent-basemap map packs (PLAN6 viewer v2: layered WebGL2 + in-browser projection)",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "fixtures": "uv run --with numpy --with pillow python fixtures/make_fixture_pack.py --out packs --extra",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  }
+}

@@ -312,6 +312,198 @@ def scan_modern_round(
     return entries
 
 
+SLIM_CELL_KEYS = ("cells", "new_cells")
+SLIM_CELL_REQUIRED = {"capability", "coordinates", "panel_metrics", "seed"}
+
+
+def _graph_treatment(graph_capability: str) -> str:
+    """Coarse label for the graph builder a map trained on.
+
+    ``cluster-spill`` covers both the c-sweep graphs (R0228) and the
+    spill-lifted ``(c=200, s=8)`` family (R0229) — "spill" is the common token.
+    Everything unrecognized is the exact brute-force family.
+    """
+    if "cuvs" in graph_capability:
+        return "cuvs"
+    if "spill" in graph_capability:
+        return "cluster-spill"
+    return "exact"
+
+
+def _variant_tag(capability: str) -> str | None:
+    """Short discriminator for siblings that share a seed inside one group.
+
+    R0228 trains three maps per seed (c4/c8/c16); a bare "seed 42" title
+    cannot tell them apart in the compare grid or the drift table.
+    """
+    m = re.search(r"cluster-spill-(c\d+)", capability)
+    if m:
+        return m.group(1)
+    if "spill-lifted" in capability:
+        return "spill-lifted"
+    m = re.search(r"cuvs(?:-igd\d+)?", capability)
+    if m:
+        return m.group(0)
+    return None
+
+
+def _slim_cells(doc) -> tuple[str | None, dict]:
+    """Per-seed map cells inside a slim-protocol panel/comparison artifact.
+
+    Matched structurally, not by schema name: every round after 0218 mints its
+    own schema string, so keying off those would need a code change per round.
+    """
+    if not isinstance(doc, dict):
+        return None, {}
+    for key in SLIM_CELL_KEYS:
+        cells = doc.get(key)
+        if not isinstance(cells, dict) or not cells:
+            continue
+        if all(
+            isinstance(cell, dict) and SLIM_CELL_REQUIRED <= set(cell)
+            for cell in cells.values()
+        ):
+            return key, cells
+    return None, {}
+
+
+def scan_slim_panel_round(
+    round_dir: Path,
+    ledger: dict,
+    *,
+    queue_dir: Path | None = None,
+) -> list[dict]:
+    """Rounds under the slim v2 protocol, which score a family of maps at once.
+
+    R0218 onward publish one artifact JSON per round carrying a per-seed cell
+    map; each cell binds its own checkpoint, its sealed 2-D coordinates and its
+    panel metrics.  ``scan_modern_round`` cannot see any of it — that scanner
+    assumes ``artifacts/train/`` and exactly one map per round — so the whole
+    MiniLM 2M seed family and its cuVS-graph siblings were invisible to both the
+    registry and the compare gallery.
+
+    The treatment that separates those siblings is the *graph* each map trained
+    on, read from the map's own train receipt (``graph_capability``), never from
+    the round's prose: R0223's pipeline stamps still carry an
+    ``R0216-exact-…`` policy label by carryover, which would mislabel every
+    cuVS cell if trusted.
+    """
+    rid_m = re.match(r"round-(\d{4})", round_dir.name)
+    rid = rid_m.group(1) if rid_m else round_dir.name
+    queue_dir = queue_dir or round_dir / "queue"
+    art = queue_dir / "artifacts"
+    if not art.is_dir():
+        return []
+    queue = _load_json(queue_dir / "queue.json") or {}
+
+    finished = None
+    for dm in sorted(art.glob("*.done.json")):
+        finished = (_load_json(dm) or {}).get("finished") or finished
+
+    entries: list[dict] = []
+    for doc_path in sorted(art.glob("*/*.json")):
+        doc = _load_json(doc_path)
+        cell_key, cells = _slim_cells(doc)
+        if not cell_key:
+            continue
+        for cell_id in sorted(cells, key=lambda s: (not s.isdigit(), int(s) if s.isdigit() else 0, s)):
+            cell = cells[cell_id]
+            # R0228 keys its cells "<clusters>:<seed>", so the dict key is not
+            # a seed. The cell's own field is authoritative; the key is only a
+            # fallback for older docs.
+            seed_field = cell.get("seed")
+            if isinstance(seed_field, int):
+                seed = seed_field
+            elif str(seed_field).isdigit():
+                seed = int(str(seed_field))
+            elif cell_id.isdigit():
+                seed = int(cell_id)
+            else:
+                seed = None
+            capability = str(cell.get("capability") or f"seed{cell_id}")
+            coords = cell.get("coordinates") if isinstance(cell.get("coordinates"), dict) else {}
+            coords_path = Path(str(coords.get("canonical_path") or ""))
+            if not coords_path.is_file():
+                continue
+            model = cell.get("model") if isinstance(cell.get("model"), dict) else {}
+            receipt_ref = cell.get("train_receipt") if isinstance(cell.get("train_receipt"), dict) else {}
+            receipt = _load_json(Path(str(receipt_ref.get("canonical_path") or ""))) or {}
+            model_path = Path(str(model.get("canonical_path") or ""))
+            # R0257 prefixes per-node artifact names (train_seed42-production-
+            # config.json); earlier rounds use the bare name. Glob for either.
+            config = {}
+            if model_path.parent.is_dir():
+                for cfg_path in sorted(model_path.parent.glob("*production-config.json")):
+                    config = _load_json(cfg_path) or {}
+                    break
+            model_cfg = (config.get("config") or {}).get("model", {})
+            pm = cell.get("panel_metrics") if isinstance(cell.get("panel_metrics"), dict) else {}
+            graph_capability = str(receipt.get("graph_capability") or "")
+            rows = receipt.get("rows") or doc.get("rows")
+            # The map belongs to the round that TRAINED it, which is usually not
+            # the round that scored it (R0218 scored R0217's family). Evidence
+            # status and the map page follow training; `scored_in_round` records
+            # where these numbers came from.
+            trained_m = re.search(r"/runs/round-(\d{4})/", str(model_path))
+            trained_rid = trained_m.group(1) if trained_m else rid
+
+            tag = _variant_tag(capability)
+            entries.append({
+                "map_id": f"round-{trained_rid}-{capability}",
+                "title": f"{tag} seed {seed}" if tag else f"seed {seed}",
+                "round_id": trained_rid,
+                "scored_in_round": rid,
+                "kind": "round-map",
+                "page": f"round-{trained_rid}/{_slug(capability)}",
+                "date": finished,
+                "evidence_status": evidence_status(trained_rid, ledger),
+                "n_rows": int(rows) if rows else None,
+                "dims": [receipt.get("dimension"), model_cfg.get("output_dimension")],
+                "seed": seed,
+                "architecture": model_cfg.get("architecture"),
+                "hidden_dim": model_cfg.get("hidden_dimension"),
+                "kernel": model_cfg.get("low_dim_kernel"),
+                "graph": {
+                    "capability": graph_capability,
+                    "treatment": _graph_treatment(graph_capability),
+                    "sha256": ((receipt.get("exact_execution_receipt") or {})
+                               .get("graph", {}).get("graph", {}).get("sha256")),
+                    "directed_edges": receipt.get("directed_edges"),
+                },
+                "updates": receipt.get("optimizer_updates"),
+                "updates_per_s": receipt.get("steady_updates_per_s"),
+                "model": {
+                    "path": _relpath(model_path),
+                    "sha256": model.get("sha256"),
+                    "bytes": model.get("bytes"),
+                },
+                "coordinates": {
+                    "file": _relpath(coords_path),
+                    "dir": _relpath(coords_path.parent),
+                    "rows": cell.get("transform_rows_finite"),
+                    "sha256": coords.get("sha256"),
+                    "ordered_sha256": cell.get("coordinates_ordered_sha256"),
+                },
+                "panel": {
+                    "path": _relpath(doc_path),
+                    "ffr": pm.get("ffr"),
+                    "density": pm.get("density_v2"),
+                    "density_semantics": "density-v2",
+                    "purity_k256": pm.get("purity_fidelity_k256"),
+                    "purity_k1024": pm.get("purity_fidelity_k1024"),
+                    "proj_ffr": None,
+                    "corpus_ffr": cell.get("corpus_ffr"),
+                    "formula_version": (cell.get("panel") or {}).get("formula_version"),
+                },
+                "renders": [],
+                "release_sha": receipt.get("release_sha")
+                               or doc.get("release_sha")
+                               or (queue.get("release") or {}).get("sha"),
+                "run_dir": _relpath(round_dir),
+            })
+    return entries
+
+
 def scan_evaluation_round(
     round_dir: Path,
     ledger: dict,
@@ -905,18 +1097,141 @@ def _latest_queue_dir(round_dir: Path) -> Path | None:
     successful retry artifacts invisible to both the registry and the local
     explorer. The highest numbered materialized attempt is the authoritative
     artifact root while every older attempt remains untouched on disk.
+
+    Retries have been named ``queue-correction-N`` since R0216, which is the
+    naming every MiniLM 2M round used — including every cuVS-graph map. Only
+    the two bare numbered forms count: a round's abandoned attempts carry a
+    descriptive suffix (``queue-attempt-1-unrunnable-metadata``) and must stay
+    invisible. No round on disk mixes the two families, so one numeric rank
+    across both is unambiguous.
     """
-    candidates: list[tuple[int, Path]] = []
-    canonical = round_dir / "queue"
-    if (canonical / "artifacts").is_dir():
-        candidates.append((1, canonical))
-    for candidate in round_dir.glob("queue-attempt-*"):
-        match = re.fullmatch(r"queue-attempt-(\d+)", candidate.name)
-        if match and (candidate / "artifacts").is_dir():
-            candidates.append((int(match.group(1)), candidate))
-    if not candidates:
-        return None
-    return max(candidates, key=lambda item: item[0])[1]
+    families = _queue_family_dirs(round_dir)
+    return families.get("queue")
+
+
+def _queue_family_dirs(round_dir: Path) -> dict[str, Path]:
+    """The newest materialized attempt of every queue *family* in one round.
+
+    R0229 runs two queue families side by side — ``queue``/``queue-correction-1``
+    holds phase 1 and ``queue-phase2``/``queue-phase2-correction-{1..3}`` holds
+    phase 2, including the round's three trained maps. A single "latest queue"
+    can only ever surface one of them. Descriptive-suffix directories
+    (``queue-attempt-1-unrunnable-metadata``, ``queue.setup-failed-…``,
+    ``queue-refresh-…``) remain invisible, exactly as before: only the bare
+    family name and its ``-attempt-N`` / ``-correction-N`` forms count.
+    """
+    best: dict[str, tuple[int, Path]] = {}
+    for candidate in round_dir.iterdir() if round_dir.is_dir() else []:
+        match = re.fullmatch(
+            r"(queue(?:-phase\d+)?)(?:-(?:attempt|correction)-(\d+))?",
+            candidate.name,
+        )
+        if not match or not (candidate / "artifacts").is_dir():
+            continue
+        family, rank = match.group(1), int(match.group(2) or 1)
+        if family not in best or rank > best[family][0]:
+            best[family] = (rank, candidate)
+    return {family: path for family, (rank, path) in best.items()}
+
+
+def scan_orphan_map_dirs(
+    round_dir: Path,
+    ledger: dict,
+    *,
+    queue_dir: Path | None = None,
+) -> list[dict]:
+    """Trained maps that no panel document anywhere has scored.
+
+    R0229 trained three ``(c=200, s=8)`` spill-lifted maps and then measured
+    their displacement *geometry* instead of running the quality panel, so no
+    document carries the per-seed cell schema and ``scan_slim_panel_round``
+    cannot see them. The map artifact directory itself is complete — model,
+    train receipt, production config, sealed coordinates — which is everything
+    the viewer needs. Panel fields stay null; if a later round does score the
+    map, ``scan()`` replaces the unscored entry with the scored one.
+    """
+    rid_m = re.match(r"round-(\d{4})", round_dir.name)
+    rid = rid_m.group(1) if rid_m else round_dir.name
+    queue_dir = queue_dir or round_dir / "queue"
+    art = queue_dir / "artifacts"
+    if not art.is_dir():
+        return []
+    queue = _load_json(queue_dir / "queue.json") or {}
+
+    entries: list[dict] = []
+    for map_dir in sorted(art.iterdir()):
+        if not map_dir.is_dir() or "-map-" not in map_dir.name:
+            continue
+        receipt = _load_json(map_dir / "train-receipt.json")
+        config = _load_json(map_dir / "production-config.json")
+        coords_files = sorted(map_dir.glob("coordinates*.npy"))
+        if not receipt or not config or not coords_files:
+            continue
+        coords_path = coords_files[0]
+        if coords_path.stat().st_size == 0:
+            continue
+        capability = map_dir.name
+        seed_m = re.search(r"seed(\d+)", capability)
+        seed = int(seed_m.group(1)) if seed_m else receipt.get("seed")
+        model_path = map_dir / "model.pt"
+        model_cfg = (config.get("config") or {}).get("model", {})
+        graph_capability = str(receipt.get("graph_capability") or "")
+        rows = receipt.get("rows")
+        tag = _variant_tag(capability)
+        entries.append({
+            "map_id": f"round-{rid}-{capability}",
+            "title": f"{tag} seed {seed}" if tag else f"seed {seed}",
+            "round_id": rid,
+            "scored_in_round": None,
+            "kind": "round-map",
+            "page": f"round-{rid}/{_slug(capability)}",
+            "date": None,
+            "evidence_status": evidence_status(rid, ledger),
+            "n_rows": int(rows) if rows else None,
+            "dims": [receipt.get("dimension"), model_cfg.get("output_dimension")],
+            "seed": seed,
+            "architecture": model_cfg.get("architecture"),
+            "hidden_dim": model_cfg.get("hidden_dimension"),
+            "kernel": model_cfg.get("low_dim_kernel"),
+            "graph": {
+                "capability": graph_capability,
+                "treatment": _graph_treatment(graph_capability),
+                "sha256": ((receipt.get("exact_execution_receipt") or {})
+                           .get("graph", {}).get("graph", {}).get("sha256")),
+                "directed_edges": receipt.get("directed_edges"),
+            },
+            "updates": receipt.get("optimizer_updates"),
+            "updates_per_s": receipt.get("steady_updates_per_s"),
+            "model": {
+                "path": _relpath(model_path),
+                "sha256": None,
+                "bytes": model_path.stat().st_size if model_path.is_file() else None,
+            },
+            "coordinates": {
+                "file": _relpath(coords_path),
+                "dir": _relpath(coords_path.parent),
+                "rows": None,
+                "sha256": None,
+                "ordered_sha256": None,
+            },
+            "panel": {
+                "path": None,
+                "source": "unscored",
+                "ffr": None,
+                "density": None,
+                "density_semantics": "density-v2",
+                "purity_k256": None,
+                "purity_k1024": None,
+                "proj_ffr": None,
+                "corpus_ffr": None,
+                "formula_version": None,
+            },
+            "renders": [],
+            "release_sha": receipt.get("release_sha")
+                           or (queue.get("release") or {}).get("sha"),
+            "run_dir": _relpath(round_dir),
+        })
+    return entries
 
 
 def scan() -> dict:
@@ -926,7 +1241,8 @@ def scan() -> dict:
         for round_dir in sorted(RUNS_DIR.glob("round-*")):
             if re.fullmatch(r"round-\d{4}", round_dir.name) is None:
                 continue
-            queue_dir = _latest_queue_dir(round_dir)
+            families = _queue_family_dirs(round_dir)
+            queue_dir = families.get("queue")
             if queue_dir is not None:
                 maps += scan_modern_round(
                     round_dir, ledger, queue_dir=queue_dir
@@ -946,9 +1262,40 @@ def scan() -> dict:
                 maps += scan_projection_maps(
                     round_dir, ledger, queue_dir=queue_dir
                 )
+            if families:
+                # Slim-family maps and unscored map dirs can live in any queue
+                # family (R0229's trained maps are in queue-phase2-correction-3).
+                for family in sorted(families):
+                    maps += scan_slim_panel_round(
+                        round_dir, ledger, queue_dir=families[family]
+                    )
+                    maps += scan_orphan_map_dirs(
+                        round_dir, ledger, queue_dir=families[family]
+                    )
             elif (round_dir / "renders").is_dir():
                 maps += scan_legacy_renders(round_dir, ledger)
     maps += scan_checkpoints()
+    # A map re-scored by a later round (R0221's cells reappear in R0222) would
+    # otherwise be indexed twice under one id. Keep the first sighting, which is
+    # the earliest scoring round, and record the others.
+    seen: dict[str, dict] = {}
+    deduped: list[dict] = []
+    for m in maps:
+        prior = seen.get(m["map_id"])
+        if prior is None:
+            seen[m["map_id"]] = m
+            deduped.append(m)
+        elif (prior.get("panel") or {}).get("source") == "unscored" and (
+            (m.get("panel") or {}).get("source") != "unscored"
+        ):
+            # A panel scored a map the orphan scanner had already minted an
+            # unscored entry for: the scored entry is strictly richer.
+            prior.clear()
+            prior.update(m)
+            seen[m["map_id"]] = prior
+        elif m.get("scored_in_round"):
+            prior.setdefault("also_scored_in", []).append(m["scored_in_round"])
+    maps = deduped
     return {
         "schema": SCHEMA,
         "generated_utc": datetime.now(timezone.utc).isoformat(),
@@ -1019,9 +1366,34 @@ th { position: sticky; top: 0; background: var(--bg); }
 .accepted { color: var(--ok); } .partial, .pending { color: var(--warn); } .rejected { color: var(--bad); }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
 img.render { max-width: 100%; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+img.thumb { width: 72px; height: 72px; object-fit: cover; border: 1px solid var(--line); border-radius: 4px; display: block; }
+td.thumbcell { padding: 2px 6px; }
+.pair { display: flex; gap: 12px; flex-wrap: wrap; }
+.pair figure { margin: 0; flex: 1 1 320px; max-width: 480px; }
+.pair figcaption { font-size: 12px; color: var(--muted, #666); margin-top: 4px; }
 code { font-size: 12.5px; background: var(--card); padding: 1px 5px; border-radius: 4px; }
 dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 14px; margin: 8px 0; }
 dt { color: var(--muted); } dd { margin: 0; overflow-wrap: anywhere; }
+.cardgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+            gap: 14px; margin: 12px 0 8px; }
+.mapcard { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+           padding: 12px 13px; display: flex; flex-direction: column; gap: 8px; }
+.mapcard .thumb { width: 100%; aspect-ratio: 1/1; object-fit: cover; border-radius: 7px;
+                  border: 1px solid var(--line); background: #fff; }
+.mapcard h3 { font-size: 0.98rem; margin: 0; line-height: 1.25; overflow-wrap: anywhere; }
+.mapcard .meta { color: var(--muted); font-size: 12px; }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.chip { padding: 1px 8px; border-radius: 9px; font-size: 12px; background: var(--bg);
+        border: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.chip.ok { color: var(--ok); border-color: var(--ok); }
+.chip.bad { color: var(--bad); border-color: var(--bad); }
+.viewerbtn { margin-top: auto; display: inline-block; text-align: center; text-decoration: none;
+             padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line);
+             background: var(--bg); font-size: 13px; font-weight: 600; }
+.viewerbtn:hover { border-color: var(--ok); }
+.legacybtn { display: inline-block; text-align: center; margin-top: 4px; font-size: 12px;
+             color: var(--muted); text-decoration: none; }
+.legacybtn:hover { text-decoration: underline; }
 """
 
 
@@ -1040,6 +1412,138 @@ def _fmt(v, digits=4):
     return html.escape(str(v))
 
 
+DENSITY_FLOOR = 0.60  # density_v2 pass threshold (density_at_least_0_60)
+
+
+def _viewer_card(built: dict, entry: dict | None) -> str:
+    """Render one map card: thumbnail, title, rows, evidence badge, metric chips."""
+    panel = (entry or {}).get("panel", {}) if entry else {}
+    ffr = panel.get("ffr")
+    density = panel.get("density")
+    rows = built.get("rows_total")
+    checks_pass = panel.get("decision_checks_all_pass")
+
+    ffr_cls = "ok" if checks_pass else ""
+    ffr_chip = f'<span class="chip {ffr_cls}">FFR {_fmt(ffr)}</span>'
+    if density is None:
+        dens_chip = '<span class="chip">density_v2 —</span>'
+    else:
+        dens_ok = density >= DENSITY_FLOOR
+        mark = "✓" if dens_ok else "✗"
+        dens_chip = (f'<span class="chip {"ok" if dens_ok else "bad"}">'
+                     f'density_v2 {_fmt(density)} {mark}</span>')
+
+    thumb = built.get("thumb_rel")
+    thumb_tag = (f'<img class="thumb" src="{html.escape(thumb)}" alt="density thumbnail" '
+                 f'loading="lazy">' if thumb else "")
+    rows_line = f'{_fmt(rows)} rows' if rows else ""
+    evidence = built.get("evidence_status") or (entry or {}).get("evidence_status") or ""
+    # Primary link is the React app (deployed to <site>/app/); the vanilla
+    # viewer page stays reachable as a small secondary "legacy viewer" link.
+    app_href = f'app/index.html#/map/{html.escape(built["map_id"])}'
+    legacy = ""
+    if built.get("viewer_rel"):
+        legacy = (f'<a class="legacybtn" href="{html.escape(built["viewer_rel"])}">'
+                  f'legacy viewer</a>')
+    return (
+        '<div class="mapcard">'
+        f'{thumb_tag}'
+        f'<h3>{html.escape(built.get("title") or built.get("map_id"))}</h3>'
+        f'<div class="meta">{html.escape(rows_line)}</div>'
+        f'<div class="chips">{_badge(evidence)}{ffr_chip}{dens_chip}</div>'
+        f'<a class="viewerbtn" href="{app_href}">open viewer →</a>'
+        f'{legacy}'
+        '</div>'
+    )
+
+
+def _inject_viewer_cards(site_dir: Path, registry: dict, built: list[dict]) -> None:
+    """Splice the viewer card grid into index.html between the section markers."""
+    index_path = site_dir / "index.html"
+    if not index_path.is_file() or not built:
+        return
+    by_id = {m.get("map_id"): m for m in registry.get("maps", [])}
+    order = {m.get("map_id"): i for i, m in enumerate(
+        sorted((m for m in registry.get("maps", []) if m.get("kind") == "round-map"),
+               key=lambda x: x.get("date") or "", reverse=True))}
+    cards = "".join(
+        _viewer_card(b, by_id.get(b["map_id"]))
+        for b in sorted(built, key=lambda b: order.get(b["map_id"], 1 << 30))
+    )
+    block = ('<!-- viewer-cards:start --><h2>Interactive maps</h2>'
+             '<p class="muted">Binned density viewers with sampled tooltips, '
+             'corpus/language overlays, and live quality-metric exemplars.</p>'
+             f'<div class="cardgrid">{cards}</div><!-- viewer-cards:end -->')
+    body = index_path.read_text()
+    body = re.sub(r"<!-- viewer-cards:start -->.*?<!-- viewer-cards:end -->",
+                  block, body, flags=re.DOTALL)
+    index_path.write_text(body)
+
+
+def _page_slug(m: dict) -> str:
+    """Site-relative directory for a map page.
+
+    One page per round was fine while a round trained one map; the slim v2
+    family rounds train four at a time, so those nest a per-map directory and
+    the round dir would otherwise be written four times, last one winning.
+    """
+    return str(m.get("page") or f'round-{m["round_id"]}')
+
+
+def _render_cache_dir(m: dict) -> Path:
+    from map_renders import RENDER_CACHE
+    return RENDER_CACHE / m["map_id"]
+
+
+def _binned_section(m: dict, page_dir: Path) -> str:
+    """Copy this map's registry-side binned renders into the page and describe them.
+
+    These are derived views regenerated by ``map_renders.py`` from the sealed
+    full-N coordinates (and, where the universe sealed a held-out reserve, the
+    reserve projected through the map's own checkpoint on CPU). They are not
+    round artifacts.
+    """
+    cache = _render_cache_dir(m)
+    meta_path = cache / "meta.json"
+    if not meta_path.is_file():
+        return ""
+    meta = _load_json(meta_path) or {}
+    rmeta = meta.get("renders", {})
+    figures = []
+    captions = {
+        "density.png": f'all {_fmt(meta.get("n_rows"))} training rows, '
+                       f'log-scaled counts on a {BINS_LABEL} grid',
+        "heldout.png": (f'{_fmt((rmeta.get("heldout") or {}).get("rows"))} sealed '
+                        'held-out reserve rows (never trained on), projected '
+                        'through this checkpoint'),
+        "train-matched.png": (f'{_fmt((rmeta.get("train_matched") or {}).get("rows"))} '
+                              'training rows, subsampled to match the reserve size'),
+    }
+    for name in ("density.png", "train-matched.png", "heldout.png"):
+        src = cache / name
+        if not src.is_file():
+            continue
+        dst = page_dir / name
+        if not dst.exists() or dst.stat().st_size != src.stat().st_size:
+            shutil.copy2(src, dst)
+        figures.append(f'<figure><img class="render" src="{name}" alt="{name}">'
+                       f'<figcaption>{captions[name]}</figcaption></figure>')
+    if not figures:
+        return ""
+    note = ""
+    if len(figures) >= 3:
+        note = ('<p class="muted">Held-out vs train-matched share the grid, '
+                'extent and color scale: matching structure means the model '
+                'places unseen rows where the training data lives.</p>')
+    return ('<h2>Binned density</h2>'
+            f'<div class="pair">{figures[0]}</div>'
+            + (f'<div class="pair">{figures[1]}{figures[2]}</div>' if len(figures) >= 3 else "")
+            + note)
+
+
+BINS_LABEL = "1024×1024"
+
+
 def publish(registry: dict) -> None:
     SITE_DIR.mkdir(parents=True, exist_ok=True)
     round_maps = [m for m in registry["maps"] if m["kind"] == "round-map"]
@@ -1050,9 +1554,14 @@ def publish(registry: dict) -> None:
     rows = []
     for m in sorted(round_maps, key=lambda x: x.get("date") or "", reverse=True):
         p = m["panel"]
-        page = f'round-{m["round_id"]}/index.html'
+        page = _page_slug(m) + "/index.html"
+        thumb = ""
+        if (_render_cache_dir(m) / "density.png").is_file():
+            thumb = (f'<a href="{page}"><img class="thumb" '
+                     f'src="{_page_slug(m)}/density.png" alt=""></a>')
         rows.append(
-            f'<tr><td><a href="{page}">{html.escape(m["map_id"])}</a></td>'
+            f'<tr><td class="thumbcell">{thumb}</td>'
+            f'<td><a href="{page}">{html.escape(m["map_id"])}</a></td>'
             f'<td>{(m.get("date") or "")[:10]}</td>'
             f'<td class="num">{_fmt(m.get("n_rows"))}</td>'
             f'<td>h{m.get("hidden_dim")} {html.escape(str(m.get("architecture") or ""))}</td>'
@@ -1072,8 +1581,15 @@ def publish(registry: dict) -> None:
     for m in sorted(projections, key=lambda x: x.get("date") or "", reverse=True):
         p = m["projection"]
         page = f'projections/{m["map_id"]}/index.html'
+        # A projection gains a React-app viewer when its coordinate npz exists
+        # (the same condition map_viewer uses to build viewer/<map_id>/data/).
+        npz_path = Path((p.get("coordinates") or "").removeprefix("gsv:"))
+        app_link = ""
+        if npz_path.is_file():
+            app_link = (f' · <a href="app/index.html#/map/{html.escape(m["map_id"])}">'
+                        f'app</a>')
         projection_rows.append(
-            f'<tr><td><a href="{page}">{html.escape(m["map_id"])}</a></td>'
+            f'<tr><td><a href="{page}">{html.escape(m["map_id"])}</a>{app_link}</td>'
             f'<td>{html.escape(str(m.get("base_map") or ""))}</td>'
             f'<td class="num">{_fmt(p.get("corpus_rows"))}</td>'
             f'<td class="num">{_fmt(p.get("ffr"))}</td>'
@@ -1100,6 +1616,7 @@ def publish(registry: dict) -> None:
 {registry["counts"]["pre_round_checkpoints"]} pre-protocol checkpoints ·
 <a href="../basemap-gallery/">old gallery (2026-07-01)</a> ·
 <a href="http://gsv.local:8710/">roundwatch</a></p>
+<!-- viewer-cards:start --><!-- viewer-cards:end -->
 <h2>Projection maps</h2>
 <p class="muted">Foreign-domain corpora and held-out queries projected through a registered basemap. Browser plots are deterministic samples; metrics use the complete registered panel.</p>
 <div class="scroll"><table>
@@ -1108,7 +1625,7 @@ def publish(registry: dict) -> None:
 </table></div>
 <h2>Round maps</h2>
 <div class="scroll"><table>
-<tr><th>map</th><th>date</th><th>N</th><th>net</th><th>ffr</th><th>density</th>
+<tr><th></th><th>map</th><th>date</th><th>N</th><th>net</th><th>ffr</th><th>density</th>
 <th>purity k1024</th><th>proj ffr</th><th>evidence</th></tr>
 {''.join(rows) or '<tr><td colspan=9 class="muted">none</td></tr>'}
 </table></div>
@@ -1135,8 +1652,10 @@ def publish(registry: dict) -> None:
     (SITE_DIR / "index.html").write_text(index)
 
     for m in round_maps + legacy:
-        page_dir = SITE_DIR / f'round-{m["round_id"]}'
-        page_dir.mkdir(exist_ok=True)
+        slug = _page_slug(m)
+        page_dir = SITE_DIR / slug
+        page_dir.mkdir(parents=True, exist_ok=True)
+        up = "../" * len(Path(slug).parts)
         img_tags = []
         for r in m.get("renders", []):
             src = Path(r["path"].removeprefix("gsv:"))
@@ -1150,6 +1669,16 @@ def publish(registry: dict) -> None:
         dl_items = []
         for label, val in [
             ("evidence", m["evidence_status"]), ("date", m.get("date")),
+            ("scored in round", m.get("scored_in_round")
+             if m.get("scored_in_round") not in (None, m.get("round_id")) else None),
+            ("also scored in", ", ".join(m.get("also_scored_in", [])) or None),
+            ("seed", m.get("seed")),
+            ("graph", (m.get("graph") or {}).get("capability")),
+            ("graph sha256", (m.get("graph") or {}).get("sha256")),
+            # Exact and cuVS graphs differ by 0.03% of their edge count, so the
+            # abbreviating formatter would print both as "48M".
+            ("graph directed edges", f'{edges:,}' if (
+                edges := (m.get("graph") or {}).get("directed_edges")) else None),
             ("N rows", m.get("n_rows")), ("architecture",
              f'{m.get("architecture")} h{m.get("hidden_dim")} → {m.get("dims")}' if m.get("architecture") else None),
             ("kernel", m.get("kernel")), ("pipeline", m.get("pipeline")),
@@ -1158,7 +1687,9 @@ def publish(registry: dict) -> None:
             ("model", (m.get("model") or {}).get("path")),
             ("model sha256", (m.get("model") or {}).get("sha256")),
             ("coordinates", (m.get("coordinates") or {}).get("dir")),
+            ("coordinates file", (m.get("coordinates") or {}).get("file")),
             ("panel file", panel.get("path")), ("panel version", panel.get("formula_version")),
+            ("density semantics", panel.get("density_semantics")),
             ("run dir", m.get("run_dir")),
         ]:
             if val is not None:
@@ -1175,12 +1706,14 @@ def publish(registry: dict) -> None:
         page = f"""<!doctype html><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(m["map_id"])}</title><style>{CSS}</style>
-<p><a href="../index.html">← all maps</a></p>
+<p><a href="{up}index.html">← all maps</a></p>
 <h1>{html.escape(m["map_id"])}</h1>
+{f'<p class="muted">{html.escape(str(m.get("title")))}</p>' if m.get("title") else ''}
 {metrics}
+{_binned_section(m, page_dir)}
 <div class="card"><b>Provenance</b><dl>{''.join(dl_items)}</dl></div>
-<h2>Renders</h2>
-{''.join(img_tags) or '<p class="muted">no renders on disk</p>'}
+<h2>Round-sealed renders</h2>
+{''.join(img_tags) or '<p class="muted">none sealed by the round</p>'}
 """
         (page_dir / "index.html").write_text(page)
 
@@ -1194,9 +1727,22 @@ def publish(registry: dict) -> None:
     except Exception as exc:
         print(f"projection explorer generation failed: {exc}")
 
+    viewer_count = 0
+    try:
+        try:
+            from experiments.map_viewer import build_map_viewers
+        except ModuleNotFoundError:  # direct script execution
+            from map_viewer import build_map_viewers
+        built = build_map_viewers(registry, SITE_DIR)
+        _inject_viewer_cards(SITE_DIR, registry, built)
+        viewer_count = len(built)
+    except Exception as exc:  # viewer build is best-effort; index must still stand
+        print(f"map viewer generation failed: {exc}")
+
     print(
-        f"published {len(round_maps)+len(legacy)} map pages and "
-        f"{projection_count} projection explorers -> {SITE_DIR}  ({SITE_URL}/)"
+        f"published {len(round_maps)+len(legacy)} map pages, "
+        f"{projection_count} projection explorers and "
+        f"{viewer_count} interactive viewers -> {SITE_DIR}  ({SITE_URL}/)"
     )
 
 
