@@ -1,0 +1,29 @@
+{
+ "schema": "basemap-pack-index-v1",
+ "packs": [
+  {
+   "map_id": "r0268-100m-seed42-preview",
+   "title": "100M seed 42 PREVIEW (non-evidence)",
+   "url": "https://storage.googleapis.com/fun-data/latent-basemap/packs/r0268-100m-seed42-preview/",
+   "N": 100000000,
+   "zmax": 5,
+   "synthetic": false
+  },
+  {
+   "map_id": "r0267-50m-seed42",
+   "title": "50M seed 42 \u2014 flagship recipe (sealed 50M_PASS)",
+   "url": "https://storage.googleapis.com/fun-data/latent-basemap/packs/r0267-50m-seed42/",
+   "N": 50000000,
+   "zmax": 5,
+   "synthetic": false
+  },
+  {
+   "map_id": "sandbox-2m-umap-md000-x4-fneg10",
+   "title": "2M sandbox \u2014 promoted recipe (with in-browser projection)",
+   "url": "https://storage.googleapis.com/fun-data/latent-basemap/packs/sandbox-2m-umap-md000-x4-fneg10/",
+   "N": 2000000,
+   "zmax": 3,
+   "synthetic": false
+  }
+ ]
+}
