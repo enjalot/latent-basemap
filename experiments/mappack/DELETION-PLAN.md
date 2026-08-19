@@ -387,7 +387,8 @@ written and committed **before** deletion. Drafts are inline below.
 > FAISS and cannot be regenerated to their sealed hashes on this box. A
 > functionally equivalent index is rebuildable from
 > `gsv:/data/embeddings/{fineweb-edu-sample-10BT,RedPajama-Data-V2-sample-10B,pile-uncopyrighted}-chunked-120-all-MiniLM-L6-v2/train/`
-> (all present) via `build_150m_index_modal.py` ported to local cuVS/FAISS —
+> (all present) via `archive/early-prototypes/build_150m_index_modal.py` ported
+> to local cuVS/FAISS —
 > IVF_PQ, nlist ≈ 12k, PQ48x8 — at an estimated multi-hour GPU cost. The
 > resulting index will **not** match `7ed8ba06…`.
 >

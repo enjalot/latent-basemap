@@ -146,6 +146,8 @@ in fixtures are synthetic; real packs and model files are not committed. See the
 - `experiments/mappack/` contains the static pack builder and ONNX export.
 - `mapviewer/` contains the browser viewer.
 - `experiments/sandbox/` contains treatment-selection experiments.
+- [`archive/early-prototypes/`](archive/early-prototypes/) contains unsupported
+  Modal-era launchers, local scripts, and notebooks retained for provenance.
 - `basemap/round*`, `experiments/round*`, and the companion `latent-labs` repo
   contain the preregistered research history and evidence machinery.
 

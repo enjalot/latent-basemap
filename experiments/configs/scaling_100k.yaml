@@ -2,7 +2,8 @@
 # Expected runtime: ~30 min on A10G, ~2 hours on CPU
 #
 # At this scale, precomputing P_sym and negatives offline is strongly recommended.
-# Use psym_modal.py / edges_modal.py first, then set the paths below.
+# Historical workflow: use archive/early-prototypes/psym_modal.py and
+# archive/early-prototypes/edges_modal.py first, then set the paths below.
 #
 # Usage:
 #   python -m experiments.run_experiment experiments/configs/scaling_100k.yaml

@@ -1,8 +1,9 @@
 """
 Edge-list training path for ParametricUMAP.
 
-Consumes the ``.npz`` edge lists produced by ``build_150m_index_modal.py`` /
-``build_*_index_modal.py`` (int32 ``sources`` / ``targets``, float32 ``weights``,
+Consumes the ``.npz`` edge lists originally produced by
+``archive/early-prototypes/build_150m_index_modal.py`` and related builders
+(int32 ``sources`` / ``targets``, float32 ``weights``,
 scalars ``n_nodes`` / ``k``) and streams balanced positive/negative batches with
 on-the-fly negative sampling — the scale path that unblocks training above
 ~300k rows and the 150M asset.

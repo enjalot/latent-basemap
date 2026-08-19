@@ -200,8 +200,9 @@ if __name__ == "__main__":
             print(f"  ✓ {name}: {path} ({size_mb:.1f} MB)")
 
     if missing:
-        print("\nMissing files! Run precompute_local.py first:")
-        print("  python precompute_local.py --dataset ls-squad --n-neighbors 100")
+        print("\nMissing files. The historical generator is archived at:")
+        print("  python archive/early-prototypes/precompute_local.py "
+              "--dataset ls-squad --n-neighbors 100")
         sys.exit(1)
 
     if "--info" in sys.argv:

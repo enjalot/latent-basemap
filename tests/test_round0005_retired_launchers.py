@@ -43,33 +43,33 @@ RETIRED_MAIN_MODULES = (
     "experiments.build_testbed",
     "experiments.score_8m_bridge",
     "experiments.space_passport",
-    "scale_experiment",
-    "train_local",
-    "validate_umap",
 )
 
 REMOTE_MODULE_PATHS = (
-    "train_dedicated_modal.py",
-    "build_150m_index_modal.py",
-    "train_15m_modal.py",
-    "train_and_project_modal.py",
-    "sweep_global_modal.py",
-    "sweep_structure_modal.py",
-    "sweep_v3_modal.py",
-    "bench_knn_modal.py",
-    "bench_query_a100.py",
-    "bench_scale_modal.py",
-    "bench_throughput_modal.py",
-    "bench_train_gpu_modal.py",
-    "build_faiss_index_modal.py",
-    "debug_faiss_modal.py",
-    "train_combined_modal.py",
-    "train_modal.py",
+    "archive/early-prototypes/train_dedicated_modal.py",
+    "archive/early-prototypes/build_150m_index_modal.py",
+    "archive/early-prototypes/train_15m_modal.py",
+    "archive/early-prototypes/train_and_project_modal.py",
+    "archive/early-prototypes/sweep_global_modal.py",
+    "archive/early-prototypes/sweep_structure_modal.py",
+    "archive/early-prototypes/sweep_v3_modal.py",
+    "archive/early-prototypes/bench_knn_modal.py",
+    "archive/early-prototypes/bench_query_a100.py",
+    "archive/early-prototypes/bench_scale_modal.py",
+    "archive/early-prototypes/bench_throughput_modal.py",
+    "archive/early-prototypes/bench_train_gpu_modal.py",
+    "archive/early-prototypes/build_faiss_index_modal.py",
+    "archive/early-prototypes/debug_faiss_modal.py",
+    "archive/early-prototypes/train_combined_modal.py",
+    "archive/early-prototypes/train_modal.py",
 )
 
 LOCAL_EXECUTABLE_PATHS = (
     "autoresearch/prepare.py",
-    "project_local.py",
+    "archive/early-prototypes/project_local.py",
+    "archive/early-prototypes/scale_experiment.py",
+    "archive/early-prototypes/train_local.py",
+    "archive/early-prototypes/validate_umap.py",
 )
 
 

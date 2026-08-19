@@ -9,7 +9,7 @@ Usage:
 """
 from basemap.round0005_retirement import refuse_retired_launcher
 
-refuse_retired_launcher("train_15m_modal.py")
+refuse_retired_launcher("archive/early-prototypes/train_15m_modal.py")
 
 import time
 import logging

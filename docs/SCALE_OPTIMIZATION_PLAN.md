@@ -5,14 +5,17 @@ The current pipeline has an O(N²) bottleneck in negative sampling and materiali
 a full N×N sparse P_sym matrix. These changes remove both bottlenecks to enable
 training on 10M+ points, with a path to 1B+.
 
+> **Historical plan.** The one-off entrypoints named below now live in
+> `archive/early-prototypes/` and are not current run instructions.
+
 ## Codebase Orientation
 - `basemap/pumap/parametric_umap/utils/graph.py` — k-NN search, sigma/rho binary search, P_sym computation
 - `basemap/pumap/parametric_umap/datasets/edge_dataset.py` — positive/negative edge sampling, batch iterators
 - `basemap/pumap/parametric_umap/core.py` — ParametricUMAP training loop
-- `edges_modal.py` — distributed negative edge precomputation (Modal)
-- `psym_modal.py` — distributed P_sym precomputation (Modal)
-- `scale_experiment.py` — scaling benchmarks
-- `train_modal.py`, `train_local.py` — training entrypoints
+- `archive/early-prototypes/edges_modal.py` — distributed negative edge precomputation (Modal)
+- `archive/early-prototypes/psym_modal.py` — distributed P_sym precomputation (Modal)
+- `archive/early-prototypes/scale_experiment.py` — scaling benchmarks
+- `archive/early-prototypes/train_modal.py`, `archive/early-prototypes/train_local.py` — training entrypoints
 
 ## Step 1: Random Negative Sampling (removes O(N²) bottleneck)
 
@@ -143,7 +146,7 @@ except ImportError:
 
 ## Step 5: Sharded k-NN for 100M+ Scale
 
-**New file:** `psym_sharded.py` (or modify `psym_modal.py`)
+**New file:** `psym_sharded.py` (or modify the archived `psym_modal.py`)
 
 The idea: split the dataset into S shards. Each shard queries its vectors against
 a shared FAISS index of ALL vectors. Each shard outputs its own edge list file.
@@ -164,7 +167,8 @@ FAISS's `IndexShards` or `IndexIVF` with `index.add_with_ids()` across machines.
 
 ## Validation Plan
 
-After each step, run `scale_experiment.py` to verify:
+After each step, the historical plan ran
+`archive/early-prototypes/scale_experiment.py` to verify:
 
 1. **Correctness:** `distance_correlation` and `knn_preservation` should not degrade
    vs. baseline at 10K and 100K

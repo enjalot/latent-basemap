@@ -7,7 +7,7 @@ Usage:
 """
 from basemap.round0005_retirement import refuse_retired_launcher
 
-refuse_retired_launcher("bench_throughput_modal.py")
+refuse_retired_launcher("archive/early-prototypes/bench_throughput_modal.py")
 
 import time
 import logging

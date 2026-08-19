@@ -14,7 +14,7 @@ Usage:
 """
 from basemap.round0005_retirement import refuse_retired_launcher
 
-refuse_retired_launcher("sweep_v3_modal.py")
+refuse_retired_launcher("archive/early-prototypes/sweep_v3_modal.py")
 
 import time
 import logging

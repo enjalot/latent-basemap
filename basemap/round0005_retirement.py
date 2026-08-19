@@ -61,49 +61,49 @@ RETIRED_LAUNCHERS = {
         "the generic scorer is limited below 8M; use the exact-gated 8M scorer",
     "basemap/panel_v2.py":
         "the generic evaluator CLI is limited below 8M and has no scale admission inputs",
-    "train_dedicated_modal.py":
+    "archive/early-prototypes/train_dedicated_modal.py":
         "remote 15M/30M training bypasses the release-bound scale queue and GPU-hour cap",
-    "build_150m_index_modal.py":
+    "archive/early-prototypes/build_150m_index_modal.py":
         "remote 30M/150M GPU indexing bypasses release-bound scale admission",
-    "train_15m_modal.py":
+    "archive/early-prototypes/train_15m_modal.py":
         "remote 15M training bypasses the release-bound scale queue and GPU-hour cap",
-    "train_and_project_modal.py":
+    "archive/early-prototypes/train_and_project_modal.py":
         "remote 15M training/projection bypasses release-bound scale admission",
-    "sweep_global_modal.py":
+    "archive/early-prototypes/sweep_global_modal.py":
         "the remote 15M sweep bypasses the release-bound scale queue and GPU-hour cap",
-    "sweep_structure_modal.py":
+    "archive/early-prototypes/sweep_structure_modal.py":
         "the remote 15M sweep bypasses the release-bound scale queue and GPU-hour cap",
-    "sweep_v3_modal.py":
+    "archive/early-prototypes/sweep_v3_modal.py":
         "the remote 15M sweep bypasses the release-bound scale queue and GPU-hour cap",
-    "bench_knn_modal.py":
+    "archive/early-prototypes/bench_knn_modal.py":
         "the remote GPU kNN benchmark bypasses exact admission and runtime telemetry",
-    "bench_query_a100.py":
+    "archive/early-prototypes/bench_query_a100.py":
         "the direct A10G/A100 query benchmark bypasses queue admission and the lease",
-    "bench_scale_modal.py":
+    "archive/early-prototypes/bench_scale_modal.py":
         "the remote scale/training benchmark bypasses release and scale admission",
-    "bench_throughput_modal.py":
+    "archive/early-prototypes/bench_throughput_modal.py":
         "the remote GPU throughput benchmark bypasses queue admission and caps",
-    "bench_train_gpu_modal.py":
+    "archive/early-prototypes/bench_train_gpu_modal.py":
         "the remote training benchmark bypasses the issued no-training program",
-    "build_faiss_index_modal.py":
+    "archive/early-prototypes/build_faiss_index_modal.py":
         "the remote GPU index builder bypasses the sealed Round 0005 input program",
-    "debug_faiss_modal.py":
+    "archive/early-prototypes/debug_faiss_modal.py":
         "the direct remote FAISS GPU diagnostic bypasses the controller lease",
-    "train_combined_modal.py":
+    "archive/early-prototypes/train_combined_modal.py":
         "the remote combined trainer bypasses the issued no-training program",
-    "train_modal.py":
+    "archive/early-prototypes/train_modal.py":
         "the generic remote trainer bypasses exact release-bound admission",
     "autoresearch/train.py":
         "the autoresearch trainer is outside the issued no-training program",
     "autoresearch/prepare.py":
         "the autoresearch executable evaluation harness is outside Round 0005",
-    "project_local.py":
+    "archive/early-prototypes/project_local.py":
         "the direct model projector can select CUDA outside controller admission",
-    "scale_experiment.py":
+    "archive/early-prototypes/scale_experiment.py":
         "the generic scaling trainer can select CUDA outside the exact program",
-    "train_local.py":
+    "archive/early-prototypes/train_local.py":
         "the generic local trainer can select CUDA outside the exact program",
-    "validate_umap.py":
+    "archive/early-prototypes/validate_umap.py":
         "the generic validation trainer can select CUDA outside queue admission",
 }
 
@@ -159,28 +159,28 @@ EXECUTABLE_GPU_ENTRYPOINTS = ADMITTED_GPU_ENTRYPOINTS | {
     "experiments/score_8m_bridge.py",
     "experiments/score_a3_rescore.py",
     "experiments/space_passport.py",
-    "bench_knn_modal.py",
-    "bench_query_a100.py",
-    "bench_scale_modal.py",
-    "bench_throughput_modal.py",
-    "bench_train_gpu_modal.py",
-    "build_faiss_index_modal.py",
-    "debug_faiss_modal.py",
-    "train_combined_modal.py",
-    "train_modal.py",
+    "archive/early-prototypes/bench_knn_modal.py",
+    "archive/early-prototypes/bench_query_a100.py",
+    "archive/early-prototypes/bench_scale_modal.py",
+    "archive/early-prototypes/bench_throughput_modal.py",
+    "archive/early-prototypes/bench_train_gpu_modal.py",
+    "archive/early-prototypes/build_faiss_index_modal.py",
+    "archive/early-prototypes/debug_faiss_modal.py",
+    "archive/early-prototypes/train_combined_modal.py",
+    "archive/early-prototypes/train_modal.py",
     "autoresearch/train.py",
     "autoresearch/prepare.py",
-    "project_local.py",
-    "scale_experiment.py",
-    "train_local.py",
-    "validate_umap.py",
-    "build_150m_index_modal.py",
-    "train_15m_modal.py",
-    "train_and_project_modal.py",
-    "train_dedicated_modal.py",
-    "sweep_global_modal.py",
-    "sweep_structure_modal.py",
-    "sweep_v3_modal.py",
+    "archive/early-prototypes/project_local.py",
+    "archive/early-prototypes/scale_experiment.py",
+    "archive/early-prototypes/train_local.py",
+    "archive/early-prototypes/validate_umap.py",
+    "archive/early-prototypes/build_150m_index_modal.py",
+    "archive/early-prototypes/train_15m_modal.py",
+    "archive/early-prototypes/train_and_project_modal.py",
+    "archive/early-prototypes/train_dedicated_modal.py",
+    "archive/early-prototypes/sweep_global_modal.py",
+    "archive/early-prototypes/sweep_structure_modal.py",
+    "archive/early-prototypes/sweep_v3_modal.py",
 }
 if not EXECUTABLE_GPU_ENTRYPOINTS - ADMITTED_GPU_ENTRYPOINTS <= set(RETIRED_LAUNCHERS):
     raise AssertionError("Round 0005 executable GPU inventory has an unclassified path")

@@ -2,7 +2,8 @@
 
 This module replaces the three divergent metric implementations that used to
 live in ``experiments/run_experiment.py`` (``compute_metrics``),
-``autoresearch/prepare.py`` (``evaluate``) and ``validate_umap.py``. It is the
+``autoresearch/prepare.py`` (``evaluate``) and the archived
+``archive/early-prototypes/validate_umap.py``. It is the
 single source of truth for basemap evaluation, implementing the metric panel
 described in ``latent-labs/guides/plan-basemap-atlas.md`` §2.2 and the stability
 playbook of §4.

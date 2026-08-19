@@ -13,7 +13,7 @@ Previous error with faiss-gpu (1.7.2):
 
 from basemap.round0005_retirement import refuse_retired_launcher
 
-refuse_retired_launcher("debug_faiss_modal.py")
+refuse_retired_launcher("archive/early-prototypes/debug_faiss_modal.py")
 
 import modal
 

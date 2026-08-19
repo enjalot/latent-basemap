@@ -2,7 +2,8 @@
 # Expected runtime: ~2-4 hours on A10G/A100
 #
 # IMPORTANT: At 1M scale:
-#   1. MUST precompute P_sym and negatives offline (edges_modal.py)
+#   1. MUST precompute P_sym and negatives offline (historical prototype:
+#      archive/early-prototypes/edges_modal.py)
 #   2. Use low_memory=true (data stays on CPU)
 #   3. Use large batch sizes to amortize I/O overhead
 #   4. Metrics are sampled (5K-10K subset), not full pairwise

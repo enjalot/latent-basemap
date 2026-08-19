@@ -12,7 +12,7 @@ Usage:
 """
 from basemap.round0005_retirement import refuse_retired_launcher
 
-refuse_retired_launcher("train_combined_modal.py")
+refuse_retired_launcher("archive/early-prototypes/train_combined_modal.py")
 
 import time
 import pickle
