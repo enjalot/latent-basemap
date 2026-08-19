@@ -135,6 +135,11 @@ PANEL_ACTION = "score_minilm_fneg_100m_x2_panel"
 GATE_ACTION = "register_fneg_100m_x2_seedmean_gate"
 
 TRAIN_SCHEMA = "round0268-minilm-fneg-100m-x2-hostint8-train-receipt-v1"
+#: The post-training transform phase seals its OWN receipt (coordinates + seed-1 tripwire +
+#: transform wall/RSS), AFTER the train receipt, so a transform-phase death never destroys a
+#: clean train's evidence (R0268 attempts 1 & 3). The panel never reads this — it re-transforms
+#: from the model — so the phase split is invisible downstream.
+TRANSFORM_SCHEMA = "round0268-minilm-fneg-100m-x2-hostint8-transform-receipt-v1"
 PANEL_CAPABILITY = "minilm-fneg-100m-x2-hostint8-panel-v1"
 PANEL_SCHEMA = "round0268-minilm-fneg-100m-x2-hostint8-panel-v1"
 GATE_CAPABILITY = "minilm-fneg-100m-x2-seedmean-gate-v1"
@@ -805,37 +810,16 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             if not checkpoint_fneg_roundtrip:
                 raise Round0268NodeError("R0268 checkpoint did not round-trip the fneg params")
             wrapped("R0268 checkpoint reloaded")
-            coordinates = _transform_100m_in_chunks(reloaded, source, wrapped)
-            validate_published_map(coordinates)
-            coordinates_path = os.path.join(output, "coordinates.npy")
-            atomic_save_new_npy(coordinates_path, coordinates, immutable=True)
-            coordinates_ordered_sha256 = ordered_array_sha256(coordinates)
-            transform_rows_finite = int(np.isfinite(coordinates).all(axis=1).sum())
-            # SEED-1 TRIPWIRE INPUTS: the map-level collapse + fog (both map-only, no truth),
-            # written into the receipt so a driver can check seed-1's backstop/fog escalation
-            # BEFORE seeds 2/3 train. These preview numbers are NOT the gate (the panel
-            # re-scores collapse/fog on the same coordinates); they are the cheap map-only
-            # instruments the tripwire reads.
-            collapse_preview = map_collapse(coordinates)
-            fog_preview = _map_fog(coordinates, bins=FOG_BINS)
-            tripwire_inputs = {
-                "collapse": float(collapse_preview["r10_over_radius_times_sqrt_n"]),
-                "fog": float(fog_preview["fog"]),
-                "resolution_levels": int(fog_preview["resolution_levels"]),
-                "degenerate": bool(fog_preview["degenerate"]),
-                "fog_detail": fog_preview,
-                "collapse_detail": collapse_preview,
-                "note": (
-                    "map-level collapse + fog (map-only, no truth) written so a driver can "
-                    "check seed-1's collapse backstop + fog escalation before seeds 2/3; the "
-                    "panel re-scores these on the same coordinates for the gate"
-                ),
-            }
-            wrapped("R0268 seed-1 tripwire inputs (collapse/fog) computed")
-            del reloaded, coordinates
-            torch.cuda.empty_cache()
-            gc.collect()
-            gate.finish(f"R0268 {capability} stage end")
+            # ===== TRAINING-PHASE BOUNDARY =====
+            # The 100M transform + seed-1 tripwire were MOVED to a post-training, UNGUARDED
+            # phase (below, after the train receipt seals). The training guards (CellWatchdog
+            # swap-growth + anon; _node_guard) exist to bound the TRAINING working set; the
+            # 100M transform is a read-only projection whose page-cache pressure from reading
+            # the 153.6 GB fp32 substrate legitimately grows system swap and tripped
+            # CellWatchdog's 1 GiB swap-growth abort mid-projection — R0268 attempts 1 & 3 each
+            # lost a clean 24h train to exactly this. `reloaded` is carried across the boundary;
+            # `source`/`graph` stay live for the transform + its receipt below.
+            gate.finish(f"R0268 {capability} training stage end")
         window.close()
         tail = _guard_tail_reported(guard_ctx, label=label)
         scored = _score_gate_without_raising(gate, tail, label=label)
@@ -886,8 +870,6 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
             _bound_path(job, "treatment_closure", label="R0268 treatment closure seal")
         ),
         "model": expected_input_signature(model_path),
-        "coordinates": expected_input_signature(coordinates_path),
-        "coordinates_ordered_sha256": coordinates_ordered_sha256,
         "substrate": substrate["substrate_signature"],
         "substrate_manifest": substrate["manifest_signature"],
         "ordered_substrate_sha256": substrate["ordered_substrate_sha256"],
@@ -913,7 +895,12 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "host_rss_limit_gib": HOST_RSS_LIMIT_GIB,
         "host_rss_limit_basis": HOST_RSS_ANALYTIC_BASIS,
         "memory_watchdog": watchdog_state,
-        "seed_1_tripwire_inputs": tripwire_inputs,
+        "attestation_scope": (
+            "TRAINING PHASE ONLY: memory_watchdog, memory.peak_host_rss_gib, guard_tail, and "
+            "train_checks.watchdog_did_not_trip attest fit→save→reload (the guarded phase). The "
+            "100M transform runs UNGUARDED after this receipt seals and is attested separately "
+            "in transform-receipt.json (coordinates finiteness, transform wall/RSS, tripwire)."
+        ),
         "gap_report": gaps,
         "enforcement_poll_spacing": scored,
         "guard_tail": tail,
@@ -936,7 +923,6 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 int8_full_receipt.get("verified_against_sealed_manifest")
                 and int8_full_receipt.get("re_encoded_at_train_time") is False
             ),
-            "all_100m_coordinates_finite": transform_rows_finite == ROWS,
             "host_int8_residency_stamp_verified": (
                 residency["x_residency"] == X_RESIDENCY
                 and residency["weighted_effective"] is False
@@ -956,6 +942,83 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "node": node_id,
     }
     _seal(output, "train-receipt.json", receipt_body)
+    # ===== TRAINING EVIDENCE SEALED =====
+    # The clean train is now salvageable even if the transform below dies: attempts 1 & 3 lost
+    # their trains ONLY because the receipt assembled AFTER the transform, so the in-memory
+    # telemetry (fneg dynamics, closure verdict, accounting, watchdog) died with the process.
+    # Guard + watchdog are CLOSED here; the transform runs unguarded.
+
+    # ===== POST-TRAINING TRANSFORM PHASE (UNGUARDED, separately receipted) =====
+    # The 100M projection + seed-1 tripwire. No CellWatchdog / _node_guard by design: the
+    # page-cache pressure from reading the 153.6 GB fp32 substrate is benign for this read-only
+    # projection (proven 3x standalone at ~117 GiB RSS: the R0268 panel dry-run + two salvage
+    # transforms), but it grows system swap past CellWatchdog's 1 GiB abort — the guard must not
+    # police a phase it was never scoped for.
+    transform_started = time.monotonic()
+
+    def _transform_poll(message: str) -> None:
+        # cooperative abort only (the gate/recorder closed with the training phase)
+        if abort_flag and os.path.exists(abort_flag):
+            raise Round0268NodeError(
+                f"R0268 seed-{seed} transform observed the cooperative abort flag"
+            )
+
+    coordinates = _transform_100m_in_chunks(reloaded, source, _transform_poll)
+    validate_published_map(coordinates)
+    coordinates_path = os.path.join(output, "coordinates.npy")
+    atomic_save_new_npy(coordinates_path, coordinates, immutable=True)
+    coordinates_ordered_sha256 = ordered_array_sha256(coordinates)
+    transform_rows_finite = int(np.isfinite(coordinates).all(axis=1).sum())
+    all_coordinates_finite = transform_rows_finite == ROWS
+    # SEED-1 TRIPWIRE (map-only collapse + fog): a PREVIEW a driver reads to check seed-1's
+    # backstop/fog escalation before seeds 2/3. NOT a gate input — the panel re-transforms from
+    # the model and re-scores collapse/fog itself.
+    collapse_preview = map_collapse(coordinates)
+    fog_preview = _map_fog(coordinates, bins=FOG_BINS)
+    tripwire_inputs = {
+        "collapse": float(collapse_preview["r10_over_radius_times_sqrt_n"]),
+        "fog": float(fog_preview["fog"]),
+        "resolution_levels": int(fog_preview["resolution_levels"]),
+        "degenerate": bool(fog_preview["degenerate"]),
+        "fog_detail": fog_preview,
+        "collapse_detail": collapse_preview,
+        "note": (
+            "map-level collapse + fog (map-only, no truth); a driver reads these to check "
+            "seed-1's backstop + fog escalation before seeds 2/3. The panel re-scores from the "
+            "model for the gate. Produced in the UNGUARDED post-training transform phase."
+        ),
+    }
+    del reloaded, coordinates
+    torch.cuda.empty_cache()
+    gc.collect()
+    transform_wall_s = time.monotonic() - transform_started
+    transform_peak_rss_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
+    transform_receipt_body = {
+        "schema": TRANSFORM_SCHEMA,
+        "round_id": ROUND_ID,
+        "capability": capability,
+        "training_seed": seed,
+        "phase": "post-training-transform",
+        "guarded": False,
+        "train_receipt": expected_input_signature(os.path.join(output, "train-receipt.json")),
+        "model": expected_input_signature(model_path),
+        "coordinates": expected_input_signature(coordinates_path),
+        "coordinates_ordered_sha256": coordinates_ordered_sha256,
+        "ordered_substrate_sha256": substrate["ordered_substrate_sha256"],
+        "seed_1_tripwire_inputs": tripwire_inputs,
+        "transform_wall_s": transform_wall_s,
+        "transform_peak_host_rss_gib": transform_peak_rss_gib,
+        "transform_checks": {
+            "all_100m_coordinates_finite": bool(all_coordinates_finite),
+            "coordinates_row_count_is_rows": int(transform_rows_finite) == ROWS,
+        },
+    }
+    if not all(transform_receipt_body["transform_checks"].values()):
+        raise Round0268NodeError(
+            f"R0268 seed-{seed} transform checks failed: "
+            f"{transform_receipt_body['transform_checks']}"
+        )
+    _seal(output, "transform-receipt.json", transform_receipt_body)
     del source, graph
     gc.collect()
     print(json.dumps({

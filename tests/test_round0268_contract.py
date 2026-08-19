@@ -657,6 +657,148 @@ def test_run_train_emits_the_analytic_rss_basis_into_the_receipt():
     assert "peak_rss_gib > HOST_RSS_LIMIT_GIB" in src
 
 
+# --------------------------------------------------------------------------- #
+# PHASE-BOUNDARY contract (the fix for the R0268 transform-phase deaths, 2026-08-19).
+# The training guards (CellWatchdog swap-growth/anon + _node_guard) exist to bound the
+# TRAINING working set; the 100M transform is a read-only projection whose page-cache
+# pressure legitimately grew system swap and tripped CellWatchdog's 1 GiB swap-growth abort
+# mid-projection (attempts 1 & 3). The fix: end the guards at the phase boundary and SEAL the
+# train receipt BEFORE the transform, so a transform-phase death never destroys a clean train.
+# These are AST/source-order tests: run_train needs CUDA + the 38 GB int8 + a 24h train, so a
+# true end-to-end fault-injection unit test is infeasible; the structural invariants below
+# plus attempt-4 itself are the validation.
+# --------------------------------------------------------------------------- #
+
+
+def _run_train_ast():
+    import ast
+    import inspect
+
+    src = inspect.getsource(N.run_train)
+    src = "\n".join(src.splitlines())  # inspect keeps the original indentation
+    import textwrap
+    return ast.parse(textwrap.dedent(src)).body[0]
+
+
+def _call_lines(tree, *, func_name=None, str_arg=None):
+    """Line numbers of Call nodes matching a callee name and/or a string argument."""
+    import ast
+
+    hits = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        callee = node.func
+        name = getattr(callee, "id", None) or getattr(callee, "attr", None)
+        if func_name is not None and name != func_name:
+            continue
+        if str_arg is not None:
+            if not any(
+                isinstance(a, ast.Constant) and a.value == str_arg for a in node.args
+            ):
+                continue
+        hits.append(node.lineno)
+    return hits
+
+
+def test_train_receipt_seals_before_the_transform():
+    tree = _run_train_ast()
+    seal_train = _call_lines(tree, func_name="_seal", str_arg="train-receipt.json")
+    transform = _call_lines(tree, func_name="_transform_100m_in_chunks")
+    assert len(seal_train) == 1, seal_train
+    assert len(transform) == 1, transform
+    # the train receipt is written on disk strictly BEFORE the 100M transform begins.
+    assert seal_train[0] < transform[0], (seal_train, transform)
+
+
+def test_transform_runs_outside_the_training_guard_and_watchdog():
+    import ast
+
+    tree = _run_train_ast()
+    transform_line = _call_lines(tree, func_name="_transform_100m_in_chunks")[0]
+    # the transform call must not be lexically inside any `with guard_ctx:` block.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.With):
+            uses_guard = any(
+                getattr(getattr(item, "context_expr", None), "id", None) == "guard_ctx"
+                for item in node.items
+            )
+            if not uses_guard:
+                continue
+            end = getattr(node, "end_lineno", node.lineno)
+            assert not (node.lineno <= transform_line <= end), (
+                "the 100M transform is inside `with guard_ctx:` — it must run unguarded"
+            )
+    # watchdog.stop() happens before the transform (the watchdog covers training only).
+    stop_lines = [
+        n.lineno
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and getattr(n.func, "attr", None) == "stop"
+        and getattr(getattr(n.func, "value", None), "id", None) == "watchdog"
+    ]
+    assert stop_lines and max(stop_lines) < transform_line, stop_lines
+
+
+def test_watchdog_trip_still_aborts_and_covers_training():
+    import ast
+    import inspect
+
+    tree = _run_train_ast()
+    src = inspect.getsource(N.run_train)
+    # the watchdog starts before training and its trip is raised (planted training trip aborts).
+    start_lines = [
+        n.lineno
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and getattr(n.func, "attr", None) == "start"
+        and getattr(getattr(n.func, "value", None), "id", None) == "watchdog"
+    ]
+    fit_lines = _call_lines(tree, func_name="fit")
+    transform_line = _call_lines(tree, func_name="_transform_100m_in_chunks")[0]
+    assert start_lines and fit_lines and start_lines[0] < fit_lines[0]
+    # the trip check raises, and it is evaluated in the TRAINING phase (before the transform).
+    assert 'if watchdog_state["tripped"]:' in src
+    assert src.index('watchdog_state["tripped"]') < src.index("_transform_100m_in_chunks")
+
+
+def test_post_training_swap_growth_cannot_abort_the_transform():
+    import ast
+    import inspect
+
+    tree = _run_train_ast()
+    src = inspect.getsource(N.run_train)
+    transform_line = _call_lines(tree, func_name="_transform_100m_in_chunks")[0]
+    # No CellWatchdog is constructed/started after the phase boundary; the only watchdog.stop()
+    # precedes the transform. So a post-training system-swap-growth event has no watchdog to trip.
+    cw_ctor = _call_lines(tree, func_name="CellWatchdog")
+    assert all(line < transform_line for line in cw_ctor), cw_ctor
+    # and the transform's own poll is cooperative-abort-only (no gate/watchdog).
+    assert "_transform_poll" in src
+
+
+def test_transform_has_its_own_receipt_and_finiteness_moved_out_of_train_checks():
+    import inspect
+
+    tree = _run_train_ast()
+    src = inspect.getsource(N.run_train)
+    # a separately-sealed transform receipt with the dedicated schema.
+    seal_transform = _call_lines(tree, func_name="_seal", str_arg="transform-receipt.json")
+    assert len(seal_transform) == 1, seal_transform
+    assert "TRANSFORM_SCHEMA" in src
+    # the transform-produced finiteness check moved OUT of train_checks (a training attestation
+    # must not depend on a post-training output) and into transform_checks.
+    assert '"all_100m_coordinates_finite"' in src  # still present...
+    # ...but only under transform_checks, after the train receipt seals.
+    assert src.index("transform_checks") < src.index('"all_100m_coordinates_finite"')
+    assert src.index('_seal(output, "train-receipt.json"') < src.index(
+        '"all_100m_coordinates_finite"'
+    )
+    # attestation scope is labelled in the train receipt (delegate condition 2).
+    assert '"attestation_scope"' in src
+    assert "TRAINING PHASE ONLY" in src
+
+
 def test_treatment_digest_excludes_execution_resource_fields(monkeypatch):
     cfg = _honest()
     digest = T.fneg_seed_invariant_sha256(cfg)
