@@ -108,10 +108,10 @@ def main() -> int:
             src = (sidecar_dir / f).resolve()
             cmds.append(f"$GSUTIL cp {shlex.quote(str(src))} "
                         f"{shlex.quote(f'{gcs}/text/{f}')}")
-    cmds.append(f"$GSUTIL cp {shlex.quote(str(stage / 'manifest.json'))} "
-                f"{shlex.quote(f'{gcs}/manifest.json')}")
-    # public objects cache aggressively; the manifest is the mutable entry point
-    cmds.append(f"$GSUTIL setmeta -h 'Cache-Control:public, max-age=300' "
+    # cache header set AT upload (creator-only IAM has no objects.update, so
+    # setmeta is unavailable); the manifest is the mutable entry point
+    cmds.append(f"$GSUTIL -h 'Cache-Control:public, max-age=300' cp "
+                f"{shlex.quote(str(stage / 'manifest.json'))} "
                 f"{shlex.quote(f'{gcs}/manifest.json')}")
     upload = stage / "upload.sh"
     upload.write_text("\n".join(cmds) + "\n")
