@@ -649,12 +649,13 @@ def test_host_rss_limit_is_the_analytic_115():
 def test_run_train_emits_the_analytic_rss_basis_into_the_receipt():
     import inspect
 
-    src = inspect.getsource(N.run_train)
-    # the receipt carries the limit AND its analytic basis (not "should be fine").
-    assert '"host_rss_limit_gib": HOST_RSS_LIMIT_GIB' in src
-    assert '"host_rss_limit_basis": HOST_RSS_ANALYTIC_BASIS' in src
-    # and the RSS backstop is checked against the analytic limit.
-    assert "peak_rss_gib > HOST_RSS_LIMIT_GIB" in src
+    # the receipt dict is now built by the pure _assemble_train_receipt helper.
+    receipt_src = inspect.getsource(N._assemble_train_receipt)
+    assert '"host_rss_limit_gib": HOST_RSS_LIMIT_GIB' in receipt_src
+    assert '"host_rss_limit_basis": HOST_RSS_ANALYTIC_BASIS' in receipt_src
+    # and the RSS backstop is checked against the analytic limit in run_train (the guarded phase).
+    train_src = inspect.getsource(N.run_train)
+    assert "peak_rss_gib > HOST_RSS_LIMIT_GIB" in train_src
 
 
 # --------------------------------------------------------------------------- #
@@ -782,21 +783,22 @@ def test_transform_has_its_own_receipt_and_finiteness_moved_out_of_train_checks(
 
     tree = _run_train_ast()
     src = inspect.getsource(N.run_train)
-    # a separately-sealed transform receipt with the dedicated schema.
+    # a separately-sealed transform receipt (built by the pure helper, sealed in run_train).
     seal_transform = _call_lines(tree, func_name="_seal", str_arg="transform-receipt.json")
     assert len(seal_transform) == 1, seal_transform
-    assert "TRANSFORM_SCHEMA" in src
-    # the transform-produced finiteness check moved OUT of train_checks (a training attestation
-    # must not depend on a post-training output) and into transform_checks.
-    assert '"all_100m_coordinates_finite"' in src  # still present...
-    # ...but only under transform_checks, after the train receipt seals.
-    assert src.index("transform_checks") < src.index('"all_100m_coordinates_finite"')
-    assert src.index('_seal(output, "train-receipt.json"') < src.index(
-        '"all_100m_coordinates_finite"'
-    )
+    # the transform receipt (with TRANSFORM_SCHEMA + finiteness) is built by the pure helper...
+    transform_src = inspect.getsource(N._assemble_transform_receipt)
+    assert "TRANSFORM_SCHEMA" in transform_src
+    assert '"all_100m_coordinates_finite"' in transform_src  # finiteness is a transform_check
+    # ...and run_train seals the TRAIN receipt strictly BEFORE it computes/sales the transform one.
+    assert src.index('_seal(output, "train-receipt.json"') < src.index("_assemble_transform_receipt")
+    assert src.index("_assemble_transform_receipt") < src.index('_seal(output, "transform-receipt.json"')
+    # the training attestation (train_checks) does NOT carry the post-training finiteness field.
+    train_src = inspect.getsource(N._assemble_train_receipt)
+    assert '"all_100m_coordinates_finite"' not in train_src
     # attestation scope is labelled in the train receipt (delegate condition 2).
-    assert '"attestation_scope"' in src
-    assert "TRAINING PHASE ONLY" in src
+    assert '"attestation_scope"' in train_src
+    assert "TRAINING PHASE ONLY" in train_src
 
 
 def test_transform_poll_reads_the_abort_flag_PATH_not_the_dict(tmp_path, monkeypatch):
@@ -862,11 +864,12 @@ def test_transform_correction_reuses_sealed_inputs_read_only_and_never_retrains(
     # UNGUARDED transform with the FIXED poll (abort_flag_path, not the dict).
     assert "os.path.exists(abort_flag_path)" in src
     assert "os.path.exists(abort_flag)" not in src
-    # seals a transform-receipt with the schema + failed-marker PROVENANCE linkage.
-    assert 'TRANSFORM_SCHEMA' in src
+    # seals a transform-receipt (built by the pure _assemble_transform_receipt helper, which
+    # carries TRANSFORM_SCHEMA) with failed-marker PROVENANCE linkage.
+    assert "_assemble_transform_receipt(" in src
     assert "original_r9_failed_marker" in src
     assert "provenance" in src
-    # fail-closed on non-finite coordinates.
+    # fail-closed on non-finite coordinates (the caller raises on any False transform_check).
     assert "transform_checks" in src
 
 
@@ -886,6 +889,327 @@ def test_correction_queue_builder_binds_sealed_inputs_and_is_single_node():
     assert "_issued_round(release_sha)" in src
     # the correction inputs come from the ORIGINAL R9 queue artifacts, read-only.
     assert "train-receipt.json" in src and "model.pt" in src and ".failed.json" in src
+
+
+def _use_after_del(func):
+    """Return [(name, del_line, use_line)] for any local USED after `del name` with no
+    intervening reassignment — the runtime UnboundLocalError class that source/AST-name review
+    does NOT catch (a del'd name still 'looks defined')."""
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func))).body[0]
+    dels: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Delete):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    dels.setdefault(t.id, node.lineno)
+    stores: dict[str, list[int]] = {}
+    loads: dict[str, list[int]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Store):
+                stores.setdefault(node.id, []).append(node.lineno)
+            elif isinstance(node.ctx, ast.Load):
+                loads.setdefault(node.id, []).append(node.lineno)
+    problems = []
+    for name, dline in dels.items():
+        for uline in loads.get(name, []):
+            if uline > dline and not any(dline < s <= uline for s in stores.get(name, [])):
+                problems.append((name, dline, uline))
+    return problems
+
+
+def test_run_train_has_no_use_after_del_in_the_post_training_path():
+    # REGRESSION for the R9-exposed latent bug (attempt-4): `int8_full` was del'd at ~803 and
+    # the train receipt read it at ~882 -> UnboundLocalError, crashing a clean 24h train before
+    # it sealed. Both adversarial reviews missed it because a del'd name still parses as defined.
+    # This asserts the ENTIRE run_train post-training path is free of use-after-del.
+    assert _use_after_del(N.run_train) == []
+
+
+def test_transform_correction_has_no_use_after_del():
+    assert _use_after_del(N.run_transform_correction) == []
+
+
+def test_all_r0268_handlers_have_no_use_after_del():
+    # delegate widening: the guard covers EVERY R0268 node handler, not just run_train — so a
+    # never-executed post-training/receipt path in any handler cannot carry a latent
+    # UnboundLocalError into a 24h run.
+    for handler in (N.run_train, N.run_panel, N.run_gate, N.run_transform_correction):
+        assert _use_after_del(handler) == [], handler.__name__
+
+
+def test_the_use_after_del_detector_actually_fires():
+    # guard the guard: the detector must catch a planted use-after-del (not tautologically pass).
+    def _planted():
+        x = 1
+        del x
+        return x  # noqa
+
+    problems = _use_after_del(_planted)
+    assert problems and problems[0][0] == "x"
+
+
+# --------------------------------------------------------------------------- #
+# EXECUTION tests for the pure receipt-assembly helpers (R11). The receipt/transform-receipt
+# dict assembly had NEVER run to completion in any attempt (transform always crashed first, then
+# attempt-4 crashed on the latent int8_full use-after-del). Source-reading review cannot catch a
+# runtime dict error; these tests BUILD the dicts from representative inputs, so any KeyError /
+# unbound / bad-index in the assembly fails here in <1s instead of after a 24h train.
+# --------------------------------------------------------------------------- #
+
+
+def _train_receipt_kwargs():
+    sig = {"canonical_path": "/x", "kind": "file", "bytes": 1, "sha256": "a"}
+    return dict(
+        capability="cap-seed42",
+        seed=42,
+        release_sha="deadbeef",
+        abort_flag={"abort_flag_path": "/run/node.abort"},
+        production_config_sig=sig,
+        config_sha="cfgsha",
+        observed_invariant="inv",
+        declared_invariant="inv",
+        recipe={"kernel": "a"},
+        closure={
+            "verdict": {"every_module_ran_the_sealed_bytes": True},
+            "controls": {"every_planted_defect_was_refused": True},
+        },
+        treatment_closure_seal_sig=sig,
+        model_sig=sig,
+        substrate={
+            "substrate_signature": sig,
+            "manifest_signature": sig,
+            "ordered_substrate_sha256": "sub-sha",
+        },
+        int8_substrate_manifest_signature=sig,
+        int8_full_receipt={
+            "verified_against_sealed_manifest": True,
+            "re_encoded_at_train_time": False,
+        },
+        graph={"manifest_signature": sig, "signature": sig, "member_signatures": {"h": sig}},
+        edges=2_511_103_254,
+        updates=8_327_508,
+        base_horizon=4_163_754,
+        accounting={"amp_overflow_skips": 0, "nonfinite_loss_skips": 0, "nonfinite_gradient_skips": 0},
+        runtime={"pipeline": "host_int8"},
+        residency={"x_residency": "host_int8", "weighted_effective": False, "positive_sampling": "uniform"},
+        fneg_telemetry={"active": True},
+        wall=85000.0,
+        memory={"peak_host_rss_gib": 104.0},
+        watchdog_state={"tripped": False},
+        peak_rss_gib=104.0,
+        gaps={},
+        scored={},
+        tail={},
+        coverage={"observed_span_s": 1.0, "node_wall_s": 2.0, "covered_fraction": 1.0},
+        node_id="train_seed42",
+        checkpoint_fneg_roundtrip=True,
+    )
+
+
+def test_assemble_train_receipt_executes_and_all_train_checks_pass_on_healthy_inputs():
+    body = N._assemble_train_receipt(**_train_receipt_kwargs())
+    # the assembly runs to completion (the attempt-4 crash was here) and is well-formed.
+    assert body["schema"] == N.TRAIN_SCHEMA
+    assert body["training_seed"] == 42
+    assert body["int8_substrate_manifest"]["sha256"] == "a"  # the field that was UnboundLocalError
+    assert body["dose_multiplier"] == N.__dict__.get("DOSE_MULTIPLIER", body["dose_multiplier"])
+    # a healthy train has every train_check True (what _authenticate_100m_map requires).
+    assert all(body["train_checks"].values()), body["train_checks"]
+    assert "attestation_scope" in body and "TRAINING PHASE ONLY" in body["attestation_scope"]
+
+
+def test_assemble_train_receipt_train_checks_flip_on_bad_inputs():
+    # a watchdog trip / numerical skip must make the corresponding train_check False (so the panel
+    # authentication — which requires all(train_checks) — would reject it).
+    kw = _train_receipt_kwargs()
+    kw["watchdog_state"] = {"tripped": True}
+    body = N._assemble_train_receipt(**kw)
+    assert body["train_checks"]["watchdog_did_not_trip"] is False
+    assert not all(body["train_checks"].values())
+
+
+def test_rehearsal_flag_marks_receipts_unmistakably_and_production_is_byte_identical():
+    # delegate requirement: a receipt built over STUBBED fit telemetry must be UNMISTAKABLE as
+    # non-evidence from the INSIDE (schema suffix + top-level marker), not just by directory — so it
+    # can never be mistaken for evidence if moved out of the rehearsal dir. Production (flag absent)
+    # must be byte-identical.
+    kw = _train_receipt_kwargs()
+    prod = N._assemble_train_receipt(**kw)
+    prod_default = N._assemble_train_receipt(**kw, rehearsal=False)
+    reh = N._assemble_train_receipt(**kw, rehearsal=True)
+    # production default == explicit-False, and neither carries the marker.
+    assert prod == prod_default
+    assert prod["schema"] == N.TRAIN_SCHEMA
+    assert "is_non_evidence_rehearsal" not in prod
+    # rehearsal: schema suffixed + top-level marker True.
+    assert reh["schema"] == N.TRAIN_SCHEMA + "-REHEARSAL-NON-EVIDENCE"
+    assert reh["is_non_evidence_rehearsal"] is True
+    # transform receipt: same discipline.
+    sig = {"canonical_path": "/x", "kind": "file", "bytes": 1, "sha256": "a"}
+    tcommon = dict(
+        capability="c", seed=42, phase="post-training-transform", train_receipt_sig=sig,
+        model_sig=sig, coordinates_sig=sig, coordinates_ordered_sha256="c", ordered_substrate_sha256="s",
+        tripwire_inputs={}, transform_wall_s=1.0, transform_peak_rss_gib=1.0,
+        all_coordinates_finite=True, transform_rows_finite=N.ROWS)
+    assert "is_non_evidence_rehearsal" not in N._assemble_transform_receipt(**tcommon)
+    reh_t = N._assemble_transform_receipt(**tcommon, rehearsal=True)
+    assert reh_t["schema"].endswith("-REHEARSAL-NON-EVIDENCE")
+    assert reh_t["is_non_evidence_rehearsal"] is True
+    # and run_train threads the job flag through to the helpers.
+    import inspect
+    tsrc = inspect.getsource(N.run_train)
+    assert 'rehearsal_flag = bool(job.get("is_non_evidence_rehearsal", False))' in tsrc
+    assert "rehearsal=rehearsal_flag" in tsrc
+
+
+def test_assemble_transform_receipt_executes_for_both_phases():
+    sig = {"canonical_path": "/x", "kind": "file", "bytes": 1, "sha256": "a"}
+    common = dict(
+        capability="cap-seed42", seed=42, train_receipt_sig=sig, model_sig=sig,
+        coordinates_sig=sig, coordinates_ordered_sha256="csha", ordered_substrate_sha256="ssha",
+        tripwire_inputs={"collapse": 1.01, "fog": 0.2}, transform_wall_s=100.0,
+        transform_peak_rss_gib=117.0, all_coordinates_finite=True, transform_rows_finite=N.ROWS,
+    )
+    # run_train's transform receipt.
+    a = N._assemble_transform_receipt(phase="post-training-transform", **common)
+    assert a["schema"] == N.TRANSFORM_SCHEMA and a["phase"] == "post-training-transform"
+    assert set(a["transform_checks"]) == {"all_100m_coordinates_finite", "coordinates_row_count_is_rows"}
+    assert all(a["transform_checks"].values())
+    # the correction node's transform receipt (extra_checks + extra top-level keys).
+    b = N._assemble_transform_receipt(
+        phase="post-training-transform-correction",
+        extra_checks={"reused_sealed_train_and_model_no_retrain": True},
+        extra={"node": "correct_seed42", "provenance": {"x": 1}, "gate_registerable_here": False},
+        **common,
+    )
+    assert b["transform_checks"]["reused_sealed_train_and_model_no_retrain"] is True
+    assert b["provenance"] == {"x": 1} and b["node"] == "correct_seed42"
+    # INTENTIONAL, DOCUMENTED (adversarial review finding): the shared helper gives the correction
+    # transform-receipt a top-level "train_receipt" key the R10 inline body lacked (it had the same
+    # signature only under provenance.sealed_train_receipt). Additive, identical value, consistent
+    # shape with run_train's transform-receipt; the R10 correction node never sealed, so nothing
+    # downstream depended on the old keyset.
+    assert b["train_receipt"] == sig
+    # a non-finite map flips the finiteness check (the fail-closed gate the caller raises on).
+    c = N._assemble_transform_receipt(
+        phase="post-training-transform", **{**common, "all_coordinates_finite": False})
+    assert c["transform_checks"]["all_100m_coordinates_finite"] is False
+
+
+# --------------------------------------------------------------------------- #
+# R11 REHEARSAL harness — the mandatory whole-pipe gate before attempt-5.
+# --------------------------------------------------------------------------- #
+
+
+def test_rehearsal_handler_stubs_fit_and_calls_the_REAL_run_train():
+    import inspect
+    import experiments.round0268_rehearsal as RH
+
+    src = inspect.getsource(RH.run_rehearsal_job)
+    # it substitutes ONLY model.fit (via apply_rehearsal_fit, which loads the preserved model) ...
+    assert "ParametricUMAP.fit = _stub_fit" in src
+    assert "apply_rehearsal_fit(self, preserved, expected_updates)" in src
+    # ... and restores the real fit, and calls the REAL run_train (not a reimplementation).
+    assert "ParametricUMAP.fit = real_fit" in src
+    assert "N.run_train(active, job)" in src
+    # the load helper uses the TESTED ParametricUMAP.load (not a hand-rolled load_state_dict on the
+    # None self.model), then stamps telemetry.
+    load_src = inspect.getsource(RH.apply_rehearsal_fit)
+    assert "ParametricUMAP.load(" in load_src
+    assert "_pipeline_info" in load_src and "_train_stats" in load_src
+    # the synthesized sampler stamp is the host-int8 uniform values the fail-closed tripwire needs.
+    assert RH._REHEARSAL_PIPELINE_INFO["weighted_effective"] is False
+    assert RH._REHEARSAL_PIPELINE_INFO["positive_sampling"] == "uniform"
+    assert RH._REHEARSAL_PIPELINE_INFO["x_residency"] == "host_int8"
+
+
+def test_apply_rehearsal_fit_actually_loads_the_preserved_model_on_cpu():
+    # REGRESSION for the bug the adversarial review caught: the stub did
+    # `self.model.load_state_dict(...)` but self.model is None until fit()/load() runs, so the
+    # rehearsal would AttributeError — a never-EXECUTED load path, the exact class this effort exists
+    # to catch. This test EXECUTES the load path on CPU against the real preserved model.
+    import experiments.round0268_rehearsal as RH
+
+    preserved = RH.PRESERVED_MODEL
+    if not os.path.exists(preserved):
+        pytest.skip(f"preserved model not present at {preserved}")
+    from basemap.pumap.parametric_umap import ParametricUMAP
+
+    # a bare model (self.model is None), like the one run_train builds before fit().
+    bare = ParametricUMAP(device="cpu")
+    assert bare.model is None  # the precondition that made the old stub crash
+    out = RH.apply_rehearsal_fit(bare, preserved, expected_updates=8_327_508)
+    # the load path RAN: the encoder is initialised + weight-loaded, and telemetry is stamped.
+    assert out.model is not None
+    assert out.is_fitted is True
+    assert out._pipeline_info["weighted_effective"] is False
+    assert out._pipeline_info["positive_sampling"] == "uniform"
+    assert out._pipeline_info["x_residency"] == "host_int8"
+    assert out._train_stats["amp_overflow_skips"] == 0
+    assert out.fneg_telemetry is not None
+    # a real forward pass works (the transform will call model.model(batch)).
+    import torch
+
+    with torch.no_grad():
+        y = out.model(torch.zeros(3, int(out.input_dim), dtype=torch.float32))
+    assert tuple(y.shape) == (3, 2)
+
+
+def test_rehearsal_handler_refuses_a_non_rehearsal_output_dir():
+    import experiments.round0268_rehearsal as RH
+
+    # the guard: refuse to run unless the output dir is clearly a rehearsal/NON-EVIDENCE dir, so a
+    # rehearsal can never accidentally write round evidence.
+    with pytest.raises(RuntimeError, match="not a rehearsal"):
+        RH.run_rehearsal_job(
+            {"manifest": {"round_id": "0268"}, "node_id": "x"},
+            {"outputs": ["/data/latent-basemap/runs/round-0268/queue/artifacts/real-evidence"],
+             "preserved_model_path": __file__},  # this file exists, so we reach the dir check
+        )
+
+
+def test_rehearsal_queue_transform_rewrites_only_handler_and_output():
+    import experiments.prepare_round0268_rehearsal_queue as Q
+
+    sig = {"canonical_path": "/x", "kind": "file", "bytes": 1, "sha256": "a"}
+    real = {
+        "release_sha": "rel", "round_sha256": "rs",
+        "jobs": [{
+            "id": "train_minilm_fneg_100m_x2_hostint8_seed42",
+            "action": "train_minilm_fneg_100m_x2_hostint8",
+            "handler_module": "experiments.round0268_nodes",
+            "handler_callable": "run_job",
+            "outputs": ["/real/artifacts/cap42"],
+            "done_marker": "/real/artifacts/train...done.json",
+            "expected_inputs": [sig, sig],
+            "substrate_manifest_signature": sig, "base_horizon": 4_163_754,
+        }, {"id": "score_...panel"}, {"id": "register_...gate"}],
+    }
+    m = Q._rehearsal_manifest_from_real(
+        real, queue_root="/rehearsal", preserved_model_path="/p/model.pt",
+        preserved_model_sig=sig)
+    assert len(m["jobs"]) == 1  # single node — panel/gate dropped
+    node = m["jobs"][0]
+    # handler swapped to the rehearsal module; action swapped; output → rehearsal dir.
+    assert node["handler_module"] == "experiments.round0268_rehearsal"
+    assert node["handler_callable"] == "run_rehearsal_job"
+    assert node["action"] == Q.REHEARSAL_ACTION
+    assert "rehearsal" in node["outputs"][0]
+    assert node["is_non_evidence_rehearsal"] is True
+    assert node["preserved_model_path"] == "/p/model.pt"
+    # the REAL bound inputs are carried through verbatim + the preserved model is bound read-only.
+    assert node["expected_inputs"][:2] == [sig, sig]
+    assert sig in node["expected_inputs"][2:]
+    assert node["substrate_manifest_signature"] == sig  # every real signature field preserved
+    assert node["base_horizon"] == 4_163_754
+    # queue is NON-EVIDENCE: produces no capabilities.
+    assert m["capabilities_produced"] == []
+    assert m["queue_class"] == "gpu-rehearsal-non-evidence"
 
 
 def test_treatment_digest_excludes_execution_resource_fields(monkeypatch):

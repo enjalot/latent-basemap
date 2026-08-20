@@ -651,6 +651,200 @@ def _seed(job: Mapping[str, Any]) -> int:
     return int(seed)
 
 
+def _assemble_train_receipt(
+    *,
+    capability: str,
+    seed: int,
+    release_sha: str,
+    abort_flag: Any,
+    production_config_sig: Mapping[str, Any],
+    config_sha: str,
+    observed_invariant: str,
+    declared_invariant: str,
+    recipe: Any,
+    closure: Mapping[str, Any],
+    treatment_closure_seal_sig: Mapping[str, Any],
+    model_sig: Mapping[str, Any],
+    substrate: Mapping[str, Any],
+    int8_substrate_manifest_signature: Mapping[str, Any],
+    int8_full_receipt: Mapping[str, Any],
+    graph: Mapping[str, Any],
+    edges: int,
+    updates: int,
+    base_horizon: int,
+    accounting: Mapping[str, Any],
+    runtime: Mapping[str, Any],
+    residency: Mapping[str, Any],
+    fneg_telemetry: Any,
+    wall: float,
+    memory: Mapping[str, Any],
+    watchdog_state: Mapping[str, Any],
+    peak_rss_gib: float,
+    gaps: Any,
+    scored: Any,
+    tail: Any,
+    coverage: Mapping[str, Any],
+    node_id: str,
+    checkpoint_fneg_roundtrip: bool,
+    rehearsal: bool = False,
+) -> dict[str, Any]:
+    """Build the R0268 train-receipt dict — a PURE function (no I/O, no globals beyond module
+    constants) so it is unit-testable WITHOUT CUDA. Every I/O signature (production config, closure
+    seal, model, int8 manifest) is computed by the caller and passed in. This exists because the
+    receipt-assembly path had NEVER executed to completion in any attempt (the transform always
+    crashed first pre-R9; post-R9 it crashed on the latent `int8_full` use-after-del at attempt-4):
+    a source-only review cannot catch a runtime dict error, so this function is EXECUTED in a test.
+
+    `rehearsal=True` (the R11 rehearsal harness, driven by a job flag) suffixes the schema and adds a
+    top-level `is_non_evidence_rehearsal` marker, so a receipt built over STUBBED fit telemetry is
+    UNMISTAKABLE as non-evidence from the inside even if the file is moved out of the rehearsal dir.
+    Production always passes False → byte-identical receipt."""
+    return {
+        "schema": TRAIN_SCHEMA + ("-REHEARSAL-NON-EVIDENCE" if rehearsal else ""),
+        **({"is_non_evidence_rehearsal": True} if rehearsal else {}),
+        "round_id": ROUND_ID,
+        "capability": capability,
+        "capabilities": [capability],
+        "training_seed": seed,
+        "is_a_100m_flagship_cell": True,
+        "release_sha": release_sha,
+        "abort_flag_precondition": abort_flag,
+        "production_config": production_config_sig,
+        "production_config_sha256": config_sha,
+        "seed_invariant_sha256": observed_invariant,
+        "recipe": recipe,
+        "x_residency": X_RESIDENCY,
+        "treatment_closure": closure["verdict"],
+        "treatment_closure_controls": closure["controls"],
+        "treatment_closure_seal": treatment_closure_seal_sig,
+        "model": model_sig,
+        "substrate": substrate["substrate_signature"],
+        "substrate_manifest": substrate["manifest_signature"],
+        "ordered_substrate_sha256": substrate["ordered_substrate_sha256"],
+        "int8_substrate_manifest": int8_substrate_manifest_signature,
+        "int8_substrate_full_file": int8_full_receipt,
+        "x_source": "pre_sealed_int8_full_file_r0262_100m",
+        "graph_manifest": graph["manifest_signature"],
+        "graph": graph["signature"],
+        "graph_members": graph["member_signatures"],
+        "rows": ROWS,
+        "dimension": DIMENSION,
+        "directed_edges": edges,
+        "optimizer_updates": updates,
+        "base_horizon": int(base_horizon),
+        "dose_multiplier": DOSE_MULTIPLIER,
+        "consumed_positive_draws_per_edge": float(updates * POSITIVE_ROWS_PER_UPDATE / edges),
+        "train_accounting": accounting,
+        "exact_execution_receipt": runtime,
+        "host_int8_residency": residency,
+        "fneg_telemetry": fneg_telemetry,
+        "train_wall_s": wall,
+        "memory": memory,
+        "host_rss_limit_gib": HOST_RSS_LIMIT_GIB,
+        "host_rss_limit_basis": HOST_RSS_ANALYTIC_BASIS,
+        "memory_watchdog": watchdog_state,
+        "attestation_scope": (
+            "TRAINING PHASE ONLY: memory_watchdog, memory.peak_host_rss_gib, guard_tail, and "
+            "train_checks.watchdog_did_not_trip attest fit→save→reload (the guarded phase). The "
+            "100M transform runs UNGUARDED after this receipt seals and is attested separately "
+            "in transform-receipt.json (coordinates finiteness, transform wall/RSS, tripwire)."
+        ),
+        "gap_report": gaps,
+        "enforcement_poll_spacing": scored,
+        "guard_tail": tail,
+        "training_performed": True,
+        "gate_registerable_here": False,
+        "map_decision_made": False,
+        "train_checks": {
+            "recipe_is_the_registered_100m_hostint8_recipe": (
+                observed_invariant == declared_invariant
+            ),
+            "every_planted_closure_defect_was_refused": bool(
+                closure["controls"]["every_planted_defect_was_refused"]
+            ),
+            "closure_ran_the_sealed_bytes": bool(
+                closure["verdict"]["every_module_ran_the_sealed_bytes"]
+            ),
+            "fneg_reweighting_was_active": fneg_telemetry is not None,
+            "checkpoint_round_trips_fneg_params": checkpoint_fneg_roundtrip,
+            "pre_sealed_int8_full_file_verified": bool(
+                int8_full_receipt.get("verified_against_sealed_manifest")
+                and int8_full_receipt.get("re_encoded_at_train_time") is False
+            ),
+            "host_int8_residency_stamp_verified": (
+                residency["x_residency"] == X_RESIDENCY
+                and residency["weighted_effective"] is False
+                and residency["positive_sampling"] == "uniform"
+            ),
+            "watchdog_did_not_trip": not bool(watchdog_state["tripped"]),
+            "host_rss_under_analytic_limit": peak_rss_gib <= HOST_RSS_LIMIT_GIB,
+            "zero_numerical_skips": (
+                int(accounting.get("amp_overflow_skips", 0)) == 0
+                and int(accounting.get("nonfinite_loss_skips", 0)) == 0
+                and int(accounting.get("nonfinite_gradient_skips", 0)) == 0
+            ),
+        },
+        "poll_coverage": coverage,
+        "observed_span_s": coverage["observed_span_s"],
+        "node_wall_s": coverage["node_wall_s"],
+        "node": node_id,
+    }
+
+
+def _assemble_transform_receipt(
+    *,
+    capability: str,
+    seed: int,
+    phase: str,
+    train_receipt_sig: Mapping[str, Any],
+    model_sig: Mapping[str, Any],
+    coordinates_sig: Mapping[str, Any],
+    coordinates_ordered_sha256: str,
+    ordered_substrate_sha256: str,
+    tripwire_inputs: Mapping[str, Any],
+    transform_wall_s: float,
+    transform_peak_rss_gib: float,
+    all_coordinates_finite: bool,
+    transform_rows_finite: int,
+    extra_checks: Mapping[str, Any] | None = None,
+    extra: Mapping[str, Any] | None = None,
+    rehearsal: bool = False,
+) -> dict[str, Any]:
+    """Build a transform-receipt dict — PURE (no I/O, no free locals), so both callers'
+    (run_train and run_transform_correction) never-executed post-transform dict assembly is
+    unit-tested by EXECUTION, not source-reading. `extra_checks` merges into transform_checks;
+    `extra` merges phase-specific top-level keys (the correction node's envelope/provenance).
+    `rehearsal=True` suffixes the schema + adds a top-level marker (as for the train receipt), so a
+    rehearsal transform-receipt is unmistakable as non-evidence from the inside; production → False."""
+    checks: dict[str, Any] = {
+        "all_100m_coordinates_finite": bool(all_coordinates_finite),
+        "coordinates_row_count_is_rows": int(transform_rows_finite) == ROWS,
+    }
+    if extra_checks:
+        checks.update(extra_checks)
+    body: dict[str, Any] = {
+        "schema": TRANSFORM_SCHEMA + ("-REHEARSAL-NON-EVIDENCE" if rehearsal else ""),
+        **({"is_non_evidence_rehearsal": True} if rehearsal else {}),
+        "round_id": ROUND_ID,
+        "capability": capability,
+        "training_seed": seed,
+        "phase": phase,
+        "guarded": False,
+        "train_receipt": train_receipt_sig,
+        "model": model_sig,
+        "coordinates": coordinates_sig,
+        "coordinates_ordered_sha256": coordinates_ordered_sha256,
+        "ordered_substrate_sha256": ordered_substrate_sha256,
+        "seed_1_tripwire_inputs": tripwire_inputs,
+        "transform_wall_s": transform_wall_s,
+        "transform_peak_host_rss_gib": transform_peak_rss_gib,
+        "transform_checks": checks,
+    }
+    if extra:
+        body.update(extra)
+    return body
+
+
 def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     install_stop_hooks(label="R0268 round0268_nodes.run_train")
     import torch
@@ -800,7 +994,11 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
                 "peak_allocated_bytes": int(torch.cuda.max_memory_allocated("cuda")),
                 "peak_reserved_bytes": int(torch.cuda.max_memory_reserved("cuda")),
             }
-            del model, int8_dataset, int8_full
+            # Free the big training objects. NOT int8_full: it is the small manifest/signature
+            # DICT (int8_full["manifest"], int8_full["manifest_signature"]) the train receipt reads
+            # at assembly (deleting it frees ~nothing and left it UNBOUND when the R9 phase-split
+            # first ran the receipt before the transform — attempt-4's 24h train crashed here).
+            del model, int8_dataset
             torch.cuda.empty_cache()
             gc.collect()
             wrapped("R0268 training objects released")
@@ -856,97 +1054,50 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "sampler_class": runtime.get("sampler_class"),
     }
     coverage = ledger.receipt()
-    receipt_body = {
-        "schema": TRAIN_SCHEMA,
-        "round_id": ROUND_ID,
-        "capability": capability,
-        "capabilities": [capability],
-        "training_seed": seed,
-        "is_a_100m_flagship_cell": True,
-        "release_sha": active["manifest"]["release_sha"],
-        "abort_flag_precondition": abort_flag,
-        "production_config": expected_input_signature(config_path),
-        "production_config_sha256": config_sha,
-        "seed_invariant_sha256": observed_invariant,
-        "recipe": recipe,
-        "x_residency": X_RESIDENCY,
-        "treatment_closure": closure["verdict"],
-        "treatment_closure_controls": closure["controls"],
-        "treatment_closure_seal": expected_input_signature(
+    # A rehearsal (R11 harness) sets this job flag; production queues never do. The flag-READ runs
+    # every time (exercised in production as False), and marks rehearsal receipts unmistakably.
+    rehearsal_flag = bool(job.get("is_non_evidence_rehearsal", False))
+    # I/O signatures computed here (the caller's job); the receipt dict is built by the PURE,
+    # unit-tested `_assemble_train_receipt` (no I/O, no free locals) so the assembly cannot carry
+    # a latent runtime error into a 24h run (attempt-4's int8_full use-after-del).
+    receipt_body = _assemble_train_receipt(
+        capability=capability,
+        seed=seed,
+        release_sha=active["manifest"]["release_sha"],
+        abort_flag=abort_flag,
+        production_config_sig=expected_input_signature(config_path),
+        config_sha=config_sha,
+        observed_invariant=observed_invariant,
+        declared_invariant=declared_invariant,
+        recipe=recipe,
+        closure=closure,
+        treatment_closure_seal_sig=expected_input_signature(
             _bound_path(job, "treatment_closure", label="R0268 treatment closure seal")
         ),
-        "model": expected_input_signature(model_path),
-        "substrate": substrate["substrate_signature"],
-        "substrate_manifest": substrate["manifest_signature"],
-        "ordered_substrate_sha256": substrate["ordered_substrate_sha256"],
-        "int8_substrate_manifest": int8_full["manifest_signature"],
-        "int8_substrate_full_file": int8_full_receipt,
-        "x_source": "pre_sealed_int8_full_file_r0262_100m",
-        "graph_manifest": graph["manifest_signature"],
-        "graph": graph["signature"],
-        "graph_members": graph["member_signatures"],
-        "rows": ROWS,
-        "dimension": DIMENSION,
-        "directed_edges": edges,
-        "optimizer_updates": updates,
-        "base_horizon": int(job.get("base_horizon", -1)),
-        "dose_multiplier": DOSE_MULTIPLIER,
-        "consumed_positive_draws_per_edge": float(updates * POSITIVE_ROWS_PER_UPDATE / edges),
-        "train_accounting": accounting,
-        "exact_execution_receipt": runtime,
-        "host_int8_residency": residency,
-        "fneg_telemetry": fneg_telemetry,
-        "train_wall_s": wall,
-        "memory": memory,
-        "host_rss_limit_gib": HOST_RSS_LIMIT_GIB,
-        "host_rss_limit_basis": HOST_RSS_ANALYTIC_BASIS,
-        "memory_watchdog": watchdog_state,
-        "attestation_scope": (
-            "TRAINING PHASE ONLY: memory_watchdog, memory.peak_host_rss_gib, guard_tail, and "
-            "train_checks.watchdog_did_not_trip attest fit→save→reload (the guarded phase). The "
-            "100M transform runs UNGUARDED after this receipt seals and is attested separately "
-            "in transform-receipt.json (coordinates finiteness, transform wall/RSS, tripwire)."
-        ),
-        "gap_report": gaps,
-        "enforcement_poll_spacing": scored,
-        "guard_tail": tail,
-        "training_performed": True,
-        "gate_registerable_here": False,
-        "map_decision_made": False,
-        "train_checks": {
-            "recipe_is_the_registered_100m_hostint8_recipe": (
-                observed_invariant == declared_invariant
-            ),
-            "every_planted_closure_defect_was_refused": bool(
-                closure["controls"]["every_planted_defect_was_refused"]
-            ),
-            "closure_ran_the_sealed_bytes": bool(
-                closure["verdict"]["every_module_ran_the_sealed_bytes"]
-            ),
-            "fneg_reweighting_was_active": fneg_telemetry is not None,
-            "checkpoint_round_trips_fneg_params": checkpoint_fneg_roundtrip,
-            "pre_sealed_int8_full_file_verified": bool(
-                int8_full_receipt.get("verified_against_sealed_manifest")
-                and int8_full_receipt.get("re_encoded_at_train_time") is False
-            ),
-            "host_int8_residency_stamp_verified": (
-                residency["x_residency"] == X_RESIDENCY
-                and residency["weighted_effective"] is False
-                and residency["positive_sampling"] == "uniform"
-            ),
-            "watchdog_did_not_trip": not bool(watchdog_state["tripped"]),
-            "host_rss_under_analytic_limit": peak_rss_gib <= HOST_RSS_LIMIT_GIB,
-            "zero_numerical_skips": (
-                int(accounting.get("amp_overflow_skips", 0)) == 0
-                and int(accounting.get("nonfinite_loss_skips", 0)) == 0
-                and int(accounting.get("nonfinite_gradient_skips", 0)) == 0
-            ),
-        },
-        "poll_coverage": coverage,
-        "observed_span_s": coverage["observed_span_s"],
-        "node_wall_s": coverage["node_wall_s"],
-        "node": node_id,
-    }
+        model_sig=expected_input_signature(model_path),
+        substrate=substrate,
+        int8_substrate_manifest_signature=int8_full["manifest_signature"],
+        int8_full_receipt=int8_full_receipt,
+        graph=graph,
+        edges=edges,
+        updates=updates,
+        base_horizon=int(job.get("base_horizon", -1)),
+        accounting=accounting,
+        runtime=runtime,
+        residency=residency,
+        fneg_telemetry=fneg_telemetry,
+        wall=wall,
+        memory=memory,
+        watchdog_state=watchdog_state,
+        peak_rss_gib=peak_rss_gib,
+        gaps=gaps,
+        scored=scored,
+        tail=tail,
+        coverage=coverage,
+        node_id=node_id,
+        checkpoint_fneg_roundtrip=checkpoint_fneg_roundtrip,
+        rehearsal=rehearsal_flag,
+    )
     _seal(output, "train-receipt.json", receipt_body)
     # ===== TRAINING EVIDENCE SEALED =====
     # The clean train is now salvageable even if the transform below dies: attempts 1 & 3 lost
@@ -1005,26 +1156,22 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     gc.collect()
     transform_wall_s = time.monotonic() - transform_started
     transform_peak_rss_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
-    transform_receipt_body = {
-        "schema": TRANSFORM_SCHEMA,
-        "round_id": ROUND_ID,
-        "capability": capability,
-        "training_seed": seed,
-        "phase": "post-training-transform",
-        "guarded": False,
-        "train_receipt": expected_input_signature(os.path.join(output, "train-receipt.json")),
-        "model": expected_input_signature(model_path),
-        "coordinates": expected_input_signature(coordinates_path),
-        "coordinates_ordered_sha256": coordinates_ordered_sha256,
-        "ordered_substrate_sha256": substrate["ordered_substrate_sha256"],
-        "seed_1_tripwire_inputs": tripwire_inputs,
-        "transform_wall_s": transform_wall_s,
-        "transform_peak_host_rss_gib": transform_peak_rss_gib,
-        "transform_checks": {
-            "all_100m_coordinates_finite": bool(all_coordinates_finite),
-            "coordinates_row_count_is_rows": int(transform_rows_finite) == ROWS,
-        },
-    }
+    transform_receipt_body = _assemble_transform_receipt(
+        capability=capability,
+        seed=seed,
+        phase="post-training-transform",
+        train_receipt_sig=expected_input_signature(os.path.join(output, "train-receipt.json")),
+        model_sig=expected_input_signature(model_path),
+        coordinates_sig=expected_input_signature(coordinates_path),
+        coordinates_ordered_sha256=coordinates_ordered_sha256,
+        ordered_substrate_sha256=substrate["ordered_substrate_sha256"],
+        tripwire_inputs=tripwire_inputs,
+        transform_wall_s=transform_wall_s,
+        transform_peak_rss_gib=transform_peak_rss_gib,
+        all_coordinates_finite=all_coordinates_finite,
+        transform_rows_finite=transform_rows_finite,
+        rehearsal=rehearsal_flag,
+    )
     if not all(transform_receipt_body["transform_checks"].values()):
         raise Round0268NodeError(
             f"R0268 seed-{seed} transform checks failed: "
@@ -1166,44 +1313,42 @@ def run_transform_correction(active: Mapping[str, Any], job: Mapping[str, Any]) 
     transform_wall_s = time.monotonic() - transform_started
     transform_peak_rss_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
 
-    body = {
-        **_receipt_envelope(active["manifest"]),
-        "schema": TRANSFORM_SCHEMA,
-        "round_id": ROUND_ID,
-        "capability": capability,
-        "training_seed": seed,
-        "node": node_id,
-        "phase": "post-training-transform-correction",
-        "guarded": False,
-        "abort_flag_precondition": abort_flag,
-        "corrects_defect": (
-            "R9 _transform_poll called os.path.exists() on the _start_node() dict → TypeError "
-            "in the original transform; the R10 poll checks abort_flag['abort_flag_path']."
-        ),
-        "provenance": {
-            "sealed_train_receipt": expected_input_signature(train_receipt_path),
-            "sealed_model": expected_input_signature(model_path),
-            "original_r9_failed_marker": failed_marker_signature,
-            "note": (
-                "seed42's clean train (attempt-4, R9) sealed its train-receipt BEFORE the transform; "
-                "this node re-runs ONLY the corrected transform from that sealed evidence. The "
-                "original failed marker + outputs are preserved untouched."
+    body = _assemble_transform_receipt(
+        capability=capability,
+        seed=seed,
+        phase="post-training-transform-correction",
+        train_receipt_sig=expected_input_signature(train_receipt_path),
+        model_sig=expected_input_signature(model_path),
+        coordinates_sig=expected_input_signature(coordinates_path),
+        coordinates_ordered_sha256=coordinates_ordered_sha256,
+        ordered_substrate_sha256=substrate["ordered_substrate_sha256"],
+        tripwire_inputs=tripwire_inputs,
+        transform_wall_s=transform_wall_s,
+        transform_peak_rss_gib=transform_peak_rss_gib,
+        all_coordinates_finite=all_coordinates_finite,
+        transform_rows_finite=transform_rows_finite,
+        extra_checks={"reused_sealed_train_and_model_no_retrain": True},
+        extra={
+            **_receipt_envelope(active["manifest"]),
+            "node": node_id,
+            "abort_flag_precondition": abort_flag,
+            "corrects_defect": (
+                "R9 _transform_poll called os.path.exists() on the _start_node() dict → TypeError "
+                "in the original transform; the R10 poll checks abort_flag['abort_flag_path']."
             ),
+            "provenance": {
+                "sealed_train_receipt": expected_input_signature(train_receipt_path),
+                "sealed_model": expected_input_signature(model_path),
+                "original_r9_failed_marker": failed_marker_signature,
+                "note": (
+                    "seed42's clean train (attempt-4, R9) sealed its train-receipt BEFORE the "
+                    "transform; this node re-runs ONLY the corrected transform from that sealed "
+                    "evidence. The original failed marker + outputs are preserved untouched."
+                ),
+            },
+            "gate_registerable_here": False,
         },
-        "model": expected_input_signature(model_path),
-        "coordinates": expected_input_signature(coordinates_path),
-        "coordinates_ordered_sha256": coordinates_ordered_sha256,
-        "ordered_substrate_sha256": substrate["ordered_substrate_sha256"],
-        "seed_1_tripwire_inputs": tripwire_inputs,
-        "transform_wall_s": transform_wall_s,
-        "transform_peak_host_rss_gib": transform_peak_rss_gib,
-        "transform_checks": {
-            "all_100m_coordinates_finite": bool(all_coordinates_finite),
-            "coordinates_row_count_is_rows": int(transform_rows_finite) == ROWS,
-            "reused_sealed_train_and_model_no_retrain": True,
-        },
-        "gate_registerable_here": False,
-    }
+    )
     if not all(body["transform_checks"].values()):
         raise Round0268NodeError(
             f"R0268 seed-{seed} transform-correction checks failed: {body['transform_checks']}"
