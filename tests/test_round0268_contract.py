@@ -1212,6 +1212,50 @@ def test_rehearsal_queue_transform_rewrites_only_handler_and_output():
     assert m["queue_class"] == "gpu-rehearsal-non-evidence"
 
 
+def test_pernode_train_queue_is_single_seed_rehomed_to_shared_artifacts():
+    import experiments.prepare_round0268_pernode_queue as P
+
+    sig = {"canonical_path": "/x", "kind": "file", "bytes": 1, "sha256": "a"}
+    real = {
+        "release_sha": "rel", "round_sha256": "rs", "p90_wall_s": {
+            "train_minilm_fneg_100m_x2_hostint8_seed43": 86400.0,
+            "train_minilm_fneg_100m_x2_hostint8_seed42": 86400.0},
+        "jobs": [
+            {"id": "train_minilm_fneg_100m_x2_hostint8_seed42", "action": "train...",
+             "outputs": ["/src/artifacts/cap42"], "done_marker": "/src/artifacts/t42.done.json",
+             "expected_inputs": [sig, sig], "substrate_manifest_signature": sig, "training_seed": 42},
+            {"id": "train_minilm_fneg_100m_x2_hostint8_seed43", "action": "train...",
+             "handler_module": "experiments.round0268_nodes", "handler_callable": "run_job",
+             "outputs": ["/src/artifacts/cap43"], "done_marker": "/src/artifacts/t43.done.json",
+             "expected_inputs": [sig, sig, sig], "substrate_manifest_signature": sig,
+             "cell_seed_invariant_sha256": "inv", "base_horizon": 4_163_754, "training_seed": 43},
+            {"id": "score_...panel"}, {"id": "register_...gate"}],
+    }
+    from basemap.round0268_int8_treatment import capability_for_seed
+    m = P._single_train_node_manifest(real, seed=43, shared_artifacts="/shared/artifacts")
+    assert len(m["jobs"]) == 1
+    node = m["jobs"][0]
+    # ONLY seed43, and it's the REAL train node (handler + action + all bound inputs untouched).
+    assert node["id"] == "train_minilm_fneg_100m_x2_hostint8_seed43"
+    assert node["handler_module"] == "experiments.round0268_nodes"
+    assert node["expected_inputs"] == [sig, sig, sig]  # bound inputs verbatim
+    assert node["substrate_manifest_signature"] == sig and node["base_horizon"] == 4_163_754
+    # output + done_marker REHOMED to the shared canonical artifacts root (so B4 panel binds them).
+    cap43 = capability_for_seed(43)
+    assert node["outputs"] == [f"/shared/artifacts/{cap43}"]
+    assert node["done_marker"] == "/shared/artifacts/train_minilm_fneg_100m_x2_hostint8_seed43.done.json"
+    assert m["capabilities_produced"] == [cap43]
+    # seed42's train node is NOT present (single-seed queue).
+    assert all("seed42" not in j["id"] for j in m["jobs"])
+
+
+def test_pernode_builder_refuses_a_non_flagship_seed():
+    import experiments.prepare_round0268_pernode_queue as P
+
+    with pytest.raises(RuntimeError, match="not a flagship seed"):
+        P.prepare_pernode_train_queue(release_sha="x", seed=99)
+
+
 def test_treatment_digest_excludes_execution_resource_fields(monkeypatch):
     cfg = _honest()
     digest = T.fneg_seed_invariant_sha256(cfg)
