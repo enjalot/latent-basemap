@@ -17,7 +17,9 @@ evidence (a genuine 24h train), so it carries the same review bar as every queue
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
+import math
 import os
 import shutil
 from typing import Any
@@ -38,6 +40,14 @@ from experiments.prepare_round0268_queue import (
 #: for all three seeds from one place.
 ATTEMPT5_ROOT = "/data/latent-basemap/runs/round-0268/attempt5"
 SHARED_ARTIFACTS = os.path.join(ATTEMPT5_ROOT, "artifacts")
+
+
+def _honest_deadline_utc(now: datetime.datetime, p90_wall_s: float, *, margin_h: float = 4.0) -> str:
+    """An HONEST deadline_utc: `now` + the node's p90 wall + margin, so the manifest never advertises
+    a deadline that expires mid-train (finding #6). `_base_manifest`'s hardcoded 12h is wrong for a
+    24h train; the runner ignores deadline_utc anyway, but the manifest should not lie."""
+    hours = math.ceil(p90_wall_s / 3600.0) + margin_h
+    return (now + datetime.timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _rmtree_force(path: str) -> None:
@@ -106,6 +116,11 @@ def prepare_pernode_train_queue(
     os.makedirs(shared_artifacts, exist_ok=True)
     os.makedirs(queue_root, exist_ok=True)
     manifest = _single_train_node_manifest(real, seed=seed, shared_artifacts=shared_artifacts)
+    # HONEST deadline (finding #6): the inherited _base_manifest 12h expires mid-24h-train. Override
+    # with now + node p90 + margin. The runner ignores deadline_utc, but the manifest must not lie.
+    manifest["deadline_utc"] = _honest_deadline_utc(
+        datetime.datetime.now(datetime.timezone.utc), float(manifest["p90_wall_s"]["total"])
+    )
     manifest_path = os.path.join(queue_root, "queue.json")
     if os.path.exists(manifest_path):
         os.chmod(manifest_path, 0o644)

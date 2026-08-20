@@ -1249,6 +1249,18 @@ def test_pernode_train_queue_is_single_seed_rehomed_to_shared_artifacts():
     assert all("seed42" not in j["id"] for j in m["jobs"])
 
 
+def test_pernode_honest_deadline_covers_the_train_wall():
+    import datetime
+    import experiments.prepare_round0268_pernode_queue as P
+
+    now = datetime.datetime(2026, 8, 20, 17, 0, 0, tzinfo=datetime.timezone.utc)
+    # a 24h train (86400s) must get a deadline strictly AFTER now+24h (not the inherited 12h).
+    dl = P._honest_deadline_utc(now, 86400.0)
+    dl_dt = datetime.datetime.fromisoformat(dl.replace("Z", "+00:00"))
+    assert (dl_dt - now).total_seconds() > 86400  # covers the full train + margin
+    assert (dl_dt - now).total_seconds() >= 86400 + 3 * 3600  # >= 24h + (margin - 1h) slack
+
+
 def test_pernode_builder_refuses_a_non_flagship_seed():
     import experiments.prepare_round0268_pernode_queue as P
 
