@@ -799,6 +799,95 @@ def test_transform_has_its_own_receipt_and_finiteness_moved_out_of_train_checks(
     assert "TRAINING PHASE ONLY" in src
 
 
+def test_transform_poll_reads_the_abort_flag_PATH_not_the_dict(tmp_path, monkeypatch):
+    # REGRESSION for the R9 defect (found in attempt-4, fixed in R10): the post-training
+    # transform's `_transform_poll` did `os.path.exists(abort_flag)` where `abort_flag` is the
+    # `_start_node()` DICT (require_enforceable_abort_flag) — raising TypeError on the FIRST poll
+    # (after transform chunk 1), deterministically, minutes into the 100M transform. R9's
+    # structural test only asserted `"_transform_poll" in src`; it never DROVE the poll with the
+    # real return shape. This test does.
+    from basemap.round0245_guard import (
+        require_enforceable_abort_flag,
+        RUNNER_ABORT_FLAG_ENV,
+    )
+
+    flag = tmp_path / "node.abort"
+    monkeypatch.setenv(RUNNER_ABORT_FLAG_ENV, str(flag))
+    abort_flag = require_enforceable_abort_flag(label="R0268 poll regression")
+    # the real shape is a DICT carrying the path — not a path.
+    assert isinstance(abort_flag, dict) and abort_flag.get("abort_flag_path") == str(flag)
+    # the R9 bug: os.path on the dict raises (this is what killed the transform).
+    with pytest.raises(TypeError):
+        os.path.exists(abort_flag)
+    # the R10 fix: extract the path; os.path.exists works and TRACKS the flag file.
+    abort_flag_path = abort_flag.get("abort_flag_path")
+    assert os.path.exists(abort_flag_path) is False  # no flag yet
+    flag.write_text("abort")
+    assert os.path.exists(abort_flag_path) is True  # cooperative abort now detected
+    # and run_train's source polls the PATH, never the dict.
+    import inspect
+
+    src = inspect.getsource(N.run_train)
+    assert "os.path.exists(abort_flag_path)" in src
+    assert "os.path.exists(abort_flag)" not in src
+
+
+# --------------------------------------------------------------------------- #
+# The seed-42 TRANSFORM-CORRECTION node + Queue-A builder (R10). Re-runs ONLY the
+# fixed unguarded transform from seed42's sealed read-only train-receipt + model.
+# --------------------------------------------------------------------------- #
+
+
+def test_run_job_dispatches_the_transform_correction_action():
+    import inspect
+
+    src = inspect.getsource(N.run_job)
+    assert "TRANSFORM_CORRECTION_ACTION" in src
+    assert "run_transform_correction(active, job)" in src
+
+
+def test_transform_correction_reuses_sealed_inputs_read_only_and_never_retrains():
+    import inspect
+
+    src = inspect.getsource(N.run_transform_correction)
+    # verifies seed42's SEALED train-receipt (schema + all train_checks + substrate identity).
+    assert "TRAIN_SCHEMA" in src
+    assert "all(bool(v) for v in train_checks.values())" in src
+    assert '!= substrate["ordered_substrate_sha256"]' in src
+    # verifies the model round-trips fneg (no bit-rot / wrong artifact).
+    assert "did not round-trip fneg params" in src
+    # NO training in a correction node: no model.fit / sampler / dose / int8 build.
+    for forbidden in ("model.fit", "build_hostint8_dataset", "successful_positive_lr", "CellWatchdog("):
+        assert forbidden not in src, forbidden
+    # UNGUARDED transform with the FIXED poll (abort_flag_path, not the dict).
+    assert "os.path.exists(abort_flag_path)" in src
+    assert "os.path.exists(abort_flag)" not in src
+    # seals a transform-receipt with the schema + failed-marker PROVENANCE linkage.
+    assert 'TRANSFORM_SCHEMA' in src
+    assert "original_r9_failed_marker" in src
+    assert "provenance" in src
+    # fail-closed on non-finite coordinates.
+    assert "transform_checks" in src
+
+
+def test_correction_queue_builder_binds_sealed_inputs_and_is_single_node():
+    import inspect
+    import experiments.prepare_round0268_correction_queue as B
+
+    src = inspect.getsource(B.prepare_correction_queue)
+    # exactly one node, the correction action, GPU + NOT training.
+    assert "TRANSFORM_CORRECTION_ACTION" in src
+    assert '"training_performed": False' in src
+    assert '"gpu_required": True' in src
+    # binds the sealed train-receipt + model + the original failed marker as expected_inputs.
+    assert "train_receipt_sig" in src and "model_sig" in src and "failed_marker_sig" in src
+    assert "expected_inputs" in src
+    # refuses unless the round is issued (base_commit ancestor of release) — provenance parity.
+    assert "_issued_round(release_sha)" in src
+    # the correction inputs come from the ORIGINAL R9 queue artifacts, read-only.
+    assert "train-receipt.json" in src and "model.pt" in src and ".failed.json" in src
+
+
 def test_treatment_digest_excludes_execution_resource_fields(monkeypatch):
     cfg = _honest()
     digest = T.fneg_seed_invariant_sha256(cfg)

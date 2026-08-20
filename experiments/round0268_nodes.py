@@ -133,6 +133,12 @@ from basemap.round0252_stoppability import gap_report
 TRAIN_ACTION = "train_minilm_fneg_100m_x2_hostint8"
 PANEL_ACTION = "score_minilm_fneg_100m_x2_panel"
 GATE_ACTION = "register_fneg_100m_x2_seedmean_gate"
+#: The seed-42 TRANSFORM-CORRECTION action (R10). Attempt-4's train sealed cleanly but the R9
+#: transform poll (dict-vs-path) TypeError'd the transform — so seed42 has a sealed train-receipt
+#: + model but no transform-receipt/tripwire. This node re-runs ONLY the (now-fixed, unguarded)
+#: transform from those sealed read-only inputs, seals a transform-receipt (+ failed-marker
+#: provenance) + its own done-marker. No re-train. R0267 queue-correction precedent.
+TRANSFORM_CORRECTION_ACTION = "transform_correct_minilm_fneg_100m_x2_hostint8"
 
 TRAIN_SCHEMA = "round0268-minilm-fneg-100m-x2-hostint8-train-receipt-v1"
 #: The post-training transform phase seals its OWN receipt (coordinates + seed-1 tripwire +
@@ -956,9 +962,15 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
     # police a phase it was never scoped for.
     transform_started = time.monotonic()
 
+    # `abort_flag` is the `_start_node()` dict (require_enforceable_abort_flag), NOT a path.
+    # The runner writes the flag FILE at abort_flag["abort_flag_path"] to signal a cooperative
+    # unwind; the transform poll must os.path.exists() THAT path, never the dict (R9 passed the
+    # dict → TypeError on the first poll; that path was structurally-only tested, never driven).
+    abort_flag_path = abort_flag.get("abort_flag_path") if isinstance(abort_flag, dict) else None
+
     def _transform_poll(message: str) -> None:
         # cooperative abort only (the gate/recorder closed with the training phase)
-        if abort_flag and os.path.exists(abort_flag):
+        if abort_flag_path and os.path.exists(abort_flag_path):
             raise Round0268NodeError(
                 f"R0268 seed-{seed} transform observed the cooperative abort flag"
             )
@@ -1030,6 +1042,182 @@ def run_train(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         "seed_1_tripwire_fog": tripwire_inputs["fog"],
         "observed_span_s": coverage["observed_span_s"],
         "covered_fraction": coverage["covered_fraction"],
+    }))
+
+
+# --------------------------------------------------------------------------- #
+# the seed-42 TRANSFORM-CORRECTION node (R10) — re-run ONLY the fixed, unguarded
+# transform from seed42's sealed train-receipt + model. No re-train.
+# --------------------------------------------------------------------------- #
+
+
+def run_transform_correction(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
+    """Re-run ONLY the (fixed, unguarded) 100M transform from seed42's SEALED train-receipt +
+    model, producing the transform-receipt + coordinates + seed-1 tripwire that the R9 defect
+    prevented. The sealed train-receipt + model are READ-ONLY inputs (signature-verified); the
+    original failed marker + its outputs are NEVER touched (preserve-not-erase). No CellWatchdog /
+    _node_guard around the transform — the same phase scoping the R10 fix establishes for run_train.
+    """
+    install_stop_hooks(label="R0268 round0268_nodes.run_transform_correction")
+    import torch
+    from basemap.pumap.parametric_umap import ParametricUMAP
+
+    if active.get("manifest", {}).get("round_id") != ROUND_ID:
+        raise Round0268NodeError("R0268 transform-correction handler received another queue")
+    if os.environ.get("CUDA_VISIBLE_DEVICES") in {None, "", "-1"}:
+        raise Round0268NodeError("R0268 transform-correction requires CUDA")
+    node_id = str(active.get("node_id") or TRANSFORM_CORRECTION_ACTION)
+    seed = int(job.get("training_seed", -1))
+    if seed not in SEEDS:
+        raise Round0268NodeError(f"R0268 transform-correction seed {seed!r} is not a flagship seed")
+    capability = capability_for_seed(seed)
+    label = f"R0268 seed-{seed} transform-correction"
+    abort_flag = _start_node(label)
+    abort_flag_path = abort_flag.get("abort_flag_path") if isinstance(abort_flag, dict) else None
+
+    # 1. the sealed R0238 100M substrate (identity-anchored, served lazily).
+    substrate = _sealed_100m_substrate(job)
+    source = _open_100m_substrate(substrate)
+
+    # 2. the SEALED train-receipt (read-only) — verify it is seed42's clean training evidence.
+    train_receipt_path = prompt_contract.verify_signature(
+        dict(job["train_receipt"]), label=f"R0268 seed-{seed} sealed train-receipt"
+    )
+    train_receipt = prompt_contract.read_sealed(
+        train_receipt_path, label=f"R0268 seed-{seed} sealed train-receipt"
+    )
+    train_checks = train_receipt.get("train_checks") or {}
+    if (
+        train_receipt.get("schema") != TRAIN_SCHEMA
+        or train_receipt.get("round_id") != ROUND_ID
+        or int(train_receipt.get("training_seed", -1)) != seed
+        or train_receipt.get("training_performed") is not True
+        or train_receipt.get("x_residency") != X_RESIDENCY
+        or not train_checks
+        or not all(bool(v) for v in train_checks.values())
+        or str(train_receipt.get("ordered_substrate_sha256")) != substrate["ordered_substrate_sha256"]
+    ):
+        raise Round0268NodeError(
+            f"R0268 seed-{seed} sealed train-receipt is not clean flagship training evidence"
+        )
+
+    # 3. the SEALED model (read-only) — verify the receipt's own model signature AND the job's.
+    model_path = prompt_contract.verify_signature(
+        dict(train_receipt["model"]), label=f"R0268 seed-{seed} sealed model (via receipt)"
+    )
+    job_model_path = prompt_contract.verify_signature(
+        dict(job["model"]), label=f"R0268 seed-{seed} sealed model (via job)"
+    )
+    if os.path.realpath(job_model_path) != os.path.realpath(model_path):
+        raise Round0268NodeError("R0268 transform-correction model input != the receipt's model")
+
+    reloaded = ParametricUMAP.load(model_path, device="cuda")
+    if not (
+        float(reloaded.fneg_weight) == R0265N.FNEG_WEIGHT
+        and float(reloaded.fneg_lo) == R0265N.FNEG_LO
+        and float(reloaded.fneg_hi) == R0265N.FNEG_HI
+    ):
+        raise Round0268NodeError("R0268 transform-correction model did not round-trip fneg params")
+
+    # 4. provenance linkage: the ORIGINAL R9 failed marker (read-only signature — the record of
+    #    the defect this node corrects). Bound by the queue; NEVER modified here.
+    failed_marker_signature = expected_input_signature(
+        prompt_contract.verify_signature(
+            dict(job["original_failed_marker"]),
+            label=f"R0268 seed-{seed} original R9 failed marker",
+        )
+    )
+
+    output = create_fresh_directory(str(job["outputs"][0]), label=label)
+
+    # 5. the FIXED, UNGUARDED transform (R10 poll: os.path.exists(abort_flag_path)).
+    def _transform_poll(message: str) -> None:
+        if abort_flag_path and os.path.exists(abort_flag_path):
+            raise Round0268NodeError(
+                f"R0268 seed-{seed} transform-correction observed the cooperative abort flag"
+            )
+
+    transform_started = time.monotonic()
+    coordinates = _transform_100m_in_chunks(reloaded, source, _transform_poll)
+    validate_published_map(coordinates)
+    coordinates_path = os.path.join(output, "coordinates.npy")
+    atomic_save_new_npy(coordinates_path, coordinates, immutable=True)
+    coordinates_ordered_sha256 = ordered_array_sha256(coordinates)
+    transform_rows_finite = int(np.isfinite(coordinates).all(axis=1).sum())
+    all_coordinates_finite = transform_rows_finite == ROWS
+    collapse_preview = map_collapse(coordinates)
+    fog_preview = _map_fog(coordinates, bins=FOG_BINS)
+    tripwire_inputs = {
+        "collapse": float(collapse_preview["r10_over_radius_times_sqrt_n"]),
+        "fog": float(fog_preview["fog"]),
+        "resolution_levels": int(fog_preview["resolution_levels"]),
+        "degenerate": bool(fog_preview["degenerate"]),
+        "fog_detail": fog_preview,
+        "collapse_detail": collapse_preview,
+        "note": (
+            "map-level collapse + fog (map-only, no truth) from the CORRECTED transform of "
+            "seed42's sealed model; a driver reads these for the seed-1 backstop + fog escalation "
+            "before seeds 43/44. The panel re-scores from the model for the gate."
+        ),
+    }
+    del reloaded, coordinates
+    torch.cuda.empty_cache()
+    gc.collect()
+    transform_wall_s = time.monotonic() - transform_started
+    transform_peak_rss_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1024 ** 2)
+
+    body = {
+        **_receipt_envelope(active["manifest"]),
+        "schema": TRANSFORM_SCHEMA,
+        "round_id": ROUND_ID,
+        "capability": capability,
+        "training_seed": seed,
+        "node": node_id,
+        "phase": "post-training-transform-correction",
+        "guarded": False,
+        "abort_flag_precondition": abort_flag,
+        "corrects_defect": (
+            "R9 _transform_poll called os.path.exists() on the _start_node() dict → TypeError "
+            "in the original transform; the R10 poll checks abort_flag['abort_flag_path']."
+        ),
+        "provenance": {
+            "sealed_train_receipt": expected_input_signature(train_receipt_path),
+            "sealed_model": expected_input_signature(model_path),
+            "original_r9_failed_marker": failed_marker_signature,
+            "note": (
+                "seed42's clean train (attempt-4, R9) sealed its train-receipt BEFORE the transform; "
+                "this node re-runs ONLY the corrected transform from that sealed evidence. The "
+                "original failed marker + outputs are preserved untouched."
+            ),
+        },
+        "model": expected_input_signature(model_path),
+        "coordinates": expected_input_signature(coordinates_path),
+        "coordinates_ordered_sha256": coordinates_ordered_sha256,
+        "ordered_substrate_sha256": substrate["ordered_substrate_sha256"],
+        "seed_1_tripwire_inputs": tripwire_inputs,
+        "transform_wall_s": transform_wall_s,
+        "transform_peak_host_rss_gib": transform_peak_rss_gib,
+        "transform_checks": {
+            "all_100m_coordinates_finite": bool(all_coordinates_finite),
+            "coordinates_row_count_is_rows": int(transform_rows_finite) == ROWS,
+            "reused_sealed_train_and_model_no_retrain": True,
+        },
+        "gate_registerable_here": False,
+    }
+    if not all(body["transform_checks"].values()):
+        raise Round0268NodeError(
+            f"R0268 seed-{seed} transform-correction checks failed: {body['transform_checks']}"
+        )
+    _seal(output, "transform-receipt.json", body)
+    del source
+    gc.collect()
+    print(json.dumps({
+        "capability": capability,
+        "seed": seed,
+        "corrected_transform": True,
+        "seed_1_tripwire_collapse": tripwire_inputs["collapse"],
+        "seed_1_tripwire_fog": tripwire_inputs["fog"],
+        "transform_wall_s": round(transform_wall_s, 1),
     }))
 
 
@@ -1866,6 +2054,9 @@ def run_job(active: Mapping[str, Any], job: Mapping[str, Any]) -> None:
         return
     if action == GATE_ACTION:
         run_gate(active, job)
+        return
+    if action == TRANSFORM_CORRECTION_ACTION:
+        run_transform_correction(active, job)
         return
     raise Round0268NodeError(f"R0268 unknown action {action!r}")
 
