@@ -258,6 +258,12 @@ ARMS: dict[str, dict] = {
                                               fneg_weight=1.0),
     "umap-md000-x2-fneg10-tanh4": _umap("000", dose=2, fneg_weight=1.0,
                                         neg_tanh_gamma=4.0),
+    # gamma mini-sweep (owner 2026-08-21, after tanh4 beat promoted 0.3690 vs
+    # 0.3378): is gamma a dial? Seed replicates of tanh4 run via --seed 43/44.
+    "umap-md000-x2-fneg10-tanh2": _umap("000", dose=2, fneg_weight=1.0,
+                                        neg_tanh_gamma=2.0),
+    "umap-md000-x2-fneg10-tanh8": _umap("000", dose=2, fneg_weight=1.0,
+                                        neg_tanh_gamma=8.0),
     "umap-md000-x2-fneg10-anneal25": _umap("000", dose=2, fneg_weight=1.0,
                                            kernel_anneal_frac=0.25),
 }

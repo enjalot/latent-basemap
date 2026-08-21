@@ -25,7 +25,8 @@ IMG = OUT / "img"
 
 RUNGS = [("2m-knobs", "2M"), ("6250k-knobs", "6.25M"),
          ("12500k-knobs", "12.5M"), ("25000k-knobs", "25M"),
-         ("500k-crosscheck", "500K")]
+         ("500k-crosscheck", "500K"),
+         ("bl-siglip-1m", "BL 1.08M"), ("sisap-clip-2m", "LAION 2M")]
 
 #: technique groups, in page order: (title, blurb, matcher on the arm name).
 #: First match wins, so put the specific families before the generic ones.
@@ -40,6 +41,11 @@ GROUPS = [
      lambda n: n in {"umap-md005-x2-fneg10", "umap-md020-x2-fneg10",
                      "gc-a2-md000-x2-fneg10", "gc-a2-md005-x2-fneg10",
                      "gc-a2-md020-x2-fneg10"}),
+    ("image embeddings (BL SigLIP / LAION CLIP)",
+     "the best-3 text recipes on image spaces: BL SigLIP2 1.08M (4-subset "
+     "overlays) and a 2M LAION CLIP768v2 slice of the SISAP 30M",
+     lambda n: n in {"promoted-fneg10", "fneg10-tanh4", "md005-fneg10"}
+     or n.startswith("bl-siglip") or n.startswith("sisap-clip")),
     ("500K upstream cross-check",
      "same 500K rows, same induced 2M-exact-graph truth, same instrument: "
      "umap-learn 0.6dev (CPU, saw only the 500K) vs our 2M-trained maps "
