@@ -24,7 +24,8 @@ OUT = Path.home() / ".agent/basemap-maps/sandbox"
 IMG = OUT / "img"
 
 RUNGS = [("2m-knobs", "2M"), ("6250k-knobs", "6.25M"),
-         ("12500k-knobs", "12.5M"), ("25000k-knobs", "25M")]
+         ("12500k-knobs", "12.5M"), ("25000k-knobs", "25M"),
+         ("500k-crosscheck", "500K")]
 
 #: technique groups, in page order: (title, blurb, matcher on the arm name).
 #: First match wins, so put the specific families before the generic ones.
@@ -39,6 +40,11 @@ GROUPS = [
      lambda n: n in {"umap-md005-x2-fneg10", "umap-md020-x2-fneg10",
                      "gc-a2-md000-x2-fneg10", "gc-a2-md005-x2-fneg10",
                      "gc-a2-md020-x2-fneg10"}),
+    ("500K upstream cross-check",
+     "same 500K rows, same induced 2M-exact-graph truth, same instrument: "
+     "umap-learn 0.6dev (CPU, saw only the 500K) vs our 2M-trained maps "
+     "sliced to those rows",
+     lambda n: n == "upstream-06dev" or n.endswith("-slice")),
     ("external baselines",
      "published competitors run on our substrate, scored on our instruments "
      "(sandbox reads, not the pre-registered baseline rounds)",
