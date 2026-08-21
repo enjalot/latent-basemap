@@ -87,6 +87,22 @@ class ParametricUMAP:
         fneg_weight=0.0,
         fneg_lo=0.1,
         fneg_hi=0.4,
+        # umap-0.6dev sandbox knobs (2026-08-21 sweep; all default-off, each
+        # guarded so 0/0.0 leaves existing configs byte-identical).
+        # rankneg_window: per-epoch random-projection rank-window hard
+        # negatives (upstream negative_selection_range); negatives' BCE is
+        # scaled by (2*window/N)^0.75 (upstream repulsion correction). Device
+        # fp16 residency only.
+        rankneg_window=0,
+        rankneg_exclude_neighbors=False,
+        # neg_tanh_gamma: soft cap on the NEGATIVE-pair BCE, gamma*tanh(l/gamma)
+        # (upstream caps the repulsive grad norm; loss-space analog here —
+        # monotone, bounds the per-pair gradient the same way in spirit).
+        neg_tanh_gamma=0.0,
+        # kernel_anneal_frac: for the first frac of the LR horizon the kernel
+        # exponents ramp a^e, b^e with e: 0.25 -> 1.0 (upstream recursive-init
+        # coarse levels train with weakened kernels a^1/4, b^1/4).
+        kernel_anneal_frac=0.0,
         weighted_edge_sampling=False,
         gpu_resident_data="auto",
         gpu_resident_vram_budget_gb=10.0,
@@ -176,6 +192,17 @@ class ParametricUMAP:
         self.fneg_lo = fneg_lo
         self.fneg_hi = fneg_hi
         self.fneg_telemetry = None   # P1: populated by fit() when fneg is on
+        self.rankneg_window = int(rankneg_window)
+        self.rankneg_exclude_neighbors = bool(rankneg_exclude_neighbors)
+        self.neg_tanh_gamma = float(neg_tanh_gamma)
+        self.kernel_anneal_frac = float(kernel_anneal_frac)
+        if not 0.0 <= self.kernel_anneal_frac < 1.0:
+            raise ValueError(f"kernel_anneal_frac must be in [0, 1), got {kernel_anneal_frac}")
+        # current kernel exponent (1.0 = no annealing); fit() ramps it when
+        # kernel_anneal_frac > 0. transform() always runs at 1.0.
+        self._kernel_exp = 1.0
+        # negative-loss scale once rank-window sampling is live (None = off)
+        self._rankneg_scale = None
         self.weighted_edge_sampling = weighted_edge_sampling
         self.graph_manifest_path = graph_manifest_path
         self.graph_manifest_sha256 = graph_manifest_sha256
@@ -249,6 +276,11 @@ class ParametricUMAP:
         """
         # fp32 throughout: the singular derivative at r=0 must not run in fp16.
         delta = src.float() - dst.float()
+        # kernel annealing (0.6dev sandbox): fit() ramps _kernel_exp 0.25 -> 1.0
+        # over the first kernel_anneal_frac of the horizon; 1.0 = exact a/b.
+        e = self._kernel_exp
+        a_eff = self.a if e == 1.0 else self.a ** e
+        b_eff = self.b if e == 1.0 else self.b ** e
         if self.low_dim_kernel in ("umap", "gcauchy"):
             r2 = delta.square().sum(dim=1)
             # P0-A: r2.pow(b) has a singular derivative b·r2^(b-1) at r2=0 for
@@ -258,12 +290,42 @@ class ParametricUMAP:
             # radial where r2==0, so both value (q=1) and gradient (0) are finite
             # while small nonzero radii keep the true r^(2b) curve.
             tiny = torch.finfo(r2.dtype).tiny
-            radial_nz = r2.clamp_min(tiny).pow(self.b)
+            radial_nz = r2.clamp_min(tiny).pow(b_eff)
             radial = torch.where(r2 == 0, torch.zeros_like(radial_nz), radial_nz)
         else:  # legacy_lp — unchanged shipped behaviour
-            radial = torch.norm(delta, dim=1, p=2 * self.b)
+            radial = torch.norm(delta, dim=1, p=2 * b_eff)
         power = self.kernel_alpha if self.low_dim_kernel == "gcauchy" else 1.0
-        return torch.pow(1 + self.a * radial, -power), radial
+        return torch.pow(1 + a_eff * radial, -power), radial
+
+    def _refresh_rank_negatives(self, loader):
+        """Install a fresh 1D rank order of the current embedding on the sampler.
+
+        0.6dev sandbox (rank-window hard negatives): project every node's
+        CURRENT 2D position onto a random unit direction (drawn from the
+        sampler's own generator — seed-deterministic) and argsort. ~1 forward
+        pass over the training rows per epoch; 2M rows ≈ 2 s.
+        """
+        import torch
+        n = loader.n_nodes
+        direction = torch.randn(self.n_components, generator=loader.gen,
+                                device=self.device)
+        direction = direction / direction.norm().clamp_min(1e-12)
+        proj = torch.empty(n, dtype=torch.float32, device=self.device)
+        was_training = self.model.training
+        self.model.eval()
+        with torch.no_grad():
+            chunk = 262_144
+            for start in range(0, n, chunk):
+                idx = torch.arange(start, min(start + chunk, n),
+                                   device=self.device)
+                feats = loader.dataset.index_select(idx)
+                proj[start:start + len(idx)] = (
+                    self.model(feats).float() @ direction)
+        if was_training:
+            self.model.train()
+        loader.set_rank_order(torch.argsort(proj))
+        self._rankneg_scale = float(
+            (2.0 * self.rankneg_window / n) ** 0.75)
 
     def _decide_gpu_resident(self, n_train, n_features, n_pos_edges,
                              edge_set, low_memory):
@@ -1347,6 +1409,16 @@ class ParametricUMAP:
             ed = None
             dataset, loader, n_pos_edges = self._prepare_edge_list_training(
                 X, precomputed_edges_path, n_train, low_memory, random_state)
+            if self.rankneg_window > 0:
+                # 0.6dev sandbox: rank-window hard negatives need the device
+                # sampler; anything else fails closed rather than silently
+                # training uniform.
+                if not hasattr(loader, "configure_rank_negatives"):
+                    raise ValueError(
+                        f"rankneg_window requires DeviceEdgeSampler; the "
+                        f"selected pipeline uses {type(loader).__name__}")
+                loader.configure_rank_negatives(
+                    self.rankneg_window, self.rankneg_exclude_neighbors)
             if self.model is None:
                 self._init_model(n_features)
             logging.info("Model parameters: %d", sum(p.numel() for p in self.model.parameters()))
@@ -1705,7 +1777,17 @@ class ParametricUMAP:
         consecutive_nonfinite_losses = 0
         consecutive_nonfinite_gradients = 0   # P0-3: separate from the loss counter
         fneg_epoch_telemetry = []   # P1: per-epoch fneg diagnostics (opt-in)
+        # 0.6dev sandbox: annealed runs start at the weakened kernel; every
+        # other run keeps the exact kernel from step 0.
+        self._kernel_exp = 0.25 if self.kernel_anneal_frac > 0 else 1.0
         for epoch in range(self.n_epochs):
+            if self.rankneg_window > 0 and hasattr(loader, "set_rank_order"):
+                # 0.6dev sandbox: re-project the CURRENT embedding on a fresh
+                # random direction and re-rank, EVERY epoch including the first
+                # (upstream semantics — the random-init projection is an
+                # arbitrary but valid order, and the 2M harness only runs 2
+                # epochs, so skipping epoch 0 would halve the treatment dose).
+                self._refresh_rank_negatives(loader)
             epoch_loss_t = torch.zeros((), device=self.device)
             epoch_umap_t = torch.zeros((), device=self.device)
             epoch_corr_t = torch.zeros((), device=self.device)
@@ -1780,38 +1862,57 @@ class ParametricUMAP:
                 # precision, then compute BCE in fp32.
                 targets_for_loss = torch.nan_to_num(targets.float(), nan=0.0, posinf=1.0, neginf=0.0)
                 targets_for_loss = torch.clamp(targets_for_loss, min=0.0, max=1.0)
-                if self.fneg_weight > 0:
-                    # Track 4C: up-weight the BCE of mid-range negatives (extra
-                    # repulsion where fog lives). "Mid-range" = 2D pair distance
-                    # in [fneg_lo, fneg_hi] x p90 map radius, both measured this
-                    # batch. Reweighting is gradient-equivalent to oversampling
-                    # those negatives; no sampler change, legacy path untouched.
+                _per_elem_loss = (self.fneg_weight > 0
+                                  or self.neg_tanh_gamma > 0
+                                  or self.rankneg_window > 0)
+                if _per_elem_loss:
                     per_elem = torch.nn.functional.binary_cross_entropy(
                         qs.float(), targets_for_loss, reduction="none")
+                    neg_mask = targets_for_loss < 0.5
+                    if self.neg_tanh_gamma > 0:
+                        # 0.6dev sandbox: soft cap on the NEGATIVE-pair loss,
+                        # gamma*tanh(l/gamma) (upstream caps the repulsive grad
+                        # norm; this loss-space analog bounds it monotonically).
+                        g = self.neg_tanh_gamma
+                        per_elem = torch.where(
+                            neg_mask, g * torch.tanh(per_elem / g), per_elem)
                     w = torch.ones_like(per_elem)
-                    with torch.no_grad():
-                        endpts = torch.cat([src_embeddings, dst_embeddings], dim=0).float()
-                        center = endpts.mean(dim=0)
-                        pr = torch.linalg.vector_norm(endpts - center, dim=1)
-                        R = torch.quantile(pr, 0.9)
-                        r2d = torch.linalg.vector_norm(
-                            (src_embeddings - dst_embeddings).float(), dim=1)
-                        band = ((targets_for_loss < 0.5)
-                                & (r2d >= self.fneg_lo * R)
-                                & (r2d <= self.fneg_hi * R))
-                    w = w + band.float() * self.fneg_weight
+                    if self.rankneg_window > 0 and self._rankneg_scale is not None:
+                        # rank-window hard negatives are ~(2W/N) as numerous a
+                        # pool as uniform; scale their repulsion by (2W/N)^0.75
+                        # (upstream's correction) once rank sampling is live.
+                        w = torch.where(
+                            neg_mask, w * self._rankneg_scale, w)
+                    if self.fneg_weight > 0:
+                        # Track 4C: up-weight the BCE of mid-range negatives
+                        # (extra repulsion where fog lives). "Mid-range" = 2D
+                        # pair distance in [fneg_lo, fneg_hi] x p90 map radius,
+                        # both measured this batch. Reweighting is gradient-
+                        # equivalent to oversampling those negatives.
+                        with torch.no_grad():
+                            endpts = torch.cat([src_embeddings, dst_embeddings], dim=0).float()
+                            center = endpts.mean(dim=0)
+                            pr = torch.linalg.vector_norm(endpts - center, dim=1)
+                            R = torch.quantile(pr, 0.9)
+                            r2d = torch.linalg.vector_norm(
+                                (src_embeddings - dst_embeddings).float(), dim=1)
+                            band = (neg_mask
+                                    & (r2d >= self.fneg_lo * R)
+                                    & (r2d <= self.fneg_hi * R))
+                        w = w + band.float() * self.fneg_weight
                     umap_loss = (per_elem * w).sum() / w.sum()
-                    with torch.no_grad():
-                        _pe = per_elem.detach()
-                        fneg_band_t += band.sum()
-                        fneg_neg_t += (targets_for_loss < 0.5).sum()
-                        fneg_extra_t += (_pe * band.float() * self.fneg_weight).sum()
-                        fneg_wsum_t += (_pe * w).sum()
-                        fneg_R_sum += R
-                        fneg_R_sqsum += R * R
-                        fneg_R_min = torch.minimum(fneg_R_min, R)
-                        fneg_R_max = torch.maximum(fneg_R_max, R)
-                        fneg_batches += 1
+                    if self.fneg_weight > 0:
+                        with torch.no_grad():
+                            _pe = per_elem.detach()
+                            fneg_band_t += band.sum()
+                            fneg_neg_t += neg_mask.sum()
+                            fneg_extra_t += (_pe * band.float() * self.fneg_weight).sum()
+                            fneg_wsum_t += (_pe * w).sum()
+                            fneg_R_sum += R
+                            fneg_R_sqsum += R * R
+                            fneg_R_min = torch.minimum(fneg_R_min, R)
+                            fneg_R_max = torch.maximum(fneg_R_max, R)
+                            fneg_batches += 1
                 else:
                     umap_loss = self.loss_fn(qs.float(), targets_for_loss)
                 # P0.3: skip the correlation branch entirely when its weight is 0
@@ -2075,6 +2176,12 @@ class ParametricUMAP:
                         scheduler.step()
                         st["scheduler_steps"] += 1
                         st["next_lr"] = optimizer.param_groups[0]['lr']
+                    if self.kernel_anneal_frac > 0:
+                        # 0.6dev sandbox: exponent ramps 0.25 -> 1.0 over the
+                        # first kernel_anneal_frac of the horizon, measured in
+                        # the same successful updates the LR schedule consumes.
+                        p = st["scheduler_steps"] / max(1.0, lr_horizon * self.kernel_anneal_frac)
+                        self._kernel_exp = 0.25 + 0.75 * min(p, 1.0)
                 else:
                     # scaler.step skipped (scale decreased) → an AMP overflow at
                     # THIS step; the schedule was NOT advanced, so H is preserved.
@@ -2274,6 +2381,9 @@ class ParametricUMAP:
                     logging.info("Peak GPU Memory: %.2f GB", peak_memory)
                 wandb.log(log_dict)
 
+        # annealing is a TRAINING schedule only — transform/save always run the
+        # exact registered kernel.
+        self._kernel_exp = 1.0
         self.is_fitted = True
         # P1: expose fneg telemetry for the summary (opt-in; None when off).
         if self.fneg_weight > 0 and fneg_epoch_telemetry:
@@ -2413,6 +2523,10 @@ class ParametricUMAP:
             'fneg_weight': self.fneg_weight,
             'fneg_lo': self.fneg_lo,
             'fneg_hi': self.fneg_hi,
+            'rankneg_window': self.rankneg_window,
+            'rankneg_exclude_neighbors': self.rankneg_exclude_neighbors,
+            'neg_tanh_gamma': self.neg_tanh_gamma,
+            'kernel_anneal_frac': self.kernel_anneal_frac,
             'x_residency': self.x_residency,
             'pipeline_info': dict(getattr(self, '_pipeline_info', {}) or {}),
         }
@@ -2460,6 +2574,13 @@ class ParametricUMAP:
             fneg_weight=save_dict.get('fneg_weight', 0.0),
             fneg_lo=save_dict.get('fneg_lo', 0.1),
             fneg_hi=save_dict.get('fneg_hi', 0.4),
+            # 0.6dev sandbox knobs (2026-08-21): same save-but-forgot-to-load
+            # hazard as the fneg params above — restore with defaults for
+            # checkpoints predating them.
+            rankneg_window=save_dict.get('rankneg_window', 0),
+            rankneg_exclude_neighbors=save_dict.get('rankneg_exclude_neighbors', False),
+            neg_tanh_gamma=save_dict.get('neg_tanh_gamma', 0.0),
+            kernel_anneal_frac=save_dict.get('kernel_anneal_frac', 0.0),
         )
 
         state_dict = save_dict['model_state_dict']

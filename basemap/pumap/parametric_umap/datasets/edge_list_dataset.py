@@ -465,6 +465,67 @@ class DeviceEdgeSampler:
             self.perm = torch.arange(self.n_pos, device=self.device)
         return self
 
+    def configure_rank_negatives(self, window, exclude_neighbors=False):
+        """Enable umap-0.6dev-style rank-window hard negatives (sandbox).
+
+        After ``set_rank_order`` installs a 1D rank order of the nodes (the
+        caller projects the CURRENT embedding on a random direction each epoch
+        and argsorts), ``neg_dst`` is drawn from a ±``window`` band around
+        ``neg_src``'s rank instead of uniformly — O(N log N) hard-negative
+        mining (upstream ``negative_selection_range``, umap/layouts.py:1395).
+        Until the first ``set_rank_order`` the draw stays uniform, so epoch 0
+        starts exactly like the baseline.
+        """
+        if self.positive_source_rows_t is not None:
+            raise ValueError(
+                "rank-window negatives are not implemented for the capped "
+                "source-universe path (fail closed)")
+        window = int(window)
+        if not 0 < window < self.n_nodes:
+            raise ValueError(f"rank window {window} not in (0, n_nodes)")
+        if exclude_neighbors:
+            # exclusion needs a per-node neighbour table; only a fixed-k,
+            # source-major edge layout gives one for free. Verify, else refuse.
+            k, rem = divmod(self.source_n_pos, self.n_nodes)
+            table_ok = rem == 0 and k > 0
+            if table_ok:
+                srcs = self.sources_t.view(self.n_nodes, k)
+                table_ok = bool((srcs == srcs[:, :1]).all())
+            if not table_ok:
+                raise ValueError(
+                    "rankneg_exclude_neighbors requires a fixed-k source-major "
+                    "edge layout (fail closed)")
+            self._rank_neighbors_t = self.targets_t.view(self.n_nodes, k)
+        self._rank_window = window
+        self._rank_exclude_neighbors = bool(exclude_neighbors)
+        self._rank_of_node = None
+        self._node_at_rank = None
+
+    def set_rank_order(self, node_at_rank):
+        """Install this epoch's rank order (int tensor: rank -> node)."""
+        if getattr(self, "_rank_window", 0) <= 0:
+            raise ValueError("configure_rank_negatives was never called")
+        node_at_rank = node_at_rank.to(device=self.device, dtype=torch.long)
+        if node_at_rank.shape != (self.n_nodes,):
+            raise ValueError(f"rank order shape {tuple(node_at_rank.shape)} != "
+                             f"({self.n_nodes},)")
+        self._node_at_rank = node_at_rank
+        rank_of_node = torch.empty_like(node_at_rank)
+        rank_of_node[node_at_rank] = torch.arange(
+            self.n_nodes, device=self.device)
+        self._rank_of_node = rank_of_node
+
+    def _rank_window_dst(self, neg_src, n):
+        """dst from a ±window band around src's rank (never offset 0)."""
+        w = self._rank_window
+        mag = torch.randint(1, w + 1, (n,), generator=self.gen,
+                            device=self.device)
+        sign = torch.randint(0, 2, (n,), generator=self.gen,
+                             device=self.device) * 2 - 1
+        rank = (self._rank_of_node.index_select(0, neg_src)
+                + mag * sign) % self.n_nodes
+        return self._node_at_rank.index_select(0, rank)
+
     def _sample_negatives(self, n):
         if self.positive_source_rows_t is not None:
             universe = len(self.positive_source_rows_t)
@@ -481,6 +542,19 @@ class DeviceEdgeSampler:
             )
         neg_src = torch.randint(0, self.n_nodes, (n,), generator=self.gen,
                                 device=self.device)
+        if getattr(self, "_rank_window", 0) > 0 and self._rank_of_node is not None:
+            neg_dst = self._rank_window_dst(neg_src, n)
+            if self._rank_exclude_neighbors:
+                # one redraw pass for pairs that are graph neighbours; a second
+                # collision is kept (approximate exclusion, like upstream's
+                # bounded filtering — never a rejection loop on device).
+                hit = (self._rank_neighbors_t.index_select(0, neg_src)
+                       == neg_dst.unsqueeze(1).to(torch.int32)).any(dim=1)
+                n_hit = int(hit.sum())
+                if n_hit:
+                    neg_dst = neg_dst.clone()
+                    neg_dst[hit] = self._rank_window_dst(neg_src[hit], n_hit)
+            return neg_src, neg_dst
         # offset in [1, n_nodes-1] -> dst != src, uniform over non-self nodes.
         offset = torch.randint(1, self.n_nodes, (n,), generator=self.gen,
                                device=self.device)

@@ -242,6 +242,24 @@ ARMS: dict[str, dict] = {
     "gc-a2-md000-x2-fneg10": _gc("000", 2.0, dose=2, fneg_weight=1.0),
     "gc-a2-md005-x2-fneg10": _gc("005", 2.0, dose=2, fneg_weight=1.0),
     "gc-a2-md020-x2-fneg10": _gc("020", 2.0, dose=2, fneg_weight=1.0),
+
+    # umap-0.6dev sweep (plan-gpu-window-2026-08-21.md §3; upstream review in
+    # scratchpad/umap-06dev-review.md). Rank-window hard negatives REPLACE the
+    # fneg band (same job, different mechanism) so those arms run fneg-off,
+    # plus one combined arm; tanh cap + kernel annealing ride the promoted
+    # baseline. gamma=4.0 mirrors upstream's ±4 repulsion clip.
+    "umap-md000-x2-rankneg100k": _umap("000", dose=2, rankneg_window=100_000),
+    "umap-md000-x2-rankneg200k": _umap("000", dose=2, rankneg_window=200_000),
+    "umap-md000-x2-rankneg500k": _umap("000", dose=2, rankneg_window=500_000),
+    "umap-md000-x2-rankneg200k-xn": _umap("000", dose=2, rankneg_window=200_000,
+                                          rankneg_exclude_neighbors=True),
+    "umap-md000-x2-rankneg200k-fneg10": _umap("000", dose=2,
+                                              rankneg_window=200_000,
+                                              fneg_weight=1.0),
+    "umap-md000-x2-fneg10-tanh4": _umap("000", dose=2, fneg_weight=1.0,
+                                        neg_tanh_gamma=4.0),
+    "umap-md000-x2-fneg10-anneal25": _umap("000", dose=2, fneg_weight=1.0,
+                                           kernel_anneal_frac=0.25),
 }
 
 
