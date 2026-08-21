@@ -444,10 +444,15 @@ def build_page() -> None:
         label = arm_dir.name
         name = f"{label}.png"
         shutil.copy2(png, SITE_DIR / name)
-        cards.append((label, name,
-                      f"quick-ffr {s['quick_ffr_at_0.1pct']:.4f} · "
-                      f"{s['horizon_updates']:,} updates · "
-                      f"{s['draws_per_edge']:.3f} draws/edge"))
+        # external-baseline summaries (e.g. paramrepulsor-upstream) carry no
+        # horizon/draws fields — show what exists rather than crashing the
+        # whole arm run at page-build time.
+        bits = [f"quick-ffr {s['quick_ffr_at_0.1pct']:.4f}"]
+        if "horizon_updates" in s:
+            bits.append(f"{s['horizon_updates']:,} updates")
+        if "draws_per_edge" in s:
+            bits.append(f"{s['draws_per_edge']:.3f} draws/edge")
+        cards.append((label, name, " · ".join(bits)))
     figs = "".join(
         f'<figure style="margin:0"><img src="{f}" style="width:100%;border:1px solid #ddd;border-radius:6px">'
         f'<figcaption><b>{html_mod.escape(t)}</b><br><small>{html_mod.escape(c)}</small></figcaption></figure>'
