@@ -10,6 +10,20 @@
     />
     <script type="module" crossorigin src="./assets/index-BkJdSLnD.js"></script>
     <link rel="stylesheet" crossorigin href="./assets/index-CUh1GiYG.css">
+<script>
+  // Google Analytics — only on the public site; the same build is served
+  // on gsv.local / localhost and those views should not be counted.
+  if (location.hostname === 'enjalot.github.io') {
+    var gaScript = document.createElement('script');
+    gaScript.async = true;
+    gaScript.src = 'https://www.googletagmanager.com/gtag/js?id=G-DZJP5PPBF7';
+    document.head.appendChild(gaScript);
+    window.dataLayer = window.dataLayer || [];
+    function gtag() { dataLayer.push(arguments); }
+    gtag('js', new Date());
+    gtag('config', 'G-DZJP5PPBF7');
+  }
+</script>
   </head>
   <body>
     <div id="app">
