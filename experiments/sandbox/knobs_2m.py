@@ -232,6 +232,16 @@ ARMS: dict[str, dict] = {
     # Renders = three orthogonal projections.
     "umap-md000-x4-fneg10-3d": _umap("000", dose=4, fneg_weight=1.0,
                                      n_components=3),
+
+    # Aesthetic-revival cross (owner picks 2026-08-21, review page): the looser
+    # kernels that scored below the promoted recipe but looked better, now WITH
+    # the promoted fneg mechanism — does fneg recover the FFR the soft kernels
+    # gave up, and does the "landmass" look survive fneg? All dose x2.
+    "umap-md005-x2-fneg10": _umap("005", dose=2, fneg_weight=1.0),
+    "umap-md020-x2-fneg10": _umap("020", dose=2, fneg_weight=1.0),
+    "gc-a2-md000-x2-fneg10": _gc("000", 2.0, dose=2, fneg_weight=1.0),
+    "gc-a2-md005-x2-fneg10": _gc("005", 2.0, dose=2, fneg_weight=1.0),
+    "gc-a2-md020-x2-fneg10": _gc("020", 2.0, dose=2, fneg_weight=1.0),
 }
 
 
