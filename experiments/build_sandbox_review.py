@@ -26,6 +26,50 @@ IMG = OUT / "img"
 RUNGS = [("2m-knobs", "2M"), ("6250k-knobs", "6.25M"),
          ("12500k-knobs", "12.5M"), ("25000k-knobs", "25M")]
 
+#: technique groups, in page order: (title, blurb, matcher on the arm name).
+#: First match wins, so put the specific families before the generic ones.
+GROUPS = [
+    ("umap-0.6dev sweep",
+     "rank-window hard negatives / tanh repulsion cap / kernel annealing "
+     "(plan §3; upstream review in the session scratchpad)",
+     lambda n: "rankneg" in n or "tanh" in n or "anneal" in n),
+    ("aesthetic × fneg cross",
+     "owner picks 2026-08-21: the looser kernels re-run WITH the promoted "
+     "fneg mechanism",
+     lambda n: n in {"umap-md005-x2-fneg10", "umap-md020-x2-fneg10",
+                     "gc-a2-md000-x2-fneg10", "gc-a2-md005-x2-fneg10",
+                     "gc-a2-md020-x2-fneg10"}),
+    ("external baselines",
+     "published competitors run on our substrate, scored on our instruments "
+     "(sandbox reads, not the pre-registered baseline rounds)",
+     lambda n: "paramrepulsor" in n),
+    ("far-negative band (fneg)",
+     "the promoted mechanism: mid-range negatives' BCE up-weighted",
+     lambda n: "fneg" in n),
+    ("3D output", "PLAN7 phase A", lambda n: "-3d" in n),
+    ("host-int8 residency", "X as int8 rows + fp16 scales in host RAM",
+     lambda n: "hostint8" in n),
+    ("density weighting", "PLAN4 density-targeted loss terms",
+     lambda n: "-dw" in n),
+    ("mid-near pairs", "PaCMAP-style mid-near attraction",
+     lambda n: "-mn" in n),
+    ("gcauchy kernel", "heavier-tailed low-dim kernel (alpha != 1)",
+     lambda n: n.startswith("gc-")),
+    ("min_dist ladder", "umap kernel (a, b) fits across min_dist",
+     lambda n: n.startswith("umap-md") or n.startswith("umap-mind")),
+    ("pos-ratio", "positive fraction of the batch",
+     lambda n: "pos0" in n or "pos1" in n),
+    ("baseline & dose", "replay baseline, dose multiples, raw kernel knobs",
+     lambda n: True),
+]
+
+
+def group_of(name: str) -> str:
+    for title, _, match in GROUPS:
+        if match(name):
+            return title
+    return GROUPS[-1][0]
+
 #: arms on the promoted-recipe lineage (context badge, not a judgment)
 PROMOTED_HINT = ("fneg10",)
 
@@ -78,7 +122,8 @@ def main() -> int:
     IMG.mkdir(exist_ok=True)
     arms = load_arms()
 
-    cards = []
+    cards_by_group: dict[str, list[str]] = {}
+    n_cards = 0
     for a in arms:
         slug = a["id"].replace("/", "__")
         imgs = []
@@ -100,7 +145,7 @@ def main() -> int:
                  if a["promoted"] else "")
         if a["n_components"] != 2:
             badge += '<span class="badge d3">3D</span>'
-        cards.append(f"""
+        cards_by_group.setdefault(group_of(a["name"]), []).append(f"""
 <figure class="card" data-id="{html.escape(a['id'])}" data-rung="{a['rung']}"
         data-ffr="{a['ffr'] if a['ffr'] is not None else -1}">
   <div class="imgs">{img_tags}</div>
@@ -113,6 +158,7 @@ def main() -> int:
     <textarea class="note" placeholder="notes…"></textarea>
   </figcaption>
 </figure>""")
+        n_cards += 1
 
     ref_html = ""
     twin = next((a for a in arms if a["id"] == "2m-knobs/umap-md000-x4-fneg10"), None)
@@ -123,6 +169,24 @@ def main() -> int:
                     f"Anything below that traded metric for looks — that trade is "
                     f"what this page is for judging.</p>")
 
+    def slug(title: str) -> str:
+        return "".join(c if c.isalnum() else "-" for c in title.lower())
+
+    toc_items, sections = [], []
+    for title, blurb, _ in GROUPS:
+        group_cards = cards_by_group.get(title)
+        if not group_cards:
+            continue
+        sid = slug(title)
+        toc_items.append(f'<a href="#{sid}">{html.escape(title)} '
+                         f'({len(group_cards)})</a>')
+        sections.append(
+            f'<section id="{sid}"><h2>{html.escape(title)} '
+            f'<small>{len(group_cards)}</small></h2>'
+            f'<p class="blurb">{html.escape(blurb)}</p>'
+            f'<div class="grid">{"".join(group_cards)}</div></section>')
+    toc_html = f'<nav class="toc">{" · ".join(toc_items)}</nav>'
+
     (OUT / "index.html").write_text(f"""<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>sandbox arm review — pick maps to explore</title>
@@ -130,6 +194,14 @@ def main() -> int:
  body {{ font-family: system-ui; max-width: 1560px; margin: 1.5rem auto; padding: 0 1rem; color: #1a202c; }}
  h1 {{ margin: 0 0 .2rem }} .sub {{ color: #4a5568; margin-top: 0 }}
  .ref {{ background: #f7fafc; border-left: 3px solid #2b6cb0; padding: .5rem .8rem }}
+ .toc {{ margin: .8rem 0; line-height: 1.9 }}
+ .toc a {{ background: #edf2f7; border-radius: 4px; padding: 2px 8px; margin-right: 4px;
+           text-decoration: none; color: #2d3748; font-size: .85rem; white-space: nowrap }}
+ .toc a:hover {{ background: #e2e8f0 }}
+ section {{ margin: 1.6rem 0 }}
+ section h2 {{ border-bottom: 2px solid #e2e8f0; padding-bottom: .25rem; margin-bottom: .25rem }}
+ section h2 small {{ color: #a0aec0; font-weight: normal }}
+ .blurb {{ color: #4a5568; margin: .2rem 0 .8rem; font-size: .9rem }}
  .bar {{ display: flex; gap: .8rem; align-items: center; margin: 1rem 0; flex-wrap: wrap }}
  .bar select, .bar button {{ font-size: .9rem; padding: .25rem .5rem }}
  .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 16px }}
@@ -172,8 +244,9 @@ interactive pack, scale-up) without retraining.</p>
   <button id="export">export shortlist</button>
   <span id="count"></span>
 </div>
+{toc_html}
 <div id="exported"></div>
-<div class="grid" id="grid">{"".join(cards)}</div>
+{"".join(sections)}
 <script>
 const LS = "sandbox-review-v1";
 const state = JSON.parse(localStorage.getItem(LS) || '{{"stars":{{}},"notes":{{}}}}');
@@ -191,22 +264,29 @@ for (const c of cards) {{
   note.oninput = () => {{ state.notes[id] = note.value; save(); }};
   paint();
 }}
-const grid = document.getElementById("grid");
 function apply() {{
   const rung = document.getElementById("rung").value;
   const only = document.getElementById("onlystars").checked;
   const sort = document.getElementById("sort").value;
   let vis = 0;
-  const sorted = [...cards].sort((a, b) => {{
-    if (sort === "name") return a.dataset.id.localeCompare(b.dataset.id);
-    const fa = +a.dataset.ffr, fb = +b.dataset.ffr;
-    return sort === "ffr-desc" ? fb - fa : fa - fb;
-  }});
-  for (const c of sorted) {{
-    grid.appendChild(c);
-    const show = (!rung || c.dataset.rung === rung) && (!only || state.stars[c.dataset.id]);
-    c.style.display = show ? "" : "none";
-    if (show) vis++;
+  for (const sec of document.querySelectorAll("section")) {{
+    const grid = sec.querySelector(".grid");
+    const secCards = [...grid.querySelectorAll(".card")].sort((a, b) => {{
+      if (sort === "name") return a.dataset.id.localeCompare(b.dataset.id);
+      const fa = +a.dataset.ffr, fb = +b.dataset.ffr;
+      return sort === "ffr-desc" ? fb - fa : fa - fb;
+    }});
+    let secVis = 0;
+    for (const c of secCards) {{
+      grid.appendChild(c);
+      const show = (!rung || c.dataset.rung === rung) && (!only || state.stars[c.dataset.id]);
+      c.style.display = show ? "" : "none";
+      if (show) secVis++;
+    }}
+    sec.style.display = secVis ? "" : "none";
+    const toc = document.querySelector(`.toc a[href="#${{sec.id}}"]`);
+    if (toc) toc.style.display = secVis ? "" : "none";
+    vis += secVis;
   }}
   document.getElementById("count").textContent = vis + " arms";
 }}
@@ -222,7 +302,7 @@ document.getElementById("export").onclick = () => {{
 apply();
 </script>
 """)
-    print(f"{len(cards)} arm cards -> {OUT}/index.html")
+    print(f"{n_cards} arm cards in {len(sections)} groups -> {OUT}/index.html")
     return 0
 
 
