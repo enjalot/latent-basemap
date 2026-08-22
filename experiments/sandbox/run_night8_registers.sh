@@ -44,11 +44,13 @@ run "redditmix reddit-probe" redditmix.log $PY experiments/sandbox/register_ood_
 [ -f /data/latent-basemap/sandbox/communityarchive-2m/edges-k15-fuzzy.npz ] && \
   run "redditmix ca-probe" redditmix.log $PY experiments/sandbox/register_ood_probe.py communityarchive-2m
 
-log "=== STAGE dose-x16 start"
-if [ ! -f /data/latent-basemap/sandbox/2m-knobs/umap-md000-x16-fneg10-tanh4-pos10/summary.json ]; then
-  run "arm x16 composed" arm-x16.log \
-    $PY experiments/sandbox/knobs_2m.py --arm umap-md000-x16-fneg10-tanh4-pos10
-fi
+log "=== STAGE gamma2-path start"
+# x16 DEFERRED (owner 2026-08-22: too long while the recipe is still moving);
+# the gamma-2 promotion path replaces it.
+for arm in umap-md000-x4-fneg10-tanh2-pos10 umap-md000-x8-fneg10-tanh2-pos10; do
+  [ -f "/data/latent-basemap/sandbox/2m-knobs/$arm/summary.json" ] && { log "arm $arm done, skip"; continue; }
+  run "arm $arm" "arm-$arm.log" $PY experiments/sandbox/knobs_2m.py --arm "$arm"
+done
 
 log "=== STAGE review-page start"
 $PY experiments/build_sandbox_review.py >>"$LOG" 2>&1 || true

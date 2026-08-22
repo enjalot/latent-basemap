@@ -314,6 +314,13 @@ ARMS: dict[str, dict] = {
                                         pos_ratio=0.10),
     "umap-md000-x4-fneg10-tanh2": _umap("000", dose=4, fneg_weight=1.0,
                                         neg_tanh_gamma=2.0),
+    # gamma-2 promotion path (tanh2 beat tanh4 at x4: 0.3981 vs 0.3936).
+    "umap-md000-x4-fneg10-tanh2-pos10": _umap("000", dose=4, fneg_weight=1.0,
+                                              neg_tanh_gamma=2.0,
+                                              pos_ratio=0.10),
+    "umap-md000-x8-fneg10-tanh2-pos10": _umap("000", dose=8, fneg_weight=1.0,
+                                              neg_tanh_gamma=2.0,
+                                              pos_ratio=0.10),
     # anti-collapse ladder (owner 2026-08-22: "maps slightly too collapsed"):
     # looser kernels x the best candidates — cheap x2 looks first, then the
     # composed winner at md005/md010.
