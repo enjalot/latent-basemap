@@ -11,8 +11,9 @@ log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >>"$LOG"; }
 while systemctl --user is-active --quiet night9-factorial.service; do sleep 120; done
 sleep 30
 log "night10 anti-collapse driver starting"
-for arm in umap-md005-x2-fneg10-tanh4 umap-md010-x2-fneg10-tanh4 \
-           umap-md005-x8-fneg10-tanh4-pos10 umap-md010-x8-fneg10-tanh4-pos10; do
+# x8 looser-kernel arms DEFERRED (owner 2026-08-22): the composed-winner
+# choice waits for the factorial; x2 looks run early via cheap-anticollapse.
+for arm in umap-md005-x2-fneg10-tanh4 umap-md010-x2-fneg10-tanh4; do
   [ -f "/data/latent-basemap/sandbox/2m-knobs/$arm/summary.json" ] && { log "arm $arm done, skip"; continue; }
   $PY experiments/sandbox/knobs_2m.py --arm "$arm" \
     >>"$LOGDIR/arm-$arm.log" 2>&1 && log "arm $arm DONE" || log "arm $arm FAILED (continuing)"

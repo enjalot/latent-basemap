@@ -13,7 +13,7 @@ log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >>"$LOG"; }
 run() { local label=$1 lf=$2; shift 2
   "$@" >>"$LOGDIR/$lf" 2>&1 && log "$label DONE" || log "$label FAILED (continuing)"; }
 
-while systemctl --user is-active --quiet night7-screen.service; do sleep 120; done
+while systemctl --user is-active --quiet cheap-anticollapse.service; do sleep 120; done
 sleep 30
 log "night8 registers driver starting"
 
