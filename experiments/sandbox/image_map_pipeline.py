@@ -40,6 +40,10 @@ ARMS = {
     "fneg10-tanh4": {"md": "000", "extra": {"fneg_weight": 1.0,
                                             "neg_tanh_gamma": 4.0}},
     "md005-fneg10": {"md": "005", "extra": {"fneg_weight": 1.0}},
+    # owner 2026-08-22: the missing kernel x tanh cell (anti-collapse look
+    # with the tanh win). Re-running train on a dataset adds just this arm.
+    "md005-fneg10-tanh4": {"md": "005", "extra": {"fneg_weight": 1.0,
+                                                  "neg_tanh_gamma": 4.0}},
 }
 
 

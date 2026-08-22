@@ -314,6 +314,19 @@ ARMS: dict[str, dict] = {
                                         pos_ratio=0.10),
     "umap-md000-x4-fneg10-tanh2": _umap("000", dose=4, fneg_weight=1.0,
                                         neg_tanh_gamma=2.0),
+    # anti-collapse ladder (owner 2026-08-22: "maps slightly too collapsed"):
+    # looser kernels x the best candidates — cheap x2 looks first, then the
+    # composed winner at md005/md010.
+    "umap-md005-x2-fneg10-tanh4": _umap("005", dose=2, fneg_weight=1.0,
+                                        neg_tanh_gamma=4.0),
+    "umap-md010-x2-fneg10-tanh4": _umap("010", dose=2, fneg_weight=1.0,
+                                        neg_tanh_gamma=4.0),
+    "umap-md005-x8-fneg10-tanh4-pos10": _umap("005", dose=8, fneg_weight=1.0,
+                                              neg_tanh_gamma=4.0,
+                                              pos_ratio=0.10),
+    "umap-md010-x8-fneg10-tanh4-pos10": _umap("010", dose=8, fneg_weight=1.0,
+                                              neg_tanh_gamma=4.0,
+                                              pos_ratio=0.10),
     # rejected-in-isolation composition screen (owner 2026-08-22): the x2
     # composed core (fneg10+tanh4+pos10, ref 0.3734) + one rejected lever
     # each. Beat the ref -> earns an x8 slot.
