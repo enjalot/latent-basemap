@@ -102,11 +102,28 @@ def _jina_multi_subsets():
     return np.concatenate([en, ml])
 
 
+def _reddit_load() -> np.ndarray:
+    # every 5th row of the 10M reddit-tldr17 MiniLM embeddings -> 2M sample.
+    # Used for knn/fuzzy TRUTH ONLY (the OOD probe projects these rows through
+    # frozen maps; no map is trained on reddit).
+    import glob as _g
+    shards = [np.load(f, mmap_mode="r") for f in sorted(_g.glob(
+        "/data/embeddings/reddit-tldr17-chunked-120-all-MiniLM-L6-v2/"
+        "train/*.npy"))]
+    parts, offset = [], 0
+    for s in shards:
+        start = (-offset) % 5
+        parts.append(np.asarray(s[start::5], dtype=np.float32))
+        offset += s.shape[0]
+    return np.concatenate(parts)
+
+
 DATASETS = {
     "bl-siglip-1m": {"load": _bl_load, "subsets": _bl_subsets},
     "sisap-clip-2m": {"load": _sisap_load, "subsets": None},
     "jina-en-2m": {"load": _jina_en_load, "subsets": _jina_en_subsets},
     "jina-multi-2m": {"load": _jina_multi_load, "subsets": _jina_multi_subsets},
+    "reddit-2m": {"load": _reddit_load, "subsets": None},
 }
 
 
