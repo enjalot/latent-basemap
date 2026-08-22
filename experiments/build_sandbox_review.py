@@ -35,7 +35,7 @@ GROUPS = [
     ("teacher distillation",
      "0.6dev layouts regressed into the encoder (plan-teacher-distillation "
      "T1/T2: full + heldout FFR, teacher agreement, wiki OOD)",
-     lambda n: n.startswith("distill-")),
+     lambda n: n.startswith(("distill-", "distillinit-"))),
     ("jina v5 nano (768-d text)",
      "best-3 recipes on jina embeddings: EN mix (same corpora as MiniLM) "
      "and a half-multilingual 2M (20 fineweb2 languages)",

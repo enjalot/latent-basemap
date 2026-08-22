@@ -285,6 +285,14 @@ ARMS: dict[str, dict] = {
     "umap-md000-x4-fneg10-tanh4": _umap("000", dose=4, fneg_weight=1.0,
                                         neg_tanh_gamma=4.0),
     "umap-md000-x8-fneg10": _umap("000", dose=8, fneg_weight=1.0),
+    # force balance under the current best mechanisms (crude version of
+    # upstream's global/local auto-calibration).
+    "umap-md000-x2-fneg10-tanh4-pos02": _umap("000", dose=2, fneg_weight=1.0,
+                                              neg_tanh_gamma=4.0,
+                                              pos_ratio=0.02),
+    "umap-md000-x2-fneg10-tanh4-pos10": _umap("000", dose=2, fneg_weight=1.0,
+                                              neg_tanh_gamma=4.0,
+                                              pos_ratio=0.10),
 }
 
 
