@@ -8,7 +8,7 @@ LOGDIR=/data/latent-basemap/sandbox/logs
 LOG=$LOGDIR/night9-factorial.log
 cd "$LB"
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >>"$LOG"; }
-while systemctl --user is-active --quiet night8-registers.service; do sleep 120; done
+while systemctl --user is-active --quiet cheap-anticollapse.service; do sleep 120; done
 sleep 30
 log "night9 factorial driver starting"
 for arm in umap-md000-x2-fneg10-pos10 umap-md000-x4-fneg10-tanh2 \

@@ -8,7 +8,7 @@ LOGDIR=/data/latent-basemap/sandbox/logs
 LOG=$LOGDIR/night10-anticollapse.log
 cd "$LB"
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >>"$LOG"; }
-while systemctl --user is-active --quiet night9-factorial.service; do sleep 120; done
+while systemctl --user is-active --quiet night8-registers.service; do sleep 120; done
 sleep 30
 log "night10 anti-collapse driver starting"
 # x8 looser-kernel arms DEFERRED (owner 2026-08-22): the composed-winner
