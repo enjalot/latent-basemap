@@ -20,7 +20,18 @@ log "night2 driver starting (images-night finished)"
 log "=== STAGE distill-T1T2 start"
 run "distill T1+T2" distill.log $PY experiments/sandbox/distill_teacher_2m.py
 
+log "=== STAGE jina-prompted-embed start"
+run "jina prompted embed" jina-embed.log \
+  $PY /home/enjalot/code/latent-data-modal/embed_jina_prompted_subsets.py
+if [ ! -f /data/latent-basemap/substrates/jina-prompted/manifest.json ]; then
+  log "jina embed incomplete -> SKIPPING jina suites (never train raw)"
+  SKIP_JINA=1
+else
+  SKIP_JINA=0
+fi
+
 for ds in jina-en-2m jina-multi-2m; do
+  [ "${SKIP_JINA:-0}" = "1" ] && { log "$ds SKIPPED (no prompted substrate)"; continue; }
   log "=== STAGE $ds start"
   if [ ! -f "/data/latent-basemap/sandbox/$ds/edges-k15-fuzzy.npz" ]; then
     run "$ds knn" "$ds.log" $PY experiments/sandbox/image_map_pipeline.py "$ds" knn

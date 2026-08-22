@@ -63,56 +63,41 @@ def _sisap_load() -> np.ndarray:
         return np.asarray(f["emb"][::15], dtype=np.float32)
 
 
-_JINA_EN = (
-    ("fineweb-edu", "fineweb-edu-sample-10BT-chunked-500-jina-v5-nano"),
-    ("redpajama", "RedPajama-Data-V2-sample-10B-chunked-500-jina-v5-nano"),
-    ("pile", "pile-uncopyrighted-chunked-500-jina-v5-nano"),
-)
+# jina substrates come from the PROMPTED re-embed (owner ruling 2026-08-22:
+# the original corpora were embedded raw, the known July problem — "Document: "
+# shifts cosine to 0.73–0.94, so raw-trained maps can't receive normally-
+# embedded datasets). embed_jina_prompted_subsets.py produces these.
+_JINA_PROMPTED = Path("/data/latent-basemap/substrates/jina-prompted")
+_JINA_EN_NAMES = ("fineweb-edu", "redpajama", "pile")
+_JINA_EN_PER = (666_667, 666_667, 666_666)
 _JINA_LANGS = ("arb_Arab", "ces_Latn", "cmn_Hani", "deu_Latn", "ell_Grek",
                "fra_Latn", "hin_Deva", "ind_Latn", "ita_Latn", "jpn_Jpan",
                "kor_Hang", "nld_Latn", "pol_Latn", "por_Latn", "rus_Cyrl",
                "spa_Latn", "swe_Latn", "tha_Thai", "tur_Latn", "vie_Latn")
 
 
-def _take_rows(dirname: str, n: int) -> np.ndarray:
-    """First n rows across a corpus' sorted shards (deterministic)."""
-    import glob as _g
-    out, got = [], 0
-    for f in sorted(_g.glob(f"/data/embeddings/{dirname}/train/*.npy")):
-        a = np.load(f, mmap_mode="r")
-        take = min(n - got, a.shape[0])
-        out.append(np.asarray(a[:take], dtype=np.float32))
-        got += take
-        if got >= n:
-            break
-    assert got == n, (dirname, got, n)
-    return np.concatenate(out)
-
-
 def _jina_en_load() -> np.ndarray:
-    # same corpora as the MiniLM training mix (fineweb-edu/RPJ/pile), jina
-    # v5 nano 768-d, 500-token chunks; 666,667/666,667/666,666 -> 2M.
-    per = [666_667, 666_667, 666_666]
-    return np.concatenate([_take_rows(d, p) for (_, d), p in zip(_JINA_EN, per)])
+    return np.array(np.load(_JINA_PROMPTED / "en-2m.f16.npy", mmap_mode="r"),
+                    dtype=np.float32)
 
 
 def _jina_en_subsets():
-    per = [666_667, 666_667, 666_666]
-    return np.repeat([n for n, _ in _JINA_EN], per)
+    return np.repeat(_JINA_EN_NAMES, _JINA_EN_PER)
 
 
 def _jina_multi_load() -> np.ndarray:
-    # half English mix (333,334/333,333/333,333), half multilingual
-    # (20 langs x 50K from the fineweb2 jina sets).
-    en = [_take_rows(d, p) for (_, d), p in zip(
-        _JINA_EN, [333_334, 333_333, 333_333])]
-    ml = [_take_rows(f"fineweb2-{l}-chunked-500-jina-v5-nano", 50_000)
-          for l in _JINA_LANGS]
-    return np.concatenate(en + ml)
+    # half English (per-corpus prefixes of the en blocks), half multilingual.
+    en = np.load(_JINA_PROMPTED / "en-2m.f16.npy", mmap_mode="r")
+    offs = np.cumsum((0,) + _JINA_EN_PER[:-1])
+    en_half = [np.asarray(en[o:o + p], dtype=np.float32)
+               for o, p in zip(offs, (333_334, 333_333, 333_333))]
+    ml = np.array(np.load(_JINA_PROMPTED / "multi-1m.f16.npy", mmap_mode="r"),
+                  dtype=np.float32)
+    return np.concatenate(en_half + [ml])
 
 
 def _jina_multi_subsets():
-    en = np.repeat([n for n, _ in _JINA_EN], [333_334, 333_333, 333_333])
+    en = np.repeat(_JINA_EN_NAMES, (333_334, 333_333, 333_333))
     ml = np.repeat([l.split("_")[0] for l in _JINA_LANGS], 50_000)
     return np.concatenate([en, ml])
 
