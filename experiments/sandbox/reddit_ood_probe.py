@@ -31,6 +31,8 @@ MAPS = {
         "/data/checkpoints/pumap/maps/minilm-100m-r0268-preview-seed42"),
     "sandbox-fneg10-tanh4": Path(
         "/data/latent-basemap/sandbox/2m-knobs/umap-md000-x2-fneg10-tanh4"),
+    "sandbox-composed-x8": Path(
+        "/data/latent-basemap/sandbox/2m-knobs/umap-md000-x8-fneg10-tanh4-pos10"),
 }
 
 
