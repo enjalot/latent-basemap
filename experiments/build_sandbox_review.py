@@ -26,11 +26,20 @@ IMG = OUT / "img"
 RUNGS = [("2m-knobs", "2M"), ("6250k-knobs", "6.25M"),
          ("12500k-knobs", "12.5M"), ("25000k-knobs", "25M"),
          ("500k-crosscheck", "500K"),
-         ("bl-siglip-1m", "BL 1.08M"), ("sisap-clip-2m", "LAION 2M")]
+         ("bl-siglip-1m", "BL 1.08M"), ("sisap-clip-2m", "LAION 2M"),
+         ("jina-en-2m", "jina EN 2M"), ("jina-multi-2m", "jina multi 2M")]
 
 #: technique groups, in page order: (title, blurb, matcher on the arm name).
 #: First match wins, so put the specific families before the generic ones.
 GROUPS = [
+    ("teacher distillation",
+     "0.6dev layouts regressed into the encoder (plan-teacher-distillation "
+     "T1/T2: full + heldout FFR, teacher agreement, wiki OOD)",
+     lambda n: n.startswith("distill-")),
+    ("jina v5 nano (768-d text)",
+     "best-3 recipes on jina embeddings: EN mix (same corpora as MiniLM) "
+     "and a half-multilingual 2M (20 fineweb2 languages)",
+     lambda n: n.startswith("jina-")),
     ("umap-0.6dev sweep",
      "rank-window hard negatives / tanh repulsion cap / kernel annealing "
      "(plan §3; upstream review in the session scratchpad)",
@@ -95,6 +104,8 @@ REFERENCES = [
 def load_arms() -> list[dict]:
     arms = []
     for rung_dir, rung_label in RUNGS:
+        if not (SANDBOX / rung_dir).is_dir():
+            continue  # rung not built yet (overnight drivers create these)
         for arm_dir in sorted((SANDBOX / rung_dir).iterdir()):
             sj = arm_dir / "summary.json"
             if not sj.exists():
