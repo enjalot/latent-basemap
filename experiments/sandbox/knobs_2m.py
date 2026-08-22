@@ -266,6 +266,25 @@ ARMS: dict[str, dict] = {
                                         neg_tanh_gamma=8.0),
     "umap-md000-x2-fneg10-anneal25": _umap("000", dose=2, fneg_weight=1.0,
                                            kernel_anneal_frac=0.25),
+
+    # gap-closure sweep (owner first-principles review 2026-08-22): the levers
+    # upstream 0.6dev (0.4798 @ 2M) uses that our recipe has never tried under
+    # the current kernel/fneg era. Next GPU window.
+    "umap-md000-x2-rankneg500k-fneg10": _umap("000", dose=2,
+                                              rankneg_window=500_000,
+                                              fneg_weight=1.0),
+    # weighted edge sampling: upstream's make_epochs_per_sample IS weighted
+    # attraction; our promoted treatment pins uniform. Sandbox re-open.
+    "umap-md000-x2-fneg10-wes": _umap("000", dose=2, fneg_weight=1.0,
+                                      weighted_edge_sampling=True),
+    # fuzzy memberships as BCE targets instead of binary 1s.
+    "umap-md000-x2-fneg10-probt": _umap("000", dose=2, fneg_weight=1.0,
+                                        positive_target_mode="probability"),
+    # best mechanisms at the family dose, and the dose ceiling: upstream's
+    # effective positive dose is ~10-15x ours.
+    "umap-md000-x4-fneg10-tanh4": _umap("000", dose=4, fneg_weight=1.0,
+                                        neg_tanh_gamma=4.0),
+    "umap-md000-x8-fneg10": _umap("000", dose=8, fneg_weight=1.0),
 }
 
 
