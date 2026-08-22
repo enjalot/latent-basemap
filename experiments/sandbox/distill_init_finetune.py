@@ -59,10 +59,18 @@ def main() -> int:
                        "n_epochs": max(1, math.ceil(
                            horizon / math.ceil(directed_edges / n_pos)))})
         p = ParametricUMAP(**kwargs)
-        p._init_model(X.shape[1])
+        # L0.5 guard: fit() refuses a pre-built model (admission must precede
+        # GPU commit). Respect it — inject the distilled weights INSIDE
+        # _init_model, which fit() calls right after admission.
         state = torch.load(DISTILLED, map_location="cuda", weights_only=False)
-        p.model.load_state_dict(state["model_state_dict"])
-        print(f"{arm}: initialized from {DISTILLED.name}", flush=True)
+        orig_init = p._init_model
+
+        def _init_with_distill(n_features, _orig=orig_init, _p=p, _s=state):
+            _orig(n_features)
+            _p.model.load_state_dict(_s["model_state_dict"])
+            print(f"distilled init loaded ({DISTILLED.name})", flush=True)
+
+        p._init_model = _init_with_distill
         torch.manual_seed(SEED)
         t0 = time.time()
         p.fit(X, precomputed_edges_path=str(edges), random_state=SEED)
