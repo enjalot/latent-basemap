@@ -293,6 +293,11 @@ ARMS: dict[str, dict] = {
     "umap-md000-x2-fneg10-tanh4-pos10": _umap("000", dose=2, fneg_weight=1.0,
                                               neg_tanh_gamma=4.0,
                                               pos_ratio=0.10),
+    # composed best (2026-08-22 gap-closure verdict: dose dominates, tanh +
+    # pos10 stack): all three winning levers at once.
+    "umap-md000-x8-fneg10-tanh4-pos10": _umap("000", dose=8, fneg_weight=1.0,
+                                              neg_tanh_gamma=4.0,
+                                              pos_ratio=0.10),
 }
 
 
