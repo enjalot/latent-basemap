@@ -52,9 +52,12 @@ def main() -> int:
         d.mkdir(parents=True, exist_ok=True)
         t0 = time.time()
         try:
-            reducer = umap.UMAP(n_neighbors=15, min_dist=0.0, verbose=True,
-                                random_state=42, **kw)
-            xy = np.asarray(reducer.fit_transform(X), dtype=np.float32)
+            if (d / "coordinates.npy").exists():  # crashed post-fit last run
+                xy = np.load(d / "coordinates.npy")
+            else:
+                reducer = umap.UMAP(n_neighbors=15, min_dist=0.0, verbose=True,
+                                    random_state=42, **kw)
+                xy = np.asarray(reducer.fit_transform(X), dtype=np.float32)
         except Exception as e:  # noqa: BLE001 — record invalid toggles honestly
             (d / "summary.json").write_text(json.dumps({
                 "arm": name, "rung": "2m", "overrides": kw, "seed": 42,
