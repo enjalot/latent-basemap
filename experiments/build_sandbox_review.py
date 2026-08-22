@@ -23,11 +23,20 @@ SANDBOX = Path("/data/latent-basemap/sandbox")
 OUT = Path.home() / ".agent/basemap-maps/sandbox"
 IMG = OUT / "img"
 
-RUNGS = [("2m-knobs", "2M"), ("6250k-knobs", "6.25M"),
-         ("12500k-knobs", "12.5M"), ("25000k-knobs", "25M"),
-         ("500k-crosscheck", "500K"),
-         ("bl-siglip-1m", "BL 1.08M"), ("sisap-clip-2m", "LAION 2M"),
-         ("jina-en-2m", "jina EN 2M"), ("jina-multi-2m", "jina multi 2M")]
+#: (dir, rung label, embedding model, corpus) — model/corpus drive the page
+#: filters (owner request 2026-08-22).
+RUNGS = [
+    ("2m-knobs", "2M", "MiniLM", "mixed-4"),
+    ("6250k-knobs", "6.25M", "MiniLM", "mixed-4"),
+    ("12500k-knobs", "12.5M", "MiniLM", "mixed-4"),
+    ("25000k-knobs", "25M", "MiniLM", "mixed-4"),
+    ("500k-crosscheck", "500K", "MiniLM", "mixed-4"),
+    ("bl-siglip-1m", "BL 1.08M", "SigLIP2", "BL books"),
+    ("sisap-clip-2m", "LAION 2M", "CLIP ViT-L/14", "LAION"),
+    ("jina-en-2m", "jina EN 2M", "jina-v5-nano", "mixed-3 EN"),
+    ("jina-multi-2m", "jina multi 2M", "jina-v5-nano", "EN+20 langs"),
+    ("minilm-redditmix-2m", "redditmix 2M", "MiniLM", "mixed-4+reddit"),
+]
 
 #: technique groups, in page order: (title, blurb, matcher on the arm name).
 #: First match wins, so put the specific families before the generic ones.
@@ -103,7 +112,7 @@ REFERENCES = [
 
 def load_arms() -> list[dict]:
     arms = []
-    for rung_dir, rung_label in RUNGS:
+    for rung_dir, rung_label, model, corpus in RUNGS:
         if not (SANDBOX / rung_dir).is_dir():
             continue  # rung not built yet (overnight drivers create these)
         for arm_dir in sorted((SANDBOX / rung_dir).iterdir()):
@@ -114,6 +123,8 @@ def load_arms() -> list[dict]:
             arms.append({
                 "id": f"{rung_dir}/{arm_dir.name}",
                 "rung": rung_label,
+                "model": model,
+                "corpus": corpus,
                 "name": arm_dir.name,
                 "png": arm_dir / "density.png",
                 "extra_pngs": sorted(arm_dir.glob("density-??.png")),
@@ -170,11 +181,13 @@ def main() -> int:
             badge += '<span class="badge d3">3D</span>'
         cards_by_group.setdefault(group_of(a["name"]), []).append(f"""
 <figure class="card" data-id="{html.escape(a['id'])}" data-rung="{a['rung']}"
+        data-model="{html.escape(a['model'])}" data-corpus="{html.escape(a['corpus'])}"
         data-ffr="{a['ffr'] if a['ffr'] is not None else -1}">
   <div class="imgs">{img_tags}</div>
   <figcaption>
     <div class="head"><b>{html.escape(a['name'])}</b>
-      <span class="rung">{a['rung']}</span>{badge}
+      <span class="rung">{a['rung']}</span>
+      <span class="meta">{html.escape(a['model'])} · {html.escape(a['corpus'])}</span>{badge}
       <button class="star" title="shortlist">☆</button></div>
     <div class="knobs">{html.escape(knobs_line(a))}</div>
     <div class="mets">quick-FFR <b>{ffr}</b> · spacing {spacing} · {wall}</div>
@@ -210,6 +223,10 @@ def main() -> int:
             f'<div class="grid">{"".join(group_cards)}</div></section>')
     toc_html = f'<nav class="toc">{" · ".join(toc_items)}</nav>'
 
+    model_opts = "".join(f"<option>{html.escape(m)}</option>" for m in
+                         sorted({a["model"] for a in arms}))
+    corpus_opts = "".join(f"<option>{html.escape(c)}</option>" for c in
+                          sorted({a["corpus"] for a in arms}))
     (OUT / "index.html").write_text(f"""<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>sandbox arm review — pick maps to explore</title>
@@ -236,6 +253,8 @@ def main() -> int:
  .head {{ display: flex; gap: .5rem; align-items: baseline }}
  .head b {{ font-size: .95rem }}
  .rung {{ color: #4a5568; font-size: .8rem }}
+ .meta {{ color: #718096; font-size: .72rem; background: #f7fafc; border-radius: 4px;
+          padding: 1px 5px; white-space: nowrap }}
  .badge {{ color: #fff; border-radius: 4px; padding: 1px 6px; font-size: .68rem }}
  .badge.lineage {{ background: #2b6cb0 }} .badge.d3 {{ background: #6b46c1 }}
  .star {{ margin-left: auto; background: none; border: none; font-size: 1.15rem; cursor: pointer; color: #a0aec0 }}
@@ -263,6 +282,8 @@ interactive pack, scale-up) without retraining.</p>
     <option value="">all</option><option>2M</option><option>6.25M</option>
     <option>12.5M</option><option>25M</option>
   </select></label>
+  <label>model <select id="model"><option value="">all</option>{model_opts}</select></label>
+  <label>corpus <select id="corpus"><option value="">all</option>{corpus_opts}</select></label>
   <label><input type="checkbox" id="onlystars"> shortlist only</label>
   <button id="export">export shortlist</button>
   <span id="count"></span>
@@ -289,6 +310,8 @@ for (const c of cards) {{
 }}
 function apply() {{
   const rung = document.getElementById("rung").value;
+  const model = document.getElementById("model").value;
+  const corpus = document.getElementById("corpus").value;
   const only = document.getElementById("onlystars").checked;
   const sort = document.getElementById("sort").value;
   let vis = 0;
@@ -302,7 +325,10 @@ function apply() {{
     let secVis = 0;
     for (const c of secCards) {{
       grid.appendChild(c);
-      const show = (!rung || c.dataset.rung === rung) && (!only || state.stars[c.dataset.id]);
+      const show = (!rung || c.dataset.rung === rung)
+        && (!model || c.dataset.model === model)
+        && (!corpus || c.dataset.corpus === corpus)
+        && (!only || state.stars[c.dataset.id]);
       c.style.display = show ? "" : "none";
       if (show) secVis++;
     }}
@@ -313,7 +339,7 @@ function apply() {{
   }}
   document.getElementById("count").textContent = vis + " arms";
 }}
-for (const id of ["sort", "rung", "onlystars"]) document.getElementById(id).onchange = apply;
+for (const id of ["sort", "rung", "model", "corpus", "onlystars"]) document.getElementById(id).onchange = apply;
 document.getElementById("export").onclick = () => {{
   const out = Object.keys(state.stars).filter(k => state.stars[k])
     .map(id => ({{ id, note: state.notes[id] || "" }}));

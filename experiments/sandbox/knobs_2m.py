@@ -298,6 +298,9 @@ ARMS: dict[str, dict] = {
     "umap-md000-x8-fneg10-tanh4-pos10": _umap("000", dose=8, fneg_weight=1.0,
                                               neg_tanh_gamma=4.0,
                                               pos_ratio=0.10),
+    "umap-md000-x16-fneg10-tanh4-pos10": _umap("000", dose=16, fneg_weight=1.0,
+                                               neg_tanh_gamma=4.0,
+                                               pos_ratio=0.10),
     # rejected-in-isolation composition screen (owner 2026-08-22): the x2
     # composed core (fneg10+tanh4+pos10, ref 0.3734) + one rejected lever
     # each. Beat the ref -> earns an x8 slot.

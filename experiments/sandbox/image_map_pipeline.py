@@ -102,6 +102,33 @@ def _jina_multi_subsets():
     return np.concatenate([en, ml])
 
 
+def _ca_load() -> np.ndarray:
+    # Community Archive tweets (MiniLM), strided to <=2M for the register probe.
+    import glob as _g
+    shards = [np.load(f, mmap_mode="r") for f in sorted(_g.glob(
+        "/data/embeddings/communityarchive-tweets-all-MiniLM-L6-v2/"
+        "train/*.npy"))]
+    n = sum(s.shape[0] for s in shards)
+    stride = max(1, -(-n // 2_000_000))
+    parts, offset = [], 0
+    for s in shards:
+        start = (-offset) % stride
+        parts.append(np.asarray(s[start::stride], dtype=np.float32))
+        offset += s.shape[0]
+    return np.concatenate(parts)
+
+
+_REDDITMIX = Path("/data/latent-basemap/substrates/minilm-redditmix-2m")
+
+
+def _redditmix_load() -> np.ndarray:
+    return np.array(np.load(_REDDITMIX / "substrate.f32.npy", mmap_mode="r"))
+
+
+def _redditmix_subsets():
+    return np.load(_REDDITMIX / "subsets.npy", allow_pickle=True)
+
+
 def _reddit_load() -> np.ndarray:
     # every 5th row of the 10M reddit-tldr17 MiniLM embeddings -> 2M sample.
     # Used for knn/fuzzy TRUTH ONLY (the OOD probe projects these rows through
@@ -118,12 +145,25 @@ def _reddit_load() -> np.ndarray:
     return np.concatenate(parts)
 
 
+#: the redditmix suite trains the promoted control + the composed winner
+#: (dose is per-arm here; default elsewhere stays x2).
+_REDDITMIX_ARMS = {
+    "promoted-fneg10": {"md": "000", "extra": {"fneg_weight": 1.0}},
+    "composed-x8": {"md": "000", "dose": 8,
+                    "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                              "pos_ratio": 0.10}},
+}
+
 DATASETS = {
     "bl-siglip-1m": {"load": _bl_load, "subsets": _bl_subsets},
     "sisap-clip-2m": {"load": _sisap_load, "subsets": None},
     "jina-en-2m": {"load": _jina_en_load, "subsets": _jina_en_subsets},
     "jina-multi-2m": {"load": _jina_multi_load, "subsets": _jina_multi_subsets},
     "reddit-2m": {"load": _reddit_load, "subsets": None},
+    "communityarchive-2m": {"load": _ca_load, "subsets": None},
+    "minilm-redditmix-2m": {"load": _redditmix_load,
+                            "subsets": _redditmix_subsets,
+                            "arms": _REDDITMIX_ARMS},
 }
 
 
@@ -212,12 +252,13 @@ def train(ds: str) -> int:
     e = int(len(np.load(edges, mmap_mode="r")["sources"]))
     n_pos_per_batch = max(1, int(round(
         BASE_KWARGS["batch_size"] * BASE_KWARGS["pos_ratio"])))
-    horizon = int(round(2 * 0.6782 * e / n_pos_per_batch))  # dose x2
-    n_epochs = max(1, math.ceil(horizon * n_pos_per_batch / e))
     x = _norm(DATASETS[ds]["load"]())
     subsets = DATASETS[ds]["subsets"]() if DATASETS[ds]["subsets"] else None
 
-    for arm, spec in ARMS.items():
+    for arm, spec in DATASETS[ds].get("arms", ARMS).items():
+        dose = spec.get("dose", 2)
+        horizon = int(round(dose * 0.6782 * e / n_pos_per_batch))
+        n_epochs = max(1, math.ceil(horizon * n_pos_per_batch / e))
         d = out / arm
         if (d / "summary.json").exists():
             print(f"{ds}/{arm}: done, skip")
@@ -245,7 +286,7 @@ def train(ds: str) -> int:
             "arm": f"{ds}--{arm}", "rung": ds,
             "overrides": {"low_dim_kernel": "umap", **MD[spec["md"]],
                           **spec["extra"]},
-            "seed": SEED, "dose_multiplier": 2, "horizon_updates": horizon,
+            "seed": SEED, "dose_multiplier": dose, "horizon_updates": horizon,
             "wall_s": wall, "quick_ffr_at_0.1pct": float(ffr),
             "edges": str(edges),
             "note": f"{ds} sandbox map; truth = own exact-k15 fuzzy graph; "
