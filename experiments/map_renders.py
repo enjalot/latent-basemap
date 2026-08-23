@@ -58,7 +58,15 @@ def _load_coords(path: Path) -> np.ndarray:
 
 
 def robust_extent(coords: np.ndarray, sample_rows: int = 2_000_000) -> list[float]:
-    """Percentile extent so one outlier island cannot shrink the whole map."""
+    """Percentile extent so one outlier island cannot shrink the whole map.
+
+    Adaptive satellite guard (2026-08-23, found on the LAION maps): when >0.1%
+    of the mass sits in far-flung satellite clusters (near-duplicate blobs
+    launched by repulsion), the 0.1/99.9 box still stretches several-fold past
+    the bulk and squeezes the map into a corner. If the 0.1/99.9 box has >4x
+    the area of the 1/99 box, fall back to the 1/99 box — the render then
+    frames the bulk and the satellites clip off-frame.
+    """
     n = len(coords)
     if n > sample_rows:
         idx = np.linspace(0, n - 1, sample_rows).astype(np.int64)
@@ -68,6 +76,12 @@ def robust_extent(coords: np.ndarray, sample_rows: int = 2_000_000) -> list[floa
     lo, hi = EXTENT_PCT
     x0, x1 = np.percentile(pts[:, 0], [lo, hi])
     y0, y1 = np.percentile(pts[:, 1], [lo, hi])
+    tx0, tx1 = np.percentile(pts[:, 0], [1.0, 99.0])
+    ty0, ty1 = np.percentile(pts[:, 1], [1.0, 99.0])
+    area = (x1 - x0) * (y1 - y0)
+    tight_area = max((tx1 - tx0) * (ty1 - ty0), 1e-12)
+    if area / tight_area > 4.0:
+        x0, x1, y0, y1 = tx0, tx1, ty0, ty1
     pad_x = 0.02 * (x1 - x0) or 1.0
     pad_y = 0.02 * (y1 - y0) or 1.0
     return [float(x0 - pad_x), float(x1 + pad_x), float(y0 - pad_y), float(y1 + pad_y)]
