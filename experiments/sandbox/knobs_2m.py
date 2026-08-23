@@ -350,6 +350,15 @@ ARMS: dict[str, dict] = {
         "010", dose=4, fneg_weight=1.0, neg_tanh_gamma=4.0, pos_ratio=0.10,
         rankneg_window=500_000, hidden_dim=1024, n_layers=2,
         architecture="mlp", batch_size=16384),
+    # MiniLM efficiency-collapse decomposition (owner 2026-08-23): champion
+    # stack with ONE lever changed each. bs16k arm uses dose-4-in-updates so
+    # positive draws/edge match the champion exactly (10.86).
+    "umap-md000-x4bs16k-winner": _umap(
+        "000", dose=4, fneg_weight=1.0, neg_tanh_gamma=4.0, pos_ratio=0.10,
+        rankneg_window=500_000, batch_size=16384),
+    "umap-md000-x8-winner-h1024": _umap(
+        "000", dose=8, fneg_weight=1.0, neg_tanh_gamma=4.0, pos_ratio=0.10,
+        rankneg_window=500_000, hidden_dim=1024),
     "umap-md020-h1024L2mlp-bs16k-x4-winner": _umap(
         "020", dose=4, fneg_weight=1.0, neg_tanh_gamma=4.0, pos_ratio=0.10,
         rankneg_window=500_000, hidden_dim=1024, n_layers=2,
