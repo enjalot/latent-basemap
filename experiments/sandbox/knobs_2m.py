@@ -341,6 +341,14 @@ ARMS: dict[str, dict] = {
     "core-mlp": _umap("000", dose=2, fneg_weight=1.0, neg_tanh_gamma=4.0,
                       pos_ratio=0.10, architecture="mlp"),
 
+    # efficiency-frontier probe (owner 2026-08-23): the champion stack
+    # (fneg+tanh4+pos10+rankneg500k) at md010, h1024 (2.2x faster encoder),
+    # batch 16384 (+15% edges/s), dose x8-in-updates = 21.7 draws/edge (2x the
+    # champion's positive dose) — more dose per wall-clock minute.
+    "umap-md010-h1024-bs16k-x8-winner": _umap(
+        "010", dose=8, fneg_weight=1.0, neg_tanh_gamma=4.0, pos_ratio=0.10,
+        rankneg_window=500_000, hidden_dim=1024, batch_size=16384),
+
     # night12 winner set (candidate confirmed 2026-08-23: x8+tanh4+pos10).
     "umap-md000-x8-fneg10-tanh4-pos10-rankneg500k": _umap(
         "000", dose=8, fneg_weight=1.0, neg_tanh_gamma=4.0, pos_ratio=0.10,
