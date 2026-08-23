@@ -9,13 +9,14 @@ log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >>"$LOG"; }
 while systemctl --user is-active --quiet night15-fixups.service; do sleep 120; done
 sleep 30
 log "night16 efficiency driver starting"
-arm=umap-md010-h1024L2mlp-bs16k-x4-winner
-if [ ! -f "/data/latent-basemap/sandbox/2m-knobs/$arm/summary.json" ]; then
+for arm in umap-md010-h1024L2mlp-bs16k-x4-winner umap-md020-h1024L2mlp-bs16k-x4-winner; do
+  [ -f "/data/latent-basemap/sandbox/2m-knobs/$arm/summary.json" ] && continue
   $LB/.venv/bin/python experiments/sandbox/knobs_2m.py --arm "$arm" \
     >>"/data/latent-basemap/sandbox/logs/arm-$arm.log" 2>&1 \
     && log "arm $arm DONE" || log "arm $arm FAILED"
-fi
-for ds in jina-en-2m jina-multi-2m sisap-clip-2m; do
+done
+# jina-en dropped (owner 2026-08-23): multi + clip only
+for ds in jina-multi-2m sisap-clip-2m; do
   log "=== STAGE $ds efficiency-x4 start"
   $LB/.venv/bin/python experiments/sandbox/image_map_pipeline.py "$ds" train \
     >>"/data/latent-basemap/sandbox/logs/$ds.log" 2>&1 \
