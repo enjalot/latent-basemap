@@ -5,8 +5,6 @@ LB=/home/enjalot/code/latent-basemap
 LOG=/data/latent-basemap/sandbox/logs/perf-round2.log
 cd "$LB"
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >>"$LOG"; }
-while systemctl --user is-active --quiet night13-md010.service; do sleep 120; done
-sleep 30
 log "perf round 2 starting"
 mkdir -p /data/latent-basemap/sandbox/perf-bench2
 for v in v00-baseline v01-quiet v02-fused-adamw v03-tf32 v04-compile \

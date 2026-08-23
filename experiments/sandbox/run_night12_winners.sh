@@ -8,7 +8,7 @@ LIST=/data/latent-basemap/sandbox/next-arms.txt
 LOG=/data/latent-basemap/sandbox/logs/night12-winners.log
 cd "$LB"
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >>"$LOG"; }
-while systemctl --user is-active --quiet perf-round.service; do sleep 120; done
+while systemctl --user is-active --quiet perf-round2.service; do sleep 120; done
 sleep 30
 log "night12 winners driver starting"
 if [ ! -f "$LIST" ]; then log "no next-arms.txt — nothing to do"; exit 0; fi
