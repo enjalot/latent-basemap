@@ -78,7 +78,7 @@ GROUPS = [
     ("external baselines",
      "published competitors run on our substrate, scored on our instruments "
      "(sandbox reads, not the pre-registered baseline rounds)",
-     lambda n: "paramrepulsor" in n),
+     lambda n: "paramrepulsor" in n or n.startswith("upstream-")),
     ("far-negative band (fneg)",
      "the promoted mechanism: mid-range negatives' BCE up-weighted",
      lambda n: "fneg" in n),
