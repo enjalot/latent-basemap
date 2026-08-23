@@ -126,7 +126,18 @@ def load_arms() -> list[dict]:
             if not sj.exists():
                 continue
             s = json.loads(sj.read_text())
+            import datetime
+            ts = None
+            if s.get("started_utc"):
+                try:
+                    ts = datetime.datetime.fromisoformat(
+                        s["started_utc"]).timestamp()
+                except ValueError:
+                    ts = None
+            if ts is None:
+                ts = sj.stat().st_mtime
             arms.append({
+                "ts": ts,
                 "id": f"{rung_dir}/{arm_dir.name}",
                 "rung": rung_label,
                 "model": model,
@@ -188,6 +199,7 @@ def main() -> int:
         cards_by_group.setdefault(group_of(a["name"]), []).append(f"""
 <figure class="card" data-id="{html.escape(a['id'])}" data-rung="{a['rung']}"
         data-model="{html.escape(a['model'])}" data-corpus="{html.escape(a['corpus'])}"
+        data-ts="{a['ts']:.0f}"
         data-ffr="{a['ffr'] if a['ffr'] is not None else -1}">
   <div class="imgs">{img_tags}</div>
   <figcaption>
@@ -280,6 +292,7 @@ interactive pack, scale-up) without retraining.</p>
 {ref_html}
 <div class="bar">
   <label>sort <select id="sort">
+    <option value="newest">newest first</option>
     <option value="name">name</option>
     <option value="ffr-desc">quick-FFR ↓</option>
     <option value="ffr-asc">quick-FFR ↑</option>
@@ -325,6 +338,7 @@ function apply() {{
     const grid = sec.querySelector(".grid");
     const secCards = [...grid.querySelectorAll(".card")].sort((a, b) => {{
       if (sort === "name") return a.dataset.id.localeCompare(b.dataset.id);
+      if (sort === "newest") return +b.dataset.ts - +a.dataset.ts;
       const fa = +a.dataset.ffr, fb = +b.dataset.ffr;
       return sort === "ffr-desc" ? fb - fa : fa - fb;
     }});
@@ -342,6 +356,15 @@ function apply() {{
     const toc = document.querySelector(`.toc a[href="#${{sec.id}}"]`);
     if (toc) toc.style.display = secVis ? "" : "none";
     vis += secVis;
+  }}
+  if (sort === "newest") {{
+    const secs = [...document.querySelectorAll("section")];
+    const anchor = secs[0].parentNode;
+    secs.sort((a, b) => {{
+      const mx = s => Math.max(0, ...[...s.querySelectorAll(".card")]
+        .filter(c => c.style.display !== "none").map(c => +c.dataset.ts));
+      return mx(b) - mx(a);
+    }}).forEach(sec => anchor.appendChild(sec));
   }}
   document.getElementById("count").textContent = vis + " arms";
 }}
