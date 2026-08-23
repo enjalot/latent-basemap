@@ -14,6 +14,5 @@ for v in v00-baseline v01-quiet v02-fused-adamw v03-tf32 v04-compile \
   $LB/.venv/bin/python experiments/sandbox/perf_bench.py "$v" \
     >>/data/latent-basemap/sandbox/logs/perf-bench2.log 2>&1 \
     && log "$v DONE" || log "$v FAILED (continuing)"
-  cp /data/latent-basemap/sandbox/perf-bench/$v.json /data/latent-basemap/sandbox/perf-bench2/$v.json 2>/dev/null || true
 done
 log "perf round 2 finished"
