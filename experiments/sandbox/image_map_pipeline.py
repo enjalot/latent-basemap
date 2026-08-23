@@ -44,6 +44,11 @@ ARMS = {
     # with the tanh win). Re-running train on a dataset adds just this arm.
     "md005-fneg10-tanh4": {"md": "005", "extra": {"fneg_weight": 1.0,
                                                   "neg_tanh_gamma": 4.0}},
+    # owner 2026-08-23: the confirmed winner (x8+tanh4+pos10) at the airier
+    # md010 kernel, for the image/jina spaces.
+    "composed-x8-md010": {"md": "010", "dose": 8,
+                          "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                    "pos_ratio": 0.10}},
 }
 
 
