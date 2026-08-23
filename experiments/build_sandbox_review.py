@@ -50,6 +50,11 @@ GROUPS = [
      "best-3 recipes on jina embeddings: EN mix (same corpora as MiniLM) "
      "and a half-multilingual 2M (20 fineweb2 languages)",
      lambda n: n.startswith("jina-")),
+    ("architecture sweep",
+     "width/depth/arch under the x2 composed core (ref h2048/L3/"
+     "residual_bottleneck = 0.3734); smaller = faster wall clock too",
+     lambda n: n.startswith("core-h") or n.startswith("core-L")
+     or n == "core-mlp"),
     ("umap-0.6dev sweep",
      "rank-window hard negatives / tanh repulsion cap / kernel annealing "
      "(plan §3; upstream review in the session scratchpad)",

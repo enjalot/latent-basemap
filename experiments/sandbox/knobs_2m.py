@@ -321,6 +321,26 @@ ARMS: dict[str, dict] = {
     "umap-md000-x8-fneg10-tanh2-pos10": _umap("000", dose=8, fneg_weight=1.0,
                                               neg_tanh_gamma=2.0,
                                               pos_ratio=0.10),
+    # architecture sweep (owner 2026-08-23): width/depth/arch under the x2
+    # composed core (ref 0.3734 at h2048/L3/residual_bottleneck). Smaller nets
+    # are ALSO the real throughput lever (the loop is encoder-GPU-bound).
+    "core-h512": _umap("000", dose=2, fneg_weight=1.0, neg_tanh_gamma=4.0,
+                       pos_ratio=0.10, hidden_dim=512),
+    "core-h1024": _umap("000", dose=2, fneg_weight=1.0, neg_tanh_gamma=4.0,
+                        pos_ratio=0.10, hidden_dim=1024),
+    "core-h3072": _umap("000", dose=2, fneg_weight=1.0, neg_tanh_gamma=4.0,
+                        pos_ratio=0.10, hidden_dim=3072),
+    "core-h4096": _umap("000", dose=2, fneg_weight=1.0, neg_tanh_gamma=4.0,
+                        pos_ratio=0.10, hidden_dim=4096),
+    "core-L2": _umap("000", dose=2, fneg_weight=1.0, neg_tanh_gamma=4.0,
+                     pos_ratio=0.10, n_layers=2),
+    "core-L4": _umap("000", dose=2, fneg_weight=1.0, neg_tanh_gamma=4.0,
+                     pos_ratio=0.10, n_layers=4),
+    "core-L5": _umap("000", dose=2, fneg_weight=1.0, neg_tanh_gamma=4.0,
+                     pos_ratio=0.10, n_layers=5),
+    "core-mlp": _umap("000", dose=2, fneg_weight=1.0, neg_tanh_gamma=4.0,
+                      pos_ratio=0.10, architecture="mlp"),
+
     # night12 winner set (candidate confirmed 2026-08-23: x8+tanh4+pos10).
     "umap-md000-x8-fneg10-tanh4-pos10-rankneg500k": _umap(
         "000", dose=8, fneg_weight=1.0, neg_tanh_gamma=4.0, pos_ratio=0.10,
