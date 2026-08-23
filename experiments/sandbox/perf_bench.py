@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import math
+import math
 import time
 from pathlib import Path
 
@@ -40,7 +41,8 @@ import numpy as np
 
 CC = Path("/data/latent-basemap/sandbox/500k-crosscheck")
 OUT = Path("/data/latent-basemap/sandbox/perf-bench")
-UPDATES = 3_000
+UPDATES = 3_000            # v1 (kept for the recorded run)
+DELTA_UPDATES = (500, 10_500)  # v2 delta-method: setup cancels in the diff
 ROWS = 500_000
 
 VARIANTS = [
@@ -114,16 +116,42 @@ def run_variant(name: str, opts: dict) -> dict:
         patches.append(("tqdm", orig_tqdm))
 
     X = np.load(CC / "subset_x.npy")
-    t0 = time.time()
     try:
-        p.fit(X, precomputed_edges_path=str(CC / "edges-induced.npz"),
-              random_state=42)
-        wall = time.time() - t0
-        st = p._train_stats
-        ups = int(st.get("successful_positive_lr_updates",
-                         st.get("executed_positive_lr_updates", UPDATES)))
-        result = {"variant": name, "opts": opts, "wall_s": round(wall, 1),
-                  "updates": ups, "updates_per_s": round(ups / wall, 1),
+        # delta method: run short then long with identical setup; the diff is
+        # pure steady-state training. n_epochs sized so the horizon is
+        # reached even at big batches (the v1 flaw).
+        walls, ups_seen = [], []
+        for target in DELTA_UPDATES:
+            q = C.ParametricUMAP(**{**kwargs, "total_steps_estimate": target,
+                                    "n_epochs": max(1, math.ceil(
+                                        target * batch * kwargs["pos_ratio"]
+                                        / 3_008_780) + 1)})
+            if opts.get("compile"):
+                orig_i = q._init_model
+
+                def _ci(nf, _o=orig_i, _q=q, _m=opts["compile"]):
+                    _o(nf)
+                    _q.model = torch.compile(
+                        _q.model, mode=None if _m == "default" else _m)
+
+                q._init_model = _ci
+            t0 = time.time()
+            q.fit(X, precomputed_edges_path=str(CC / "edges-induced.npz"),
+                  random_state=42)
+            walls.append(time.time() - t0)
+            st = q._train_stats
+            ups_seen.append(int(st.get("optimizer_steps_succeeded")
+                                or st.get("positive_lr_optimizer_steps")
+                                or st.get("scheduler_steps") or target))
+            del q
+            torch.cuda.empty_cache()
+        d_up = ups_seen[1] - ups_seen[0]
+        d_wall = walls[1] - walls[0]
+        ups_per_s = d_up / max(d_wall, 1e-9)
+        result = {"variant": name, "opts": opts,
+                  "updates": ups_seen, "walls_s": [round(w, 1) for w in walls],
+                  "updates_per_s": round(ups_per_s, 1),
+                  "edges_per_s": round(ups_per_s * batch),
                   "peak_vram_gb": round(
                       torch.cuda.max_memory_allocated() / 1e9, 2)}
     except Exception as e:  # noqa: BLE001 — a variant may just not work
