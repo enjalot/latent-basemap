@@ -36,6 +36,7 @@ RUNGS = [
     ("jina-en-2m", "jina EN 2M", "jina-v5-nano", "mixed-3 EN"),
     ("jina-multi-2m", "jina multi 2M", "jina-v5-nano", "EN+20 langs"),
     ("minilm-redditmix-2m", "redditmix 2M", "MiniLM", "mixed-4+reddit"),
+    ("sisap-clip-2m-dedup", "LAION 2M dedup", "CLIP ViT-L/14", "LAION dedup"),
 ]
 
 #: technique groups, in page order: (title, blurb, matcher on the arm name).

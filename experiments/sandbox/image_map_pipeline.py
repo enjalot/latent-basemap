@@ -163,6 +163,23 @@ _REDDITMIX_ARMS = {
                               "pos_ratio": 0.10}},
 }
 
+def _sisap_dedup_load() -> np.ndarray:
+    return np.array(np.load(
+        "/data/latent-basemap/substrates/sisap-clip-2m-dedup/substrate.f32.npy",
+        mmap_mode="r"))
+
+
+#: dedup comparison arms — SAME two recipes the original sisap suite ran, so
+#: the render/satellite comparison is apples-to-apples. NOTE the FFR caveat:
+#: dup rows have trivially-findable neighbors (their own copies), so the
+#: original suite's FFR is inflated; expect dedup FFR lower for metric
+#: reasons even when the map is better.
+_SISAP_DEDUP_ARMS = {
+    "promoted-fneg10": {"md": "000", "extra": {"fneg_weight": 1.0}},
+    "fneg10-tanh4": {"md": "000", "extra": {"fneg_weight": 1.0,
+                                            "neg_tanh_gamma": 4.0}},
+}
+
 DATASETS = {
     "bl-siglip-1m": {"load": _bl_load, "subsets": _bl_subsets},
     "sisap-clip-2m": {"load": _sisap_load, "subsets": None},
@@ -173,6 +190,8 @@ DATASETS = {
     "minilm-redditmix-2m": {"load": _redditmix_load,
                             "subsets": _redditmix_subsets,
                             "arms": _REDDITMIX_ARMS},
+    "sisap-clip-2m-dedup": {"load": _sisap_dedup_load, "subsets": None,
+                            "arms": _SISAP_DEDUP_ARMS},
 }
 
 

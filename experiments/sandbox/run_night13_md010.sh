@@ -5,7 +5,7 @@ LB=/home/enjalot/code/latent-basemap
 LOG=/data/latent-basemap/sandbox/logs/night13-md010.log
 cd "$LB"
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >>"$LOG"; }
-while systemctl --user is-active --quiet night12-winners.service; do sleep 120; done
+while systemctl --user is-active --quiet dedup-round.service; do sleep 120; done
 sleep 30
 log "night13 md010 driver starting"
 for ds in sisap-clip-2m jina-en-2m jina-multi-2m; do
