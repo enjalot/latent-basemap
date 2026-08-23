@@ -128,7 +128,7 @@ def grid() -> int:
                 yb = Tg.index_select(0, idx)
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     pred = net(xb)
-                loss = torch.nn.functional.huber_loss(pred.float(), yb, 1.0)
+                loss = torch.nn.functional.huber_loss(pred.float(), yb, delta=1.0)
                 opt.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
