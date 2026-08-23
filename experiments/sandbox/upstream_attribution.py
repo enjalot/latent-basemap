@@ -33,10 +33,9 @@ OUT_ROOT = Path("/data/latent-basemap/sandbox/2m-knobs")
 
 ABLATIONS = {
     "upstream-ablate-init-random": {"init": "random"},
-    "upstream-ablate-init-spectral": {"init": "spectral"},
-    "upstream-ablate-neg-uniform": {"negative_selection_range": None},
+    "upstream-ablate-neg-uniform": {"negative_selection_range": 2_000_000},
     "upstream-ablate-neg-fixedscale": {"negative_sample_scale": 1.0},
-    "upstream-ablate-optimizer-sgd": {"optimizer": "sgd"},
+    "upstream-ablate-optimizer-compat": {"optimizer": "compatibility"},
 }
 
 

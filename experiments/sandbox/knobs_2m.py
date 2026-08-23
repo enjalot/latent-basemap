@@ -321,6 +321,10 @@ ARMS: dict[str, dict] = {
     "umap-md000-x8-fneg10-tanh2-pos10": _umap("000", dose=8, fneg_weight=1.0,
                                               neg_tanh_gamma=2.0,
                                               pos_ratio=0.10),
+    # night12 winner set (candidate confirmed 2026-08-23: x8+tanh4+pos10).
+    "umap-md000-x8-fneg10-tanh4-pos10-rankneg500k": _umap(
+        "000", dose=8, fneg_weight=1.0, neg_tanh_gamma=4.0, pos_ratio=0.10,
+        rankneg_window=500_000),
     # anti-collapse ladder (owner 2026-08-22: "maps slightly too collapsed"):
     # looser kernels x the best candidates — cheap x2 looks first, then the
     # composed winner at md005/md010.
