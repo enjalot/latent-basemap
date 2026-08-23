@@ -33,14 +33,15 @@ from __future__ import annotations
 
 import json
 import math
-import math
 import time
 from pathlib import Path
 
 import numpy as np
 
 CC = Path("/data/latent-basemap/sandbox/500k-crosscheck")
-OUT = Path("/data/latent-basemap/sandbox/perf-bench")
+import os
+OUT = Path(os.environ.get("PERF_OUT",
+           "/data/latent-basemap/sandbox/perf-bench"))
 UPDATES = 3_000            # v1 (kept for the recorded run)
 DELTA_UPDATES = (500, 10_500)  # v2 delta-method: setup cancels in the diff
 ROWS = 500_000
