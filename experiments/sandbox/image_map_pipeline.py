@@ -49,6 +49,16 @@ ARMS = {
     "composed-x8-md010": {"md": "010", "dose": 8,
                           "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
                                     "pos_ratio": 0.10}},
+    # owner 2026-08-23 v2: the best-efficiency guess (see knobs_2m
+    # umap-md010-h1024L2mlp-bs16k-x4-winner).
+    "efficiency-x4-md010": {"md": "010", "dose": 4,
+                            "extra": {"fneg_weight": 1.0,
+                                      "neg_tanh_gamma": 4.0,
+                                      "pos_ratio": 0.10,
+                                      "rankneg_window": 500_000,
+                                      "hidden_dim": 1024, "n_layers": 2,
+                                      "architecture": "mlp",
+                                      "batch_size": 16384}},
 }
 
 
@@ -286,7 +296,10 @@ def train(ds: str) -> int:
     for arm, spec in DATASETS[ds].get("arms", ARMS).items():
         dose = spec.get("dose", 2)
         horizon = int(round(dose * 0.6782 * e / n_pos_per_batch))
-        n_epochs = max(1, math.ceil(horizon * n_pos_per_batch / e))
+        arm_batch = spec.get("extra", {}).get("batch_size",
+                                              BASE := 8192)
+        arm_pos = spec.get("extra", {}).get("pos_ratio", 0.05)
+        n_epochs = max(1, math.ceil(horizon * arm_batch * arm_pos / e))
         d = out / arm
         if (d / "summary.json").exists():
             print(f"{ds}/{arm}: done, skip")
