@@ -51,7 +51,39 @@ SCALES = {
            "teacher": Path("/data/latent-basemap/sandbox/2m-knobs/"
                            "upstream-06dev-2m/coordinates.npy"),
            "edges": SUB2M / "edges-k15-fuzzy.npz", "rows": 2_000_000},
+    # 6.25M anchor (owner 2026-08-23): the point that tests the sqrt-N fit.
+    "6250k": {"x": Path("/data/latent-basemap/runs/round-0233/queue/artifacts/"
+                        "minilm-mixed-6250k-substrate-and-reserves-v1/"
+                        "substrate.f32.npy"),
+              "teacher": GRID / "subset-6250k/teacher.npy",
+              "edges": None,  # resolved below (R0233 fuzzy npz)
+              "rows": 6_250_000,
+              "widths": (2048, 3072, 4096, 6144)},
 }
+import glob as _g
+_e = sorted(_g.glob("/data/latent-basemap/runs/round-0233/queue-correction-1/"
+                    "artifacts/minilm-mixed-6250k-cluster-spill-k15-fuzzy-"
+                    "graph-v1/*.npz"))
+if _e:
+    SCALES["6250k"]["edges"] = Path(_e[0])
+
+
+def prep625() -> int:
+    import umap
+
+    d = GRID / "subset-6250k"
+    d.mkdir(parents=True, exist_ok=True)
+    if (d / "teacher.npy").exists():
+        print("6250k teacher exists, skip")
+        return 0
+    X = np.array(np.load(SCALES["6250k"]["x"], mmap_mode="r"),
+                 dtype=np.float32)
+    t0 = time.time()
+    xy = umap.UMAP(n_neighbors=15, min_dist=0.0, random_state=SEED,
+                   verbose=True).fit_transform(X)
+    np.save(d / "teacher.npy", np.asarray(xy, dtype=np.float32))
+    print(f"6250k teacher in {(time.time()-t0)/60:.1f} min")
+    return 0
 
 
 def prep() -> int:
@@ -103,7 +135,7 @@ def grid() -> int:
         Xg = torch.from_numpy(X).cuda().half()
         Tg = torch.from_numpy(t).cuda()
         n = X.shape[0]
-        for width in WIDTHS:
+        for width in sc.get("widths", WIDTHS):
             d = GRID / f"{sname}-h{width}"
             if (d / "summary.json").exists():
                 print(f"{sname}-h{width}: done, skip")
@@ -160,7 +192,7 @@ def grid() -> int:
     sat = {}
     for sname, sc in SCALES.items():
         curve = {}
-        for width in WIDTHS:
+        for width in sc.get("widths", WIDTHS):
             f = GRID / f"{sname}-h{width}" / "summary.json"
             if f.exists():
                 curve[width] = json.loads(f.read_text())["quick_ffr_at_0.1pct"]
@@ -190,4 +222,5 @@ def grid() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit({"prep": prep, "grid": grid}[sys.argv[1]]())
+    raise SystemExit({"prep": prep, "prep625": prep625,
+                      "grid": grid}[sys.argv[1]]())

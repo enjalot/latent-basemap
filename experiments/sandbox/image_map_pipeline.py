@@ -202,6 +202,30 @@ DATASETS = {
                             "arms": _REDDITMIX_ARMS},
     "sisap-clip-2m-dedup": {"load": _sisap_dedup_load, "subsets": None,
                             "arms": _SISAP_DEDUP_ARMS},
+    "jina-multi-6m": {
+        "load": lambda: np.array(np.load(
+            _JINA_PROMPTED / "substrate-6250k.f16.npy", mmap_mode="r"),
+            dtype=np.float32),
+        "subsets": None,
+        "arms": {
+            # champion-class at scale (bs16k acquitted: 0.4646 vs 0.4600).
+            "champion-bs16k": {"md": "000", "dose": 4,
+                               "extra": {"fneg_weight": 1.0,
+                                         "neg_tanh_gamma": 4.0,
+                                         "pos_ratio": 0.10,
+                                         "rankneg_window": 500_000,
+                                         "batch_size": 16384}},
+            # does the efficiency recipe survive scale on the easy space?
+            "efficiency-x4-md010": {"md": "010", "dose": 4,
+                                    "extra": {"fneg_weight": 1.0,
+                                              "neg_tanh_gamma": 4.0,
+                                              "pos_ratio": 0.10,
+                                              "rankneg_window": 500_000,
+                                              "hidden_dim": 1024,
+                                              "n_layers": 2,
+                                              "architecture": "mlp",
+                                              "batch_size": 16384}},
+        }},
 }
 
 
