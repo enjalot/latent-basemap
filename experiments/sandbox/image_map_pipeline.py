@@ -214,7 +214,8 @@ DATASETS = {
                                          "neg_tanh_gamma": 4.0,
                                          "pos_ratio": 0.10,
                                          "rankneg_window": 500_000,
-                                         "batch_size": 16384}},
+                                         "batch_size": 16384,
+                                         "gpu_resident_vram_budget_gb": 22.0}},
             # does the efficiency recipe survive scale on the easy space?
             "efficiency-x4-md010": {"md": "010", "dose": 4,
                                     "extra": {"fneg_weight": 1.0,
@@ -224,7 +225,8 @@ DATASETS = {
                                               "hidden_dim": 1024,
                                               "n_layers": 2,
                                               "architecture": "mlp",
-                                              "batch_size": 16384}},
+                                              "batch_size": 16384,
+                                              "gpu_resident_vram_budget_gb": 22.0}},
         }},
 }
 
