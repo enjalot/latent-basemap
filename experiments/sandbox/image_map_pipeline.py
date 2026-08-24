@@ -221,11 +221,12 @@ DATASETS = {
         "subsets": None,
         "arms": {
             # champion-class at scale (bs16k acquitted: 0.4646 vs 0.4600).
+            # rankneg REMOVED (2026-08-24 verdict: fixed 500K window = 8%
+            # fraction at 6.25M dragged FFR -0.07; norank scales cleanly).
             "champion-bs16k": {"md": "000", "dose": 4,
                                "extra": {"fneg_weight": 1.0,
                                          "neg_tanh_gamma": 4.0,
                                          "pos_ratio": 0.10,
-                                         "rankneg_window": 500_000,
                                          "batch_size": 16384,
                                          "gpu_resident_vram_budget_gb": 22.0}},
             # does the efficiency recipe survive scale on the easy space?
@@ -233,7 +234,6 @@ DATASETS = {
                                     "extra": {"fneg_weight": 1.0,
                                               "neg_tanh_gamma": 4.0,
                                               "pos_ratio": 0.10,
-                                              "rankneg_window": 500_000,
                                               "hidden_dim": 1024,
                                               "n_layers": 2,
                                               "architecture": "mlp",
