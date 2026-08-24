@@ -425,7 +425,7 @@ function apply() {{
       c.style.display = show ? "" : "none";
       if (show) vis++;
     }}
-    flat.style.display = "";
+    flat.style.display = "block";
     secs.forEach(s => s.style.display = "none");
     document.querySelector(".toc").style.display = "none";
   }} else {{
