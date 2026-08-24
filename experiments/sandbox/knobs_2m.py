@@ -356,6 +356,12 @@ ARMS: dict[str, dict] = {
     "umap-md000-x4bs16k-winner": _umap(
         "000", dose=4, fneg_weight=1.0, neg_tanh_gamma=4.0, pos_ratio=0.10,
         rankneg_window=500_000, batch_size=16384),
+    # rankneg-at-scale diagnostic (owner 2026-08-24): champion-bs16k MINUS
+    # rankneg, for the 6250k rung — did the fixed 500K window (25% of 2M but
+    # only 8% of 6.25M) cause the scaling regression (0.4145 vs 0.4343)?
+    "umap-md000-x4bs16k-winner-norank": _umap(
+        "000", dose=4, fneg_weight=1.0, neg_tanh_gamma=4.0, pos_ratio=0.10,
+        batch_size=16384),
     "umap-md000-x8-winner-h1024": _umap(
         "000", dose=8, fneg_weight=1.0, neg_tanh_gamma=4.0, pos_ratio=0.10,
         rankneg_window=500_000, hidden_dim=1024),
