@@ -362,6 +362,12 @@ ARMS: dict[str, dict] = {
     "umap-md000-x4bs16k-winner-norank": _umap(
         "000", dose=4, fneg_weight=1.0, neg_tanh_gamma=4.0, pos_ratio=0.10,
         batch_size=16384),
+    # fraction-scaled rankneg test (owner 2026-08-24, prioritized): 25% of
+    # 6.25M = 1.5625M window. Does proportional windowing recover the 2M-style
+    # +0.02 on top of norank's 0.4848?
+    "umap-md000-x4bs16k-winner-rank25": _umap(
+        "000", dose=4, fneg_weight=1.0, neg_tanh_gamma=4.0, pos_ratio=0.10,
+        rankneg_window=1_562_500, batch_size=16384),
     "umap-md000-x8-winner-h1024": _umap(
         "000", dose=8, fneg_weight=1.0, neg_tanh_gamma=4.0, pos_ratio=0.10,
         rankneg_window=500_000, hidden_dim=1024),
