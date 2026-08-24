@@ -230,12 +230,14 @@ DATASETS = {
         "subsets": None,
         "arms": {
             # champion-class at scale (bs16k acquitted: 0.4646 vs 0.4600).
-            # rankneg REMOVED (2026-08-24 verdict: fixed 500K window = 8%
-            # fraction at 6.25M dragged FFR -0.07; norank scales cleanly).
+            # rankneg RESTORED with the FRACTION-SCALED window (2026-08-24 rank25 verdict:
+            # fixed 500K/8% dragged -0.07, but 1.5625M/25% = 0.4981 > norank 0.4848, +0.0133;
+            # the pitfall was the FIXED window, not rankneg — so 25% of 6.25M = 1,562,500).
             "champion-bs16k": {"md": "000", "dose": 4,
                                "extra": {"fneg_weight": 1.0,
                                          "neg_tanh_gamma": 4.0,
                                          "pos_ratio": 0.10,
+                                         "rankneg_window": 1_562_500,
                                          "batch_size": 16384,
                                          "gpu_resident_vram_budget_gb": 22.0}},
             # does the efficiency recipe survive scale on the easy space?
@@ -243,6 +245,7 @@ DATASETS = {
                                     "extra": {"fneg_weight": 1.0,
                                               "neg_tanh_gamma": 4.0,
                                               "pos_ratio": 0.10,
+                                              "rankneg_window": 1_562_500,
                                               "hidden_dim": 1024,
                                               "n_layers": 2,
                                               "architecture": "mlp",
