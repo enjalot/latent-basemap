@@ -24,6 +24,7 @@ Usage: image_map_pipeline.py <dataset> knn|fuzzy|train
 from __future__ import annotations
 
 import json
+import os
 import math
 import sys
 import time
@@ -209,7 +210,8 @@ DATASETS = {
                      "arms": {**ARMS, "champion-bs16k": _CHAMPION_270K,
                               "champion-bs16k-norank": _CHAMPION_NORANK}},
     "sisap-clip-2m": {"load": _sisap_load, "subsets": None,
-                      "arms": {**ARMS, "champion-bs16k": _CHAMPION_500K}},
+                      "arms": {**ARMS, "champion-bs16k": _CHAMPION_500K,
+                               "champion-bs16k-norank": _CHAMPION_NORANK}},
     "jina-en-2m": {"load": _jina_en_load, "subsets": _jina_en_subsets},
     "jina-multi-2m": {"load": _jina_multi_load, "subsets": _jina_multi_subsets,
                       "arms": {**ARMS, "champion-bs16k": _CHAMPION_500K,
@@ -338,7 +340,10 @@ def train(ds: str) -> int:
     x = _norm(DATASETS[ds]["load"]())
     subsets = DATASETS[ds]["subsets"]() if DATASETS[ds]["subsets"] else None
 
+    only = os.environ.get("ONLY_ARM")
     for arm, spec in DATASETS[ds].get("arms", ARMS).items():
+        if only and arm != only:
+            continue
         dose = spec.get("dose", 2)
         horizon = int(round(dose * 0.6782 * e / n_pos_per_batch))
         arm_batch = spec.get("extra", {}).get("batch_size",
