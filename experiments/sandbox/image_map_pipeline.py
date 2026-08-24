@@ -190,11 +190,23 @@ _SISAP_DEDUP_ARMS = {
                                             "neg_tanh_gamma": 4.0}},
 }
 
+_CHAMPION_500K = {"md": "000", "dose": 4,
+                  "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                            "pos_ratio": 0.10, "rankneg_window": 500_000,
+                            "batch_size": 16384}}
+_CHAMPION_270K = {"md": "000", "dose": 4,
+                  "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                            "pos_ratio": 0.10, "rankneg_window": 270_000,
+                            "batch_size": 16384}}
+
 DATASETS = {
-    "bl-siglip-1m": {"load": _bl_load, "subsets": _bl_subsets},
-    "sisap-clip-2m": {"load": _sisap_load, "subsets": None},
+    "bl-siglip-1m": {"load": _bl_load, "subsets": _bl_subsets,
+                     "arms": {**ARMS, "champion-bs16k": _CHAMPION_270K}},
+    "sisap-clip-2m": {"load": _sisap_load, "subsets": None,
+                      "arms": {**ARMS, "champion-bs16k": _CHAMPION_500K}},
     "jina-en-2m": {"load": _jina_en_load, "subsets": _jina_en_subsets},
-    "jina-multi-2m": {"load": _jina_multi_load, "subsets": _jina_multi_subsets},
+    "jina-multi-2m": {"load": _jina_multi_load, "subsets": _jina_multi_subsets,
+                      "arms": {**ARMS, "champion-bs16k": _CHAMPION_500K}},
     "reddit-2m": {"load": _reddit_load, "subsets": None},
     "communityarchive-2m": {"load": _ca_load, "subsets": None},
     "minilm-redditmix-2m": {"load": _redditmix_load,

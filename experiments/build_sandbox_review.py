@@ -195,7 +195,19 @@ def param_rows(a: dict) -> list[tuple[str, str]]:
                 return s[k]
         return None
 
-    kern = get("low_dim_kernel")
+    # trainer-produced cards (knobs/pipeline arms) fill KNOWN defaults; only
+    # external arms (upstream/paramrepulsor/slices) keep the n/a dash.
+    is_trainer = ("dose_multiplier" in s or "horizon_updates" in s)
+    D = {"fneg_weight": 0, "neg_tanh_gamma": "off", "rankneg_window": "off",
+         "pos_ratio": 0.05, "batch_size": 8192, "hidden_dim": 2048,
+         "n_layers": 3, "architecture": "residual_bottleneck",
+         "low_dim_kernel": "legacy_lp"} if is_trainer else {}
+
+    def getd(*keys):
+        v = get(*keys)
+        return v if v is not None else D.get(keys[0])
+
+    kern = getd("low_dim_kernel")
     alpha = get("kernel_alpha")
     if kern == "gcauchy" and alpha is not None:
         kern = f"gcauchy α={alpha}"
@@ -209,14 +221,14 @@ def param_rows(a: dict) -> list[tuple[str, str]]:
     return [
         ("kernel", fmt(kern)), ("min_dist", fmt(md)),
         ("dose", fmt(f"×{dose}" if dose else None)),
-        ("fneg", fmt(get("fneg_weight"))),
-        ("tanh γ", fmt(get("neg_tanh_gamma"))),
-        ("rankneg", fmt(get("rankneg_window"))),
-        ("pos_ratio", fmt(get("pos_ratio"))),
-        ("batch", fmt(get("batch_size"))),
-        ("width", fmt(get("hidden_dim", "width"))),
-        ("layers", fmt(get("n_layers"))),
-        ("arch", fmt(get("architecture", "init"))),
+        ("fneg", fmt(getd("fneg_weight"))),
+        ("tanh γ", fmt(getd("neg_tanh_gamma"))),
+        ("rankneg", fmt(getd("rankneg_window"))),
+        ("pos_ratio", fmt(getd("pos_ratio"))),
+        ("batch", fmt(getd("batch_size"))),
+        ("width", fmt(getd("hidden_dim", "width"))),
+        ("layers", fmt(getd("n_layers"))),
+        ("arch", fmt(getd("architecture", "init"))),
         ("wall", fmt(wall)),
     ]
 
