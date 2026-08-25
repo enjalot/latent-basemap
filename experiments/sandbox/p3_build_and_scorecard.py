@@ -340,10 +340,19 @@ def _substrate_scores(path: Path, anchor_ids: np.ndarray) -> dict:
     X = np.load(path, mmap_mode="r")
     n = int(X.shape[0])
     ids = anchor_ids[anchor_ids < n]
+    # Drop degenerate (near-zero-norm) filler rows from the kNN-ball anchors: they are
+    # kept in the substrate per the keep-degenerate-filler policy but are not unit-norm,
+    # so they skew the radius metric and trip high_d_radii's unit-norm check. vendi_cosine
+    # guards zero rows internally, so it is computed on the full substrate.
+    anc = np.asarray(X[ids], dtype=np.float32)
+    keep = np.linalg.norm(anc, axis=1) >= 0.5
+    n_dropped = int((~keep).sum())
+    ids = ids[keep]
     vendi = float(vendi_cosine(X))
     radii = high_d_radii(X, ids, k=K)
     return {
         "path": str(path), "rows": n,
+        "degenerate_anchors_dropped": n_dropped,
         "vendi": vendi,
         "knn_ball_mean": float(np.mean(radii)),
         "knn_ball_median": float(np.median(radii)),
