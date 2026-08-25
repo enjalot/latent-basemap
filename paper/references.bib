@@ -1,6 +1,5 @@
 % Bibliography for the basemap paper. Lit-index pointers ([lit NNNN]) refer
-% to latent-labs/research/markdowns/. Entries marked TODO-verify need a
-% citation check before submission.
+% to latent-labs/research/markdowns/ and are internal research aids.
 
 % ---------- neighbor-embedding lineage ----------
 
@@ -23,7 +22,7 @@
 
 @article{vandermaaten2008tsne,
   title   = {Visualizing Data using t-SNE},
-  author  = {van der Maaten, Laurens and Hinton, Geoffrey},
+  author  = {{van der Maaten}, Laurens and Hinton, Geoffrey},
   journal = {Journal of Machine Learning Research},
   volume  = {9}, pages = {2579--2605},
   year    = {2008},
@@ -107,10 +106,14 @@
   note    = {[lit 0006]; cuML — our per-rung reference frames}
 }
 
-@misc{outofcore2025umap,
-  title = {Massive-Scale Out-Of-Core UMAP on the GPU},
-  note  = {[lit 0197] TODO-verify: full author list, venue, year before submission},
-  year  = {2025}
+@inproceedings{outofcore2026umap,
+  title     = {Massive-Scale Out-Of-Core {UMAP} on the {GPU}},
+  author    = {Park, Jinsol and Nolet, Corey J. and Raff, Edward and Oates, Tim and Naruse, Akira},
+  booktitle = {Proceedings of Machine Learning and Systems},
+  volume    = {8},
+  year      = {2026},
+  url       = {https://proceedings.mlsys.org/paper_files/paper/2026/hash/0badcb4e95306df76a719409155e46e8-Abstract-Conference.html},
+  note      = {[lit 0197]}
 }
 
 @article{johnson2019faiss,
@@ -122,12 +125,16 @@
   note    = {[lit 0065]}
 }
 
-@article{policar2019opentsne,
+@article{policar2024opentsne,
   title   = {openTSNE: a modular Python library for t-SNE dimensionality reduction and embedding},
   author  = {Poli{\v{c}}ar, Pavlin G. and Stra{\v{z}}ar, Martin and Zupan, Bla{\v{z}}},
   journal = {Journal of Statistical Software},
+  volume  = {109},
+  number  = {3},
+  pages   = {1--30},
   year    = {2024},
-  note    = {[lit 0033] TODO-verify volume/pages}
+  doi     = {10.18637/jss.v109.i03},
+  note    = {[lit 0033]}
 }
 
 % ---------- substrate / embeddings ----------
@@ -155,11 +162,14 @@
   year    = {2024}
 }
 
-@misc{together2023redpajama,
-  title  = {RedPajama: an Open Dataset for Training Large Language Models},
-  author = {{Together Computer}},
-  year   = {2023},
-  note   = {RedPajama-Data-V2; TODO-verify: cite the 2024 NeurIPS datasets paper (arXiv:2411.12372)}
+@inproceedings{weber2024redpajama,
+  title     = {RedPajama: an Open Dataset for Training Large Language Models},
+  author    = {Weber, Maurice and Fu, Daniel Y. and Anthony, Quentin and Oren, Yonatan and Adams, Shane and Alexandrov, Anton and Lyu, Xiaozhong and Nguyen, Huu and Yao, Xiaozhe and Adams, Virginia and Athiwaratkun, Ben and Chalamala, Rahul and Chen, Kezhen and Ryabinin, Max and Dao, Tri and Liang, Percy and R{\'e}, Christopher and Rish, Irina and Zhang, Ce},
+  booktitle = {Advances in Neural Information Processing Systems},
+  volume    = {37},
+  year      = {2024},
+  doi       = {10.52202/079017-3697},
+  url       = {https://proceedings.neurips.cc/paper_files/paper/2024/hash/d34497330b1fd6530f7afd86d0df9f76-Abstract-Datasets_and_Benchmarks_Track.html}
 }
 
 @article{gao2020pile,
@@ -167,6 +177,14 @@
   author  = {Gao, Leo and Biderman, Stella and Black, Sid and Golding, Laurence and Hoppe, Travis and Foster, Charles and Phang, Jason and He, Horace and Thite, Anish and Nabeshima, Noa and Presser, Shawn and Leahy, Connor},
   journal = {arXiv preprint arXiv:2101.00027},
   year    = {2020}
+}
+
+@article{li2023starcoder,
+  title   = {StarCoder: may the source be with you!},
+  author  = {Li, Raymond and Allal, Loubna Ben and Zi, Yangtian and Muennighoff, Niklas and Kocetkov, Denis and Mou, Chenghao and Marone, Marc and Akiki, Christopher and Li, Jia and Chim, Jenny and Liu, Qian and Zheltonozhskii, Evgenii and Zhuo, Terry Yue and Wang, Thomas and Dehaene, Olivier and Lamy-Poirier, Joel and Monteiro, Joao and Shliazhko, Oleh and Gontier, Nicolas and Meade, Nathaniel and Zebaze, Armel and Yee, Ming-Ho and Umapathi, Logesh Kumar and Zhu, Jian and Lipkin, Ben and Oblokulov, Muhtasham and Wang, Zhiruo and Murthy, Rudra and Stillerman, Jason and Patel, Siva Sankalp and Abulkhanov, Dmitry and Zocca, Marco and Dey, Manan and Zhang, Zhihan and Bhattacharyya, Urvashi and Yu, Wenhao and Luccioni, Sasha and Villegas, Paulo and Kunakov, Fedor and Zhdanov, Fedor and Romero, Manuel and Lee, Tony and Timor, Nadav and Ding, Jennifer and Schlesinger, Claire and Schoelkopf, Hailey and Ebert, Jan and Dao, Tri and Mishra, Mayank and Gu, Alex and Robinson, Jennifer and Anderson, Carolyn Jane and Dolan-Gavitt, Brendan and Contractor, Danish and Reddy, Siva and Fried, Daniel and Bahdanau, Dzmitry and Jernite, Yacine and Ferrandis, Carlos Mu{\~n}oz and Hughes, Sean and Wolf, Thomas and Guha, Arjun and von Werra, Leandro and de Vries, Harm},
+  journal = {arXiv preprint arXiv:2305.06161},
+  year    = {2023},
+  url     = {https://arxiv.org/abs/2305.06161}
 }
 
 % ---------- representativeness audit ----------
@@ -199,13 +217,17 @@
 @misc{atlas,
   title  = {Nomic Atlas},
   author = {{Nomic AI}},
-  note   = {[lit 0068]; software, https://atlas.nomic.ai}
+  year   = {2026},
+  url    = {https://atlas.nomic.ai},
+  note   = {[lit 0068]; software}
 }
 
 @misc{latentscope,
   title  = {latent-scope},
-  author = {{enjalot}},
-  note   = {software, https://github.com/enjalot/latent-scope; TODO(owner): preferred author name form}
+  author = {Johnson, Ian},
+  year   = {2026},
+  url    = {https://github.com/enjalot/latent-scope},
+  note   = {software}
 }
 
 @article{schonemann1966,
@@ -223,13 +245,13 @@
 % logs/process/2026-08-18_prior-art-sweep.md for the differentiation map) ----------
 
 @misc{duderstadt2025nomad,
-  title = {NOMAD Projection}, author = {Duderstadt, Brandon and Nussbaum, Zach and van der Maaten, Laurens},
-  note = {arXiv:2505.15511; multi-GPU data map of Multilingual Wikipedia — closest scale competitor, non-parametric}, year = {2025}
+  title = {NOMAD Projection}, author = {Duderstadt, Brandon and Nussbaum, Zach and {van der Maaten}, Laurens},
+  note = {arXiv:2505.15511}, year = {2025}, url = {https://arxiv.org/abs/2505.15511}
 }
 @inproceedings{huang2024paramrepulsor,
   title = {Navigating the Effect of Parametrization for Dimensionality Reduction},
-  author = {Huang, Haiyang and Wang, Yingfan and Rudin, Cynthia}, booktitle = {NeurIPS}, year = {2024},
-  note = {arXiv:2411.15894; parametric-DR SOTA, hard negative mining}
+  author = {Huang, Haiyang and Wang, Yingfan and Rudin, Cynthia}, booktitle = {Advances in Neural Information Processing Systems}, volume = {37}, year = {2024},
+  doi = {10.52202/079017-0413}, url = {https://proceedings.neurips.cc/paper_files/paper/2024/hash/178de34a090423c359a0ca2d51a25706-Abstract-Conference.html}
 }
 @article{gonzalezmarquez2024landscape,
   title = {The landscape of biomedical research}, author = {Gonz{\'a}lez-M{\'a}rquez, Rita and Schmidt, Luca and Schmidt, Benjamin M. and Berens, Philipp and Kobak, Dmitry},
@@ -240,8 +262,8 @@
   journal = {Information Visualization}, year = {2020}, note = {arXiv:1902.07958; train-once/stability claim at small scale}
 }
 @misc{islam2026oosumap,
-  title = {On Out-of-sample Embedding in UMAP}, author = {Islam, Md Tauhidul and Fleischer, Jason W.},
-  note = {arXiv:2606.04451; peripheral drift of projected points}, year = {2026}
+  title = {On Out-of-sample Embedding in UMAP}, author = {Islam, Mohammad Tariqul and Fleischer, Jason W.},
+  note = {arXiv:2606.04451}, year = {2026}, url = {https://arxiv.org/abs/2606.04451}
 }
 @article{rafols2010overlay,
   title = {Science overlay maps: a new tool for research policy and library management},
@@ -281,9 +303,10 @@
   title = {Assessing and improving reliability of neighbor embedding methods: a map-continuity perspective},
   author = {Liu, Zhexuan and Ma, Rong and Zhong, Yiqiao}, note = {arXiv:2410.16608}, year = {2024}
 }
-@misc{dagstuhl2025lowdim,
+@misc{debodt2025review,
   title = {Low-dimensional embeddings of high-dimensional data},
-  author = {{Dagstuhl review (21 authors incl. McInnes, Kobak, Damrich)}}, note = {arXiv:2508.15929; best-practices checklist}, year = {2025}
+  author = {{de Bodt}, Cyril and Diaz-Papkovich, Alex and Bleher, Michael and Bunte, Kerstin and Coupette, Corinna and Damrich, Sebastian and Fita Sanmartin, Enrique and Hamprecht, Fred A. and Horv{\'a}t, Em{\H{o}}ke-{\'A}gnes and Kohli, Dhruv and Krishnaswamy, Smita and Lee, John A. and Lelieveldt, Boudewijn P. F. and McInnes, Leland and Nabney, Ian T. and Noichl, Maximilian and Poli{\v{c}}ar, Pavlin G. and Rieck, Bastian and Wolf, Guy and Mishne, Gal and Kobak, Dmitry},
+  note = {arXiv:2508.15929}, year = {2025}, url = {https://arxiv.org/abs/2508.15929}
 }
 @inproceedings{wang2023wizmap,
   title = {WizMap: Scalable Interactive Visualization for Exploring Large Machine Learning Embeddings},
@@ -294,11 +317,11 @@
   note = {arXiv:2505.06386; Apple, WebGPU + DuckDB-WASM in-browser filtering}, year = {2025}
 }
 @misc{hackerverse2024, title = {Hackerverse}, author = {Lin, Wilson},
-  note = {blog.wilsonl.in/hackerverse; 40M-point tiled embedding map on static storage, semantic fly-to}, year = {2024}
+  url = {https://blog.wilsonl.in/hackerverse/}, year = {2024}
 }
 @misc{noichl2024openalexmapper, title = {OpenAlex Mapper}, author = {Noichl, Maximilian},
-  note = {fixed basemap + server-side projection of new documents onto stable coordinates}, year = {2024}
+  url = {https://openalex-map.org/}, year = {2024}
 }
 @misc{pmtiles, title = {PMTiles}, author = {Liu, Brandon},
-  note = {range-request single-file tile archives; with COPC/Potree (Morton-ordered point clouds) the map-pack mechanism precedent}
+  year = {2026}, url = {https://github.com/protomaps/PMTiles}, note = {software specification}
 }
