@@ -205,17 +205,47 @@ def r_sisap(i, dedup=False):
     return {"text": f"(LAION image — no metadata on disk; {meta})"}
 
 
-def r_curated(i):
-    if "selrows" not in _cache:
-        _cache["selrows"] = np.load(
-            "/data/latent-basemap/substrates/minilm-curated-2m/"
-            "selected_candidate_rows.npy", mmap_mode="r")
-    c = int(_cache["selrows"][i])
-    corpus = ("fineweb" if c < 1_600_000 else
-              "redpajama" if c < 2_600_000 else
-              "pile" if c < 3_600_000 else "starcoder")
-    return {"text": f"({corpus} — exact text needs RNG replay; "
-                    f"candidate row {c})"}
+P3_DIRS = {  # short corpus name -> (embedding ds, chunk dir), both chunked-120
+    "fineweb": ("fineweb-edu-sample-10BT-chunked-120-all-MiniLM-L6-v2",
+                "fineweb-edu-sample-10BT-chunked-120"),
+    "redpajama": ("RedPajama-Data-V2-sample-10B-chunked-120-all-MiniLM-L6-v2",
+                  "RedPajama-Data-V2-sample-10B-chunked-120"),
+    "pile": ("pile-uncopyrighted-chunked-120-all-MiniLM-L6-v2",
+             "pile-uncopyrighted-chunked-120"),
+    "starcoder": ("starcoderdata-code-chunked-120-all-MiniLM-L6-v2",
+                  "starcoderdata-code-chunked-120"),
+}
+
+
+def r_p3(sub: str, i: int):
+    """curated/random rows via the materialized provenance (2026-08-25)."""
+    base = Path(f"/data/latent-basemap/substrates/minilm-{sub}-2m")
+    key = ("p3", sub)
+    if key not in _cache:
+        prov = np.load(base / "provenance.npy", mmap_mode="r")
+        corpora = json.loads((base / "provenance_corpora.json").read_text())
+        man = json.loads((base / "manifest.json").read_text())
+        pc = man.get("candidate_per_corpus") or man["per_corpus"]
+        cums = {c: np.cumsum([0] + list(v["shard_rows"]))
+                for c, v in pc.items()}
+        _cache[key] = (prov, corpora, cums)
+    prov, corpora, cums = _cache[key]
+    c, g = int(prov[i][0]), int(prov[i][1])
+    corpus = corpora[str(c)]
+    emb_ds, chunk_dir = P3_DIRS[corpus]
+    cum = cums[corpus]
+    k = int(np.searchsorted(cum, g, side="right") - 1)
+    local = g - int(cum[k])
+    emb_files = sorted(glob.glob(f"/data/embeddings/{emb_ds}/train/*.npy"))
+    stem = Path(emb_files[k]).stem
+    pf = Path(f"{CHUNKS}/{chunk_dir}/train/{stem}.parquet")
+    if not pf.exists():  # starcoder: names differ, counts align -> position
+        pf = Path(sorted(glob.glob(
+            f"{CHUNKS}/{chunk_dir}/train/*.parquet"))[k])
+    files, cum2, groups = dir_index(chunk_dir)
+    fi = files.index(str(pf))
+    return {"text": dir_text(chunk_dir, int(cum2[fi]) + local),
+            "meta": corpus}
 
 
 RESOLVERS = {
@@ -231,9 +261,8 @@ RESOLVERS = {
     "bl-siglip-1m": r_bl,
     "sisap-clip-2m": r_sisap,
     "sisap-clip-2m-dedup": lambda i: r_sisap(i, dedup=True),
-    "minilm-curated-2m": r_curated,
-    "minilm-random-2m": lambda i: {"text": "(random substrate — provenance "
-                                           "needs RNG replay; pending)"},
+    "minilm-curated-2m": lambda i: r_p3("curated", i),
+    "minilm-random-2m": lambda i: r_p3("random", i),
 }
 
 
