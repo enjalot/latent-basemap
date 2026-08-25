@@ -252,6 +252,60 @@ DATASETS = {
                                               "batch_size": 16384,
                                               "gpu_resident_vram_budget_gb": 22.0}},
         }},
+    # P4 mini-ladders (owner 2026-08-25): nested MiniLM sub-2M substrates
+    # (every-kth-row, mixture-preserving) for (i) rankneg-fraction @1M and
+    # (ii) dose-vs-N @500K+1M. Champion recipe = fneg10+tanh4+pos10+bs16k, md000.
+    # rankneg held at the validated 25% fraction across the dose ladder so dose is
+    # the only variable; P4(i) sweeps the fraction itself (12.5/25/50%) at fixed dose4.
+    "minilm-mix-1m": {
+        "load": lambda: np.load(
+            "/data/latent-basemap/substrates/minilm-mix-1m/substrate.f32.npy",
+            mmap_mode="r"),
+        "subsets": None,
+        "arms": {
+            # P4(i) rankneg-fraction @1M: 12.5% / 25% / 50% windows (125K/250K/500K).
+            "rankfrac-12p5": {"md": "000", "dose": 4,
+                              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                        "pos_ratio": 0.10, "rankneg_window": 125_000,
+                                        "batch_size": 16384}},
+            "rankfrac-25": {"md": "000", "dose": 4,      # = dose-x4 @1M (P4ii reuses this)
+                            "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                      "pos_ratio": 0.10, "rankneg_window": 250_000,
+                                      "batch_size": 16384}},
+            "rankfrac-50": {"md": "000", "dose": 4,
+                            "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                      "pos_ratio": 0.10, "rankneg_window": 500_000,
+                                      "batch_size": 16384}},
+            # P4(ii) dose-vs-N @1M (dose4 == rankfrac-25 above): add dose2 + dose8, rankneg 25%.
+            "dose-x2-rf25": {"md": "000", "dose": 2,
+                             "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                       "pos_ratio": 0.10, "rankneg_window": 250_000,
+                                       "batch_size": 16384}},
+            "dose-x8-rf25": {"md": "000", "dose": 8,
+                             "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                       "pos_ratio": 0.10, "rankneg_window": 250_000,
+                                       "batch_size": 16384}},
+        }},
+    "minilm-mix-500k": {
+        "load": lambda: np.load(
+            "/data/latent-basemap/substrates/minilm-mix-500k/substrate.f32.npy",
+            mmap_mode="r"),
+        "subsets": None,
+        "arms": {
+            # P4(ii) dose-vs-N @500K: dose 2/4/8, rankneg 25% of N = 125K.
+            "dose-x2-rf25": {"md": "000", "dose": 2,
+                             "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                       "pos_ratio": 0.10, "rankneg_window": 125_000,
+                                       "batch_size": 16384}},
+            "dose-x4-rf25": {"md": "000", "dose": 4,
+                             "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                       "pos_ratio": 0.10, "rankneg_window": 125_000,
+                                       "batch_size": 16384}},
+            "dose-x8-rf25": {"md": "000", "dose": 8,
+                             "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                       "pos_ratio": 0.10, "rankneg_window": 125_000,
+                                       "batch_size": 16384}},
+        }},
 }
 
 # capacity-curve calibration (owner 2026-08-24, DEFERRED-to-LAST 2026-08-25): IDENTICAL to
