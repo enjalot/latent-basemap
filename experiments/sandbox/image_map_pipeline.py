@@ -324,6 +324,29 @@ DATASETS = {
                              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
                                        "pos_ratio": 0.10, "rankneg_window": 125_000,
                                        "batch_size": 16384}},
+            # #3 int8-tax factorization @500K (external review 2026-08-25): champion recipe
+            # (rankneg 125K = 25% of 500K), differ ONLY in the X path. (i) fp16 control +
+            # (iii) host-int8 here; (ii) quant-dequant lives on minilm-mix-500k-qdq (shares this
+            # dataset's graph via symlink). Factorization: (i)->(ii) quant damage, (ii)->(iii) loader.
+            "int8fac-fp16": {"md": "000", "dose": 4,
+                             "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                       "pos_ratio": 0.10, "rankneg_window": 125_000,
+                                       "batch_size": 16384, "x_residency": "auto"}},
+            "int8fac-hostint8": {"md": "000", "dose": 4,
+                                 "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                           "pos_ratio": 0.10, "rankneg_window": 125_000,
+                                           "batch_size": 16384, "x_residency": "host_int8"}},
+        }},
+    "minilm-mix-500k-qdq": {   # #3 (ii): int8 quant->dequant substrate (graph symlinked to 500k)
+        "load": lambda: np.load(
+            "/data/latent-basemap/substrates/minilm-mix-500k-qdq/substrate.f32.npy",
+            mmap_mode="r"),
+        "subsets": None,
+        "arms": {
+            "int8fac-qdq": {"md": "000", "dose": 4,
+                            "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                      "pos_ratio": 0.10, "rankneg_window": 125_000,
+                                      "batch_size": 16384, "x_residency": "auto"}},
         }},
     # MiniLM-2M capacity-probe dataset (owner 2026-08-25): completes the 4-space width
     # table. load = the sealed R0216 (a) substrate; teacher + edges symlinked into
