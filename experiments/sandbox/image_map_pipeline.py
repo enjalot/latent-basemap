@@ -323,6 +323,20 @@ DATASETS = {
             mmap_mode="r"),
         "subsets": None,
         "arms": {"champion-bs16k": _CHAMPION_500K}},
+    # P2 jina-champion OOD register corpora (owner 2026-08-25): document-prompted
+    # jina-v5-nano embeds of ~250K reddit + ~250K CA chunks (built by p2_jina_embed.py).
+    # Probe-only — knn+fuzzy build their jina-space truth graphs; no train arms. p2_jina_probe.py
+    # projects them through the jina-multi-2m champion for per-register OOD-FFR.
+    "reddit-jina-250k": {
+        "load": lambda: np.asarray(np.load(
+            "/data/latent-basemap/substrates/reddit-jina-250k/substrate.f16.npy",
+            mmap_mode="r"), dtype=np.float32),
+        "subsets": None},
+    "ca-jina-250k": {
+        "load": lambda: np.asarray(np.load(
+            "/data/latent-basemap/substrates/ca-jina-250k/substrate.f16.npy",
+            mmap_mode="r"), dtype=np.float32),
+        "subsets": None},
 }
 
 # capacity-curve calibration (owner 2026-08-24, DEFERRED-to-LAST 2026-08-25): IDENTICAL to
