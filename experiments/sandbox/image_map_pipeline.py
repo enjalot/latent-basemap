@@ -254,6 +254,25 @@ DATASETS = {
         }},
 }
 
+# capacity-curve calibration (owner 2026-08-24, DEFERRED-to-LAST 2026-08-25): IDENTICAL to
+# champion-bs16k (rankneg_window 1.5625M, bs16k, dose x4) + hidden_dim=4096. ~14h (width mult
+# ~3.1-3.3x). ENV-GATED so the branch-suite's no-ONLY_ARM jina-6m stage (trains all dict arms)
+# does NOT pick it up — h4096 must run LAST, after the P1->P4->P3-GPU cheaper experiments.
+# The dedicated final unit sets ENABLE_H4096=1 ONLY_ARM=champion-bs16k-h4096.
+# Resident decision is hidden_dim-independent (need = X fp16 + edges only), so it inherits the
+# proven rank25 resident+rankneg path; a HostStream fallback would raise (core.py:1416, fails
+# closed, never silent-norank).
+if os.environ.get("ENABLE_H4096"):
+    DATASETS["jina-multi-6m"]["arms"]["champion-bs16k-h4096"] = {
+        "md": "000", "dose": 4,
+        "extra": {"fneg_weight": 1.0,
+                  "neg_tanh_gamma": 4.0,
+                  "pos_ratio": 0.10,
+                  "rankneg_window": 1_562_500,
+                  "hidden_dim": 4096,
+                  "batch_size": 16384,
+                  "gpu_resident_vram_budget_gb": 22.0}}
+
 
 def _norm(x: np.ndarray) -> np.ndarray:
     n = np.linalg.norm(x, axis=1, keepdims=True)
