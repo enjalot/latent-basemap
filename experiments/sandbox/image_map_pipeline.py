@@ -306,6 +306,23 @@ DATASETS = {
                                        "pos_ratio": 0.10, "rankneg_window": 125_000,
                                        "batch_size": 16384}},
         }},
+    # P3 curation validation loop (owner 2026-08-25): (b) curated + (c) random 2M
+    # substrates (built by p3_build_and_scorecard.py from the same f32 shards as (a),
+    # mix 40/25/25/10 — precision constant across the triple). Trained with the SAME
+    # champion recipe as (a) (_CHAMPION_500K: rankneg 500K = 25% of 2M) so curation is
+    # the only variable. (a) = existing 2m-knobs/umap-md000-x4bs16k-winner (not re-registered).
+    "minilm-random-2m": {
+        "load": lambda: np.load(
+            "/data/latent-basemap/substrates/minilm-random-2m/substrate.f32.npy",
+            mmap_mode="r"),
+        "subsets": None,
+        "arms": {"champion-bs16k": _CHAMPION_500K}},
+    "minilm-curated-2m": {
+        "load": lambda: np.load(
+            "/data/latent-basemap/substrates/minilm-curated-2m/substrate.f32.npy",
+            mmap_mode="r"),
+        "subsets": None,
+        "arms": {"champion-bs16k": _CHAMPION_500K}},
 }
 
 # capacity-curve calibration (owner 2026-08-24, DEFERRED-to-LAST 2026-08-25): IDENTICAL to
