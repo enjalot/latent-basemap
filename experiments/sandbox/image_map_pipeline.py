@@ -357,7 +357,13 @@ DATASETS = {
 # Resident decision is hidden_dim-independent (need = X fp16 + edges only), so it inherits the
 # proven rank25 resident+rankneg path; a HostStream fallback would raise (core.py:1416, fails
 # closed, never silent-norank).
-if os.environ.get("ENABLE_H4096"):
+# HOLD guard (owner 2026-08-25, external-review directive): h4096@6.25M is HELD behind a
+# preregistered gate (runs only if a 2M width arm beats the best 2M exposure arm by >=+0.010 FFR
+# without hurting the worst-register probe). While /data/latent-basemap/sandbox/H4096_HOLD exists,
+# the arm is NOT injected, so the P-plan's h4096 stage is a no-op (ONLY_ARM finds no match). Python
+# is imported fresh per stage, so toggling the hold file needs no code edit. Delete the file to release.
+if os.environ.get("ENABLE_H4096") and not os.path.exists(
+        "/data/latent-basemap/sandbox/H4096_HOLD"):
     DATASETS["jina-multi-6m"]["arms"]["champion-bs16k-h4096"] = {
         "md": "000", "dose": 4,
         "extra": {"fneg_weight": 1.0,
