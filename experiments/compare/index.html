@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>basemap compare</title>
+<style>
+  :root { --bg:#0e1116; --panel:#161b23; --edge:#2a3140; --fg:#d7dde8;
+          --dim:#8b93a7; --acc:#ffb347; --sel:#ff5d3a; }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--fg);
+         font:13px/1.45 "Source Sans 3",system-ui,sans-serif; height:100vh;
+         display:flex; flex-direction:column; overflow:hidden; }
+  header { display:flex; gap:10px; align-items:center; padding:8px 12px;
+           border-bottom:1px solid var(--edge); flex-wrap:wrap; }
+  header h1 { font-size:15px; font-weight:600; margin-right:6px; }
+  header .hint { color:var(--dim); font-size:12px; }
+  select,input[type=text] { background:var(--panel); color:var(--fg);
+    border:1px solid var(--edge); border-radius:6px; padding:5px 8px;
+    font:inherit; }
+  #main { flex:1; display:flex; min-height:0; }
+  .mapcol { flex:1; display:flex; flex-direction:column; min-width:0;
+            border-right:1px solid var(--edge); }
+  .mapbar { display:flex; gap:8px; align-items:center; padding:6px 10px;
+            border-bottom:1px solid var(--edge); background:var(--panel); }
+  .combo { position:relative; flex:1; min-width:0; }
+  .combo input { width:100%; }
+  .combo .list { position:absolute; z-index:30; left:0; right:0; top:100%;
+    max-height:340px; overflow:auto; background:var(--panel);
+    border:1px solid var(--edge); border-radius:0 0 8px 8px; display:none; }
+  .combo .list div { padding:5px 9px; cursor:pointer; display:flex; gap:8px;
+    white-space:nowrap; overflow:hidden; }
+  .combo .list div:hover, .combo .list div.hot { background:#232b38; }
+  .combo .list .ffr { color:var(--acc); min-width:52px; }
+  .combo .list .dt { color:var(--dim); margin-left:auto; }
+  .combo .list .up { color:#7fd0ff; }
+  .meta { font-size:12px; color:var(--dim); padding:2px 10px 4px;
+          background:var(--panel); border-bottom:1px solid var(--edge);
+          white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .meta b { color:var(--acc); font-weight:600; }
+  .stage { position:relative; flex:1; min-height:0; }
+  .stage canvas { position:absolute; inset:0; width:100%; height:100%; }
+  .stage .ov { cursor:crosshair; }
+  #tablecol { width:400px; display:flex; flex-direction:column;
+              min-width:280px; }
+  #tablehead { padding:7px 10px; border-bottom:1px solid var(--edge);
+               background:var(--panel); display:flex; gap:8px;
+               align-items:center; }
+  #tablehead .n { color:var(--acc); font-weight:600; }
+  #tablehead button { background:none; border:1px solid var(--edge);
+    color:var(--dim); border-radius:6px; padding:2px 8px; cursor:pointer; }
+  #tbody { flex:1; overflow-y:auto; position:relative; }
+  #tspacer { position:absolute; width:1px; }
+  .trow { position:absolute; left:0; right:0; padding:6px 10px;
+    border-bottom:1px solid #1c222d; overflow:hidden; display:flex; gap:8px; }
+  .trow .idx { color:var(--dim); font-size:11px; min-width:64px; }
+  .trow .txt { flex:1; display:-webkit-box; -webkit-line-clamp:3;
+    -webkit-box-orient:vertical; overflow:hidden; font-size:12px; }
+  .trow img { height:72px; border-radius:4px; background:#000; }
+  .slider { display:flex; align-items:center; gap:5px; color:var(--dim);
+            font-size:12px; }
+  #swap { background:var(--panel); border:1px solid var(--edge);
+    color:var(--fg); border-radius:6px; padding:4px 10px; cursor:pointer; }
+  #swap:hover { border-color:var(--acc); }
+</style></head><body>
+<header>
+  <h1>basemap compare</h1>
+  <label>rung <select id="rung"></select></label>
+  <button id="swap" title="swap A and B">A &#8646; B</button>
+  <span class="slider">heat <input type="range" id="gain" min="-2" max="4"
+        step="0.1" value="0.6" style="width:90px"></span>
+  <span class="hint">click a tile on either map &rarr; its points light up on
+    the other + list on the right &middot; drag pan &middot; wheel zoom
+    &middot; dbl-click reset</span>
+</header>
+<div id="main">
+  <div class="mapcol" id="colA"></div>
+  <div class="mapcol" id="colB"></div>
+  <div id="tablecol">
+    <div id="tablehead"><span class="n" id="selcount">0</span>
+      <span id="selwhere" class="hint">no tile selected</span>
+      <button id="clearsel">clear</button></div>
+    <div id="tbody"><div id="tspacer"></div></div>
+  </div>
+</div>
+<script>
+"use strict";
+const API = location.origin.replace(":8800", ":8801");
+const TILE = 30;               // screen px tile for click-selection
+let catalog = null, rungs = [], state = {
+  rung: null, sel: { ids: null, from: null, rect: null }, gain: 0.6,
+};
+
+/* ---------------- map panel ---------------- */
+function makePanel(colId, key) {
+  const col = document.getElementById(colId);
+  col.innerHTML = `
+    <div class="mapbar"><b style="color:var(--acc)">${key}</b>
+      <div class="combo"><input type="text" spellcheck="false"
+        placeholder="type to filter maps (recent first)&hellip;">
+        <div class="list"></div></div></div>
+    <div class="meta"></div>
+    <div class="stage"><canvas class="gl"></canvas>
+      <canvas class="ov"></canvas></div>`;
+  const p = {
+    key, col, entry: null, coords: null, n: 0,
+    input: col.querySelector("input"), list: col.querySelector(".list"),
+    meta: col.querySelector(".meta"),
+    stage: col.querySelector(".stage"),
+    glc: col.querySelector(".gl"), ovc: col.querySelector(".ov"),
+    view: { z: 0.92, tx: 0, ty: 0 },
+    gl: null, R: null, dirty: true,
+  };
+  p.gl = p.glc.getContext("webgl2", { antialias: false });
+  p.R = makeRenderer(p.gl);
+  bindCombo(p); bindNav(p);
+  return p;
+}
+
+/* ---------------- WebGL ---------------- */
+function sh(gl, type, src) {
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    throw gl.getShaderInfoLog(s);
+  return s;
+}
+function prog(gl, vs, fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, sh(gl, gl.VERTEX_SHADER, vs));
+  gl.attachShader(p, sh(gl, gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+    throw gl.getProgramInfoLog(p);
+  return p;
+}
+const VS = `#version 300 es
+layout(location=0) in vec2 pos;
+uniform vec2 uS, uT; uniform float uPt;
+void main(){ gl_Position=vec4(pos*uS+uT,0.,1.); gl_PointSize=uPt; }`;
+const FS_DOT = `#version 300 es
+precision highp float; uniform float uAdd; out vec4 o;
+void main(){ vec2 d=gl_PointCoord-.5; if(dot(d,d)>.25) discard;
+  o=vec4(uAdd,0.,0.,uAdd); }`;
+const FS_HEAT = `#version 300 es
+precision highp float; uniform sampler2D uD; uniform float uG, uInv;
+in vec2 vUV; out vec4 o;
+vec3 ramp(float t){
+  const vec3 c0=vec3(.050,.063,.086), c1=vec3(.13,.22,.42),
+    c2=vec3(.12,.49,.55), c3=vec3(.29,.76,.42), c4=vec3(.95,.90,.35),
+    c5=vec3(1.,1.,.95);
+  float x=t*5.; vec3 c=mix(c0,c1,clamp(x,0.,1.));
+  c=mix(c,c2,clamp(x-1.,0.,1.)); c=mix(c,c3,clamp(x-2.,0.,1.));
+  c=mix(c,c4,clamp(x-3.,0.,1.)); return mix(c,c5,clamp(x-4.,0.,1.)); }
+void main(){ float d=texture(uD,vUV).r*uInv;
+  float v=log(1.+d*exp(uG))/7.0; o=vec4(ramp(clamp(v,0.,1.)),1.); }`;
+const VS_Q = `#version 300 es
+layout(location=0) in vec2 q; out vec2 vUV;
+void main(){ vUV=q*.5+.5; gl_Position=vec4(q,0.,1.); }`;
+const FS_SEL = `#version 300 es
+precision highp float; uniform vec4 uC; out vec4 o;
+void main(){ vec2 d=gl_PointCoord-.5; float r=dot(d,d);
+  if(r>.25) discard; o=uC; }`;
+
+function pickAccumFormat(gl) {
+  // float accumulation preferred; fall back for software GL / mobile
+  if (gl.getExtension("EXT_color_buffer_float"))
+    return { fmt: gl.R32F, scale: 1.0 };
+  if (gl.getExtension("EXT_color_buffer_half_float"))
+    return { fmt: gl.R16F, scale: 1.0 };
+  return { fmt: gl.RGBA8, scale: 1 / 255 };  // density counts in .r * 255
+}
+function makeRenderer(gl) {
+  const accum = pickAccumFormat(gl);
+  const R = {
+    accum,
+    pDot: prog(gl, VS, FS_DOT), pHeat: prog(gl, VS_Q, FS_HEAT),
+    pSel: prog(gl, VS, FS_SEL),
+    vboPts: gl.createBuffer(), vboQuad: gl.createBuffer(),
+    iboSel: gl.createBuffer(), nSel: 0, fb: null, tex: null, fw: 0, fh: 0,
+    vaoPts: gl.createVertexArray(), vaoQuad: gl.createVertexArray(),
+    vaoSel: gl.createVertexArray(), n: 0,
+  };
+  gl.bindVertexArray(R.vaoQuad);
+  gl.bindBuffer(gl.ARRAY_BUFFER, R.vboQuad);
+  gl.bufferData(gl.ARRAY_BUFFER,
+    new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+  return R;
+}
+function setPoints(p, i16, n) {
+  const { gl, R } = p;
+  R.n = n;
+  gl.bindBuffer(gl.ARRAY_BUFFER, R.vboPts);
+  gl.bufferData(gl.ARRAY_BUFFER, i16, gl.STATIC_DRAW);
+  for (const vao of [R.vaoPts, R.vaoSel]) {
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, R.vboPts);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.SHORT, true, 0, 0);
+    if (vao === R.vaoSel)
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, R.iboSel);
+    gl.bindVertexArray(null);
+  }
+}
+function setSelection(p, ids) {
+  const { gl, R } = p;
+  R.nSel = ids ? ids.length : 0;
+  if (R.nSel) {
+    gl.bindVertexArray(R.vaoSel);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, R.iboSel);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, ids, gl.DYNAMIC_DRAW);
+    gl.bindVertexArray(null);
+  }
+  p.dirty = true;
+}
+function draw(p) {
+  const { gl, R } = p;
+  const w = p.glc.clientWidth * devicePixelRatio | 0;
+  const h = p.glc.clientHeight * devicePixelRatio | 0;
+  if (!w || !h || !R.n) return;
+  if (p.glc.width !== w || p.glc.height !== h) {
+    p.glc.width = w; p.glc.height = h;
+  }
+  if (R.fw !== w || R.fh !== h) {
+    if (R.tex) { gl.deleteTexture(R.tex); gl.deleteFramebuffer(R.fb); }
+    R.tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, R.tex);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, R.accum.fmt, w, h);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    R.fb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, R.fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0,
+      gl.TEXTURE_2D, R.tex, 0);
+    R.fw = w; R.fh = h;
+  }
+  const aspect = w / h, v = p.view;
+  const S = [v.z / aspect, v.z], T = [v.tx, v.ty];
+  const pt = Math.max(1.5, Math.min(7, v.z * 1.15)) * devicePixelRatio;
+  // pass 1: density accumulation
+  gl.bindFramebuffer(gl.FRAMEBUFFER, R.fb);
+  gl.viewport(0, 0, w, h);
+  gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+  gl.useProgram(R.pDot);
+  gl.uniform2fv(gl.getUniformLocation(R.pDot, "uS"), S);
+  gl.uniform2fv(gl.getUniformLocation(R.pDot, "uT"), T);
+  gl.uniform1f(gl.getUniformLocation(R.pDot, "uPt"), pt);
+  gl.uniform1f(gl.getUniformLocation(R.pDot, "uAdd"), R.accum.scale);
+  gl.bindVertexArray(R.vaoPts);
+  gl.drawArrays(gl.POINTS, 0, R.n);
+  // pass 2: colormap to screen
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, w, h);
+  gl.disable(gl.BLEND);
+  gl.useProgram(R.pHeat);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, R.tex);
+  gl.uniform1i(gl.getUniformLocation(R.pHeat, "uD"), 0);
+  gl.uniform1f(gl.getUniformLocation(R.pHeat, "uG"),
+    state.gain - Math.log(Math.max(1, v.z * v.z)));
+  gl.uniform1f(gl.getUniformLocation(R.pHeat, "uInv"),
+    1.0 / R.accum.scale);
+  gl.bindVertexArray(R.vaoQuad);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  // pass 3: selected points
+  if (R.nSel) {
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(R.pSel);
+    gl.uniform2fv(gl.getUniformLocation(R.pSel, "uS"), S);
+    gl.uniform2fv(gl.getUniformLocation(R.pSel, "uT"), T);
+    gl.uniform1f(gl.getUniformLocation(R.pSel, "uPt"),
+      Math.max(2.5, pt * 1.35));
+    gl.uniform4f(gl.getUniformLocation(R.pSel, "uC"), 1, .36, .23, .9);
+    gl.bindVertexArray(R.vaoSel);
+    gl.drawElements(gl.POINTS, R.nSel, gl.UNSIGNED_INT, 0);
+  }
+  gl.bindVertexArray(null);
+}
+
+/* ---------------- overlay: grid + tiles ---------------- */
+function drawOverlay(p, hover) {
+  const c = p.ovc, w = c.clientWidth * devicePixelRatio | 0,
+        h = c.clientHeight * devicePixelRatio | 0;
+  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+  const g = c.getContext("2d");
+  g.clearRect(0, 0, w, h);
+  const t = TILE * devicePixelRatio;
+  if (hover) {
+    g.strokeStyle = "rgba(255,179,71,.9)"; g.lineWidth = 2;
+    g.strokeRect(hover[0] * t, hover[1] * t, t, t);
+  }
+  const sel = state.sel;
+  if (sel.rect && sel.from === p.key) {
+    const [a, b] = dataToScreen(p, sel.rect[0], sel.rect[1]);
+    const [x2, y2] = dataToScreen(p, sel.rect[2], sel.rect[3]);
+    g.strokeStyle = "rgba(255,93,58,.95)"; g.lineWidth = 2.5;
+    g.strokeRect(Math.min(a, x2), Math.min(b, y2),
+      Math.abs(x2 - a), Math.abs(y2 - b));
+  }
+}
+function screenToData(p, px, py) {
+  const w = p.ovc.clientWidth, h = p.ovc.clientHeight, v = p.view;
+  const aspect = w / h;
+  const cx = (px / w) * 2 - 1, cy = 1 - (py / h) * 2;
+  return [(cx - v.tx) / (v.z / aspect), (cy - v.ty) / v.z];
+}
+function dataToScreen(p, dx, dy) {
+  const w = p.ovc.clientWidth, h = p.ovc.clientHeight, v = p.view;
+  const aspect = w / h;
+  const cx = dx * (v.z / aspect) + v.tx, cy = dy * v.z + v.ty;
+  return [((cx + 1) / 2) * w * devicePixelRatio,
+          ((1 - cy) / 2) * h * devicePixelRatio];
+}
+
+/* ---------------- navigation + tile click ---------------- */
+function bindNav(p) {
+  const el = p.ovc;
+  let drag = null, moved = false, hover = null;
+  el.addEventListener("pointerdown", e => {
+    drag = [e.clientX, e.clientY]; moved = false;
+    el.setPointerCapture(e.pointerId);
+  });
+  el.addEventListener("pointermove", e => {
+    const r = el.getBoundingClientRect();
+    if (drag) {
+      const dx = e.clientX - drag[0], dy = e.clientY - drag[1];
+      if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+      if (moved) {
+        p.view.tx += (dx / r.width) * 2;
+        p.view.ty -= (dy / r.height) * 2;
+        drag = [e.clientX, e.clientY]; p.dirty = true;
+      }
+    }
+    hover = [Math.floor((e.clientX - r.left) / TILE),
+             Math.floor((e.clientY - r.top) / TILE)];
+    drawOverlay(p, hover);
+  });
+  el.addEventListener("pointerleave", () => drawOverlay(p, null));
+  el.addEventListener("pointerup", e => {
+    el.releasePointerCapture(e.pointerId);
+    if (!moved && drag) tileClick(p, e);
+    drag = null;
+  });
+  el.addEventListener("wheel", e => {
+    e.preventDefault();
+    const r = el.getBoundingClientRect();
+    const [dx, dy] = screenToData(p, e.clientX - r.left, e.clientY - r.top);
+    const f = Math.exp(-e.deltaY * 0.0016);
+    const v = p.view, aspect = r.width / r.height;
+    v.z *= f;
+    v.tx = ((e.clientX - r.left) / r.width) * 2 - 1 - dx * (v.z / aspect);
+    v.ty = 1 - ((e.clientY - r.top) / r.height) * 2 - dy * v.z;
+    p.dirty = true;
+  }, { passive: false });
+  el.addEventListener("dblclick", () => {
+    p.view = { z: 0.92, tx: 0, ty: 0 }; p.dirty = true;
+  });
+}
+function tileClick(p, e) {
+  if (!p.coords) return;
+  const r = p.ovc.getBoundingClientRect();
+  const tx = Math.floor((e.clientX - r.left) / TILE) * TILE,
+        ty = Math.floor((e.clientY - r.top) / TILE) * TILE;
+  const [x0, y0] = screenToData(p, tx, ty + TILE),
+        [x1, y1] = screenToData(p, tx + TILE, ty);
+  const ids = scanRect(p, x0, y0, x1, y1);
+  state.sel = { ids, from: p.key, rect: [x0, y0, x1, y1] };
+  applySelection();
+}
+function scanRect(p, x0, y0, x1, y1) {
+  const a = Math.round(Math.max(-1, x0) * 32767),
+        b = Math.round(Math.max(-1, y0) * 32767),
+        c = Math.round(Math.min(1, x1) * 32767),
+        d = Math.round(Math.min(1, y1) * 32767);
+  const q = p.coords, out = [];
+  for (let i = 0, n = p.n; i < n; i++) {
+    const x = q[i << 1], y = q[(i << 1) | 1];
+    if (x >= a && x <= c && y >= b && y <= d) out.push(i);
+  }
+  return new Uint32Array(out);
+}
+function applySelection() {
+  for (const p of [A, B]) {
+    setSelection(p, state.sel.ids);
+    drawOverlay(p, null);
+  }
+  renderTableReset();
+}
+
+/* ---------------- combobox ---------------- */
+function comboEntries() {
+  return catalog.maps.filter(e => e.rung === state.rung);
+}
+function bindCombo(p) {
+  const show = (filter) => {
+    const f = (filter || "").toLowerCase();
+    const es = comboEntries().filter(e => e.arm.toLowerCase().includes(f));
+    p.list.innerHTML = es.slice(0, 80).map((e, i) =>
+      `<div data-arm="${e.arm}">
+        <span class="ffr">${e.ffr != null ? e.ffr.toFixed(4) : "–"}</span>
+        <span class="${e.upstream ? "up" : ""}">${e.arm}</span>
+        <span class="dt">${e.date_et}</span></div>`).join("");
+    p.list.style.display = es.length ? "block" : "none";
+    for (const div of p.list.children)
+      div.onmousedown = ev => { ev.preventDefault();
+        selectMap(p, div.dataset.arm); p.list.style.display = "none"; };
+  };
+  p.input.addEventListener("focus", () => { p.input.select(); show(""); });
+  p.input.addEventListener("input", () => show(p.input.value));
+  p.input.addEventListener("blur",
+    () => setTimeout(() => p.list.style.display = "none", 150));
+}
+async function selectMap(p, arm) {
+  const e = comboEntries().find(x => x.arm === arm);
+  if (!e) return;
+  p.entry = e;
+  p.input.value = e.arm;
+  const o = e.overrides || {};
+  const bits = [
+    e.ffr != null ? `FFR <b>${e.ffr.toFixed(4)}</b>` : null,
+    e.dose ? `dose ×${e.dose}` : null,
+    o.rankneg_window ? `rankneg ${(o.rankneg_window / 1e3) | 0}K` : null,
+    o.neg_tanh_gamma ? `tanh${o.neg_tanh_gamma}` : null,
+    o.hidden_dim ? `h${o.hidden_dim}` : null,
+    o.batch_size ? `bs${(o.batch_size / 1024) | 0}K` : null,
+    `n ${(e.n / 1e6).toFixed(2)}M`, e.date_et,
+  ].filter(Boolean);
+  p.meta.innerHTML = bits.join(" · ");
+  const buf = await fetch(e.bin).then(r => r.arrayBuffer());
+  p.coords = new Int16Array(buf);
+  p.n = e.n;
+  setPoints(p, p.coords, e.n);
+  if (state.sel.ids) setSelection(p, state.sel.ids);
+  p.dirty = true;
+}
+
+/* ---------------- virtualized table ---------------- */
+const tbody = document.getElementById("tbody"),
+      tspacer = document.getElementById("tspacer");
+let rowH = 74, contentCache = new Map(), fetching = new Set();
+function renderTableReset() {
+  contentCache = new Map(); fetching = new Set();
+  const ids = state.sel.ids;
+  document.getElementById("selcount").textContent = ids ? ids.length : 0;
+  document.getElementById("selwhere").textContent = ids
+    ? `points from map ${state.sel.from} tile — shown on ${
+        state.sel.from === "A" ? "B" : "A"}` : "no tile selected";
+  tbody.scrollTop = 0;
+  rowH = (A.entry && A.entry.content === "image") ? 90 : 74;
+  tspacer.style.height = (ids ? ids.length * rowH : 0) + "px";
+  renderTableWindow();
+}
+function renderTableWindow() {
+  for (const el of [...tbody.children])
+    if (el !== tspacer) el.remove();
+  const ids = state.sel.ids;
+  if (!ids || !ids.length) return;
+  const top = tbody.scrollTop, vh = tbody.clientHeight;
+  const i0 = Math.max(0, (top / rowH | 0) - 4),
+        i1 = Math.min(ids.length, ((top + vh) / rowH | 0) + 5);
+  const missing = [];
+  for (let i = i0; i < i1; i++) {
+    const id = ids[i];
+    const row = document.createElement("div");
+    row.className = "trow"; row.style.top = (i * rowH) + "px";
+    row.style.height = rowH + "px";
+    const c = contentCache.get(id);
+    const isImg = A.entry && A.entry.content === "image";
+    row.innerHTML = `<span class="idx">#${id}</span>` + (c
+      ? (isImg && c.thumb
+          ? `<img loading="lazy" src="${c.thumb}"><span class="txt">${
+              esc(c.text || "")}</span>`
+          : `<span class="txt">${esc(c.text || "(empty)")}</span>`)
+      : `<span class="txt" style="color:var(--dim)">…</span>`);
+    tbody.appendChild(row);
+    if (!c && !fetching.has(id)) missing.push(id);
+  }
+  if (missing.length) fetchContent(missing.slice(0, 100));
+}
+function esc(s) {
+  return s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;",
+    ">": "&gt;" }[c]));
+}
+async function fetchContent(ids) {
+  ids.forEach(id => fetching.add(id));
+  try {
+    const r = await fetch(`${API}/content?rung=${state.rung}&ids=${
+      ids.join(",")}`);
+    if (!r.ok) throw 0;
+    const j = await r.json();
+    for (const it of j.items) contentCache.set(it.id, it);
+  } catch {
+    for (const id of ids)
+      contentCache.set(id, { id, text: "(content service offline)" });
+  }
+  renderTableWindow();
+}
+tbody.addEventListener("scroll", renderTableWindow);
+document.getElementById("clearsel").onclick = () => {
+  state.sel = { ids: null, from: null, rect: null }; applySelection();
+};
+
+/* ---------------- top-level wiring ---------------- */
+const A = makePanel("colA", "A"), B = makePanel("colB", "B");
+document.getElementById("gain").oninput = e => {
+  state.gain = +e.target.value; A.dirty = B.dirty = true;
+};
+document.getElementById("swap").onclick = () => {
+  const ea = A.entry, eb = B.entry;
+  if (ea && eb) { selectMap(A, eb.arm); selectMap(B, ea.arm); }
+};
+document.getElementById("rung").onchange = e => setRung(e.target.value);
+function setRung(rung) {
+  state.rung = rung;
+  document.getElementById("rung").value = rung;
+  state.sel = { ids: null, from: null, rect: null };
+  const es = comboEntries();
+  // A default: the plain 0.6dev baseline, not an ablation of it
+  const up = es.find(e => e.arm.startsWith("upstream-06dev"))
+    || es.find(e => e.upstream);
+  const recent = es.find(e => !e.upstream);
+  if (up) selectMap(A, up.arm); else if (recent) selectMap(A, recent.arm);
+  if (recent) selectMap(B, recent.arm);
+  applySelection();
+}
+(async function init() {
+  catalog = await fetch("data/catalog.json").then(r => r.json());
+  const counts = {};
+  for (const e of catalog.maps) counts[e.rung] = (counts[e.rung] || 0) + 1;
+  // 2M focus: rungs ordered by most-recent map, ~2M first
+  const seen = new Map();
+  for (const e of catalog.maps)
+    if (!seen.has(e.rung)) seen.set(e.rung, e);
+  rungs = [...seen.values()].sort((a, b) =>
+    (b.rung === "2m-knobs") - (a.rung === "2m-knobs")
+    || (Math.abs(b.n - 2e6) < 3e5) - (Math.abs(a.n - 2e6) < 3e5)
+    || b.ts - a.ts);
+  const sel = document.getElementById("rung");
+  sel.innerHTML = rungs.map(e =>
+    `<option value="${e.rung}">${e.rung_label} — ${e.rung} (${
+      counts[e.rung]})</option>`).join("");
+  setRung("2m-knobs");
+  (function loop() {
+    for (const p of [A, B]) if (p.dirty) { p.dirty = false; draw(p); }
+    requestAnimationFrame(loop);
+  })();
+  new ResizeObserver(() => { A.dirty = B.dirty = true; }).observe(
+    document.getElementById("main"));
+})();
+</script>
+</body></html>
