@@ -212,6 +212,16 @@ def param_rows(a: dict) -> list[tuple[str, str]]:
     if kern == "gcauchy" and alpha is not None:
         kern = f"gcauchy α={alpha}"
     md = A_TO_MD.get(round(float(o["a"]), 4)) if "a" in o else None
+    # kernel a/b: recorded in overrides for umap-kernel arms; 0.6dev upstream
+    # runs all use min_dist=0/spread=1 -> find_ab_params = (1.9329, 0.7915)
+    # (their summaries don't record it).
+    if "a" in o and "b" in o:
+        ab = f"{float(o['a']):.4g} / {float(o['b']):.4g}"
+    elif "upstream" in a["name"]:
+        ab = "1.933 / 0.7915"
+        md = md or "0.0"
+    else:
+        ab = None
     dose = a.get("dose")
     wall = f"{a['wall_s']/60:.0f} min" if a.get("wall_s") else None
 
@@ -220,6 +230,7 @@ def param_rows(a: dict) -> list[tuple[str, str]]:
 
     return [
         ("kernel", fmt(kern)), ("min_dist", fmt(md)),
+        ("a / b", fmt(ab)),
         ("dose", fmt(f"×{dose}" if dose else None)),
         ("fneg", fmt(getd("fneg_weight"))),
         ("tanh γ", fmt(getd("neg_tanh_gamma"))),
