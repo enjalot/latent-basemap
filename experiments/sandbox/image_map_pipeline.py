@@ -306,6 +306,16 @@ DATASETS = {
                                        "pos_ratio": 0.10, "rankneg_window": 125_000,
                                        "batch_size": 16384}},
         }},
+    # MiniLM-2M capacity-probe dataset (owner 2026-08-25): completes the 4-space width
+    # table. load = the sealed R0216 (a) substrate; teacher + edges symlinked into
+    # sandbox/minilm-mix-2m/{upstream-06dev/coordinates.npy, edges-k15-fuzzy.npz} (row-aligned,
+    # 0.6dev 0.4798). Probe-only via space_capacity_probe.py minilm-mix-2m (no train arms).
+    "minilm-mix-2m": {
+        "load": lambda: np.load(
+            "/data/latent-basemap/runs/round-0216/queue-correction-3/artifacts/"
+            "minilm-mixed-2m-substrate-and-exact-k15-graph-v1/substrate.f32.npy",
+            mmap_mode="r"),
+        "subsets": None},
     # P3 curation validation loop (owner 2026-08-25): (b) curated + (c) random 2M
     # substrates (built by p3_build_and_scorecard.py from the same f32 shards as (a),
     # mix 40/25/25/10 — precision constant across the triple). Trained with the SAME
