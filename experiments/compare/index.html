@@ -471,7 +471,7 @@ function renderTableWindow() {
     const isImg = A.entry && A.entry.content === "image";
     row.innerHTML = `<span class="idx">#${id}</span>` + (c
       ? (isImg && c.thumb
-          ? `<img loading="lazy" src="${c.thumb}"><span class="txt">${
+          ? `<img loading="lazy" src="${API}${c.thumb}"><span class="txt">${
               esc(c.text || "")}</span>`
           : `<span class="txt">${esc(c.text || "(empty)")}</span>`)
       : `<span class="txt" style="color:var(--dim)">…</span>`);
