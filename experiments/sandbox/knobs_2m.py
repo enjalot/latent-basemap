@@ -368,6 +368,16 @@ ARMS: dict[str, dict] = {
     "umap-md000-x4bs16k-winner-rank25": _umap(
         "000", dose=4, fneg_weight=1.0, neg_tanh_gamma=4.0, pos_ratio=0.10,
         rankneg_window=1_562_500, batch_size=16384),
+    # P1 int8-residency parity (owner 2026-08-25): the champion-bs16k winner
+    # (0.4646 ref) with the ONLY change being x_residency=host_int8 — the
+    # 30M-viable data path. Question: does the full champion stack INCLUDING
+    # rankneg run + hold quality on int8 residency? rankneg is SAFE here — the
+    # int8 path uses DeviceEdgeSampler (configure_rank_negatives present), so it
+    # RUNS, not the night17 fp16-HostStream refusal. receipt_diff allows the
+    # x_residency departure (it is in the arm's knobs). Parity band 0.4646 +-0.005.
+    "umap-md000-x4bs16k-winner-hostint8": _umap(
+        "000", dose=4, fneg_weight=1.0, neg_tanh_gamma=4.0, pos_ratio=0.10,
+        rankneg_window=500_000, batch_size=16384, x_residency="host_int8"),
     "umap-md000-x8-winner-h1024": _umap(
         "000", dose=8, fneg_weight=1.0, neg_tanh_gamma=4.0, pos_ratio=0.10,
         rankneg_window=500_000, hidden_dim=1024),
