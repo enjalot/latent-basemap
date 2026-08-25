@@ -215,7 +215,26 @@ DATASETS = {
     "jina-en-2m": {"load": _jina_en_load, "subsets": _jina_en_subsets},
     "jina-multi-2m": {"load": _jina_multi_load, "subsets": _jina_multi_subsets,
                       "arms": {**ARMS, "champion-bs16k": _CHAMPION_500K,
-                               "champion-bs16k-norank": _CHAMPION_NORANK}},
+                               "champion-bs16k-norank": _CHAMPION_NORANK,
+                               # #2 dose-vs-width decomposition (external review 2026-08-25);
+                               # champion-identical except one lever, rank25=500K. Baseline 0.6426.
+                               "champion-x8-h2048": {"md": "000", "dose": 8,       # exposure lever
+                                   "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                             "pos_ratio": 0.10, "rankneg_window": 500_000,
+                                             "batch_size": 16384}},
+                               "champion-x4-h3072": {"md": "000", "dose": 4,       # capacity lever
+                                   "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                             "pos_ratio": 0.10, "rankneg_window": 500_000,
+                                             "batch_size": 16384, "hidden_dim": 3072}},
+                               "champion-x8-h3072": {"md": "000", "dose": 8,       # escalation: both levers
+                                   "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                             "pos_ratio": 0.10, "rankneg_window": 500_000,
+                                             "batch_size": 16384, "hidden_dim": 3072}},
+                               "champion-x8-h4096": {"md": "000", "dose": 8,       # escalation: h3072 capacity-limited
+                                   "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                             "pos_ratio": 0.10, "rankneg_window": 500_000,
+                                             "batch_size": 16384, "hidden_dim": 4096,
+                                             "gpu_resident_vram_budget_gb": 22.0}}}},
     "reddit-2m": {"load": _reddit_load, "subsets": None},
     "communityarchive-2m": {"load": _ca_load, "subsets": None},
     "minilm-redditmix-2m": {"load": _redditmix_load,

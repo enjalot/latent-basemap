@@ -356,6 +356,12 @@ ARMS: dict[str, dict] = {
     "umap-md000-x4bs16k-winner": _umap(
         "000", dose=4, fneg_weight=1.0, neg_tanh_gamma=4.0, pos_ratio=0.10,
         rankneg_window=500_000, batch_size=16384),
+    # #2 dose-vs-width decomposition (external review 2026-08-25): TRUE dose-x8 (exposure
+    # lever) on the tuned MiniLM space — champion-bs16k with dose_multiplier 8 (2x the winner's
+    # x4, ~21.7 draws/edge at bs16k), rankneg 500K (25% of 2M), h2048. Baseline to beat: 0.4646.
+    "umap-md000-x8bs16k-winner": _umap(
+        "000", dose=8, fneg_weight=1.0, neg_tanh_gamma=4.0, pos_ratio=0.10,
+        rankneg_window=500_000, batch_size=16384),
     # rankneg-at-scale diagnostic (owner 2026-08-24): champion-bs16k MINUS
     # rankneg, for the 6250k rung — did the fixed 500K window (25% of 2M but
     # only 8% of 6.25M) cause the scaling regression (0.4145 vs 0.4343)?
