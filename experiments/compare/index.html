@@ -69,11 +69,11 @@
   <label>rung <select id="rung"></select></label>
   <button id="swap" title="swap A and B">A &#8646; B</button>
   <label>pick <select id="pick">
-    <option value="tile">tile</option>
     <option value="circle">circle</option>
+    <option value="tile">tile</option>
   </select></label>
   <input type="range" id="pickr" min="8" max="90" value="28"
-    style="width:70px; display:none" title="circle radius">
+    style="width:70px" title="circle radius">
   <button id="clearsel2" style="background:var(--panel);
     border:1px solid var(--edge); color:var(--fg); border-radius:6px;
     padding:4px 10px; cursor:pointer">clear sel</button>
@@ -112,7 +112,7 @@ const API = location.origin.replace(":8800", ":8801");
 const TILE = 30;               // screen px tile for click-selection
 let catalog = null, rungs = [], state = {
   rung: null, sel: { ids: null, from: null, shape: null }, gain: 0.6,
-  view: "heat", pick: "tile", pickR: 28,
+  view: "heat", pick: "circle", pickR: 28,
 };
 
 // float16 -> float32 lookup (spread bins are f16)
@@ -351,7 +351,7 @@ function draw(p) {
   gl.bindTexture(gl.TEXTURE_2D, R.tex);
   gl.uniform1i(gl.getUniformLocation(R.pHeat, "uD"), 0);
   gl.uniform1f(gl.getUniformLocation(R.pHeat, "uG"),
-    state.gain - Math.log(Math.max(1, v.z * v.z)));
+    state.gain + Math.min(0.5 * Math.log(Math.max(1, v.z * v.z)), 3.0));
   gl.uniform1f(gl.getUniformLocation(R.pHeat, "uInv"),
     1.0 / R.accum.scale);
   gl.uniform1f(gl.getUniformLocation(R.pHeat, "uMode"),
@@ -370,11 +370,13 @@ function draw(p) {
     gl.bindVertexArray(vao);
     gl.drawElements(gl.POINTS, count, gl.UNSIGNED_INT, 0);
   };
+  const zBoost = Math.min(2.2, Math.max(1, Math.pow(v.z, 0.35)));
   if (R.nSel)
-    overlayPass(R.vaoSel, R.nSel, Math.max(2.5, pt * 1.35), [1, .36, .23, .9]);
+    overlayPass(R.vaoSel, R.nSel, Math.max(2.5, pt * 1.35),
+      [1, .36, .23, Math.min(.85, .38 * zBoost)]);
   if (R.nHover)
     overlayPass(R.vaoHover, R.nHover, Math.max(2, pt * 1.2),
-      [1, .85, .25, .8]);
+      [1, .85, .25, Math.min(.75, .30 * zBoost)]);
   gl.bindVertexArray(null);
 }
 
