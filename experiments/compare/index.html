@@ -61,15 +61,8 @@
   #swap { background:var(--panel); border:1px solid var(--edge);
     color:var(--fg); border-radius:6px; padding:4px 10px; cursor:pointer; }
   #swap:hover { border-color:var(--acc); }
-  #legend input[type=range]::-webkit-slider-thumb {
-    -webkit-appearance:none; appearance:none; pointer-events:auto;
-    width:12px; height:22px; border-radius:4px; background:#e8edf5;
-    border:1px solid #0e1116; cursor:ew-resize; }
-  #legend input[type=range]::-moz-range-thumb {
-    pointer-events:auto; width:12px; height:22px; border-radius:4px;
-    background:#e8edf5; border:1px solid #0e1116; cursor:ew-resize; }
-  #legend input[type=range]::-webkit-slider-runnable-track { background:none; }
-  #legend input[type=range]::-moz-range-track { background:none; }
+  #brushsvg .selection { stroke:#e8edf5; fill:#fff; fill-opacity:.18; }
+  #brushsvg .handle { fill:#e8edf5; }
 </style></head><body>
 <header>
   <h1>basemap compare</h1>
@@ -83,21 +76,10 @@
   </select></label>
   <span id="legend" style="display:none; align-items:center; gap:6px">
     <span class="hint">compacted</span>
-    <span style="position:relative; width:170px; height:26px">
-      <span style="position:absolute; left:0; right:0; top:9px; height:8px;
-        border-radius:4px; background:linear-gradient(90deg,
-        #408cff 0%, #6b7380 50%, #ff8c26 100%)"></span>
-      <input type="range" id="fmin" min="-3" max="3" step="0.1" value="-3"
-        style="position:absolute; inset:0; width:100%; margin:0;
-        background:none; pointer-events:none; -webkit-appearance:none;
-        appearance:none">
-      <input type="range" id="fmax" min="-3" max="3" step="0.1" value="3"
-        style="position:absolute; inset:0; width:100%; margin:0;
-        background:none; pointer-events:none; -webkit-appearance:none;
-        appearance:none">
-    </span>
+    <svg id="brushsvg" width="210" height="26"></svg>
     <span class="hint">spread</span>
-    <span id="frange" class="hint" style="min-width:86px"></span>
+    <span id="frange" class="hint" style="min-width:80px"></span>
+    <span id="fcount" style="color:var(--acc); min-width:90px"></span>
   </span>
   <span id="spreadinfo" class="hint" style="color:var(--acc)"></span>
   <span class="hint">click a tile on either map &rarr; its points light up on
@@ -114,6 +96,7 @@
     <div id="tbody"><div id="tspacer"></div></div>
   </div>
 </div>
+<script src="d3.v7.min.js"></script>
 <script>
 "use strict";
 const API = location.origin.replace(":8800", ":8801");
@@ -568,6 +551,7 @@ function computePairSpread() {
   A.scoreSign = -1; B.scoreSign = 1;
   A.scoresRaw = sA; B.scoresRaw = sB;
   setScores(A, sA); setScores(B, sB);
+  updateCount();
   info.textContent = `B vs A: median ${med >= 0 ? "+" : ""}${
     med.toFixed(2)} oct · ${(100 * nComp / n).toFixed(1)}% compacted >2× · ${
     (100 * nSpread / n).toFixed(1)}% spread >2×`;
@@ -650,24 +634,47 @@ document.getElementById("view").onchange = e => {
     state.view === "spread" ? "inline-flex" : "none";
   A.dirty = B.dirty = true; pushHash();
 };
-function updateFilter() {
-  let lo = +document.getElementById("fmin").value,
-      hi = +document.getElementById("fmax").value;
-  if (lo > hi) [lo, hi] = [hi, lo];
+state.fmin = -3; state.fmax = 3;
+const BW = 210, BSCALE = d3.scaleLinear().domain([-3, 3]).range([0, BW]);
+let countPending = false;
+function updateCount() {
+  const el = document.getElementById("fcount");
+  if (!B.scoresRaw) { el.textContent = ""; return; }
+  if (countPending) return;
+  countPending = true;
+  requestAnimationFrame(() => {
+    countPending = false;
+    const s = B.scoresRaw, lo = state.fmin / 3, hi = state.fmax / 3;
+    let c = 0;
+    for (let i = 0; i < s.length; i++)
+      if (s[i] >= lo && s[i] <= hi) c++;
+    el.textContent = `${c.toLocaleString()} pts`;
+  });
+}
+function applyFilterRange(lo, hi) {
   state.fmin = lo; state.fmax = hi;
   document.getElementById("frange").textContent =
-    (lo > -3 || hi < 3) ? `${lo.toFixed(1)} … ${hi.toFixed(1)} oct` : "all";
+    (lo > -2.999 || hi < 2.999)
+      ? `${lo.toFixed(1)} … ${hi.toFixed(1)} oct` : "all";
+  updateCount();
   A.dirty = B.dirty = true;
 }
-document.getElementById("fmin").oninput = updateFilter;
-document.getElementById("fmax").oninput = updateFilter;
-for (const id of ["fmin", "fmax"])
-  document.getElementById(id).ondblclick = () => {
-    document.getElementById("fmin").value = -3;
-    document.getElementById("fmax").value = 3;
-    updateFilter();
-  };
-state.fmin = -3; state.fmax = 3;
+{
+  const svg = d3.select("#brushsvg");
+  const grad = svg.append("defs").append("linearGradient").attr("id", "lg");
+  for (const [o, c] of [[0, "#408cff"], [.5, "#6b7380"], [1, "#ff8c26"]])
+    grad.append("stop").attr("offset", o).attr("stop-color", c);
+  svg.append("rect").attr("x", 0).attr("y", 9).attr("width", BW)
+    .attr("height", 8).attr("rx", 4).attr("fill", "url(#lg)");
+  const brush = d3.brushX().extent([[0, 3], [BW, 23]])
+    .on("brush end", ev => {
+      if (!ev.selection) applyFilterRange(-3, 3);
+      else applyFilterRange(BSCALE.invert(ev.selection[0]),
+                            BSCALE.invert(ev.selection[1]));
+    });
+  const g = svg.append("g").call(brush);
+  g.on("dblclick", () => g.call(brush.move, null));
+}
 document.getElementById("swap").onclick = () => {
   const ea = A.entry, eb = B.entry;
   if (ea && eb) { selectMap(A, eb.arm); selectMap(B, ea.arm); }
