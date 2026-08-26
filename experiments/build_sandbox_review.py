@@ -130,6 +130,11 @@ A_TO_MD = {1.9328: "0.0", 1.8404: "0.025", 1.7502: "0.05", 1.5769: "0.1",
 
 PROMOTED_HINT = ("fneg10",)
 
+#: map-health sidecar (fog/collapse) written by compare/export_map_health.py
+_HEALTH_FILE = SANDBOX / "map-health.json"
+HEALTH: dict = (json.loads(_HEALTH_FILE.read_text())
+                if _HEALTH_FILE.exists() else {})
+
 
 def group_of(rung_dir: str, name: str) -> str:
     if rung_dir in DATASET_GROUPS:
@@ -266,6 +271,11 @@ def main() -> int:
         g = group_of(a["rung_dir"], a["name"])
         audit.setdefault(g, []).append(a["id"])
         ffr = f"{a['ffr']:.4f}" if a["ffr"] is not None else "—"
+        h = HEALTH.get(a["id"], {})
+        health_bits = ""
+        if h:
+            health_bits = (f" · fog <b>{h['fog']:.3f}</b>"
+                           f" · collapse <b>{h['collapse_sqrt_n']:.2f}</b>")
         when = datetime.datetime.fromtimestamp(a["ts"], tz=ET).strftime(
             "%b %d %I:%M %p ET")
         img_tags = "".join(
@@ -290,7 +300,7 @@ def main() -> int:
       <span class="rung">{a['rung']}</span>
       <span class="meta">{html.escape(a['model'])} · {html.escape(a['corpus'])}</span>{badge}
       <button class="star" title="shortlist">☆</button></div>
-    <div class="when">{when} · quick-FFR <b>{ffr}</b></div>
+    <div class="when">{when} · quick-FFR <b>{ffr}</b>{health_bits}</div>
     <div class="params">{params}</div>
     <textarea class="note" placeholder="notes…"></textarea>
   </figcaption>

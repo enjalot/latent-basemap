@@ -68,6 +68,11 @@
   <button id="swap" title="swap A and B">A &#8646; B</button>
   <span class="slider">heat <input type="range" id="gain" min="-2" max="4"
         step="0.1" value="0.6" style="width:90px"></span>
+  <label>view <select id="view">
+    <option value="heat">heatmap</option>
+    <option value="spread">spread vs other</option>
+  </select></label>
+  <span id="spreadinfo" class="hint" style="color:var(--acc)"></span>
   <span class="hint">click a tile on either map &rarr; its points light up on
     the other + list on the right &middot; drag pan &middot; wheel zoom
     &middot; dbl-click reset</span>
@@ -88,7 +93,22 @@ const API = location.origin.replace(":8800", ":8801");
 const TILE = 30;               // screen px tile for click-selection
 let catalog = null, rungs = [], state = {
   rung: null, sel: { ids: null, from: null, rect: null }, gain: 0.6,
+  view: "heat",
 };
+
+// float16 -> float32 lookup (spread bins are f16)
+const F16 = (() => {
+  const t = new Float32Array(65536), b = new ArrayBuffer(4),
+        u = new Uint32Array(b), f = new Float32Array(b);
+  for (let h = 0; h < 65536; h++) {
+    const s = (h & 0x8000) << 16, e = (h & 0x7c00) >> 10, m = h & 0x3ff;
+    if (e === 0) u[0] = s | 0;                       // subnormals ~ 0
+    else if (e === 31) u[0] = s | 0x7f800000 | (m << 13);
+    else u[0] = s | ((e + 112) << 23) | (m << 13);
+    t[h] = f[0];
+  }
+  return t;
+})();
 
 /* ---------------- map panel ---------------- */
 function makePanel(colId, key) {
@@ -134,14 +154,15 @@ function prog(gl, vs, fs) {
 }
 const VS = `#version 300 es
 layout(location=0) in vec2 pos;
-uniform vec2 uS, uT; uniform float uPt;
-void main(){ gl_Position=vec4(pos*uS+uT,0.,1.); gl_PointSize=uPt; }`;
+layout(location=1) in float sc;
+uniform vec2 uS, uT; uniform float uPt; out float vSc;
+void main(){ vSc=sc; gl_Position=vec4(pos*uS+uT,0.,1.); gl_PointSize=uPt; }`;
 const FS_DOT = `#version 300 es
-precision highp float; uniform float uAdd; out vec4 o;
+precision highp float; uniform float uAdd; in float vSc; out vec4 o;
 void main(){ vec2 d=gl_PointCoord-.5; if(dot(d,d)>.25) discard;
-  o=vec4(uAdd,0.,0.,uAdd); }`;
+  o=vec4(uAdd, uAdd*vSc, 0., uAdd); }`;
 const FS_HEAT = `#version 300 es
-precision highp float; uniform sampler2D uD; uniform float uG, uInv;
+precision highp float; uniform sampler2D uD; uniform float uG, uInv, uMode;
 in vec2 vUV; out vec4 o;
 vec3 ramp(float t){
   const vec3 c0=vec3(.050,.063,.086), c1=vec3(.13,.22,.42),
@@ -150,8 +171,15 @@ vec3 ramp(float t){
   float x=t*5.; vec3 c=mix(c0,c1,clamp(x,0.,1.));
   c=mix(c,c2,clamp(x-1.,0.,1.)); c=mix(c,c3,clamp(x-2.,0.,1.));
   c=mix(c,c4,clamp(x-3.,0.,1.)); return mix(c,c5,clamp(x-4.,0.,1.)); }
+vec3 divg(float t){  // t in [-1,1]: blue = compacted, orange = spread
+  vec3 cold=vec3(.25,.55,1.), mid=vec3(.42,.45,.50), warm=vec3(1.,.55,.15);
+  return t<0. ? mix(mid,cold,-t) : mix(mid,warm,t); }
 void main(){ float d=texture(uD,vUV).r*uInv;
-  float v=log(1.+d*exp(uG))/7.0; o=vec4(ramp(clamp(v,0.,1.)),1.); }`;
+  float v=log(1.+d*exp(uG))/7.0; v=clamp(v,0.,1.);
+  if(uMode<0.5){ o=vec4(ramp(v),1.); }
+  else {
+    float m=texture(uD,vUV).g/max(texture(uD,vUV).r,1e-9);
+    o=vec4(divg(clamp(m,-1.,1.))*max(v,.04)*1.6, 1.); } }`;
 const VS_Q = `#version 300 es
 layout(location=0) in vec2 q; out vec2 vUV;
 void main(){ vUV=q*.5+.5; gl_Position=vec4(q,0.,1.); }`;
@@ -162,11 +190,12 @@ void main(){ vec2 d=gl_PointCoord-.5; float r=dot(d,d);
 
 function pickAccumFormat(gl) {
   // float accumulation preferred; fall back for software GL / mobile
+  // two channels: r = density count, g = sum of per-point spread score
   if (gl.getExtension("EXT_color_buffer_float"))
-    return { fmt: gl.R32F, scale: 1.0 };
+    return { fmt: gl.RG32F, scale: 1.0, spread: true };
   if (gl.getExtension("EXT_color_buffer_half_float"))
-    return { fmt: gl.R16F, scale: 1.0 };
-  return { fmt: gl.RGBA8, scale: 1 / 255 };  // density counts in .r * 255
+    return { fmt: gl.RG16F, scale: 1.0, spread: true };
+  return { fmt: gl.RGBA8, scale: 1 / 255, spread: false };  // density counts in .r * 255
 }
 function makeRenderer(gl) {
   const accum = pickAccumFormat(gl);
@@ -202,6 +231,26 @@ function setPoints(p, i16, n) {
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, R.iboSel);
     gl.bindVertexArray(null);
   }
+}
+function setScores(p, f32OrNull) {
+  const { gl, R } = p;
+  R.hasScores = !!f32OrNull;
+  if (f32OrNull) {
+    if (!R.vboScore) R.vboScore = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, R.vboScore);
+    gl.bufferData(gl.ARRAY_BUFFER, f32OrNull, gl.DYNAMIC_DRAW);
+    gl.bindVertexArray(R.vaoPts);
+    gl.bindBuffer(gl.ARRAY_BUFFER, R.vboScore);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
+  } else {
+    gl.bindVertexArray(R.vaoPts);
+    gl.disableVertexAttribArray(1);
+    gl.vertexAttrib1f(1, 0);
+    gl.bindVertexArray(null);
+  }
+  p.dirty = true;
 }
 function setSelection(p, ids) {
   const { gl, R } = p;
@@ -262,6 +311,8 @@ function draw(p) {
     state.gain - Math.log(Math.max(1, v.z * v.z)));
   gl.uniform1f(gl.getUniformLocation(R.pHeat, "uInv"),
     1.0 / R.accum.scale);
+  gl.uniform1f(gl.getUniformLocation(R.pHeat, "uMode"),
+    (state.view === "spread" && R.hasScores && R.accum.spread) ? 1 : 0);
   gl.bindVertexArray(R.vaoQuad);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   // pass 3: selected points
@@ -433,8 +484,44 @@ async function selectMap(p, arm) {
   p.coords = new Int16Array(buf);
   p.n = e.n;
   setPoints(p, p.coords, e.n);
+  p.spread = null;
+  try {
+    const sb = await fetch(e.bin.replace(/\.bin$/, ".spread.bin"));
+    if (sb.ok) p.spread = new Uint16Array(await sb.arrayBuffer());
+  } catch {}
+  computePairSpread();
   if (state.sel.ids) setSelection(p, state.sel.ids);
   p.dirty = true;
+}
+
+function computePairSpread() {
+  const ok = A.spread && B.spread && A.entry && B.entry
+    && A.entry.rung === B.entry.rung && A.n === B.n;
+  const info = document.getElementById("spreadinfo");
+  if (!ok) {
+    setScores(A, null); setScores(B, null);
+    info.textContent = state.view === "spread" ? "spread n/a for pair" : "";
+    return;
+  }
+  const n = A.n, sB = new Float32Array(n), sA = new Float32Array(n);
+  let nComp = 0, nSpread = 0;
+  const samp = [];
+  for (let i = 0; i < n; i++) {
+    const qa = F16[A.spread[i]], qb = F16[B.spread[i]];
+    let v = 0;
+    if (qa > 1e-7 && qb > 1e-7 && isFinite(qa) && isFinite(qb))
+      v = Math.log2(qb / qa);
+    if (v <= -1) nComp++; else if (v >= 1) nSpread++;
+    if ((i & 1023) === 0) samp.push(v);
+    const c = Math.max(-1, Math.min(1, v / 3));
+    sB[i] = c; sA[i] = -c;
+  }
+  samp.sort((x, y) => x - y);
+  const med = samp[samp.length >> 1] || 0;
+  setScores(A, sA); setScores(B, sB);
+  info.textContent = `B vs A: median ${med >= 0 ? "+" : ""}${
+    med.toFixed(2)} oct · ${(100 * nComp / n).toFixed(1)}% compacted >2× · ${
+    (100 * nSpread / n).toFixed(1)}% spread >2×`;
 }
 
 /* ---------------- virtualized table ---------------- */
@@ -507,6 +594,10 @@ document.getElementById("clearsel").onclick = () => {
 const A = makePanel("colA", "A"), B = makePanel("colB", "B");
 document.getElementById("gain").oninput = e => {
   state.gain = +e.target.value; A.dirty = B.dirty = true;
+};
+document.getElementById("view").onchange = e => {
+  state.view = e.target.value; computePairSpread();
+  A.dirty = B.dirty = true;
 };
 document.getElementById("swap").onclick = () => {
   const ea = A.entry, eb = B.entry;
