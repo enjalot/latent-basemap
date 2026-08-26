@@ -47,8 +47,31 @@ RUNG_META = {
 #: rungs whose content is images (table shows thumbnails, not text)
 IMAGE_RUNGS = {"bl-siglip-1m", "sisap-clip-2m", "sisap-clip-2m-dedup"}
 
+#: bump to force re-export of all bins (e.g. alignment changes)
+EXPORT_VERSION = 2  # v2: procrustes-align arms to the rung's md000 upstream
 
-def export_arm(rung: str, arm_dir: Path) -> dict | None:
+
+def rung_reference(rung_dir: Path) -> Path | None:
+    """The md000 0.6dev upstream arm of a rung (alignment reference)."""
+    for name in ("upstream-06dev", "upstream-06dev-2m"):
+        d = rung_dir / name / "coordinates.npy"
+        if d.exists():
+            return d
+    return None
+
+
+def procrustes(xy: np.ndarray, ref: np.ndarray) -> np.ndarray:
+    """Similarity-align xy onto ref (rotation+reflection+scale, all rows)."""
+    mx, mr = xy.mean(axis=0), ref.mean(axis=0)
+    Xc, Rc = xy - mx, ref - mr
+    u, s, vt = np.linalg.svd(Xc.T @ Rc)
+    rot = u @ vt
+    scale = s.sum() / max((Xc ** 2).sum(), 1e-12)
+    return scale * (Xc @ rot) + mr
+
+
+def export_arm(rung: str, arm_dir: Path,
+               ref: np.ndarray | None) -> dict | None:
     cf = arm_dir / "coordinates.npy"
     sf = arm_dir / "summary.json"
     if not cf.exists() or not sf.exists():
@@ -59,17 +82,25 @@ def export_arm(rung: str, arm_dir: Path) -> dict | None:
     bin_path = DATA / rung / f"{arm_dir.name}.bin"
     bin_path.parent.mkdir(parents=True, exist_ok=True)
 
-    xy = np.load(cf, mmap_mode="r")
+    xy = np.asarray(np.load(cf, mmap_mode="r"), dtype=np.float64)
     n = int(xy.shape[0])
+    aligned = False
+    if ref is not None and ref.shape[0] == n:
+        xy = procrustes(xy, ref)
+        aligned = True
+    ver = bin_path.with_suffix(".v")
     stale = (not bin_path.exists()
-             or bin_path.stat().st_mtime < cf.stat().st_mtime)
+             or bin_path.stat().st_mtime < cf.stat().st_mtime
+             or not ver.exists()
+             or ver.read_text() != f"{EXPORT_VERSION}:{int(aligned)}")
     lo = np.percentile(xy, 0.1, axis=0).astype(np.float64)
     hi = np.percentile(xy, 99.9, axis=0).astype(np.float64)
     span = np.maximum(hi - lo, 1e-9)
     if stale:
-        q = (np.asarray(xy, dtype=np.float64) - lo) / span
+        q = (xy - lo) / span
         q = np.clip(q, 0.0, 1.0) * 65535.0 - 32768.0
         q.astype("<i2").tofile(bin_path)
+        ver.write_text(f"{EXPORT_VERSION}:{int(aligned)}")
 
     ts = None
     if s.get("started_utc"):
@@ -92,6 +123,7 @@ def export_arm(rung: str, arm_dir: Path) -> dict | None:
         "upstream": "upstream" in arm_dir.name,
         "rung_label": label, "model": model, "corpus": corpus,
         "content": "image" if rung in IMAGE_RUNGS else "text",
+        "aligned": aligned,
         "overrides": s.get("overrides") or {},
         "dose": s.get("dose_multiplier"),
     }
@@ -103,11 +135,17 @@ def main() -> int:
     for rung_dir in sorted(SANDBOX.iterdir()):
         if not rung_dir.is_dir() or rung_dir.name in ("logs", "distill-grid"):
             continue
+        ref_path = rung_reference(rung_dir)
+        ref = None
+        if ref_path is not None:
+            r = np.load(ref_path, mmap_mode="r")
+            if r.ndim == 2 and r.shape[1] == 2:
+                ref = np.asarray(r, dtype=np.float64)
         for arm_dir in sorted(rung_dir.iterdir()):
             if not arm_dir.is_dir():
                 continue
             try:
-                e = export_arm(rung_dir.name, arm_dir)
+                e = export_arm(rung_dir.name, arm_dir, ref)
             except Exception as ex:  # never let one arm kill the export
                 print(f"SKIP {rung_dir.name}/{arm_dir.name}: {ex}")
                 continue
