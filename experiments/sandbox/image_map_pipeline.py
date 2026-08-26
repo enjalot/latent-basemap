@@ -397,6 +397,25 @@ DATASETS = {
             "/data/latent-basemap/substrates/ca-jina-250k/substrate.f16.npy",
             mmap_mode="r"), dtype=np.float32),
         "subsets": None},
+    # ---- #5 mixture sweep (owner 2026-08-26): 6 social-mix 1M substrates (rmix=reddit-only,
+    # bmix=balanced reddit/CA/twitter/bluesky; share 10/20/30%). champion-bs16k = dose4, rankneg
+    # 250K (25% of 1M). 0% baseline reuses minilm-mix-1m/rankfrac-25. Scored on the broad probe suite.
+    **{ds: {"load": (lambda p=f"/data/latent-basemap/substrates/{ds}/substrate.f32.npy":
+                     np.load(p, mmap_mode="r")),
+            "subsets": None,
+            "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+                                        "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                                  "pos_ratio": 0.10, "rankneg_window": 250_000,
+                                                  "batch_size": 16384}}}}
+       for ds in ("minilm-rmix10-1m", "minilm-rmix20-1m", "minilm-rmix30-1m",
+                  "minilm-bmix10-1m", "minilm-bmix20-1m", "minilm-bmix30-1m")},
+    # ---- #5 broad probe-register suite (heldout, disjoint from sweep training). Probe-only (no arms);
+    # the orchestrator builds each register's knn+fuzzy truth graph, frozen before any sweep train seals.
+    **{ds: {"load": (lambda p=f"/data/latent-basemap/substrates/{ds}/substrate.f32.npy":
+                     np.load(p, mmap_mode="r")),
+            "subsets": None}
+       for ds in ("probe-reddit", "probe-ca", "probe-twitter", "probe-bluesky",
+                  "probe-wiki", "probe-ccweb", "probe-ccscience", "probe-code")},
 }
 
 # capacity-curve calibration (owner 2026-08-24, DEFERRED-to-LAST 2026-08-25): IDENTICAL to
