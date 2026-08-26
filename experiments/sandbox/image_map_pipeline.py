@@ -449,6 +449,13 @@ DATASETS = {
             "subsets": None}
        for ds in ("probe-reddit", "probe-ca", "probe-twitter", "probe-bluesky",
                   "probe-wiki", "probe-ccweb", "probe-ccscience", "probe-code")},
+    # Phase A1 cross-scale audit: one frozen common sample (250K of the 2M pool). Probe-only;
+    # the orchestrator builds its knn+fuzzy truth, then a1_audit.py scores every MiniLM head on it.
+    "a1-common": {
+        "load": lambda: np.load(
+            "/data/latent-basemap/substrates/a1-common/substrate.f32.npy",
+            mmap_mode="r"),
+        "subsets": None},
 }
 
 # capacity-curve calibration (owner 2026-08-24, DEFERRED-to-LAST 2026-08-25): IDENTICAL to
