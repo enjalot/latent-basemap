@@ -480,6 +480,7 @@ async function selectMap(p, arm) {
     `n ${(e.n / 1e6).toFixed(2)}M`, e.date_et,
   ].filter(Boolean);
   p.meta.innerHTML = bits.join(" · ");
+  pushHash();
   const buf = await fetch(e.bin).then(r => r.arrayBuffer());
   p.coords = new Int16Array(buf);
   p.n = e.n;
@@ -597,7 +598,7 @@ document.getElementById("gain").oninput = e => {
 };
 document.getElementById("view").onchange = e => {
   state.view = e.target.value; computePairSpread();
-  A.dirty = B.dirty = true;
+  A.dirty = B.dirty = true; pushHash();
 };
 document.getElementById("swap").onclick = () => {
   const ea = A.entry, eb = B.entry;
@@ -617,6 +618,20 @@ function setRung(rung) {
   if (recent) selectMap(B, recent.arm);
   applySelection();
 }
+function hashState() {
+  const h = new URLSearchParams(location.hash.slice(1));
+  return { rung: h.get("rung"), a: h.get("a"), b: h.get("b"),
+           view: h.get("view") };
+}
+function pushHash() {
+  const h = new URLSearchParams();
+  if (state.rung) h.set("rung", state.rung);
+  if (A.entry) h.set("a", A.entry.arm);
+  if (B.entry) h.set("b", B.entry.arm);
+  if (state.view !== "heat") h.set("view", state.view);
+  history.replaceState(null, "", "#" + h.toString());
+}
+
 (async function init() {
   catalog = await fetch("data/catalog.json").then(r => r.json());
   const counts = {};
@@ -633,7 +648,14 @@ function setRung(rung) {
   sel.innerHTML = rungs.map(e =>
     `<option value="${e.rung}">${e.rung_label} — ${e.rung} (${
       counts[e.rung]})</option>`).join("");
-  setRung("2m-knobs");
+  const hs = hashState();
+  if (hs.view) {
+    state.view = hs.view;
+    document.getElementById("view").value = hs.view;
+  }
+  setRung(hs.rung && counts[hs.rung] ? hs.rung : "2m-knobs");
+  if (hs.a) selectMap(A, hs.a);
+  if (hs.b) selectMap(B, hs.b);
   (function loop() {
     for (const p of [A, B]) if (p.dirty) { p.dirty = false; draw(p); }
     requestAnimationFrame(loop);
