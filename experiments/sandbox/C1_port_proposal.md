@@ -4,11 +4,14 @@
 re-imports `core.py` / `edge_list_dataset.py`; applying any of these diffs now would break
 production trains. See §6 for the safe apply-window.
 
-**Scope:** Port round0034's fast input machinery (two pinned host slots, background fill,
-combined endpoint gather, cached binary labels, fused forward) into the generic
+**Scope:** Port round0034's fast input machinery — two pinned host slots + combined endpoint gather,
+cached binary labels, fused forward (M1/M3/M5/M6) — into the generic
 `HostInt8ArrayDataset` + `DeviceEdgeSampler` resident path, **default-off**, with rankneg
 (`configure_rank_negatives` / `set_rank_order`) preserved; plus a `sealed_int8_path` knob so a
-pre-sealed int8 substrate is consumed without re-encode and without re-normalize.
+pre-sealed int8 substrate is consumed without re-encode and without re-normalize. **Cut 1 deliberately
+excludes round0034's background producer thread (M4)** — it is a stale-feature correctness hazard on
+the generic rankneg path and is deferred to a follow-on (see §2a). Cut 1 also **never pins the full
+int8 matrix**, so it holds at 30M where a full-matrix pin would hit the memlock ceiling.
 
 **Files that would change (do NOT edit until §6 window):**
 `basemap/pumap/parametric_umap/datasets/edge_list_dataset.py`,
@@ -65,18 +68,33 @@ takes the two-forward branch.
 ## 2. The port diffs (default-off; rankneg preserved)
 
 **Design:** one new opt-in constructor flag `host_int8_fast_input` (default `False`). When off, every
-path is byte-identical. When on **and** `x_residency="host_int8"`, `HostInt8ArrayDataset` grows M1–M4
-(pinned slots + combined `gather_pairs` + optional producer thread) and `DeviceEdgeSampler` uses the
-combined gather + cached labels (M5) + sets `fused_endpoint_forward` (M6). **The negative draw —
+path is byte-identical. When on **and** `x_residency="host_int8"`, `HostInt8ArrayDataset` grows the two
+pinned slots + a synchronous combined `gather_pairs` (M1/M3) and keeps the codes as plain numpy (no
+full-matrix pin), and `DeviceEdgeSampler` uses the combined gather + cached labels (M5) + sets
+`fused_endpoint_forward` (M6). **The negative draw —
 including rankneg `_sample_negatives` / `_rank_window_dst` — is unchanged**; only the *feature
 transport given the already-drawn indices* changes. That is why `configure_rank_negatives` /
 `set_rank_order` remain fully functional (proof in §2c).
 
-An env kill-switch `PUMAP_HOST_INT8_PREFETCH=0` disables just the producer thread (M4), leaving the
-synchronous combined gather (M1/M3/M5/M6) — a safety valve if the thread ever misbehaves on an
-unattended run.
+**Cut 1 ships M1/M3/M5/M6 only — no producer thread (M4), no full-matrix pin.** Two design decisions
+that the coordinator flagged as required:
 
-### 2a. `edge_list_dataset.py` — grow `HostInt8ArrayDataset` (add methods only; existing `index_select` untouched)
+1. **M4 (background producer thread) is DROPPED from cut 1** — it is a genuine correctness hazard as
+   naively pipelined (would pair batch *t*'s labels/rankneg draw with batch *t−1*'s features; see the
+   M4 follow-on note after §2a for why, and what a correct version requires). Cut 1 uses a
+   **synchronous** combined gather. Overlap still happens — the host-side numpy fancy-index of the
+   current batch runs on the main thread *while the GPU is still executing the previous batch's queued
+   forward/backward kernels* (ordinary async-CUDA overlap), and the two pinned slots + per-slot CUDA
+   events let each combined H2D be genuinely non-blocking without clobbering an in-flight transfer.
+   No thread, no reordering, no stale-feature risk.
+2. **`fast_input=True` NEVER pins (or materializes) the full int8 matrix** — that full-matrix pin is
+   the 30M memlock blocker (C3: ~21.5 GiB at 30M×768 > the 15.4 GiB memlock ceiling), which is exactly
+   what C1 exists to avoid. In fast mode the codes/scales stay **plain numpy** (page-cache-backed
+   memmap on the sealed path, zero-copy) and only the two `buffer_rows`-sized slots are pinned. The
+   legacy `index_select` (used only by `_refresh_rank_negatives` at epoch boundaries) falls back to a
+   pageable numpy gather — throughput-irrelevant there.
+
+### 2a. `edge_list_dataset.py` — grow `HostInt8ArrayDataset` (fast_input adds slots + combined gather; NO full-matrix pin)
 
 ```diff
 --- a/basemap/pumap/parametric_umap/datasets/edge_list_dataset.py
@@ -84,115 +102,155 @@ unattended run.
 @@ class HostInt8ArrayDataset:
      def __init__(self, X, device, *, encoded=None, scales=None,
 -                 encode_chunk=1_000_000):
-+                 encode_chunk=1_000_000, fast_input=False, buffer_rows=0):
++                 encode_chunk=1_000_000, fast_input=False):
 @@
+         encoded = np.ascontiguousarray(encoded)
+         scales = np.ascontiguousarray(scales)
+@@ (invariant checks unchanged) @@
+         self.device = device
+         self._pin = "cuda" in str(device)
+-        self._i8 = torch.from_numpy(encoded)
+-        self._scales = torch.from_numpy(scales)
+-        if self._pin:
+-            self._i8 = self._i8.pin_memory()
+-            self._scales = self._scales.pin_memory()
++        self._fast_input = bool(fast_input)
++        if self._fast_input:
++            # C1: DO NOT pin or copy the full matrix — that full-matrix pin is
++            # the 30M memlock blocker (~21.5 GiB @ 30M×768 > 15.4 GiB ceiling).
++            # Keep codes/scales as plain numpy (page-cache-backed memmap on the
++            # sealed path, zero-copy) and gather per batch into two small pinned
++            # slots. `np.ascontiguousarray` above is a NO-OP for the already
++            # C-order sealed memmap, so no 21.5 GiB copy happens here.
++            self._enc_np = encoded          # int8 (N, D), C-order (ndarray or memmap)
++            self._sc_np = scales            # fp16 (N,)
++            self._i8 = None                 # no resident full-matrix tensor
++            self._scales = None
++            self._slots = None              # two pinned slots, sized on first gather
++            self._slot_index = 0
++            self._buffer_rows = 0
++        else:
++            self._i8 = torch.from_numpy(encoded)
++            self._scales = torch.from_numpy(scales)
++            if self._pin:
++                self._i8 = self._i8.pin_memory()
++                self._scales = self._scales.pin_memory()
          self.shape = (int(encoded.shape[0]), int(encoded.shape[1]))
          self.storage_dtype = torch.int8
          self._n = int(encoded.shape[0])
-+        # ── C1 fast-input transport (opt-in; M1–M4). Default off => the class
-+        #    behaves exactly as before (only index_select is used). ───────────
-+        self._fast_input = bool(fast_input)
-+        self._slots = None
-+        self._slot_index = 0
-+        self._producer = None
-+        self._pending = None            # (slot_index, count) filled by producer
-+        import os as _os
-+        self._prefetch = self._fast_input and self._pin and (
-+            _os.environ.get("PUMAP_HOST_INT8_PREFETCH", "1") != "0")
-+        if self._fast_input:
-+            # Keep a plain-numpy view for host-side fancy-index (M2); the pinned
-+            # full matrix (self._i8) is only used by the legacy index_select.
-+            self._enc_np = encoded                     # int8 (N, D), C-order
-+            self._sc_np = scales                       # fp16 (N,)
-+            self._buffer_rows = int(buffer_rows) or None   # sized on first use
 +
 +    def _ensure_slots(self, rows):
-+        """Allocate the two pinned host slots (M1) sized to the batch."""
-+        if self._slots is not None and self._buffer_rows >= rows:
++        """Allocate the two pinned host slots (M1) once, sized to the batch.
++        `rows` is bounded by batch_size (num_pos+num_neg) and constant across a
++        run, so this allocates exactly once — no growth path, no leak."""
++        if self._slots is not None:
++            if rows > self._buffer_rows:
++                # batch never grows mid-run; treat as a contract violation.
++                raise RuntimeError(
++                    f"gather batch {rows} exceeds slot buffer {self._buffer_rows}")
 +            return
-+        self._buffer_rows = max(int(rows), int(self._buffer_rows or 0))
++        self._buffer_rows = int(rows)
 +        d = self.shape[1]
 +        self._slots = []
 +        for _ in range(2):
-+            si8 = torch.empty((self._buffer_rows, d), dtype=torch.int8, pin_memory=True)
++            si8 = torch.empty((rows, d), dtype=torch.int8, pin_memory=True)
 +            di8 = torch.empty_like(si8, pin_memory=True)
-+            ssc = torch.empty((self._buffer_rows,), dtype=torch.float16, pin_memory=True)
++            ssc = torch.empty((rows,), dtype=torch.float16, pin_memory=True)
 +            dsc = torch.empty_like(ssc, pin_memory=True)
 +            self._slots.append({"src_i8": si8, "dst_i8": di8,
 +                                "src_sc": ssc, "dst_sc": dsc, "event": None})
-+        if self._prefetch:
-+            import concurrent.futures
-+            self._producer = concurrent.futures.ThreadPoolExecutor(
-+                max_workers=1, thread_name_prefix="pumap-host-int8-fill")
-+
-+    def _fill_slot(self, slot_index, src_rows_np, dst_rows_np):
-+        """Host fancy-index of BOTH endpoints into one pinned slot (M2).
-+        Pure numpy; issues no CUDA — safe to run in the producer thread."""
-+        slot = self._slots[slot_index]
-+        ev = slot.get("event")
-+        if ev is not None:
-+            ev.synchronize()                            # guard slot reuse
-+        c = len(src_rows_np)
-+        slot["src_i8"].numpy()[:c] = self._enc_np[src_rows_np]
-+        slot["dst_i8"].numpy()[:c] = self._enc_np[dst_rows_np]
-+        slot["src_sc"].numpy()[:c] = self._sc_np[src_rows_np]
-+        slot["dst_sc"].numpy()[:c] = self._sc_np[dst_rows_np]
-+        return slot_index, c
-+
-+    def _transfer_slot(self, slot_index, count):
-+        """One combined H2D from the pinned slot + dequant + split (M3)."""
-+        slot = self._slots[slot_index]
-+        si8 = slot["src_i8"][:count].to(self.device, non_blocking=True)
-+        di8 = slot["dst_i8"][:count].to(self.device, non_blocking=True)
-+        ssc = slot["src_sc"][:count].to(self.device, non_blocking=True)
-+        dsc = slot["dst_sc"][:count].to(self.device, non_blocking=True)
-+        src = si8.float() * ssc.float().view(-1, 1)
-+        dst = di8.float() * dsc.float().view(-1, 1)
-+        ev = torch.cuda.Event()
-+        ev.record(torch.cuda.current_stream(self.device))
-+        slot["event"] = ev
-+        return src, dst
 +
 +    def gather_pairs(self, src_idx, dst_idx):
 +        """Combined endpoint gather for two device LongTensors of equal length.
-+        Returns (src_feats, dst_feats) fp32 on device — identical arithmetic to
-+        two index_select calls, one transfer instead of two, pinned source, and
-+        (with prefetch) the host fancy-index of batch t+1 overlapped with the GPU
-+        compute of batch t (M4). rankneg-agnostic: the indices are supplied by
-+        the caller, which has already applied rank-window negatives."""
++        Synchronous (no producer thread): host fancy-index BOTH endpoints into
++        one pinned slot (M1/M2), ONE non-blocking H2D from the pinned slot (M3),
++        dequant + split. Two slots + per-slot CUDA events let the current fill
++        proceed while the previous slot's H2D is still in flight, and overlap the
++        host gather with the GPU compute already queued for the prior batch.
++        Identical dequant arithmetic to two index_select calls. rankneg-agnostic:
++        the caller supplies indices that already include rank-window negatives."""
 +        src_np = src_idx.detach().to("cpu", dtype=torch.long).numpy()
 +        dst_np = dst_idx.detach().to("cpu", dtype=torch.long).numpy()
-+        self._ensure_slots(len(src_np))
-+        if not self._prefetch:
-+            si = self._slot_index
-+            self._slot_index ^= 1
-+            _, c = self._fill_slot(si, src_np, dst_np)
-+            return self._transfer_slot(si, c)
-+        # Software-pipelined: transfer the slot the producer filled last call,
-+        # submit this call's fill into the alternate slot for next time.
-+        if self._pending is None:              # prime the pipeline (batch 0)
-+            si = self._slot_index; self._slot_index ^= 1
-+            self._pending = self._producer.submit(self._fill_slot, si, src_np, dst_np).result()
-+        si, c = self._pending
-+        out = self._transfer_slot(si, c)
-+        nxt = self._slot_index; self._slot_index ^= 1
-+        self._pending = self._producer.submit(self._fill_slot, nxt, src_np, dst_np).result()
-+        return out
-+
-+    def close_fast_input(self):
-+        if self._producer is not None:
-+            self._producer.shutdown(wait=True, cancel_futures=True)
-+            self._producer = None
++        c = len(src_np)
++        self._ensure_slots(c)
++        si = self._slot_index
++        self._slot_index ^= 1                       # round-robin the two slots
++        slot = self._slots[si]
++        ev = slot["event"]
++        if ev is not None:
++            ev.synchronize()                        # guard: prior H2D on this slot done
++        slot["src_i8"].numpy()[:c] = self._enc_np[src_np]
++        slot["dst_i8"].numpy()[:c] = self._enc_np[dst_np]
++        slot["src_sc"].numpy()[:c] = self._sc_np[src_np]
++        slot["dst_sc"].numpy()[:c] = self._sc_np[dst_np]
++        s_i8 = slot["src_i8"][:c].to(self.device, non_blocking=True)
++        d_i8 = slot["dst_i8"][:c].to(self.device, non_blocking=True)
++        s_sc = slot["src_sc"][:c].to(self.device, non_blocking=True)
++        d_sc = slot["dst_sc"][:c].to(self.device, non_blocking=True)
++        src = s_i8.float() * s_sc.float().view(-1, 1)
++        dst = d_i8.float() * d_sc.float().view(-1, 1)
++        nev = torch.cuda.Event()
++        nev.record(torch.cuda.current_stream(self.device))
++        slot["event"] = nev
++        return src, dst
 ```
 
-> **Note on M4 fidelity:** round0034 prefetches the whole *draw* because its negatives are host-drawn.
-> The generic rankneg path draws negatives **on-device** (§2c), so we prefetch only the host
-> fancy-index step (M2), not the draw. The `.result()` above still hands the CPU gather to the worker
-> thread; to get true overlap the coordinator can switch the two `.submit(...).result()` sites to hold
-> the `Future` across the caller's GPU compute (a one-line change — store the future, resolve it at the
-> top of the next `gather_pairs`). Presented conservatively (resolve-in-place) so the first-cut diff is
-> obviously correct; the overlap upgrade is a follow-on toggle. Either way the FILL values are
-> identical, so FFR is unaffected.
+The legacy `index_select` (`edge_list_dataset.py:239-253`) needs a fast-mode fallback because in
+fast mode there is no resident `self._i8` tensor. It is called **only** by `_refresh_rank_negatives`
+(`core.py:324`) at epoch boundaries and by the optional density/mid-near gathers — never on the
+throughput hot path — so a pageable numpy gather is fine:
+
+```diff
+@@ class HostInt8ArrayDataset:
+     def index_select(self, idx):
++        if self._fast_input:
++            # Epoch-boundary path (rank-order projection / density). No resident
++            # pinned matrix in fast mode: pageable numpy gather -> device.
++            if torch.is_tensor(idx):
++                rows = idx.detach().to("cpu", dtype=torch.long).numpy()
++            else:
++                rows = np.asarray(idx, dtype=np.int64)
++            enc = np.ascontiguousarray(self._enc_np[rows])
++            sc = np.asarray(self._sc_np[rows], dtype=np.float32)
++            rt = torch.from_numpy(enc).to(self.device).float()
++            st = torch.from_numpy(sc).to(self.device).unsqueeze(1)
++            return rt * st
+         if not torch.is_tensor(idx):
+             idx = torch.as_tensor(np.asarray(idx), dtype=torch.long)
+         idx_cpu = idx.detach().to("cpu", dtype=torch.long)
+         rows_i8 = self._i8.index_select(0, idx_cpu)
+         ...
+```
+
+The `to()` method (`edge_list_dataset.py:231-237`) re-pins the full matrix; guard it so fast mode
+never re-pins (there is nothing resident to pin):
+
+```diff
+@@ class HostInt8ArrayDataset:
+     def to(self, device):  # int8 rows stay on host; only the dequant target moves
+         self.device = device
+         self._pin = "cuda" in str(device)
++        if self._fast_input:
++            return self          # no resident matrix to (re-)pin in fast mode
+         if self._pin and not self._i8.is_pinned():
+             self._i8 = self._i8.pin_memory()
+             self._scales = self._scales.pin_memory()
+         return self
+```
+
+> **M4 (background producer thread) — DROPPED from cut 1; follow-on work.** A naive pipelined producer
+> is a **stale-feature correctness bug**, not just a missed optimization. Trace the reuse-current-indices
+> design: call 1 (indices I1) fills slot0 with I1, transfers slot0 (correct), then fills slot1 with I1
+> **again** and stores it pending; call 2 (indices I2) transfers the pending slot1 = **I1's features**,
+> returned for I2's labels and rankneg draw. So every batch *t ≥ 2* pairs batch *t*'s labels/negatives
+> with batch *t−1*'s FEATURES — silently wrong, and FFR would drift. Resolving the future in-place
+> (`.submit(...).result()`) buys **zero** overlap anyway. A *correct* producer must fill slot *t+1* with
+> batch *t+1*'s **own** indices, which requires the SAMPLER to **pre-draw batch t+1's indices** (the
+> on-device positive+rankneg draw is cheap, and the rank order is epoch-stable, so drawing one batch
+> ahead is sound) and hand those future indices to the fill thread — a `DeviceEdgeSampler` change, not a
+> dataset one. That is deferred to a follow-on cut with its own A/B; **cut 1 is synchronous only.** The
+> synchronous path already overlaps the host gather with the previous batch's in-flight GPU kernels, so
+> most of the transport win is captured without the thread.
 
 ### 2b. `edge_list_dataset.py` — `DeviceEdgeSampler`: cached labels (M5), combined gather, fused flag (M6)
 
@@ -394,9 +452,12 @@ normalized**. Consuming them must (a) skip the loader's re-encode and (b) skip t
 +                assert getattr(X, "_prenormalized", False) is True, (
 +                    "sealed_int8 substrate must be pre-normalized; refusing to "
 +                    "feed a non-prenormalized sealed X to the host-int8 loader")
++                # Feed the memmaps DIRECTLY (no np.asarray): with fast_input=True
++                # the loader keeps them as plain numpy (page-cache-backed,
++                # zero-copy) and never pins the full matrix — the 30M path.
 +                hi8 = HostInt8ArrayDataset(
 +                    None, self.device,
-+                    encoded=np.asarray(X.encoded), scales=np.asarray(X.scales),
++                    encoded=X.encoded, scales=X.scales,
 +                    fast_input=self.host_int8_fast_input)
 +            else:
 +                hi8 = HostInt8ArrayDataset(
@@ -419,11 +480,17 @@ normalized**. Consuming them must (a) skip the loader's re-encode and (b) skip t
              return hi8, loader, n_pos_edges
 ```
 
-> `np.asarray(X.encoded)` materializes the int8 payload once (9.6 GiB @ 25M×384, ~0.77 GiB @ 2M) —
-> which `HostInt8ArrayDataset.__init__` then `ascontiguousarray`s and pins; this is the intended int8
-> residency, not a >=2 GB fp32 violation. `fit` reads `X.shape[1]`/`[0]` from the wrapper (`.shape`),
-> and `transform` slices the wrapper (dequantized fp32) — no full fp32 array is ever built. Save/load
-> and stamps are unchanged.
+> **Zero-copy on the fast path.** `X.encoded`/`X.scales` are memmaps passed straight through; with
+> `fast_input=True` the loader stores them as `_enc_np`/`_sc_np` without pinning or copying the full
+> matrix (`np.ascontiguousarray` is a no-op on the already-C-order memmap), so resident/pinned bytes
+> stay O(2 slots) regardless of N — the whole point of C1 at 30M. `fit` reads `X.shape[1]`/`[0]` from
+> the wrapper (`.shape`); `transform` slices the wrapper (dequantized fp32) — no full fp32 array is ever
+> built. Save/load and stamps are unchanged.
+>
+> **Sealed WITHOUT fast_input (small-scale only):** if `host_int8_fast_input=False` on a sealed X, the
+> loader takes the legacy branch — `torch.from_numpy(memmap).pin_memory()` materializes + pins the full
+> int8 payload (fine at ≤2M, the C3 memlock blocker at 30M). Sealed substrates at scale MUST pair with
+> `host_int8_fast_input=True`; the §5 checklist asserts the no-full-pin invariant.
 
 ### 3c. `image_map_pipeline.py` — DATASETS knob + branch the substrate load (no `_norm` on sealed)
 
@@ -541,20 +608,34 @@ cd /home/enjalot/code/latent-basemap
 `summary.json` (`realized_updates`, `wall_s`). Both arms run identical horizons, so compare wall clock
 directly.
 
-**Pass bars:**
-- **Throughput:** treatment updates/s ≥ control updates/s (the port is a speedup; it must not regress).
-  The "≥85%" bar: treatment must sustain ≥ 85% of round0034's reference 122.6 updates/s **at the
-  matching batch geometry** — i.e., confirm the ported generic path recovers the bulk of R0034's
-  transport headroom rather than the legacy two-transfer path. Record both arms' updates/s and the
-  ratio to 122.6/s.
+**Pass bars (hard):**
+- **Throughput:** **treatment updates/s ≥ control updates/s** — the port must not regress and should
+  show the combined-gather/pinned-transfer win. This is the binding bar.
 - **FFR parity:** `quick_ffr_at_0.1pct` (control) vs (treatment) within **±0.005** (noise band already
   used for the int8 parity arm, `knobs_2m.py:383`). Because the fast path is a transport/label/forward
   refactor with **bit-identical dequant, identical rankneg draws, and MLP-fused forward equal to the
   two-forward split** (no batchnorm/dropout), FFR should match to well within noise. A drift beyond
   ±0.005 signals a real bug (e.g., slot reuse race, label misalignment) → do not ship.
-- **Determinism spot-check:** a 3rd run of the treatment at the same seed should reproduce FFR exactly
-  (the producer thread only reorders host copies, never RNG; if FFR wobbles run-to-run, the M4 overlap
-  upgrade reordered a draw — fall back to `PUMAP_HOST_INT8_PREFETCH=0`).
+
+**Directional only (not a pass/fail bar):** round0034 hit **122.6 updates/s at 30M**, a *different*
+batch geometry / model / graph than the 2M knobs arm — so it is a sanity reference for "are we in the
+right order of magnitude for the transport," NOT a threshold the 2M arm must clear. Record the 2M
+treatment updates/s and note it alongside 122.6/s for context; do not gate on it.
+
+**30M-shaped memory assertion (REQUIRED — the whole reason for `fast_input`):** confirm that with
+`host_int8_fast_input=True` the resident/pinned footprint is **O(2 slots), never O(N)**. Cheap CPU-only
+checks (no 30M run needed):
+- Static: in the fast branch there is no `self._i8` / `.pin_memory()` on the full matrix (grep the
+  applied diff); only the two `buffer_rows`-sized slots are pinned. `buffer_rows == batch_size`
+  (16384), so pinned host bytes ≈ `2 slots × 2 endpoints × 16384 × (dim×1 B int8 + 2 B fp16)` ≈ a few
+  MiB — independent of N.
+- Runtime spot-check (2M arm is enough to prove the invariant): during the treatment run, sample
+  `VmLck` / pinned bytes (e.g. `grep VmLck /proc/<pid>/status`, or CUDA pinned-alloc counters) and
+  assert it does **not** scale with the substrate row count. Extrapolation: at 30M×768 the *dropped*
+  full-matrix pin would have been ~21.5 GiB > the 15.4 GiB memlock ceiling (C3); the fast path must
+  show none of that growth.
+- Sealed zero-copy: confirm RSS does not jump by the full int8 payload at load (memmap is page-cache
+  backed, faulted lazily by the per-batch fancy-index), i.e. no eager 21.5 GiB materialization.
 
 **Sealed-path A/B (separate, optional):** build a 2M sealed substrate with
 `build_int8_substrate.py`, add a `sealed_int8_path` twin of the 500k int8 dataset in
@@ -575,15 +656,23 @@ the edit would import the changed module mid-sweep — inconsistent. Apply in a 
 §5 A/B, then let production resume.
 
 **Risks:**
-- **Pinned-slot reuse race (M1/M4):** the CUDA event guard in `_fill_slot` (`ev.synchronize()`) must
-  precede overwriting a slot the GPU may still be transferring. Mitigation: 2 slots + event-per-slot
-  exactly mirrors round0034 (`:829-832`, `:1101-1107`); the conservative resolve-in-place variant in
-  §2a serializes fill↔transfer so no race is possible on the first cut. Only the follow-on overlap
-  toggle introduces concurrency, guarded by the same event.
-- **Producer thread on unattended runs (M4):** a dead worker could stall. Mitigation:
-  `PUMAP_HOST_INT8_PREFETCH=0` disables just the thread (keeps M1/M3/M5/M6); `close_fast_input()`
-  should be called at train end (wire into the existing `HostStreamEdgeSampler.close()` teardown at
-  `core.py:2438`).
+- **Pinned-slot reuse race (M1/M3):** before overwriting a slot the GPU may still be transferring,
+  `gather_pairs` calls `ev.synchronize()` on that slot's CUDA event (recorded after the prior H2D on
+  that slot). Cut 1 is single-threaded, so fill and transfer are serialized on the main thread and the
+  only concurrency is the async H2D itself — fully covered by the per-slot event (mirrors round0034
+  `:829-832`). No producer thread, so no cross-thread race.
+- **Slot allocation is one-shot (no leak):** `_ensure_slots` allocates exactly once (batch size is
+  constant across a run) and raises if a later batch exceeds `buffer_rows` rather than reallocating —
+  so there is no per-batch pinned-buffer churn and no growth leak. (The earlier draft's
+  `ThreadPoolExecutor` in `_ensure_slots` is gone with M4; nothing to leak.)
+- **No full-matrix pin at scale:** the fast branch never builds/pins `self._i8`; the §5 memory
+  assertion gates this. A regression that reintroduces the full-matrix pin would pass 2M but hit the
+  15.4 GiB memlock ceiling at 30M — the assertion catches it at 2M.
+- **Fast-mode teardown:** the two pinned slots are freed with the dataset at GC; no thread to join.
+  If an explicit release is wanted, add it to the **`fit`-end / `DeviceEdgeSampler` teardown** path
+  (near `core.py:2438`, where `HostStreamEdgeSampler` producer threads are stopped) — NOT inside
+  `HostStreamEdgeSampler.close()` (a different sampler that cut 1 does not use). Cut 1 has no producer
+  thread, so this is optional hygiene, not a stall risk.
 - **Partial final batch (M5):** perm-mode (non-uwr) last chunk has `n_pos_b < num_pos`; the diff
   rebuilds labels for that batch. The 2M rankneg arms use non-uwr perm mode, so this path is exercised
   — the guard is required, not theoretical.
@@ -601,11 +690,15 @@ the edit would import the changed module mid-sweep — inconsistent. Apply in a 
 
 ---
 
-## Appendix — one-flag summary
+## Appendix — one-flag summary (cut 1)
 
 | Flag / knob | Default | Effect when set |
 |---|---|---|
-| `ParametricUMAP(host_int8_fast_input=True)` | `False` | Enables M1–M6 on the `x_residency="host_int8"` path only. Off ⇒ byte-identical legacy. |
-| env `PUMAP_HOST_INT8_PREFETCH=0` | `1` | Disables the producer thread (M4); keeps combined pinned gather (M1/M3), cached labels (M5), fused forward (M6). |
-| DATASETS `sealed_int8_path` (+`int8_dim`) | absent | `train()` loads a `SealedInt8Substrate` (no `_norm`, no re-encode) instead of `_norm(load())`. |
+| `ParametricUMAP(host_int8_fast_input=True)` | `False` | On the `x_residency="host_int8"` path only: combined pinned-slot gather (M1/M3), cached labels (M5), fused forward (M6), and **no full-matrix pin**. Off ⇒ byte-identical legacy. |
+| DATASETS `sealed_int8_path` (+`int8_dim`) | absent | `train()` loads a `SealedInt8Substrate` (no `_norm`, no re-encode) instead of `_norm(load())`. Pair with `host_int8_fast_input=True` for the zero-copy / no-pin benefit at scale. |
+
+**Not in cut 1 (follow-on):** M4 background producer thread — requires a `DeviceEdgeSampler` change to
+pre-draw batch *t+1*'s indices (so the fill has genuine future indices, not stale current ones); it has
+its own A/B and is deferred. Cut 1 is synchronous and already captures the transport win via
+async-CUDA overlap of the host gather with the prior batch's queued GPU kernels.
 ```
