@@ -234,7 +234,15 @@ DATASETS = {
                                    "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
                                              "pos_ratio": 0.10, "rankneg_window": 500_000,
                                              "batch_size": 16384, "hidden_dim": 4096,
-                                             "gpu_resident_vram_budget_gb": 22.0}}}},
+                                             "gpu_resident_vram_budget_gb": 22.0}},
+                               # aesthetics track (owner 2026-08-26): md010 (looser kernel,
+                               # a=1.577/b=0.8951) counterpart of the 0.6871 champion-x8-h2048
+                               # exposure arm — does the spread-ier md010 trade a little FFR for a
+                               # less island-y look at full dose8? Same champion stack otherwise.
+                               "champion-md010-x8-h2048": {"md": "010", "dose": 8,
+                                   "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                             "pos_ratio": 0.10, "rankneg_window": 500_000,
+                                             "batch_size": 16384}}}},
     "reddit-2m": {"load": _reddit_load, "subsets": None},
     "communityarchive-2m": {"load": _ca_load, "subsets": None},
     "minilm-redditmix-2m": {"load": _redditmix_load,
