@@ -68,6 +68,15 @@
   <h1>basemap compare</h1>
   <label>rung <select id="rung"></select></label>
   <button id="swap" title="swap A and B">A &#8646; B</button>
+  <label>pick <select id="pick">
+    <option value="tile">tile</option>
+    <option value="circle">circle</option>
+  </select></label>
+  <input type="range" id="pickr" min="8" max="90" value="28"
+    style="width:70px; display:none" title="circle radius">
+  <button id="clearsel2" style="background:var(--panel);
+    border:1px solid var(--edge); color:var(--fg); border-radius:6px;
+    padding:4px 10px; cursor:pointer">clear sel</button>
   <span class="slider">heat <input type="range" id="gain" min="-2" max="4"
         step="0.1" value="0.6" style="width:90px"></span>
   <label>view <select id="view">
@@ -82,9 +91,9 @@
     <span id="fcount" style="color:var(--acc); min-width:90px"></span>
   </span>
   <span id="spreadinfo" class="hint" style="color:var(--acc)"></span>
-  <span class="hint">click a tile on either map &rarr; its points light up on
-    the other + list on the right &middot; drag pan &middot; wheel zoom
-    &middot; dbl-click reset</span>
+  <span class="hint">hover highlights on the other map; click to select +
+    list &middot; drag pan &middot; wheel zoom &middot; dbl-click resets view
+    + clears selection</span>
 </header>
 <div id="main">
   <div class="mapcol" id="colA"></div>
@@ -102,8 +111,8 @@
 const API = location.origin.replace(":8800", ":8801");
 const TILE = 30;               // screen px tile for click-selection
 let catalog = null, rungs = [], state = {
-  rung: null, sel: { ids: null, from: null, rect: null }, gain: 0.6,
-  view: "heat",
+  rung: null, sel: { ids: null, from: null, shape: null }, gain: 0.6,
+  view: "heat", pick: "tile", pickR: 28,
 };
 
 // float16 -> float32 lookup (spread bins are f16)
@@ -218,8 +227,9 @@ function makeRenderer(gl) {
     pSel: prog(gl, VS, FS_SEL),
     vboPts: gl.createBuffer(), vboQuad: gl.createBuffer(),
     iboSel: gl.createBuffer(), nSel: 0, fb: null, tex: null, fw: 0, fh: 0,
+    iboHover: gl.createBuffer(), nHover: 0,
     vaoPts: gl.createVertexArray(), vaoQuad: gl.createVertexArray(),
-    vaoSel: gl.createVertexArray(), n: 0,
+    vaoSel: gl.createVertexArray(), vaoHover: gl.createVertexArray(), n: 0,
   };
   gl.bindVertexArray(R.vaoQuad);
   gl.bindBuffer(gl.ARRAY_BUFFER, R.vboQuad);
@@ -235,15 +245,28 @@ function setPoints(p, i16, n) {
   R.n = n;
   gl.bindBuffer(gl.ARRAY_BUFFER, R.vboPts);
   gl.bufferData(gl.ARRAY_BUFFER, i16, gl.STATIC_DRAW);
-  for (const vao of [R.vaoPts, R.vaoSel]) {
+  for (const vao of [R.vaoPts, R.vaoSel, R.vaoHover]) {
     gl.bindVertexArray(vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, R.vboPts);
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0, 2, gl.SHORT, true, 0, 0);
     if (vao === R.vaoSel)
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, R.iboSel);
+    if (vao === R.vaoHover)
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, R.iboHover);
     gl.bindVertexArray(null);
   }
+}
+function setHover(p, ids) {
+  const { gl, R } = p;
+  R.nHover = ids ? ids.length : 0;
+  if (R.nHover) {
+    gl.bindVertexArray(R.vaoHover);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, R.iboHover);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, ids, gl.DYNAMIC_DRAW);
+    gl.bindVertexArray(null);
+  }
+  p.dirty = true;
 }
 function setScores(p, f32OrNull) {
   const { gl, R } = p;
@@ -335,42 +358,55 @@ function draw(p) {
     (state.view === "spread" && R.hasScores && R.accum.spread) ? 1 : 0);
   gl.bindVertexArray(R.vaoQuad);
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-  // pass 3: selected points
-  if (R.nSel) {
+  // pass 3: selected + hovered points
+  const overlayPass = (vao, count, size, col) => {
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.useProgram(R.pSel);
     gl.uniform2fv(gl.getUniformLocation(R.pSel, "uS"), S);
     gl.uniform2fv(gl.getUniformLocation(R.pSel, "uT"), T);
-    gl.uniform1f(gl.getUniformLocation(R.pSel, "uPt"),
-      Math.max(2.5, pt * 1.35));
-    gl.uniform4f(gl.getUniformLocation(R.pSel, "uC"), 1, .36, .23, .9);
-    gl.bindVertexArray(R.vaoSel);
-    gl.drawElements(gl.POINTS, R.nSel, gl.UNSIGNED_INT, 0);
-  }
+    gl.uniform1f(gl.getUniformLocation(R.pSel, "uPt"), size);
+    gl.uniform4fv(gl.getUniformLocation(R.pSel, "uC"), col);
+    gl.bindVertexArray(vao);
+    gl.drawElements(gl.POINTS, count, gl.UNSIGNED_INT, 0);
+  };
+  if (R.nSel)
+    overlayPass(R.vaoSel, R.nSel, Math.max(2.5, pt * 1.35), [1, .36, .23, .9]);
+  if (R.nHover)
+    overlayPass(R.vaoHover, R.nHover, Math.max(2, pt * 1.2),
+      [1, .85, .25, .8]);
   gl.bindVertexArray(null);
 }
 
 /* ---------------- overlay: grid + tiles ---------------- */
-function drawOverlay(p, hover) {
+function strokeShape(g, p, shape, style, lw) {
+  g.strokeStyle = style; g.lineWidth = lw;
+  if (shape.type === "rect") {
+    const [a, b] = dataToScreen(p, shape.x0, shape.y0);
+    const [x2, y2] = dataToScreen(p, shape.x1, shape.y1);
+    g.strokeRect(Math.min(a, x2), Math.min(b, y2),
+      Math.abs(x2 - a), Math.abs(y2 - b));
+  } else {
+    const [cx, cy] = dataToScreen(p, shape.cx, shape.cy);
+    const [ex] = dataToScreen(p, shape.cx + shape.rx, shape.cy);
+    g.beginPath();
+    g.arc(cx, cy, Math.abs(ex - cx), 0, Math.PI * 2);
+    g.stroke();
+  }
+}
+function drawOverlay(p, hoverShape) {
   const c = p.ovc, w = c.clientWidth * devicePixelRatio | 0,
         h = c.clientHeight * devicePixelRatio | 0;
   if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
   const g = c.getContext("2d");
   g.clearRect(0, 0, w, h);
-  const t = TILE * devicePixelRatio;
-  if (hover) {
-    g.strokeStyle = "rgba(255,179,71,.9)"; g.lineWidth = 2;
-    g.strokeRect(hover[0] * t, hover[1] * t, t, t);
-  }
+  if (hoverShape)
+    strokeShape(g, p, hoverShape, "rgba(255,215,80,.9)",
+      2 * devicePixelRatio);
   const sel = state.sel;
-  if (sel.rect && sel.from === p.key) {
-    const [a, b] = dataToScreen(p, sel.rect[0], sel.rect[1]);
-    const [x2, y2] = dataToScreen(p, sel.rect[2], sel.rect[3]);
-    g.strokeStyle = "rgba(255,93,58,.95)"; g.lineWidth = 2.5;
-    g.strokeRect(Math.min(a, x2), Math.min(b, y2),
-      Math.abs(x2 - a), Math.abs(y2 - b));
-  }
+  if (sel.shape && sel.from === p.key)
+    strokeShape(g, p, sel.shape, "rgba(255,93,58,.95)",
+      2.5 * devicePixelRatio);
 }
 function screenToData(p, px, py) {
   const w = p.ovc.clientWidth, h = p.ovc.clientHeight, v = p.view;
@@ -387,9 +423,23 @@ function dataToScreen(p, dx, dy) {
 }
 
 /* ---------------- navigation + tile click ---------------- */
+function hoverShapeAt(p, e) {
+  const r = p.ovc.getBoundingClientRect();
+  const px = e.clientX - r.left, py = e.clientY - r.top;
+  if (state.pick === "circle") {
+    const [cx, cy] = screenToData(p, px, py);
+    const [ex, ey] = screenToData(p, px + state.pickR, py + state.pickR);
+    return { type: "circle", cx, cy, rx: Math.abs(ex - cx),
+             ry: Math.abs(ey - cy) };
+  }
+  const tx = Math.floor(px / TILE) * TILE, ty = Math.floor(py / TILE) * TILE;
+  const [x0, y0] = screenToData(p, tx, ty + TILE);
+  const [x1, y1] = screenToData(p, tx + TILE, ty);
+  return { type: "rect", x0, y0, x1, y1 };
+}
 function bindNav(p) {
   const el = p.ovc;
-  let drag = null, moved = false, hover = null;
+  let drag = null, moved = false, hoverScan = null;
   el.addEventListener("pointerdown", e => {
     drag = [e.clientX, e.clientY]; moved = false;
     el.setPointerCapture(e.pointerId);
@@ -405,14 +455,26 @@ function bindNav(p) {
         drag = [e.clientX, e.clientY]; p.dirty = true;
       }
     }
-    hover = [Math.floor((e.clientX - r.left) / TILE),
-             Math.floor((e.clientY - r.top) / TILE)];
-    drawOverlay(p, hover);
+    const shape = hoverShapeAt(p, e);
+    drawOverlay(p, shape);
+    // live highlight on the other map, rAF-throttled
+    if (!drag && p.coords) {
+      if (!hoverScan) {
+        hoverScan = requestAnimationFrame(() => {
+          hoverScan = null;
+          const other = p === A ? B : A;
+          setHover(other, scanShape(p, shape));
+        });
+      }
+    }
   });
-  el.addEventListener("pointerleave", () => drawOverlay(p, null));
+  el.addEventListener("pointerleave", () => {
+    drawOverlay(p, null);
+    setHover(p === A ? B : A, null);
+  });
   el.addEventListener("pointerup", e => {
     el.releasePointerCapture(e.pointerId);
-    if (!moved && drag) tileClick(p, e);
+    if (!moved && drag) pickClick(p, e);
     drag = null;
   });
   el.addEventListener("wheel", e => {
@@ -428,39 +490,53 @@ function bindNav(p) {
   }, { passive: false });
   el.addEventListener("dblclick", () => {
     p.view = { z: 0.92, tx: 0, ty: 0 }; p.dirty = true;
+    clearSelection();
   });
 }
-function tileClick(p, e) {
+function pickClick(p, e) {
   if (!p.coords) return;
-  const r = p.ovc.getBoundingClientRect();
-  const tx = Math.floor((e.clientX - r.left) / TILE) * TILE,
-        ty = Math.floor((e.clientY - r.top) / TILE) * TILE;
-  const [x0, y0] = screenToData(p, tx, ty + TILE),
-        [x1, y1] = screenToData(p, tx + TILE, ty);
-  const ids = scanRect(p, x0, y0, x1, y1);
-  state.sel = { ids, from: p.key, rect: [x0, y0, x1, y1] };
+  const shape = hoverShapeAt(p, e);
+  const ids = scanShape(p, shape);
+  state.sel = { ids, from: p.key, shape };
   applySelection();
 }
-function scanRect(p, x0, y0, x1, y1) {
-  const a = Math.round(Math.max(-1, x0) * 32767),
-        b = Math.round(Math.max(-1, y0) * 32767),
-        c = Math.round(Math.min(1, x1) * 32767),
-        d = Math.round(Math.min(1, y1) * 32767);
+function scanShape(p, shape) {
   const q = p.coords, out = [];
   const filterOn = state.view === "spread" && p.scoresRaw
     && (state.fmin > -3 || state.fmax < 3);
   const sgn = p.scoreSign || 1, lo = state.fmin / 3, hi = state.fmax / 3;
-  for (let i = 0, n = p.n; i < n; i++) {
-    const x = q[i << 1], y = q[(i << 1) | 1];
-    if (x >= a && x <= c && y >= b && y <= d) {
-      if (filterOn) {
-        const s = p.scoresRaw[i] * sgn;
-        if (s < lo || s > hi) continue;
-      }
-      out.push(i);
+  const keep = i => {
+    if (filterOn) {
+      const s = p.scoresRaw[i] * sgn;
+      if (s < lo || s > hi) return false;
+    }
+    out.push(i);
+    return true;
+  };
+  if (shape.type === "rect") {
+    const a = Math.round(Math.max(-1, shape.x0) * 32767),
+          b = Math.round(Math.max(-1, shape.y0) * 32767),
+          c = Math.round(Math.min(1, shape.x1) * 32767),
+          d = Math.round(Math.min(1, shape.y1) * 32767);
+    for (let i = 0, n = p.n; i < n; i++) {
+      const x = q[i << 1], y = q[(i << 1) | 1];
+      if (x >= a && x <= c && y >= b && y <= d) keep(i);
+    }
+  } else {
+    const cx = shape.cx * 32767, cy = shape.cy * 32767;
+    const rx = Math.max(shape.rx * 32767, 1e-6),
+          ry = Math.max(shape.ry * 32767, 1e-6);
+    for (let i = 0, n = p.n; i < n; i++) {
+      const dx = (q[i << 1] - cx) / rx, dy = (q[(i << 1) | 1] - cy) / ry;
+      if (dx * dx + dy * dy <= 1) keep(i);
     }
   }
   return new Uint32Array(out);
+}
+function clearSelection() {
+  state.sel = { ids: null, from: null, shape: null };
+  setHover(A, null); setHover(B, null);
+  applySelection();
 }
 function applySelection() {
   for (const p of [A, B]) {
@@ -619,8 +695,15 @@ async function fetchContent(ids) {
   renderTableWindow();
 }
 tbody.addEventListener("scroll", renderTableWindow);
-document.getElementById("clearsel").onclick = () => {
-  state.sel = { ids: null, from: null, rect: null }; applySelection();
+document.getElementById("clearsel").onclick = clearSelection;
+document.getElementById("clearsel2").onclick = clearSelection;
+document.getElementById("pick").onchange = e => {
+  state.pick = e.target.value;
+  document.getElementById("pickr").style.display =
+    state.pick === "circle" ? "inline" : "none";
+};
+document.getElementById("pickr").oninput = e => {
+  state.pickR = +e.target.value;
 };
 
 /* ---------------- top-level wiring ---------------- */
@@ -683,7 +766,7 @@ document.getElementById("rung").onchange = e => setRung(e.target.value);
 function setRung(rung) {
   state.rung = rung;
   document.getElementById("rung").value = rung;
-  state.sel = { ids: null, from: null, rect: null };
+  state.sel = { ids: null, from: null, shape: null };
   const es = comboEntries();
   // A default: the plain 0.6dev baseline, not an ablation of it
   const up = es.find(e => e.arm.startsWith("upstream-06dev"))
