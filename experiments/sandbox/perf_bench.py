@@ -86,13 +86,19 @@ def run_variant(name: str, opts: dict) -> dict:
 
     patches = []
     if opts.get("fused"):
-        orig_adamw = torch.optim.AdamW
+        # core.py binds AdamW at import time (`from torch.optim import AdamW`,
+        # core.py:10) and constructs the optimizer via that module-global name
+        # (core.py:1654, and the anchored-init path at core.py:1137). Patching
+        # torch.optim.AdamW is therefore invisible to the trainer — the alias
+        # already captured the original class. Rebind the name in core's own
+        # namespace so the fused kwarg actually reaches the constructed optimizer.
+        orig_adamw = C.AdamW
 
         def fused_adamw(params, **kw):
             kw["fused"] = True
             return orig_adamw(params, **kw)
 
-        torch.optim.AdamW = fused_adamw
+        C.AdamW = fused_adamw
         patches.append(("adamw", orig_adamw))
     if opts.get("compile"):
         orig_init = p._init_model
@@ -161,8 +167,7 @@ def run_variant(name: str, opts: dict) -> dict:
     finally:
         for kind, orig in patches:
             if kind == "adamw":
-                import torch as _t
-                _t.optim.AdamW = orig
+                C.AdamW = orig
             elif kind == "tqdm":
                 import tqdm as tqdm_mod
                 tqdm_mod.tqdm = orig
