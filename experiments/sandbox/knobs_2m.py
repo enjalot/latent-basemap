@@ -564,11 +564,20 @@ def run_arm(arm: str, dry_run: bool, seed: int = SEED, rung_name: str = "2m") ->
                        out_dir / f"density-{name}.png")
         shutil.copy2(out_dir / "density-xy.png", out_dir / "density.png")
 
+    # Realized positive-pair bookkeeping (parity with image_map_pipeline): num_pos
+    # = int(batch*pos_ratio); updates actually taken = positive_lr_optimizer_steps.
+    realized_updates = int((getattr(model, "_train_stats", {}) or {}).get(
+        "positive_lr_optimizer_steps", horizon) or horizon)
+    actual_positive_pairs = realized_updates * num_pos
     summary = {
         "arm": arm, "rung": rung_name, "overrides": overrides, "seed": seed,
         "n_components": kwargs.get("n_components", 2),
         "dose_multiplier": dose_mult, "horizon_updates": horizon,
-        "draws_per_edge": dose, "wall_s": wall_s, "quick_ffr_at_0.1pct": ffr,
+        "positive_lr_updates": realized_updates,
+        "pos_per_batch": num_pos,
+        "actual_positive_pairs": actual_positive_pairs,
+        "draws_per_edge": actual_positive_pairs / rung["directed_edges"],
+        "wall_s": wall_s, "quick_ffr_at_0.1pct": ffr,
         "r10_over_map_radius_median": r10,
         "substrate": str(rung["substrate"]), "edges": str(edges_path),
         "started_utc": started.isoformat(),

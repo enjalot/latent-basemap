@@ -66,9 +66,13 @@ class MLP(nn.Module):
 class ResidualBottleneckMLP(nn.Module):
     """Bottleneck MLP with residual blocks in the hidden bottleneck."""
 
-    def __init__(self, input_dim, hidden_dim, output_dim, num_layers=3):
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers=3,
+                 neck_fraction=0.75):
         super().__init__()
-        neck_dim = hidden_dim * 3 // 4
+        # neck_fraction default 0.75: int(hidden_dim*0.75) == hidden_dim*3//4 for
+        # every integer hidden_dim (0.75 is exact in binary), so existing configs
+        # stay byte-identical; smaller fractions taper the bottleneck (Phase A4).
+        neck_dim = int(hidden_dim * neck_fraction)
         self.proj_in = nn.Linear(input_dim, hidden_dim)
         self.down = nn.Sequential(nn.Linear(hidden_dim, neck_dim), nn.ReLU())
         self.blocks = nn.ModuleList([

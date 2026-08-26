@@ -45,6 +45,7 @@ class ParametricUMAP:
         clip_grad_value=None,
         pos_ratio=0.5,
         architecture="mlp",
+        neck_fraction=0.75,   # ResidualBottleneckMLP neck = int(hidden_dim*neck_fraction); 0.75 == 3//4
         correlation_distance_transform="raw",
         lr_schedule="plateau",
         warmup_steps=0,
@@ -155,6 +156,7 @@ class ParametricUMAP:
         self.clip_grad_value = clip_grad_value
         self.pos_ratio = pos_ratio
         self.architecture = architecture
+        self.neck_fraction = float(neck_fraction)
         self.correlation_distance_transform = correlation_distance_transform
         self.lr_schedule = lr_schedule
         self.warmup_steps = warmup_steps
@@ -257,6 +259,7 @@ class ParametricUMAP:
                 hidden_dim=self.hidden_dim,
                 output_dim=self.n_components,
                 num_layers=self.n_layers,
+                neck_fraction=self.neck_fraction,
             ).to(self.device)
         else:
             raise ValueError(f"Unknown architecture: {self.architecture}")

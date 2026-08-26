@@ -242,7 +242,30 @@ DATASETS = {
                                "champion-md010-x8-h2048": {"md": "010", "dose": 8,
                                    "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
                                              "pos_ratio": 0.10, "rankneg_window": 500_000,
-                                             "batch_size": 16384}}}},
+                                             "batch_size": 16384}},
+                               # Phase A3 matched-positive: constant TOTAL positive pairs vs
+                               # champion-x8-h2048 (H=592187, ~970M pairs), fewer updates via
+                               # higher pos_ratio (H = 592187 * 0.10/pos_ratio). Explicit horizon.
+                               "champion-x8-h2048-pos15": {"md": "000", "dose": 0, "horizon": 394_791,
+                                   "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                             "pos_ratio": 0.15, "rankneg_window": 500_000,
+                                             "batch_size": 16384}},
+                               "champion-x8-h2048-pos20": {"md": "000", "dose": 0, "horizon": 296_094,
+                                   "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                             "pos_ratio": 0.20, "rankneg_window": 500_000,
+                                             "batch_size": 16384}},
+                               # Phase A4 tapered neck: champion-x8-h3072 (0.6999, residual_bottleneck)
+                               # verbatim, only neck_fraction changes (default 0.75->2304; 0.50->1536, 0.625->1920).
+                               "champion-x8-h3072-neck50": {"md": "000", "dose": 8,
+                                   "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                             "pos_ratio": 0.10, "rankneg_window": 500_000,
+                                             "batch_size": 16384, "hidden_dim": 3072,
+                                             "neck_fraction": 0.50}},
+                               "champion-x8-h3072-neck625": {"md": "000", "dose": 8,
+                                   "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                             "pos_ratio": 0.10, "rankneg_window": 500_000,
+                                             "batch_size": 16384, "hidden_dim": 3072,
+                                             "neck_fraction": 0.625}}}},
     "reddit-2m": {"load": _reddit_load, "subsets": None},
     "communityarchive-2m": {"load": _ca_load, "subsets": None},
     "minilm-redditmix-2m": {"load": _redditmix_load,
@@ -278,6 +301,16 @@ DATASETS = {
                                               "architecture": "mlp",
                                               "batch_size": 16384,
                                               "gpu_resident_vram_budget_gb": 22.0}},
+            # Phase A2 6.25M horizon ladder (explicit "horizon" override, NOT dose): champion
+            # h2048 knobs at EXPLICIT H (draws/edge H320k~3.67, H640k~7.35; champion dose4~10.84).
+            "champion-h2048-H320k": {"md": "000", "dose": 0, "horizon": 320_000,
+                "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                          "rankneg_window": 1_562_500, "batch_size": 16384,
+                          "hidden_dim": 2048, "gpu_resident_vram_budget_gb": 22.0}},
+            "champion-h2048-H640k": {"md": "000", "dose": 0, "horizon": 640_000,
+                "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                          "rankneg_window": 1_562_500, "batch_size": 16384,
+                          "hidden_dim": 2048, "gpu_resident_vram_budget_gb": 22.0}},
         }},
     # P4 mini-ladders (owner 2026-08-25): nested MiniLM sub-2M substrates
     # (every-kth-row, mixture-preserving) for (i) rankneg-fraction @1M and
@@ -538,6 +571,12 @@ def train(ds: str) -> int:
             continue
         dose = spec.get("dose", 2)
         horizon = int(round(dose * 0.6782 * e / n_pos_per_batch))
+        # Phase A explicit update-horizon override: an arm may set "horizon" to
+        # train at exactly that many positive-LR updates instead of the dose-derived
+        # budget. train() threads horizon -> total_steps_estimate (cosine LR/stop
+        # horizon, core.py) and n_epochs below derives from it, so it's honored end-to-end.
+        if spec.get("horizon") is not None:
+            horizon = int(spec["horizon"])
         arm_batch = spec.get("extra", {}).get("batch_size",
                                               BASE := 8192)
         arm_pos = spec.get("extra", {}).get("pos_ratio", 0.05)
@@ -565,11 +604,23 @@ def train(ds: str) -> int:
                 render_png(binned_counts(xy[subsets == name], frame),
                            d / f"density-{name}.png")
         ffr = quick_ffr(xy, edges, x.shape[0])
+        # Realized positive-pair bookkeeping (adopt everywhere): actual per-batch
+        # positive count is int(batch*pos_ratio) (sampler num_pos; 1638 for
+        # bs16k*0.10, NOT 1638.4), and the run takes positive_lr_optimizer_steps
+        # updates. Stamp realized totals, not just the dose label.
+        pos_per_batch = max(1, int(arm_batch * arm_pos))
+        realized_updates = int((getattr(model, "_train_stats", {}) or {}).get(
+            "positive_lr_optimizer_steps", horizon) or horizon)
+        actual_positive_pairs = realized_updates * pos_per_batch
         (d / "summary.json").write_text(json.dumps({
             "arm": f"{ds}--{arm}", "rung": ds,
             "overrides": {"low_dim_kernel": "umap", **MD[spec["md"]],
                           **spec["extra"]},
             "seed": SEED, "dose_multiplier": dose, "horizon_updates": horizon,
+            "positive_lr_updates": realized_updates,
+            "pos_per_batch": pos_per_batch,
+            "actual_positive_pairs": actual_positive_pairs,
+            "draws_per_edge": actual_positive_pairs / e,
             "wall_s": wall, "quick_ffr_at_0.1pct": float(ffr),
             "edges": str(edges),
             "note": f"{ds} sandbox map; truth = own exact-k15 fuzzy graph; "
