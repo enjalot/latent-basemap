@@ -2503,6 +2503,7 @@ class ParametricUMAP:
         save_dict = {
             'model_state_dict': self.model.state_dict(),
             'architecture': self.architecture,
+            'neck_fraction': self.neck_fraction,
             'input_dim': self.input_dim,
             'n_components': self.n_components,
             'hidden_dim': self.hidden_dim,
@@ -2551,6 +2552,7 @@ class ParametricUMAP:
             n_components=save_dict['n_components'],
             hidden_dim=save_dict['hidden_dim'],
             n_layers=save_dict['n_layers'],
+            neck_fraction=save_dict.get('neck_fraction', 0.75),
             n_neighbors=save_dict.get('n_neighbors', 15),
             a=save_dict['a'],
             b=save_dict['b'],
