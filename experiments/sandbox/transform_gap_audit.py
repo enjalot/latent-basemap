@@ -1,24 +1,35 @@
 #!/usr/bin/env python3
 """Transform-vs-train gap audit (owner 2026-08-27, A1 follow-on) — INFERENCE ONLY.
 
-For each (smaller-N head, larger-N rung) pair: transform the FULL rung-N substrate
-through the SMALLER-N-trained head (pure batched forward pass), score against the
-rung's OWN sealed truth with the same instrument the trained-at-N map used
-(quick_ffr_v2 + collapse), and diff vs the trained-at-N map's score on that truth.
-Deliverable: the gap-vs-extrapolation-factor curve + a health read on HOW transform
-degrades (collapse fraction: fog/over-collapse vs the trained twin).
+Transform the larger-N rung through the SMALLER-N-trained head (pure batched
+forward pass), score against the rung's own truth, and diff vs the trained-at-N
+map's score. Deliverable: the gap-vs-extrapolation-factor curve + a collapse read.
+Direct "can a small head serve the full atlas" measurement.
 
-Recipe-clean HEADLINE pairs (carry the conclusion): MiniLM 2M→6.25M, jina 2M→6.25M.
-Older MiniLM rungs (12.5M/25M/50M/100M) are recipe-MIXED across generations (same
-caveat as A1) and are reported with that flag; a pair whose substrate OR truth is
-missing is SKIPPED cleanly (recorded as skipped, never faked).
+TWO instruments (delegate ruling 2026-08-27):
 
-Transforms are batched forward passes — trivially interruptible and low-VRAM; the
-orchestrator only invokes this when the GPU is free (yields to any queued train).
-Transformed coordinates are exported as new rung "arms" labelled
-`xform-from-<head>` so the provenance is obvious on the compare page.
+* FULL-RUNG (recipe-clean HEADLINE pairs, 6.25× extrapolation): transform the FULL
+  rung substrate through the head (lazy per-batch normalizing memmap — the >=2 GB
+  substrates never materialize), score on the rung's OWN sealed k15 truth at
+  disc = 0.1% x N. Pairs: MiniLM 2M->6.25M, jina 2M->6.25M.
 
-GPU script. Output: /data/latent-basemap/sandbox/transform-gap-audit.json
+* 2M-SLICE (big rungs 12.5M/25M/50M/100M, mixed-recipe reference — flagged): the
+  full-rung 0.1%-disc KD-tree is infeasible at 100M (disc=100k). Instead draw a
+  FIXED 2M subsample (same seed across all big rungs), build a FRESH exact-k15
+  truth WITHIN the subsample from its substrate rows (NOT induced edges from the
+  full graph — a 2M-of-100M slice keeps ~2% of each row's NN, a near-empty faked
+  truth), transform the head onto the subsample, restrict the trained-at-N ref
+  coords to the same rows, and score BOTH at disc = 0.1%-of-2M against that fresh
+  in-slice truth. Instrument recorded as "FFR@0.1%-of-2M-slice (fresh in-slice
+  truth)" — never read as the full-rung number. The deliverable is the paired GAP,
+  so instrument consistency between the two maps (not full-rung fidelity) is what
+  matters. Fallback (a): only if a big-rung |gap| < ~0.01 do we run one full-disc
+  50M point to check the slice instrument isn't hiding a real difference.
+
+Transformed coords are exported as `xform-from-<head>` rung arms for the compare
+page. Transforms are batched forward passes — interruptible; the orchestrator runs
+this only when the GPU is free. GPU script.
+Output: /data/latent-basemap/sandbox/transform-gap-audit.json
 """
 from __future__ import annotations
 
@@ -31,11 +42,33 @@ from pathlib import Path
 import numpy as np
 
 SB = Path("/data/latent-basemap/sandbox")
-CKPT = Path("/data/checkpoints/pumap")
+SLICE_N = 2_000_000
+SLICE_SEED = 42
+K_TRUE = 15
+
+
+class NormMemmap:
+    """Lazy L2-row-normalizing view over a memmap. transform() slices X[i:j] per
+    batch and casts to f32 but does NOT normalize; pre-_norm on a 76/153 GB
+    substrate would materialize it (>=2 GB rule). Normalizing inside __getitem__
+    keeps only one batch resident."""
+
+    def __init__(self, mm):
+        self._mm = mm
+        self.shape = tuple(mm.shape)
+        self.dtype = np.float32
+
+    def __len__(self):
+        return int(self.shape[0])
+
+    def __getitem__(self, sl):
+        chunk = np.asarray(self._mm[sl], dtype=np.float32)
+        nrm = np.linalg.norm(chunk, axis=1, keepdims=True)
+        nrm[nrm == 0] = 1.0
+        return chunk / nrm
 
 
 def _resolve(p):
-    """Resolve a path or a glob to an existing file, else None."""
     if p is None:
         return None
     p = str(p)
@@ -45,40 +78,78 @@ def _resolve(p):
     return Path(p) if Path(p).exists() else None
 
 
-# Each pair: smaller-N HEAD (model.pt) transformed onto a larger-N RUNG substrate,
-# scored vs that rung's sealed truth; reference = the trained-at-N map's coords.
+def _exact_knn(x_normed: np.ndarray, K: int = K_TRUE) -> np.ndarray:
+    """Exact cosine k-NN on an in-memory NORMALIZED (n,d) array — the same GPU
+    brute-force the rung builds use (image_map_pipeline.knn), self dropped.
+    Returns (n, K) int32 neighbor indices."""
+    import torch
+    n = int(x_normed.shape[0])
+    db = torch.from_numpy(np.ascontiguousarray(x_normed, dtype=np.float32)).half().cuda()
+    idx_out = np.empty((n, K), dtype=np.int32)
+    q_chunk, d_chunk = 4096, 262_144
+    with torch.no_grad():
+        for qs in range(0, n, q_chunk):
+            q = db[qs:qs + q_chunk].float()
+            best_s = torch.full((q.shape[0], K + 1), -2.0, device="cuda")
+            best_i = torch.zeros((q.shape[0], K + 1), dtype=torch.long, device="cuda")
+            for dstart in range(0, n, d_chunk):
+                sims = q @ db[dstart:dstart + d_chunk].float().T
+                s, i = torch.topk(sims, min(K + 1, sims.shape[1]), dim=1)
+                best_s, sel = torch.topk(torch.cat([best_s, s], dim=1), K + 1, dim=1)
+                best_i = torch.gather(torch.cat([best_i, i + dstart], dim=1), 1, sel)
+            rows = torch.arange(qs, qs + q.shape[0], device="cuda")
+            is_self = best_i == rows.unsqueeze(1)
+            keep = ~is_self
+            no_self = keep.all(dim=1)
+            keep[no_self, K] = False
+            idx_out[qs:qs + q.shape[0]] = best_i[keep].view(q.shape[0], K).cpu().numpy().astype(np.int32)
+    del db
+    torch.cuda.empty_cache()
+    return idx_out
+
+
 def _pairs():
     from knobs_2m import RUNGS
-    P = []
-    # --- MiniLM: the 2M champion head projected up the ladder ---
     head2m = SB / "2m-knobs/umap-md000-x4bs16k-winner/model.pt"
-    mini = [
-        ("6.25M", "6250k", SB / "6250k-knobs/umap-md000-x4bs16k-winner-rank25", 3.125, True),
-        ("12.5M", "12500k", SB / "12500k-knobs/umap-md000-x4-fneg10", 6.25, False),
-        ("25M",  "25000k", SB / "25000k-knobs/umap-md000-x2-fneg10-hostint8", 12.5, False),
+    R = RUNGS
+    P = [
+        # --- FULL-RUNG recipe-clean headlines ---
+        {"space": "MiniLM", "head": "2m-champion", "rung": "6.25M", "extrap": 3.125,
+         "recipe_clean": True, "instrument": "full", "head_pt": head2m,
+         "substrate": _resolve(R.get("6250k", {}).get("substrate")),
+         "truth": _resolve(R.get("6250k", {}).get("edges") or R.get("6250k", {}).get("edges_glob")),
+         "knn_indices": _resolve(str(Path(str(R.get("6250k", {}).get("substrate"))).parent / "knn_indices.npy")),
+         "ref_dir": SB / "6250k-knobs/umap-md000-x4bs16k-winner-rank25"},
+        {"space": "jina", "head": "jina-2m-champion", "rung": "6.25M", "extrap": 3.125,
+         "recipe_clean": True, "instrument": "full",
+         "head_pt": SB / "jina-multi-2m/champion-bs16k/model.pt",
+         "substrate_ds": "jina-multi-6m",
+         "truth": _resolve(SB / "jina-multi-6m/edges-k15-fuzzy.npz"),
+         "knn_indices": _resolve(SB / "jina-multi-6m/knn_indices.npy"),
+         "ref_dir": SB / "jina-multi-6m/champion-bs16k"},
+        # --- 2M-SLICE big rungs (mixed-recipe reference — flagged) ---
+        {"space": "MiniLM", "head": "2m-champion", "rung": "12.5M", "extrap": 6.25,
+         "recipe_clean": False, "instrument": "slice", "head_pt": head2m,
+         "substrate": _resolve(R.get("12500k", {}).get("substrate")),
+         "ref_dir": SB / "12500k-knobs/umap-md000-x4-fneg10"},
+        {"space": "MiniLM", "head": "2m-champion", "rung": "25M", "extrap": 12.5,
+         "recipe_clean": False, "instrument": "slice", "head_pt": head2m,
+         "substrate": _resolve(R.get("25000k", {}).get("substrate")),
+         "ref_dir": SB / "25000k-knobs/umap-md000-x2-fneg10-hostint8"},
+        {"space": "MiniLM", "head": "2m-champion", "rung": "50M", "extrap": 25.0,
+         "recipe_clean": False, "instrument": "slice", "head_pt": head2m,
+         "substrate": _resolve("/data/latent-basemap/runs/round-0237/queue/artifacts/"
+                               "minilm-mixed-50000k-nested-substrate-and-reserves-v1/substrate.f32.npy"),
+         "ref_dir": Path("/data/checkpoints/pumap/maps/minilm-50m-r0267-seed42")},
+        {"space": "MiniLM", "head": "2m-champion", "rung": "100M", "extrap": 50.0,
+         "recipe_clean": False, "instrument": "slice", "head_pt": head2m,
+         "substrate": _resolve("/data/latent-basemap/runs/round-0238/queue/artifacts/"
+                               "minilm-mixed-100000k-nested-substrate-and-reserves-v1/substrate.f32.npy"),
+         "ref_dir": Path("/data/latent-basemap/runs/round-0268/attempt5/artifacts/"
+                         "minilm-mixed-100000k-fneg-x2-md000-hostint8-seed43-r0268-v1")},
     ]
-    for rung_label, rung_key, ref_dir, extrap, clean in mini:
-        r = RUNGS.get(rung_key, {})
-        sub = _resolve(r.get("substrate"))
-        truth = _resolve(r.get("edges") or r.get("edges_glob"))
-        P.append({
-            "space": "MiniLM", "head": "2m-champion", "rung": rung_label,
-            "extrap": extrap, "recipe_clean": clean,
-            "head_pt": head2m, "substrate": sub, "truth": truth,
-            "ref_coords": ref_dir / "coordinates.npy",
-            "ref_summary": ref_dir / "summary.json",
-        })
-    # --- jina: the 2M champion head onto the 6.25M rung (recipe-clean headline) ---
-    P.append({
-        "space": "jina", "head": "jina-2m-champion", "rung": "6.25M",
-        "extrap": 3.125, "recipe_clean": True,
-        "head_pt": SB / "jina-multi-2m/champion-bs16k/model.pt",
-        "substrate": None,   # loaded via DATASETS['jina-multi-6m'] below
-        "substrate_ds": "jina-multi-6m",
-        "truth": _resolve(SB / "jina-multi-6m/edges-k15-fuzzy.npz"),
-        "ref_coords": SB / "jina-multi-6m/champion-bs16k/coordinates.npy",
-        "ref_summary": SB / "jina-multi-6m/champion-bs16k/summary.json",
-    })
+    for p in P:
+        p.setdefault("ref_coords", (p["ref_dir"] / "coordinates.npy") if p.get("ref_dir") else None)
     return P
 
 
@@ -96,8 +167,8 @@ def main() -> int:
     coords_dir = SB / "transform-gap-coords"
     coords_dir.mkdir(parents=True, exist_ok=True)
 
-    def _score(xy, truth, n):
-        out = {"ffr_v2": float(quick_ffr_v2(xy, truth, n))}
+    def _score(xy, rows, truth=None, kidx=None):
+        out = {"ffr_v2": float(quick_ffr_v2(xy, truth or kidx, rows, knn_indices_path=kidx))}
         if collapse_frac is not None:
             try:
                 out["collapse"] = float(collapse_frac(xy))
@@ -105,68 +176,91 @@ def main() -> int:
                 out["collapse"] = None
         return out
 
-    rows = []
+    rows_out = []
     for p in _pairs():
-        rec = {k: (str(v) if isinstance(v, Path) else v)
-               for k, v in p.items() if k not in ("substrate_ds",)}
-        # inventory gate — skip cleanly on any missing artifact
-        head_pt = p["head_pt"]
-        truth = p["truth"]
-        missing = [k for k, v in (("head_pt", head_pt), ("truth", truth),
-                                  ("ref_coords", p["ref_coords"])) if not (v and Path(v).exists())]
-        # substrate: either a path or a DATASETS key
+        rec = {k: (str(v) if isinstance(v, Path) else v) for k, v in p.items()
+               if k not in ("ref_dir",)}
+        ref_coords = p.get("ref_coords")
+        head_pt = p.get("head_pt")
         sub = p.get("substrate")
         sub_ds = p.get("substrate_ds")
+        miss = [k for k, v in (("head_pt", head_pt), ("ref_coords", ref_coords)) if not (v and Path(v).exists())]
         if sub_ds is None and not (sub and Path(sub).exists()):
-            missing.append("substrate")
-        if missing:
-            rec["status"] = f"SKIPPED (missing: {','.join(missing)})"
-            rows.append(rec)
+            miss.append("substrate")
+        if p["instrument"] == "full" and not (p.get("truth") or p.get("knn_indices")):
+            miss.append("truth")
+        if miss:
+            rec["status"] = f"SKIPPED (missing: {','.join(miss)})"
+            rows_out.append(rec)
             print(f"SKIP {p['space']} {p['head']}→{p['rung']}: {rec['status']}", flush=True)
             continue
 
         t0 = time.time()
-        X = (_norm(DATASETS[sub_ds]["load"]()) if sub_ds
-             else _norm(np.asarray(np.load(sub, mmap_mode="r"), dtype=np.float32)))
-        n = int(X.shape[0])
         model = ParametricUMAP.load(str(head_pt), device="cuda")
-        xy = np.asarray(model.transform(X, batch_size=8192), dtype=np.float32)
-        label = f"xform-from-{p['head']}"
-        np.save(coords_dir / f"{p['space']}__{p['rung']}__{label}.npy", xy)
-        transform_score = _score(xy, truth, n)
 
-        ref_xy = np.asarray(np.load(p["ref_coords"]), dtype=np.float32)
-        trained_score = _score(ref_xy, truth, n)
-        # prefer the sealed FFR from the ref summary if present (same instrument)
+        if p["instrument"] == "full":
+            X = (NormMemmap(DATASETS[sub_ds]["load"]()) if sub_ds
+                 else NormMemmap(np.load(sub, mmap_mode="r")))
+            n = len(X)
+            xy = np.asarray(model.transform(X, batch_size=8192), dtype=np.float32)
+            np.save(coords_dir / f"{p['space']}__{p['rung']}__xform-from-{p['head']}.npy", xy)
+            kidx = p.get("knn_indices")
+            transform_score = _score(xy, n, truth=p.get("truth"), kidx=kidx)
+            ref_xy = np.asarray(np.load(ref_coords), dtype=np.float32)
+            trained_score = _score(ref_xy, n, truth=p.get("truth"), kidx=kidx)
+            instrument = "FFR@0.1%-of-N (full-rung sealed truth)"
+        else:
+            # 2M-slice: subsample, fresh in-slice k15, score both at disc=0.1%-of-2M
+            mm = np.load(sub, mmap_mode="r")
+            N = int(mm.shape[0])
+            rng = np.random.default_rng(SLICE_SEED)
+            idx = np.sort(rng.choice(N, size=min(SLICE_N, N), replace=False))
+            n = int(idx.shape[0])
+            xs = _norm(np.asarray(mm[idx], dtype=np.float32))   # 2M×384 (~3 GB)
+            slice_dir = SB / f"gap-slice-{p['space']}-{p['rung']}"
+            slice_dir.mkdir(parents=True, exist_ok=True)
+            kfile = slice_dir / "knn_indices.npy"
+            if not kfile.exists():
+                np.save(kfile, _exact_knn(xs, K_TRUE))
+                np.save(slice_dir / "subsample_idx.npy", idx)
+            xy = np.asarray(model.transform(xs, batch_size=8192), dtype=np.float32)
+            np.save(coords_dir / f"{p['space']}__{p['rung']}__xform-from-{p['head']}.npy", xy)
+            ref_full = np.load(ref_coords, mmap_mode="r")
+            ref_xy = np.asarray(ref_full[idx], dtype=np.float32)
+            transform_score = _score(xy, n, kidx=kfile)
+            trained_score = _score(ref_xy, n, kidx=kfile)
+            instrument = "FFR@0.1%-of-2M-slice (fresh in-slice truth)"
+
         try:
-            rs = json.loads(Path(p["ref_summary"]).read_text())
+            rs = json.loads((p["ref_dir"] / "summary.json").read_text())
             trained_score["sealed_ffr_v1"] = rs.get("quick_ffr_at_0.1pct")
             trained_score["sealed_ffr_v2"] = rs.get("quick_ffr_v2")
         except Exception:
             pass
 
         gap = round(trained_score["ffr_v2"] - transform_score["ffr_v2"], 4)
-        rec.update({
-            "status": "OK", "rows": n, "coords_label": label,
-            "transform": transform_score, "trained": trained_score,
-            "gap_ffr_v2": gap, "gap_per_extrap": round(gap / p["extrap"], 5),
-            "wall_s": round(time.time() - t0, 1),
-        })
-        rows.append(rec)
-        print(f"OK {p['space']} {p['head']}→{p['rung']} x{p['extrap']}: "
-              f"transform {transform_score['ffr_v2']:.4f} vs trained "
-              f"{trained_score['ffr_v2']:.4f} → gap {gap:+.4f} "
-              f"({(time.time()-t0)/60:.1f} min)", flush=True)
+        rec.update({"status": "OK", "rows": n, "instrument": instrument,
+                    "coords_label": f"xform-from-{p['head']}",
+                    "transform": transform_score, "trained": trained_score,
+                    "gap_ffr_v2": gap, "gap_per_extrap": round(gap / p["extrap"], 5),
+                    "wall_s": round(time.time() - t0, 1)})
+        rows_out.append(rec)
+        print(f"OK {p['space']} {p['head']}→{p['rung']} x{p['extrap']} [{p['instrument']}]: "
+              f"transform {transform_score['ffr_v2']:.4f} vs trained {trained_score['ffr_v2']:.4f} "
+              f"→ gap {gap:+.4f} ({(time.time()-t0)/60:.1f} min)", flush=True)
         del model
 
     out = SB / "transform-gap-audit.json"
     out.write_text(json.dumps({
         "schema": "transform-vs-train-gap-2026-08-27",
-        "note": "smaller-N head transformed onto larger-N rung, scored vs the rung's "
-                "sealed truth (quick_ffr_v2 + collapse); gap = trained-at-N − transform. "
-                "recipe_clean pairs (2M→6.25M both spaces) carry the headline; mixed-recipe "
-                "rungs flagged. Transformed coords exported as xform-from-<head> arms.",
-        "pairs": rows,
+        "slice_n": SLICE_N, "slice_seed": SLICE_SEED,
+        "note": "gap = trained-at-N − transform(smaller head). FULL pairs (2M→6.25M, "
+                "recipe-clean) on the rung's sealed truth at disc 0.1%×N; SLICE pairs "
+                "(12.5M/25M/50M/100M, mixed-recipe ref) on a fresh in-slice k15 over a "
+                "fixed 2M subsample at disc 0.1%-of-2M (NOT full-rung — instrument in "
+                "each row). Same slice seed across big rungs. Fallback (a) full-disc 50M "
+                "only if a big-rung |gap|<0.01.",
+        "pairs": rows_out,
     }, indent=1))
     print(f"\nwrote {out}", flush=True)
     return 0
