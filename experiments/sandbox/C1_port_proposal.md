@@ -664,6 +664,50 @@ produce **identical** FFR (the sealed codes are bit-identical to the in-loader e
 
 ---
 
+## 5b. Three admission gates for 30M (fail-closed) — review #10
+
+30M admission on the host-int8 path is gated by **three independent checks**. All
+three must PASS (or gate 3 must be explicitly owner-accepted) before a 30M run is
+launched. They test *different* things and must not be conflated:
+
+**Gate 1 — transport equivalence (bit-identical).** The `host_int8_fast_input`
+port must be bit-identical to the resident-int8 control it replaces: same dequant
+bytes, same rankneg draws, fused forward == two-forward split. Measured by the §5
+2M A/B (`umap-md000-x4bs16k-winner-hostint8` vs `...-hostint8-fast`, same seed):
+FFR within ±0.005 AND the sealed-path bitwise check (`build_int8_substrate
+--validate`, now PASS). This gates the CODE PORT only — it says the fast transport
+did not corrupt anything. **Status: PENDING** (runs in the §6 quiescent window;
+sealed bitwise sub-check already PASS).
+
+**Gate 2 — throughput ≥ 85% of RESIDENT at the true jina shape.** The int8 path's
+updates/s must be ≥ 85% of the fp16/fp32-RESIDENT path measured at the *actual*
+jina D768 batch geometry (not a MiniLM D384 proxy, not the 30M round0034 D-shape).
+This is what makes int8 admission worth its quality cost. **Status: UNMEASURED at
+the jina shape** — the §5 A/B measures transport (int8-fast vs int8-control), not
+int8-vs-RESIDENT throughput; a jina-shape resident-vs-int8 bench is required
+(folds into the #12 perf-tail rebuild at jina D768 h2048/h3072).
+
+**Gate 3 — quality within ±0.005 of RESIDENT (the int8 tax).** The int8-QUANTIZED
+substrate's FFR must be within ±0.005 of the fp16-RESIDENT substrate at the same
+recipe/shape. This is the *quantization* cost (fp16 → int8 per-row), NOT the
+transport port (gate 1, bit-identical). **Status: the only REPRODUCIBLE int8-tax
+on disk is int8fac @500K MiniLM = fp16 − hostint8 = +0.0034 (v1) / +0.0038 (v2)
+[`ffr-v2-verdict-stability.json` D block], which is WITHIN ±0.005.** A larger
+prior figure (−0.0123 "vs RESIDENT") was carried in the driver's working notes but
+has **no persisted artifact** and could not be reproduced (2026-08-27); it is NOT
+treated as fact. The tax must be re-measured at the TRUE jina D768 shape and at a
+larger N than 500K before gate 3 is ruled — the 500K-MiniLM pass does not license
+30M-jina. **RULE: 30M is BLOCKED until gate 3 is measured-and-passed at the true
+shape, OR the owner explicitly accepts the measured tax.**
+
+Gate-check discipline: a `c1_admission_gates.py` reads each arm's `summary.json`
+and reports PASS/FAIL/UNMEASURED per gate, defaulting UNMEASURED→BLOCK (fail-
+closed). It must never infer a gate from a proxy shape (MiniLM D384 does not
+satisfy a jina D768 gate) and must refuse to emit ADMIT while any gate is
+UNMEASURED. (Script deferred to the §6 apply-window with the A/B it scores.)
+
+---
+
 ## 6. Risks + safe apply-window
 
 **Apply-window (hard gate):** `core.py` and `edge_list_dataset.py` are re-imported by the live GPU
