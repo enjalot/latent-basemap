@@ -492,6 +492,112 @@ def quick_ffr(xy: np.ndarray, edges_path: Path, rows: int,
     return hits / max(total, 1)
 
 
+def quick_ffr_v2(xy: np.ndarray, edges_path, rows: int,
+                 n_queries: int = 20_000, k_true: int = 15,
+                 knn_indices_path=None) -> float:
+    """FFR@0.1% v2 — corrected high-D truth selection (external review 2026-08-27).
+
+    Fixes the two v1 defects (see quick_ffr above, kept intact for archived
+    comparability):
+
+    1. TRUTH IS THE ACTUAL NEAREST NEIGHBORS, not an ID-ordered slice of the
+       fuzzy graph.  Preference order:
+         (a) the rung's saved EXACT k15 ``knn_indices.npy`` (co-located with the
+             fuzzy npz, i.e. next to ``edges_path``) — the real cosine k15;
+         (b) ELSE the top-``k_true`` destinations BY FUZZY WEIGHT (highest
+             membership) out of that node's fuzzy-graph row — NOT storage order.
+       Pass ``knn_indices_path`` to force a specific exact-truth file; pass it as
+       ``False`` to force the weight fallback; leave ``None`` to auto-resolve
+       ``<edges_dir>/knn_indices.npy``.
+
+    2. THE QUERY IS EXCLUDED FROM ITS OWN RETRIEVAL BUDGET on both sides: a point
+       is never its own high-D truth neighbor, and the 2D disc of ``rows*0.1%``
+       neighbors is measured over OTHER points (query k=disc+1, drop self) so the
+       budget is not silently spent on the trivial self-hit.
+
+    Same signature shape as v1 (``xy, edges_path, rows, ...``) so it drops into
+    the existing scorers.  Returns micro-averaged recall of the high-D truth
+    neighbors among the 2D disc neighbors.
+    """
+    from scipy.spatial import cKDTree
+
+    edges_path = Path(edges_path)
+    rng = np.random.default_rng(0)
+    queries = rng.choice(rows, size=min(n_queries, rows), replace=False)
+
+    # --- high-D truth: exact knn_indices.npy where present, else top-k by weight ---
+    truth_by_query: dict = {}
+    exact_idx = None
+    if knn_indices_path is None:
+        cand = edges_path.parent / "knn_indices.npy"
+        knn_indices_path = cand if cand.is_file() else False
+    if knn_indices_path:
+        knn_indices_path = Path(knn_indices_path)
+        if knn_indices_path.is_file():
+            exact_idx = np.load(knn_indices_path, mmap_mode="r")
+            if exact_idx.shape[0] != rows:
+                exact_idx = None            # shape mismatch -> fall back to weight
+
+    truth_mode = "exact" if exact_idx is not None else "weight"
+    if exact_idx is not None:
+        for q in queries:
+            t = np.asarray(exact_idx[q][:k_true], dtype=np.int64)
+            truth_by_query[q] = t[t != q]           # never self
+    else:
+        with np.load(edges_path) as z:
+            names = z.files
+            src_name = next(n for n in ("sources", "src", "rows") if n in names)
+            dst_name = next(n for n in ("destinations", "dst", "cols", "targets")
+                            if n in names)
+            w_name = next((n for n in ("weights", "data", "vals", "values")
+                           if n in names), None)
+            sources = z[src_name]
+            dests = z[dst_name]
+            weights = z[w_name] if w_name is not None else None
+        order = np.argsort(sources, kind="stable")
+        sources = sources[order]
+        dests = dests[order]
+        weights = weights[order] if weights is not None else None
+        starts = np.searchsorted(sources, np.arange(rows))
+        ends = np.searchsorted(sources, np.arange(rows), side="right")
+        for q in queries:
+            d = dests[starts[q]:ends[q]]
+            keep = d != q                            # never self
+            d = d[keep]
+            if len(d) == 0:
+                truth_by_query[q] = d.astype(np.int64)
+                continue
+            if weights is not None:
+                w = weights[starts[q]:ends[q]][keep]
+                if len(d) > k_true:
+                    top = np.argpartition(w, len(w) - k_true)[-k_true:]
+                    d = d[top]
+                else:
+                    d = d
+            else:
+                d = d[:k_true]                       # no weights: storage order
+            truth_by_query[q] = d.astype(np.int64)
+
+    # --- 2D disc neighbors, query excluded from its own budget ---
+    disc = max(int(rows * 0.001), 1)
+    tree = cKDTree(xy)
+    _, near = tree.query(xy[queries], k=disc + 1, workers=8)
+    near = np.atleast_2d(near)
+
+    hits = 0
+    total = 0
+    for qi, q in enumerate(queries):
+        truth = truth_by_query[q]
+        if len(truth) == 0:
+            continue
+        nbrs = near[qi]
+        nbrs = nbrs[nbrs != q]                        # drop the self hit -> disc others
+        hits += np.isin(truth, nbrs).sum()
+        total += len(truth)
+    quick_ffr_v2.last_truth_mode = truth_mode
+    return hits / max(total, 1)
+
+
 def run_arm(arm: str, dry_run: bool, seed: int = SEED, rung_name: str = "2m") -> int:
     rung = RUNGS[rung_name]
     overrides = dict(ARMS[arm])

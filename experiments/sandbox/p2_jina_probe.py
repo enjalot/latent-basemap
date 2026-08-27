@@ -45,7 +45,7 @@ def main() -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from image_map_pipeline import _norm
-    from knobs_2m import quick_ffr
+    from knobs_2m import quick_ffr_v2 as quick_ffr  # v2 truth-selection (review 2026-08-27)
 
     from basemap.pumap.parametric_umap.core import ParametricUMAP
 

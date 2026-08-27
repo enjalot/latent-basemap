@@ -456,6 +456,15 @@ DATASETS = {
             "/data/latent-basemap/substrates/a1-common/substrate.f32.npy",
             mmap_mode="r"),
         "subsets": None},
+    # Phase A1 cross-scale audit (Bug #5 fix): NEUTRAL common probe (250K sampled from the
+    # source MiniLM shards MINUS every head's training rows; held out for ALL heads at 0.000000%
+    # overlap). Probe-only; the orchestrator builds its knn+fuzzy truth, then a1_audit.py scores
+    # every MiniLM head on it. Supersedes "a1-common" (which was the 2M train set, 100% overlap).
+    "a1-common-neutral": {
+        "load": lambda: np.load(
+            "/data/latent-basemap/substrates/a1-common-neutral/substrate.f32.npy",
+            mmap_mode="r"),
+        "subsets": None},
 }
 
 # capacity-curve calibration (owner 2026-08-24, DEFERRED-to-LAST 2026-08-25): IDENTICAL to
