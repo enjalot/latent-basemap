@@ -690,15 +690,35 @@ int8-vs-RESIDENT throughput; a jina-shape resident-vs-int8 bench is required
 **Gate 3 — quality within ±0.005 of RESIDENT (the int8 tax).** The int8-QUANTIZED
 substrate's FFR must be within ±0.005 of the fp16-RESIDENT substrate at the same
 recipe/shape. This is the *quantization* cost (fp16 → int8 per-row), NOT the
-transport port (gate 1, bit-identical). **Status: the only REPRODUCIBLE int8-tax
-on disk is int8fac @500K MiniLM = fp16 − hostint8 = +0.0034 (v1) / +0.0038 (v2)
-[`ffr-v2-verdict-stability.json` D block], which is WITHIN ±0.005.** A larger
-prior figure (−0.0123 "vs RESIDENT") was carried in the driver's working notes but
-has **no persisted artifact** and could not be reproduced (2026-08-27); it is NOT
-treated as fact. The tax must be re-measured at the TRUE jina D768 shape and at a
-larger N than 500K before gate 3 is ruled — the 500K-MiniLM pass does not license
-30M-jina. **RULE: 30M is BLOCKED until gate 3 is measured-and-passed at the true
-shape, OR the owner explicitly accepts the measured tax.**
+transport port (gate 1, bit-identical). **The tax GROWS with N**, so a small-N pass
+does not license 30M. Two measured points on disk (both computed as resident −
+hostint8, sole delta `x_residency`):
+
+| shape | resident (v2) | hostint8 (v2) | tax v1 / v2 | vs ±0.005 |
+|---|---|---|---|---|
+| 500K MiniLM D384 (`int8fac`) | 0.4429 | 0.4391 | +0.0034 / +0.0038 | **PASS** |
+| 2M MiniLM D384 (`2m-knobs/umap-md000-x4bs16k-winner[-hostint8]`) | 0.47954 | 0.46621 | +0.01227 / +0.01333 | **FAIL** |
+| jina D768 (true shape) | — | — | — | **UNMEASURED** |
+
+The 2M point is the binding evidence: **+0.0133 FAILS ±0.005** under the corrected
+v2 metric, and the tax roughly quadrupled from 500K→2M — the quantization scheme
+carries ≈70% of it (int8fac qdq-vs-hostint8 attribution), which is the fix lever.
+Do NOT read the 500K PASS as the state of the world. (My first search reported
+−0.0123 "unreproducible" — that was a scope error: it is a computed difference of
+two persisted summaries, not a stored literal; verified 2026-08-27.) **RULE: 30M is
+BLOCKED until gate 3 is measured-and-passed at the true jina shape, OR the owner
+explicitly accepts the measured tax** (which at 2M is already ~2.7× the band).
+
+**Measurement methods (no proxies).** Gate 2 (throughput) is measured by the
+jina-shape within-run segment bench (`perf_bench` rebuilt at D768 h2048+h3072,
+int8 vs fp16-resident updates/s; don't-revisit variants dropped; the segment
+machinery is reused later for the B2 levers — BF16, combined-gather, cached
+labels, strided fneg/clip). Gate 3 (the int8 tax) is measured by a FULL parity
+twin ARM at the true shape — `jina-multi-2m champion-bs16k` (fp16 resident, on
+disk) vs a `champion-bs16k-hostint8` twin whose sole delta is `x_residency`
+(~1.5 h) — NOT a truncated-horizon quality segment (a short quality readout is a
+proxy, and the campaign's standing lesson is that proxies don't measure the real
+thing). Both re-queue after Phase A.
 
 Gate-check discipline: a `c1_admission_gates.py` reads each arm's `summary.json`
 and reports PASS/FAIL/UNMEASURED per gate, defaulting UNMEASURED→BLOCK (fail-
