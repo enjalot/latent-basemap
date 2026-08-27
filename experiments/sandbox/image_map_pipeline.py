@@ -634,6 +634,15 @@ def train(ds: str) -> int:
         realized_updates = int((getattr(model, "_train_stats", {}) or {}).get(
             "positive_lr_optimizer_steps", horizon) or horizon)
         actual_positive_pairs = realized_updates * pos_per_batch
+        # #13 (external review 2026-08-27): record REALIZED NEGATIVE totals too.
+        # edge_list_dataset fills each batch to batch_size with num_pos positives
+        # + num_neg = batch_size - num_pos negatives (edge_list_dataset.py:304-305).
+        # A "matched-positive" arm (higher pos_ratio, shorter horizon holding
+        # actual_positive_pairs constant) therefore trains on FEWER total
+        # negatives and a different pos:neg batch balance -> it is a CHANGED
+        # OBJECTIVE (less repulsion), NOT the same objective with fewer steps.
+        neg_per_batch = max(0, arm_batch - pos_per_batch)
+        actual_negative_pairs = realized_updates * neg_per_batch
         (d / "summary.json").write_text(json.dumps({
             "arm": f"{ds}--{arm}", "rung": ds,
             "overrides": {"low_dim_kernel": "umap", **MD[spec["md"]],
@@ -641,8 +650,20 @@ def train(ds: str) -> int:
             "seed": SEED, "dose_multiplier": dose, "horizon_updates": horizon,
             "positive_lr_updates": realized_updates,
             "pos_per_batch": pos_per_batch,
+            "neg_per_batch": neg_per_batch,
             "actual_positive_pairs": actual_positive_pairs,
+            "actual_negative_pairs": actual_negative_pairs,
             "draws_per_edge": actual_positive_pairs / e,
+            "negatives_per_edge": actual_negative_pairs / e,
+            "pos_to_neg_per_batch": (f"1:{neg_per_batch / pos_per_batch:.2f}"
+                                     if pos_per_batch else None),
+            "objective_note": (
+                "matched-positive arms (higher pos_ratio at a shorter horizon) hold "
+                "actual_positive_pairs ~constant but train on FEWER total negatives "
+                "(neg_per_batch = batch - int(batch*pos_ratio)); the pos:neg balance "
+                "and total repulsion change -> compare as a CHANGED OBJECTIVE, not "
+                "'same objective, fewer steps'. Sweep arms use unmatched (screening) "
+                "rows; finalists must replicate at 2M with matched rows."),
             "wall_s": wall, "quick_ffr_at_0.1pct": float(ffr),
             "edges": str(edges),
             "note": f"{ds} sandbox map; truth = own exact-k15 fuzzy graph; "
