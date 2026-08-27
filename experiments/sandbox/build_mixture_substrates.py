@@ -261,6 +261,12 @@ GRID = [
     ("minilm-bmix10-1m", "bmix", 0.10),
     ("minilm-bmix20-1m", "bmix", 0.20),
     ("minilm-bmix30-1m", "bmix", 0.30),
+    # social-CEILING arms (owner 2026-08-27): extend the balanced-family share curve past 30%
+    # (bmix beat rmix at every share >=20%, so only the balanced family is extended). Same protocol,
+    # same holdout>=300k, same frozen truths. 50% social at 1M = 125k each of 4 social corpora
+    # (pools beyond 300k: reddit 9.7M, CA 14.55M, twitter ~1.4M, bluesky ~1.4M -- ample).
+    ("minilm-bmix40-1m", "bmix", 0.40),
+    ("minilm-bmix50-1m", "bmix", 0.50),
 ]
 
 

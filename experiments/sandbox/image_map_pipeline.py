@@ -466,7 +466,9 @@ DATASETS = {
                                                   "pos_ratio": 0.10, "rankneg_window": 250_000,
                                                   "batch_size": 16384}}}}
        for ds in ("minilm-rmix10-1m", "minilm-rmix20-1m", "minilm-rmix30-1m",
-                  "minilm-bmix10-1m", "minilm-bmix20-1m", "minilm-bmix30-1m")},
+                  "minilm-bmix10-1m", "minilm-bmix20-1m", "minilm-bmix30-1m",
+                  # social-CEILING arms (owner 2026-08-27): balanced family only, extend past 30%.
+                  "minilm-bmix40-1m", "minilm-bmix50-1m")},
     # ---- #5 broad probe-register suite (heldout, disjoint from sweep training). Probe-only (no arms);
     # the orchestrator builds each register's knn+fuzzy truth graph, frozen before any sweep train seals.
     **{ds: {"load": (lambda p=f"/data/latent-basemap/substrates/{ds}/substrate.f32.npy":
