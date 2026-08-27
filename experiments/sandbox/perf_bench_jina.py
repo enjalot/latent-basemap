@@ -57,9 +57,19 @@ SEGMENTS = [
 ]
 
 
+def _ensure_paths():
+    # repo root (for `basemap`), experiments, and sandbox — delta_updates_per_s
+    # imports `basemap...` so the ROOT (parents[2]) MUST be on the path, not just
+    # experiments/sandbox (the original bug: all segments ModuleNotFoundError).
+    for p in (Path(__file__).resolve().parents[2],
+              Path(__file__).resolve().parents[1],
+              Path(__file__).resolve().parent):
+        if str(p) not in sys.path:
+            sys.path.insert(0, str(p))
+
+
 def _load_jina():
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    _ensure_paths()
     from image_map_pipeline import DATASETS, _norm
     x = _norm(DATASETS[DS]["load"]())
     e = int(len(np.load(EDGES, mmap_mode="r")["sources"]))
@@ -163,6 +173,15 @@ def main() -> int:
         }
         (OUT / "results.json").write_text(json.dumps(out, indent=1))
         print(f"\ngate2: {json.dumps(gate2)}\nverdict: {verdict}", flush=True)
+    # FAIL LOUDLY (non-zero) when a segment errored or the gate could not be
+    # measured — a fail-closed orchestrator must NOT read null gate-2 as success.
+    errored = [k for k, v in rows.items() if isinstance(v, dict) and v.get("error")]
+    if errored:
+        print(f"ERROR: {len(errored)} segment(s) failed: {errored} — non-zero exit", flush=True)
+        return 1
+    if not which and verdict == "INCOMPLETE":
+        print("ERROR: gate2 INCOMPLETE (unmeasured) — non-zero exit", flush=True)
+        return 1
     return 0
 
 
