@@ -456,7 +456,11 @@ DATASETS = {
                      np.load(p, mmap_mode="r")),
             "subsets": None}
        for ds in ("probe-reddit", "probe-ca", "probe-twitter", "probe-bluesky",
-                  "probe-wiki", "probe-ccweb", "probe-ccscience", "probe-code")},
+                  "probe-wiki", "probe-ccweb", "probe-ccscience", "probe-code",
+                  # #8 fix: HELD-OUT code register (250K from the complement of the 2M
+                  # baseline's starcoder rows; 0 overlap proven, incl. bmix30-2m ⊆ baseline).
+                  # Replaces the contaminated probe-code at 2M-confirmation decision time.
+                  "probe-code-heldout")},
     # Phase A1 cross-scale audit: one frozen common sample (250K of the 2M pool). Probe-only;
     # the orchestrator builds its knn+fuzzy truth, then a1_audit.py scores every MiniLM head on it.
     "a1-common": {
