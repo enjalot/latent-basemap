@@ -216,6 +216,14 @@ DATASETS = {
     "jina-multi-2m": {"load": _jina_multi_load, "subsets": _jina_multi_subsets,
                       "arms": {**ARMS, "champion-bs16k": _CHAMPION_500K,
                                "champion-bs16k-norank": _CHAMPION_NORANK,
+                               # #12 gate-3 parity twin (external review 2026-08-27): champion-bs16k
+                               # with the SOLE delta x_residency=host_int8, so resident (0.6426 /
+                               # v2-rescored) vs hostint8 measures the TRUE jina-D768 int8 tax at 2M —
+                               # the jina-shape number that governs 30M gate 3, replacing the
+                               # MiniLM-shape points. Queue AFTER Phase A (needs an idle GPU, ~1.5h).
+                               "champion-bs16k-hostint8": {**_CHAMPION_500K,
+                                   "extra": {**_CHAMPION_500K["extra"],
+                                             "x_residency": "host_int8"}},
                                # #2 dose-vs-width decomposition (external review 2026-08-25);
                                # champion-identical except one lever, rank25=500K. Baseline 0.6426.
                                "champion-x8-h2048": {"md": "000", "dose": 8,       # exposure lever
