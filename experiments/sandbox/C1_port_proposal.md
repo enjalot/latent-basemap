@@ -377,13 +377,13 @@ normalized**. Consuming them must (a) skip the loader's re-encode and (b) skip t
 +    sealed_int8 = True
 +    _prenormalized = True
 +
-+    def __init__(self, path, dim=None):
-+        import json, os
++    def __init__(self, path, dim=None, verify_hashes=True):
++        import json, os, hashlib
 +        path = str(path)
 +        i8p = os.path.join(path, "embeddings.i8")
 +        scp = os.path.join(path, "scales.f16")
 +        manp = os.path.join(path, "manifest.json")
-+        rows = None
++        rows = None; man = None
 +        if os.path.isfile(manp):
 +            man = json.loads(open(manp).read())
 +            rows, dim = int(man["rows"]), int(man["dim"])
@@ -397,6 +397,25 @@ normalized**. Consuming them must (a) skip the loader's re-encode and (b) skip t
 +        if i8_bytes != rows * dim or sc_bytes != rows * 2:
 +            raise ValueError(f"sealed byte geometry mismatch: i8={i8_bytes} sc={sc_bytes} "
 +                             f"rows={rows} dim={dim}")
++        # review #9: LOADER VERIFIES HASHES. A sealed substrate built by the
++        # hardened build_int8_substrate.py carries manifest["sha256"]; re-stream
++        # both files (1 MiB chunks, never materialised) and fail closed on any
++        # mismatch before the 30M train trusts a corrupt/tampered/truncated seal.
++        # One-time ~i8_bytes read at open; set verify_hashes=False only for a
++        # throwaway re-open of an already-verified seal in the same process.
++        want = (man or {}).get("sha256")
++        if verify_hashes and want:
++            for fname, want_hex in want.items():
++                h = hashlib.sha256()
++                with open(os.path.join(path, fname), "rb") as f:
++                    for chunk in iter(lambda: f.read(1 << 20), b""):
++                        h.update(chunk)
++                if h.hexdigest() != want_hex:
++                    raise ValueError(f"sealed {fname}: SHA-256 mismatch vs manifest "
++                                     f"(corrupt/tampered seal) at {path}")
++        elif verify_hashes and man is not None:
++            raise ValueError("sealed manifest has no sha256 block — rebuild with the "
++                             "hardened build_int8_substrate.py before training on it")
 +        self.encoded = np.memmap(i8p, dtype=np.int8, mode="r", shape=(rows, dim))
 +        self.scales = np.memmap(scp, dtype="<f2", mode="r", shape=(rows,))
 +        self.shape = (rows, dim)

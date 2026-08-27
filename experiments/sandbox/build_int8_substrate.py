@@ -66,7 +66,9 @@ Self-validate on the first 200K rows of the 2M MiniLM substrate::
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -106,6 +108,18 @@ def build(src_path: Path, out_dir: Path, block: int, limit: int | None) -> dict:
 
     Only one ``block``-row slice of fp32 is ever resident. Returns the manifest
     dict that was written to ``<out_dir>/manifest.json``.
+
+    Hardened (Phase C2 / review #9):
+      * NON-FINITE rows are detected per block; their global indices are recorded
+        to ``nonfinite_rows.json`` and the build FAILS CLOSED (never seals a
+        substrate the loader would crash on at its ``scales > 0`` assert).
+      * TMP + atomic rename: data is streamed to ``*.tmp`` and ``os.replace``d to
+        the final names only after every byte-size/hash check passes, so a killed
+        build never leaves a half-written seal that write-once would then refuse
+        to rebuild.
+      * SHA-256 of both sealed files is computed streaming (never re-reads the
+        whole file) and stored in the manifest; ``verify_sealed`` / the loader
+        re-checks it (round0034 sealed-int8 load path, C1_port_proposal.md).
     """
     i8_path = out_dir / "embeddings.i8"
     scales_path = out_dir / "scales.f16"
@@ -114,6 +128,11 @@ def build(src_path: Path, out_dir: Path, block: int, limit: int | None) -> dict:
         if p.exists():
             raise SystemExit(f"REFUSING to overwrite existing {p} (write-once).")
     out_dir.mkdir(parents=True, exist_ok=True)
+    # tmp scratch names — atomically renamed to the finals only on full success.
+    i8_tmp, sc_tmp = i8_path.with_suffix(".i8.tmp"), scales_path.with_suffix(".f16.tmp")
+    for p in (i8_tmp, sc_tmp):
+        if p.exists():
+            p.unlink()   # stale scratch from a prior killed build; safe to drop.
 
     raw = np.load(src_path, mmap_mode="r")
     if raw.ndim != 2:
@@ -127,39 +146,78 @@ def build(src_path: Path, out_dir: Path, block: int, limit: int | None) -> dict:
     max_abs_quant_err = 0.0     # max |dequant - normalized| over all elements
     scale_min, scale_max = np.inf, -np.inf
     rows_written = 0
+    bad_rows: list[int] = []            # global indices of non-finite input rows
+    h_i8, h_sc = hashlib.sha256(), hashlib.sha256()   # streaming file hashes
 
     # Append raw C-order bytes block by block. int8 codes are already C-order
     # from quantize_int8_rows; scales are cast to little-endian fp16 (<f2) to
     # match np.fromfile(..., dtype="<f2") on the loader side regardless of host
     # byte order.
-    with open(i8_path, "wb") as fi8, open(scales_path, "wb") as fsc:
+    with open(i8_tmp, "wb") as fi8, open(sc_tmp, "wb") as fsc:
         for i in range(0, n, block):
             end = min(i + block, n)
             blk = np.asarray(raw[i:end], dtype=np.float32)   # only fp32 held
+
+            # Non-finite guard: any row with a NaN/Inf element is fatal for the
+            # sealed format (its scale would be NaN/Inf/0 and trip the loader's
+            # finite&&>0 assert). Record global indices; neutralise the row to
+            # zero so the block loop/hashing stays well-defined, then fail-closed
+            # after the full scan (so the report lists EVERY bad row, once).
+            finite = np.isfinite(blk).all(axis=1)
+            clean_block = bool(finite.all())
+            if not clean_block:
+                bad_rows.extend((i + np.nonzero(~finite)[0]).tolist())
+                blk = np.where(finite[:, None], blk, 0.0)
+
             xn = _norm(blk)                                  # trainer pre-quant
             enc, sc = quantize_int8_rows(xn)                 # R0262 int8+fp16
 
             enc = np.ascontiguousarray(enc, dtype=np.int8)
             sc = np.ascontiguousarray(sc.astype("<f2"))
-            fi8.write(enc.tobytes(order="C"))
-            fsc.write(sc.tobytes(order="C"))
+            b_i8, b_sc = enc.tobytes(order="C"), sc.tobytes(order="C")
+            fi8.write(b_i8); h_i8.update(b_i8)
+            fsc.write(b_sc); h_sc.update(b_sc)
             rows_written += end - i
 
-            # Accounting: dequant EXACTLY as HostInt8ArrayDataset.index_select
-            # (int8.float() * scale.float()) and compare to the normalized rows.
-            deq = enc.astype(np.float32) * sc.astype(np.float32)[:, None]
-            max_abs_quant_err = max(max_abs_quant_err,
-                                    float(np.abs(deq - xn).max()))
-            scale_min = min(scale_min, float(sc.astype(np.float32).min()))
-            scale_max = max(scale_max, float(sc.astype(np.float32).max()))
+            # Accounting/asserts only over CLEAN rows so a doomed build's stats
+            # aren't poisoned by the zeroed placeholders.
+            sc_f32 = sc.astype(np.float32)
+            if clean_block:
+                assert np.all(np.isfinite(sc_f32)) and np.all(sc_f32 > 0), \
+                    f"non-finite/non-positive scale in clean block {i}..{end}"
+                deq = enc.astype(np.float32) * sc_f32[:, None]
+                max_abs_quant_err = max(max_abs_quant_err,
+                                        float(np.abs(deq - xn).max()))
+                scale_min = min(scale_min, float(sc_f32.min()))
+                scale_max = max(scale_max, float(sc_f32.max()))
             print(f"  rows {i:>10}..{end:<10}  "
-                  f"i8={i8_path.stat().st_size}B  f16={scales_path.stat().st_size}B")
+                  f"i8={i8_tmp.stat().st_size}B  f16={sc_tmp.stat().st_size}B"
+                  f"{'  [NON-FINITE ROWS]' if not clean_block else ''}")
 
-    # Byte-size self-check against the loader's geometry contract.
-    i8_bytes = i8_path.stat().st_size
-    sc_bytes = scales_path.stat().st_size
+    # FAIL CLOSED on any non-finite input row — record the indices, refuse to seal.
+    if bad_rows:
+        (out_dir / "nonfinite_rows.json").write_text(json.dumps({
+            "source": str(src_path), "rows_scanned": n,
+            "nonfinite_row_count": len(bad_rows),
+            "nonfinite_row_indices": bad_rows[:10000],
+            "truncated": len(bad_rows) > 10000,
+        }, indent=1))
+        for p in (i8_tmp, sc_tmp):
+            p.unlink(missing_ok=True)
+        raise SystemExit(
+            f"REFUSING to seal: {len(bad_rows)} non-finite input row(s) "
+            f"(first {bad_rows[:8]}...). See {out_dir/'nonfinite_rows.json'}.")
+
+    # Byte-size self-check against the loader's geometry contract (on tmp files).
+    i8_bytes = i8_tmp.stat().st_size
+    sc_bytes = sc_tmp.stat().st_size
     assert i8_bytes == rows_written * d, (i8_bytes, rows_written * d)
     assert sc_bytes == rows_written * 2, (sc_bytes, rows_written * 2)
+    sha_i8, sha_sc = h_i8.hexdigest(), h_sc.hexdigest()
+
+    # All checks passed — atomically publish the data files, then the manifest.
+    os.replace(i8_tmp, i8_path)
+    os.replace(sc_tmp, scales_path)
 
     manifest = {
         "name": out_dir.name,
@@ -193,18 +251,60 @@ def build(src_path: Path, out_dir: Path, block: int, limit: int | None) -> dict:
         "normalized_before_quant": True,
         "i8_bytes": i8_bytes,
         "scales_bytes": sc_bytes,
+        "sha256": {"embeddings.i8": sha_i8, "scales.f16": sha_sc},
+        "nonfinite_rows": 0,
         "max_abs_quant_error_vs_normalized": max_abs_quant_err,
         "scale_min": scale_min,
         "scale_max": scale_max,
         "block_rows": block,
         "builder": "experiments/sandbox/build_int8_substrate.py",
     }
-    manifest_path.write_text(json.dumps(manifest, indent=1))
+    tmp_manifest = manifest_path.with_suffix(".json.tmp")
+    tmp_manifest.write_text(json.dumps(manifest, indent=1))
+    os.replace(tmp_manifest, manifest_path)
     print(f"\nwrote {i8_path} ({i8_bytes} B) + {scales_path} ({sc_bytes} B)")
     print(f"wrote {manifest_path}")
+    print(f"sha256 embeddings.i8 = {sha_i8}")
+    print(f"sha256 scales.f16    = {sha_sc}")
     print(f"max abs quant error vs normalized: {max_abs_quant_err:.6e}")
     print(f"scale range: [{scale_min:.6e}, {scale_max:.6e}]")
     return manifest
+
+
+def verify_sealed(out_dir: Path) -> bool:
+    """Re-hash the sealed files and check them against the manifest (review #9).
+
+    The loader MUST call this before trusting a sealed int8 substrate (wired into
+    the round0034 sealed-int8 load path per C1_port_proposal.md): it re-streams
+    ``embeddings.i8`` + ``scales.f16``, recomputes their SHA-256, and asserts the
+    digests + byte-geometry match ``manifest.json``. Streaming (1 MiB chunks) so
+    it never materialises a 30M-row file. Returns True on match, else raises.
+    """
+    out_dir = Path(out_dir)
+    manifest = json.loads((out_dir / "manifest.json").read_text())
+    want = manifest.get("sha256")
+    if not want:
+        raise SystemExit(f"{out_dir}/manifest.json has no sha256 block "
+                         "(rebuild with the hardened builder before verifying).")
+    rows, dim = int(manifest["rows"]), int(manifest["dim"])
+    exp_bytes = {"embeddings.i8": rows * dim, "scales.f16": rows * 2}
+    for fname, want_hex in want.items():
+        p = out_dir / fname
+        got = p.stat().st_size
+        if got != exp_bytes[fname]:
+            raise SystemExit(f"{p}: size {got} != expected {exp_bytes[fname]} "
+                             f"(rows*{'dim' if fname.endswith('.i8') else '2'}).")
+        h = hashlib.sha256()
+        with open(p, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        got_hex = h.hexdigest()
+        if got_hex != want_hex:
+            raise SystemExit(f"{p}: SHA-256 MISMATCH\n  manifest={want_hex}\n"
+                             f"  ondisk  ={got_hex}\n  (corrupt/tampered seal).")
+        print(f"verify {fname}: OK  ({got} B, sha256 {got_hex[:16]}...)")
+    print(f"verify_sealed({out_dir}): PASS")
+    return True
 
 
 def validate(src_path: Path, out_dir: Path, limit: int) -> int:
