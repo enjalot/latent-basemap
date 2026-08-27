@@ -43,9 +43,16 @@ EN registers (the language floor's EN anchor). ~100-250k each.
 NO code corpus (unlike MiniLM's starcoder 10%), so there is no code register on the
 jina side — the code-displacement question is MiniLM-specific.
 
+**MATCHED-DISPLACEMENT ladder (delegate 2026-08-27 — upgrade over MiniLM screening).**
+Build the 1M base ONCE. Every mixed arm = the SAME 1M base rows with a seed-42 chosen
+share DISPLACED by social — base rows BIT-IDENTICAL across all arms, social share the
+SOLE variable (exactly the bmix30-2m matched design, applied to the whole ladder). So
+the jina ladder is matched/sealed-grade from the start, not screening-grade.
+
 **Share ladder (balanced family):** {0, 10, 20, 30} (+40/50 IFF the MiniLM ceiling arms
-show worst-register still rising past 30%). balanced share s = (1−s) multi-base +
-s/4 each of reddit/CA/twitter/bluesky (holdout-disjoint ≥300k).
+show worst-register still rising past 30% — if MiniLM turns over at 40, jina stops at 30).
+balanced share s displaces s×1M base rows, replaced by s/4 each of reddit/CA/twitter/
+bluesky (holdout-disjoint ≥300k). The 0% arm = the undisplaced base.
 
 **Transfer check:** ONE reddit-only point at 20% (rmix-jina-20) — tests whether the
 MiniLM "balance beats volume" finding transfers to jina space.
@@ -77,8 +84,18 @@ Interior-optimum + per-register delta-vs-0% reported as in the MiniLM sweep.
    is informed) and after prereqs exist. Propose armed HEADs (this doc) → owner signoff →
    build substrates (CPU) → knn/fuzzy/train/score (GPU) → maximin.
 
-## Open items for signoff
-- jina base 0% map: reuse existing champion vs train jina-multi-1m/champion-bs16k? (confirm)
-- per-lang probe size 100k vs 250k (time budget).
-- +40/50 jina arms gated on the MiniLM ceiling result.
-- social pool embed size (500k/corpus proposed) — enough for 50% share + probe.
+## Signoff (delegate 2026-08-27 — all four ruled)
+- (a) TRAIN a fresh jina-multi-1m/champion-bs16k as the 0% point (~45 min; no jina 1M rung
+  exists to reuse). AND adopt matched-displacement across the WHOLE ladder (above).
+- (b) per-lang probe size = **100k/lang** (keep the 20-lang build ~35 min).
+- (c) +40/50 jina arms GATED on the MiniLM ceiling arms showing continued worst-register
+  rise; if MiniLM turns over at 40, jina stops at 30.
+- (d) social pool embed size = **500k/corpus** approved.
+
+## Addition (delegate 2026-08-27): language-floor backfill of EXISTING jina maps
+When P-B's 20-language truths land, ALSO score the maps we already own — jina-multi-2m
+champion-bs16k, champion-x8-h3072, the 6.25M champion, and the md010 arm (when sealed) —
+through the 20-language suite. Cheap (transform + FFR, no train). We have never had
+per-language OOD numbers for these maps; the sweep's 0% interpretation needs to know
+whether the current maps even have a language floor. Report per-map × per-language FFR +
+worst-language, alongside the sweep.
