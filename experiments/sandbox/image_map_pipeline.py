@@ -149,6 +149,11 @@ def _redditmix_subsets():
     return np.load(_REDDITMIX / "subsets.npy", allow_pickle=True)
 
 
+def _bmix30_2m_subsets():
+    return np.load("/data/latent-basemap/substrates/minilm-bmix30-2m/subsets.npy",
+                   allow_pickle=True)
+
+
 def _reddit_load() -> np.ndarray:
     # every 5th row of the 10M reddit-tldr17 MiniLM embeddings -> 2M sample.
     # Used for knn/fuzzy TRUTH ONLY (the OOD probe projects these rows through
@@ -274,6 +279,18 @@ DATASETS = {
                                              "pos_ratio": 0.10, "rankneg_window": 500_000,
                                              "batch_size": 16384, "hidden_dim": 3072,
                                              "neck_fraction": 0.625}}}},
+    # ---- bmix30-2m FINALIST CONFIRMATION (owner 2026-08-27): social-mixture sweep winner
+    # (bmix30 = 30% balanced social) replicated at 2M with MATCHED rows vs minilm-mixed-2m — 1.4M
+    # base rows IDENTICAL to a subset of that baseline + 600K balanced social (150K each
+    # reddit/CA/twitter/bluesky, holdout-disjoint offset>=300000), so the social 30% is the SOLE
+    # delta. champion-bs16k = _CHAMPION_500K (dose4, rankneg 500K = 25% of 2M), same recipe as the
+    # 2M baseline. Scored on the full probe-register suite (incl. probe-code-heldout).
+    "minilm-bmix30-2m": {
+        "load": lambda: np.load(
+            "/data/latent-basemap/substrates/minilm-bmix30-2m/substrate.f32.npy",
+            mmap_mode="r"),
+        "subsets": _bmix30_2m_subsets,
+        "arms": {"champion-bs16k": _CHAMPION_500K}},
     "reddit-2m": {"load": _reddit_load, "subsets": None},
     "communityarchive-2m": {"load": _ca_load, "subsets": None},
     "minilm-redditmix-2m": {"load": _redditmix_load,
