@@ -573,7 +573,13 @@ def train(ds: str) -> int:
     subsets = DATASETS[ds]["subsets"]() if DATASETS[ds]["subsets"] else None
 
     only = os.environ.get("ONLY_ARM")
-    for arm, spec in DATASETS[ds].get("arms", ARMS).items():
+    _arms = DATASETS[ds].get("arms", ARMS)
+    # #1 (external review 2026-08-27): a typo'd/missing ONLY_ARM must HARD-ERROR, not silently
+    # "succeed" by training nothing (that is how the held-h4096 stage logged DONE).
+    if only and only not in _arms:
+        raise SystemExit(
+            f"ONLY_ARM={only!r} not in {ds} arms {list(_arms)} — refusing silent no-op (typo?)")
+    for arm, spec in _arms.items():
         if only and arm != only:
             continue
         dose = spec.get("dose", 2)

@@ -144,18 +144,38 @@ def main(argv: list[str]) -> int:
         matrix[key] = row
         del model
 
-    # per-map worst + mean over the registers actually scored.
+    # #8 (external review 2026-08-27): probe-code has 1724-2252 exact-row overlap with EVERY
+    # training arm (contaminated) -> EXCLUDE from worst/mean/maximin (still scored + reported for
+    # the record). Rebuild held-out starcoder register before code re-enters maximin.
+    CODE_EXCLUDED = {"probe-code"}
+    maximin_regs = [r for r in REGISTERS if r not in CODE_EXCLUDED]
+
+    def _finite(v):
+        return v is not None and np.isfinite(v)
+
+    # per-map worst + mean over the maximin (code-excluded) registers.
     per_map_worst: dict[str, float | None] = {}
     per_map_mean: dict[str, float | None] = {}
     for key, row in matrix.items():
-        if row is None:
-            per_map_worst[key] = per_map_mean[key] = None
-            continue
-        vals = [v for v in row.values() if v is not None]
+        vals = [row[r] for r in maximin_regs if row and _finite(row.get(r))] if row else []
         per_map_worst[key] = float(min(vals)) if vals else None
         per_map_mean[key] = float(np.mean(vals)) if vals else None
 
-    # maximin winner: the map whose worst register is least bad.
+    # #2 full-matrix assert: declare a winner ONLY if EVERY expected (map x maximin-register)
+    # cell exists and is finite; else abort LOUDLY (no winner, non-zero exit).
+    missing = [(k, r) for k in SWEEP_MAPS for r in maximin_regs
+               if matrix.get(k) is None or not _finite((matrix.get(k) or {}).get(r))]
+    if missing:
+        (SANDBOX / "mixture-sweep-results.json").write_text(json.dumps({
+            "schema": "mixture-broad-probe-2026-08-26", "ABORTED": True,
+            "reason": "incomplete matrix: missing/non-finite maximin cells; no winner",
+            "missing_cells": [f"{k}--{r}" for k, r in missing][:60],
+            "ffr_matrix": matrix, "code_excluded_from_maximin": True}, indent=1))
+        print(f"ABORT: {len(missing)} missing/non-finite maximin cells -> NO winner declared",
+              flush=True)
+        raise SystemExit(2)
+
+    # maximin winner (over code-excluded registers): the map whose worst register is least bad.
     scored_worst = {k: v for k, v in per_map_worst.items() if v is not None}
     maximin_winner = (max(scored_worst, key=scored_worst.get)
                       if scored_worst else None)
