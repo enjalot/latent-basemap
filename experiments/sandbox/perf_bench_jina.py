@@ -69,6 +69,20 @@ BATCHSCAN_SEGMENTS = [
     for w in BATCH_SCAN_WIDTHS for b in BATCH_SCAN_BATCHES
     for r in ("auto", "host_int8")
 ]
+# --transport (owner 2026-08-28): the 4-way transport A/B that settles gate-2 — resident /
+# legacy host-int8 / C1 fast host-int8 / device-int8, at h2048 + h3072. Sole delta = transport.
+# updates/s + ratio-vs-resident each. If device-int8 reaches resident-class, gate-2 dissolves.
+TRANSPORT_SEGMENTS = [
+    (f"h{w}-{name}", {"hidden_dim": w, **ov})
+    for w in (2048, 3072)
+    for name, ov in (
+        ("resident",    {"x_residency": "auto"}),
+        ("legacy-int8", {"x_residency": "host_int8"}),
+        ("fast-int8",   {"x_residency": "host_int8", "host_int8_fast_input": True}),
+        ("device-int8", {"x_residency": "device_int8"}),
+    )
+]
+
 BATCHSCAN_PROVENANCE = (
     "SCOPED EXCEPTION to don't-revisit 'bs32K no benefit': that was fp16-resident MiniLM "
     "D384 on the OLD partially-invalidated perf bench; this measures int8-TRANSPORT jina "
@@ -151,9 +165,12 @@ def delta_updates_per_s(label: str, overrides: dict, X, e: int) -> dict:
 def main() -> int:
     args = sys.argv[1:]
     batchscan = "--batchscan" in args
+    transport = "--transport" in args
     which = next((a for a in args if not a.startswith("--")), None)
-    segments = BATCHSCAN_SEGMENTS if batchscan else SEGMENTS
-    out_dir = (OUT.parent / "perf-bench-jina-batchscan") if batchscan else OUT
+    segments = (TRANSPORT_SEGMENTS if transport
+                else BATCHSCAN_SEGMENTS if batchscan else SEGMENTS)
+    out_dir = (OUT.parent / "perf-bench-jina-transport" if transport
+               else OUT.parent / "perf-bench-jina-batchscan" if batchscan else OUT)
     out_dir.mkdir(parents=True, exist_ok=True)
     X, e = _load_jina()
     print(f"jina substrate {X.shape} dtype={X.dtype}; edges={e}"
@@ -172,7 +189,32 @@ def main() -> int:
         print(json.dumps(r), flush=True)
         (out_dir / f"{label}.json").write_text(json.dumps(r, indent=1))
 
-    if batchscan:
+    if transport:
+        # 4-way per width: each transport's ups + ratio-vs-resident. gate-2 dissolves if
+        # any int8 transport reaches >= 0.85 of resident. device-int8 = zero-transport probe.
+        table = {}
+        for w in (2048, 3072):
+            res = rows.get(f"h{w}-resident", {}).get("updates_per_s")
+            row = {"resident_ups": res}
+            for name in ("legacy-int8", "fast-int8", "device-int8"):
+                u = rows.get(f"h{w}-{name}", {}).get("updates_per_s")
+                err = rows.get(f"h{w}-{name}", {}).get("error")
+                row[name] = {"ups": u, "ratio": (round(u / res, 3) if res and u else None),
+                             "clears_0.85": bool(res and u and u / res >= GATE2_RATIO),
+                             "error": err}
+            table[f"h{w}"] = row
+        if not which:
+            (out_dir / "transport-results.json").write_text(json.dumps({
+                "schema": "perf-bench-jina-transport-4way-2026-08-28",
+                "shape": {"dataset": DS, "dim": int(X.shape[1]), "rows": int(X.shape[0])},
+                "gate2_ratio_threshold": GATE2_RATIO, "table": table, "segments": rows,
+                "note": "sole delta = transport. If device-int8 (zero-transport) reaches "
+                        "resident-class, gate-2 dissolves and C1's transport machinery is the "
+                        "100M-era fallback. Quality-parity (device-int8 FFR vs hostint8 0.6964) "
+                        "is a separate full-train assert, not measured in this throughput bench.",
+            }, indent=1))
+            print(f"\ntransport 4-way: {json.dumps(table)}", flush=True)
+    elif batchscan:
         # per-(width,batch): int8/resident ratio + samples/s (ups×batch). Does a bigger
         # batch amortize the fixed int8 transport overhead enough to clear 0.85?
         grid = {}
@@ -219,15 +261,19 @@ def main() -> int:
             }, indent=1))
             print(f"\ngate2: {json.dumps(gate2)}\nverdict: {verdict}", flush=True)
 
-    # FAIL LOUDLY (non-zero) when a segment errored — a fail-closed orchestrator must not
-    # read null throughput as success.
+    # FAIL LOUDLY (non-zero) only in the fail-closed gate-2 mode — a fail-closed orchestrator
+    # must not read null throughput as success. transport/batchscan RECORD segment errors in
+    # their tables (a device-int8 error is an informative A/B result, not an orchestrator abort).
     errored = [k for k, v in rows.items() if isinstance(v, dict) and v.get("error")]
-    if errored:
-        print(f"ERROR: {len(errored)} segment(s) failed: {errored} — non-zero exit", flush=True)
-        return 1
-    if not which and not batchscan and verdict == "INCOMPLETE":
-        print("ERROR: gate2 INCOMPLETE (unmeasured) — non-zero exit", flush=True)
-        return 1
+    if not transport and not batchscan:
+        if errored:
+            print(f"ERROR: {len(errored)} segment(s) failed: {errored} — non-zero exit", flush=True)
+            return 1
+        if not which and verdict == "INCOMPLETE":
+            print("ERROR: gate2 INCOMPLETE (unmeasured) — non-zero exit", flush=True)
+            return 1
+    elif errored:
+        print(f"NOTE: {len(errored)} segment(s) errored (recorded in table): {errored}", flush=True)
     return 0
 
 
