@@ -238,6 +238,14 @@ DATASETS = {
                                "champion-bs16k-deviceint8": {**_CHAMPION_500K,
                                    "extra": {**_CHAMPION_500K["extra"],
                                              "x_residency": "device_int8"}},
+                               # determinism CONTROL (2026-08-28): identical to champion-bs16k-hostint8
+                               # (seed 42, host_int8), distinct out-dir. Its FFR vs champion-bs16k-hostint8
+                               # measures the run-to-run GPU non-determinism FLOOR at fixed config — the
+                               # yardstick for judging device-int8's 0.0025 vs hostint8 (GPU-noise if the
+                               # self-vs-self floor is comparable, real divergence if the floor is ~0).
+                               "champion-bs16k-hostint8-rep2": {**_CHAMPION_500K,
+                                   "extra": {**_CHAMPION_500K["extra"],
+                                             "x_residency": "host_int8"}},
                                # gate-3 SEED-43 replicate PAIR (delegate 2026-08-28): the jina-D768
                                # int8 SIGN-FLIP (int8 +0.0134 vs resident @ seed 42) doesn't enter the
                                # 30M spec on one seed. Resident + hostint8 twins at seed 43, otherwise
