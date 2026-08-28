@@ -343,6 +343,18 @@ DATASETS = {
                             "arms": _REDDITMIX_ARMS},
     "sisap-clip-2m-dedup": {"load": _sisap_dedup_load, "subsets": None,
                             "arms": _SISAP_DEDUP_ARMS},
+    # ---- jina LANGUAGE-PRESERVING social-mixture sweep (JINA_SWEEP_PROPOSAL.md 2026-08-28):
+    # social displaces ONLY the EN 1M (proportional fw/rp/pile); all 20 language blocks held
+    # BIT-IDENTICAL to the 0% baseline (jina-multi-2m/champion-bs16k, reused as the 0% arm). f16 (2M,768).
+    # champion-bs16k = _CHAMPION_500K (dose4, rankneg 500K = 25% of 2M), same recipe as jina-multi-2m.
+    **{arm: {
+        "load": (lambda a=arm: np.asarray(np.load(
+            f"/data/latent-basemap/substrates/{a}/substrate.f16.npy",
+            mmap_mode="r"), dtype=np.float32)),
+        "subsets": (lambda a=arm: np.load(
+            f"/data/latent-basemap/substrates/{a}/subsets.npy", allow_pickle=True)),
+        "arms": {"champion-bs16k": _CHAMPION_500K}}
+       for arm in ("jina-bmix10-2m", "jina-bmix20-2m", "jina-bmix30-2m", "jina-rmix20-2m")},
     "jina-multi-6m": {
         "load": lambda: np.array(np.load(
             _JINA_PROMPTED / "substrate-6250k.f16.npy", mmap_mode="r"),
