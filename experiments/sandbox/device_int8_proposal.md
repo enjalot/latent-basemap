@@ -29,17 +29,26 @@ fail-closed resident-set pre-check.** Inserted just before the `host_int8` branc
 +        if str(self.x_residency).lower() == "device_int8":
 +            if edge_set is not None:
 +                raise RuntimeError("x_residency='device_int8' incompatible with reject_neighbors")
-+            # Fail-closed VRAM pre-check: full int8 X + scales must fit the device
-+            # budget with headroom for edges + model/opt/activations. NEVER silently
-+            # fall back to host_int8 (that would hide a wrong residency choice).
++            # Fail-closed VRAM pre-check (FIXED per review 2026-08-28): the resident set
++            # is int8 X + the edge arrays the sampler is about to upload + a real margin
++            # for model/opt/activations/rankneg. NEVER silently fall back to host_int8.
++            # (Earlier draft was fail-OPEN: `headroom = budget or (free-need)` — a nonzero
++            # env var made headroom always >0 so the check was DISABLED; unset, it only
++            # asked "does X alone fit", reserving nothing for what OOMs two lines later.)
 +            free_b, total_b = torch.cuda.mem_get_info(self.device)
 +            need_x = n_train * n_features * 1 + n_train * 2          # int8 codes + fp16 scales
-+            budget = float(os.environ.get("DEVICE_INT8_VRAM_BUDGET_GB", "0")) * (1024**3)
-+            headroom = budget or (free_b - need_x)
-+            if need_x > free_b or headroom < 0:
++            edges_bytes = int(len(sources)) * (4 + 4 + 4)            # src+dst i32 + wt f32 on device
++            # margin covers model+optimizer+activations+rankneg rank-order arrays at champion
++            # shapes; the env var RAISES it (stricter), it can NOT bypass the check.
++            margin = max(3.5, float(os.environ.get("DEVICE_INT8_VRAM_MARGIN_GB", "3.5"))) * (1024**3)
++            need_total = need_x + edges_bytes + margin
++            if need_total > free_b:
 +                raise RuntimeError(
-+                    f"device_int8: int8 X needs {need_x/1e9:.1f} GB but only "
-+                    f"{free_b/1e9:.1f} GB free — use host_int8 or compact edges (CSR).")
++                    "device_int8: resident set exceeds free VRAM — X "
++                    f"{need_x/1e9:.1f} GB + edges {edges_bytes/1e9:.1f} GB + margin "
++                    f"{margin/1e9:.1f} GB = {need_total/1e9:.1f} GB > {free_b/1e9:.1f} GB free. "
++                    "Compact edges (CSR/streamed) or use host_int8. "
++                    "[breakdown printed so a 30M attempt shows which term to compact]")
 +            uwr = positive_source_rows is not None
 +            device_uniform_replacement = bool(
 +                uwr or (not self.weighted_edge_sampling
@@ -67,7 +76,14 @@ GPU and `index_select` gathers + dequants on-device (no `idx→cpu`, no H2D):
 ```python
      def __init__(self, X, device, *, encoded=None, scales=None,
 -                 ...):
-+                 resident="host", ...):
++                 resident="host", fast_input=False, ...):
++        # GUARD (review 2026-08-28): device residency and C1's fast_input are mutually
++        # exclusive — gather_pairs reads the HOST-side _enc_np arrays, whose semantics
++        # diverge when the int8 X lives on the device. Fail closed rather than admit an
++        # undefined combined path from a future arm spec.
++        if resident == "device" and fast_input:
++            raise ValueError("HostInt8ArrayDataset: resident='device' and fast_input are "
++                             "mutually exclusive (C1 gather_pairs reads host-side _enc_np).")
 +        self._resident = resident
          ...
          self._i8 = torch.from_numpy(encoded)
