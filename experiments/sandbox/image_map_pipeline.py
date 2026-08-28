@@ -229,6 +229,15 @@ DATASETS = {
                                "champion-bs16k-hostint8": {**_CHAMPION_500K,
                                    "extra": {**_CHAMPION_500K["extra"],
                                              "x_residency": "host_int8"}},
+                               # device-int8 quality-parity (2026-08-28): sole delta
+                               # x_residency=device_int8 (zero-transport). Shares the quant scheme +
+                               # sampler draws with hostint8, so FFR MUST reproduce champion-bs16k-
+                               # hostint8's 0.6964 (v2) within |Δ|<0.002 — a larger deviation is a
+                               # gather-misorder/dequant bug. Confirms device-int8 (resident-class
+                               # throughput per the 4-way A/B) is also quality-correct before 30M.
+                               "champion-bs16k-deviceint8": {**_CHAMPION_500K,
+                                   "extra": {**_CHAMPION_500K["extra"],
+                                             "x_residency": "device_int8"}},
                                # gate-3 SEED-43 replicate PAIR (delegate 2026-08-28): the jina-D768
                                # int8 SIGN-FLIP (int8 +0.0134 vs resident @ seed 42) doesn't enter the
                                # 30M spec on one seed. Resident + hostint8 twins at seed 43, otherwise
