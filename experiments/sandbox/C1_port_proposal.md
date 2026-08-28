@@ -703,25 +703,31 @@ hostint8, sole delta `x_residency`):
 |---|---|---|---|---|
 | 500K MiniLM D384 (`int8fac`) | 0.4429 | 0.4391 | +0.0034 / +0.0038 | PASS (small) |
 | 2M MiniLM D384 (`2m-knobs/umap-md000-x4bs16k-winner[-hostint8]`) | 0.47954 | 0.46621 | +0.01227 / +0.01333 | **FAIL (int8 worse)** |
-| **jina D768 2M (`jina-multi-2m/champion-bs16k[-hostint8]`)** | 0.6830 | 0.6964 | **−0.0142 / −0.0134** | band-exceeding but **int8 BETTER** — PENDING seed replicate |
+| **jina D768 2M seed42** | 0.6830 | 0.6964 | −0.0134 | int8 better (ONE seed) |
+| **jina D768 2M seed43** | 0.6966 | 0.6886 | **+0.0080** | resident better — SIGN FLIPS |
+| **jina D768 2M (2-seed mean)** | — | — | **−0.0027** | **PARITY within seed noise** (var 0.008–0.014 > \|tax\|) |
 
-**The int8 tax is SPACE-DEPENDENT and this re-partitions the whole 30M admission
-problem.** At MiniLM D384 int8 is a cost that GROWS with N (+0.0038 @500K →
-+0.0133 @2M; quant scheme ≈70% of it). At the TRUE jina D768 shape — which is the
-actual 30M target — int8 is a BENEFIT: it beats fp16-resident by +0.0134 (v2), sole
-delta x_residency, seed 42, horizon-matched (296093). Plausible mechanism: per-row
-int8 quantization noise acts as a regularizer that helps fold-faithfulness more at
-D768 than it damages signal. So the MiniLM-based gate-3 blocker DOES NOT TRANSFER
-to jina; gate 3 looks RESOLVED-GOOD at the true shape **pending a seed-43 replicate
-pair** (queued — a single-seed sign-flip does not enter the 30M spec). The whole
-30M burden then shifts to gate 2 (THROUGHPUT): the hostint8 arm ran 143min vs the
-resident 88min (~0.62 updates/s ratio, informal), well under 0.85 — which is exactly
-what the C1 transport port exists to lift. **RULE: 30M gate 3 is favorable-pending-
-replicate at the true shape; the binding constraint is gate 2, and C1's §5 A/B is
-the test of whether the ported transport lifts 0.62 toward 0.85+ while keeping the
-favorable quality.** (The MiniLM 2M FAIL stands as the small-dim reference; the
-earlier "−0.0123 unreproducible" was a scope error — a computed difference of two
-persisted summaries, verified 2026-08-27.)
+**The int8 tax is SPACE-DEPENDENT, and the seed-43 replicate corrected an over-claim
+into the rigorous result.** At MiniLM D384 int8 is a cost that GROWS with N (+0.0038
+@500K → +0.0133 @2M; quant scheme ≈70% of it). At the TRUE jina D768 shape (the 30M
+target) the single seed-42 measurement showed int8 +0.0134 BETTER — but the seed-43
+replicate FLIPPED the sign (+0.0080, resident better), and the seed-to-seed variance
+(0.008 int8 / 0.014 resident) EXCEEDS the tax magnitude. So the "int8 helps at D768"
+reading was single-seed noise; the honest 2-seed result is **PARITY** (mean tax
+−0.0027, within ±0.005). The space-dependence is real but weaker than the first read:
+the int8 quality COST that blocks 30M at D384 **vanishes at D768** (parity), it just
+does not become a benefit. **gate 3 at the true jina shape = quality-PARITY (int8 ≈
+resident within seed noise), so the MiniLM-based gate-3 blocker DOES NOT TRANSFER —
+int8 is quality-acceptable at 30M jina.** The whole 30M burden then shifts to gate 2
+(THROUGHPUT): the hostint8 arm ran 143min vs resident 88min (~0.62 informal, measured
+0.639 h2048 / 0.769 h3072), under 0.85 — exactly what C1's transport port (and the
+device_int8 zero-transport path) exist to lift. **RULE: 30M gate 3 is PARITY-passing
+at the true shape (2 seeds); the binding constraint is gate 2; the 4-way transport
+A/B (resident / legacy-int8 / C1-fast / device-int8) decides whether the ported or
+zero-transport path lifts the ratio toward ≥0.85 while holding quality parity.**
+(The MiniLM 2M FAIL stands as the small-dim reference; the earlier "−0.0123
+unreproducible" was a scope error, verified 2026-08-27; the "int8 +0.0134 helps" was
+a single-seed artifact, corrected by the seed-43 replicate 2026-08-28.)
 
 **Measurement methods (no proxies).** Gate 2 (throughput) is measured by the
 jina-shape within-run segment bench (`perf_bench` rebuilt at D768 h2048+h3072,
