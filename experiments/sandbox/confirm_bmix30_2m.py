@@ -50,6 +50,18 @@ from pathlib import Path
 
 import numpy as np
 
+
+def _np(o):
+    """json.dumps default: numpy scalars (np.bool_/integer/floating) -> python."""
+    if isinstance(o, np.bool_):
+        return bool(o)
+    if isinstance(o, np.integer):
+        return int(o)
+    if isinstance(o, np.floating):
+        return float(o)
+    return str(o)
+
+
 SANDBOX = Path("/data/latent-basemap/sandbox")
 SUBSTRATES = Path("/data/latent-basemap/substrates")
 
@@ -256,7 +268,7 @@ def main(argv: list[str]) -> int:
                       "cells; no confirmation verdict",
             "missing_cells": [f"{k}--{r}" for k, r in missing][:60],
             "ffr_matrix": matrix, "code_excluded_from_maximin": sorted(CODE_EXCLUDED),
-            "projectors": projectors}, indent=1))
+            "projectors": projectors}, indent=1, default=_np))
         print(f"\nABORT: {len(missing)} missing/non-finite maximin cells -> "
               "NO confirmation verdict", flush=True)
         raise SystemExit(2)
@@ -331,7 +343,7 @@ def main(argv: list[str]) -> int:
             "reception) and on the 6.25M substrate at disc=0.1%xN (3.1x extrapolation, "
             "lazy NormMemmap, same instrument as transform_gap_audit) — tests whether the "
             "coverage-optimized substrate makes a better projector head."),
-    }, indent=1))
+    }, indent=1, default=_np))
     print(f"\nresults: {out}", flush=True)
     print(f"  per-head worst-register FFR: {per_map_worst}")
     print(f"  per-head mean FFR:           {per_map_mean}")
