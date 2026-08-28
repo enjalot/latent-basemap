@@ -696,18 +696,27 @@ hostint8, sole delta `x_residency`):
 
 | shape | resident (v2) | hostint8 (v2) | tax v1 / v2 | vs ±0.005 |
 |---|---|---|---|---|
-| 500K MiniLM D384 (`int8fac`) | 0.4429 | 0.4391 | +0.0034 / +0.0038 | **PASS** |
-| 2M MiniLM D384 (`2m-knobs/umap-md000-x4bs16k-winner[-hostint8]`) | 0.47954 | 0.46621 | +0.01227 / +0.01333 | **FAIL** |
-| jina D768 (true shape) | — | — | — | **UNMEASURED** |
+| 500K MiniLM D384 (`int8fac`) | 0.4429 | 0.4391 | +0.0034 / +0.0038 | PASS (small) |
+| 2M MiniLM D384 (`2m-knobs/umap-md000-x4bs16k-winner[-hostint8]`) | 0.47954 | 0.46621 | +0.01227 / +0.01333 | **FAIL (int8 worse)** |
+| **jina D768 2M (`jina-multi-2m/champion-bs16k[-hostint8]`)** | 0.6830 | 0.6964 | **−0.0142 / −0.0134** | band-exceeding but **int8 BETTER** — PENDING seed replicate |
 
-The 2M point is the binding evidence: **+0.0133 FAILS ±0.005** under the corrected
-v2 metric, and the tax roughly quadrupled from 500K→2M — the quantization scheme
-carries ≈70% of it (int8fac qdq-vs-hostint8 attribution), which is the fix lever.
-Do NOT read the 500K PASS as the state of the world. (My first search reported
-−0.0123 "unreproducible" — that was a scope error: it is a computed difference of
-two persisted summaries, not a stored literal; verified 2026-08-27.) **RULE: 30M is
-BLOCKED until gate 3 is measured-and-passed at the true jina shape, OR the owner
-explicitly accepts the measured tax** (which at 2M is already ~2.7× the band).
+**The int8 tax is SPACE-DEPENDENT and this re-partitions the whole 30M admission
+problem.** At MiniLM D384 int8 is a cost that GROWS with N (+0.0038 @500K →
++0.0133 @2M; quant scheme ≈70% of it). At the TRUE jina D768 shape — which is the
+actual 30M target — int8 is a BENEFIT: it beats fp16-resident by +0.0134 (v2), sole
+delta x_residency, seed 42, horizon-matched (296093). Plausible mechanism: per-row
+int8 quantization noise acts as a regularizer that helps fold-faithfulness more at
+D768 than it damages signal. So the MiniLM-based gate-3 blocker DOES NOT TRANSFER
+to jina; gate 3 looks RESOLVED-GOOD at the true shape **pending a seed-43 replicate
+pair** (queued — a single-seed sign-flip does not enter the 30M spec). The whole
+30M burden then shifts to gate 2 (THROUGHPUT): the hostint8 arm ran 143min vs the
+resident 88min (~0.62 updates/s ratio, informal), well under 0.85 — which is exactly
+what the C1 transport port exists to lift. **RULE: 30M gate 3 is favorable-pending-
+replicate at the true shape; the binding constraint is gate 2, and C1's §5 A/B is
+the test of whether the ported transport lifts 0.62 toward 0.85+ while keeping the
+favorable quality.** (The MiniLM 2M FAIL stands as the small-dim reference; the
+earlier "−0.0123 unreproducible" was a scope error — a computed difference of two
+persisted summaries, verified 2026-08-27.)
 
 **Measurement methods (no proxies).** Gate 2 (throughput) is measured by the
 jina-shape within-run segment bench (`perf_bench` rebuilt at D768 h2048+h3072,

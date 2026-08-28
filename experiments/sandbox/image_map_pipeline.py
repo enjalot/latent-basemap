@@ -229,6 +229,15 @@ DATASETS = {
                                "champion-bs16k-hostint8": {**_CHAMPION_500K,
                                    "extra": {**_CHAMPION_500K["extra"],
                                              "x_residency": "host_int8"}},
+                               # gate-3 SEED-43 replicate PAIR (delegate 2026-08-28): the jina-D768
+                               # int8 SIGN-FLIP (int8 +0.0134 vs resident @ seed 42) doesn't enter the
+                               # 30M spec on one seed. Resident + hostint8 twins at seed 43, otherwise
+                               # champion-bs16k-identical -> confirm int8 >= resident (sealed) or flip
+                               # back (seed-noise). Distinct out dirs (seed in the name) avoid write-once skip.
+                               "champion-bs16k-seed43": {**_CHAMPION_500K, "seed": 43},
+                               "champion-bs16k-hostint8-seed43": {**_CHAMPION_500K, "seed": 43,
+                                   "extra": {**_CHAMPION_500K["extra"],
+                                             "x_residency": "host_int8"}},
                                # #2 dose-vs-width decomposition (external review 2026-08-25);
                                # champion-identical except one lever, rank25=500K. Baseline 0.6426.
                                "champion-x8-h2048": {"md": "000", "dose": 8,       # exposure lever
@@ -643,9 +652,10 @@ def train(ds: str) -> int:
         kwargs.update({"low_dim_kernel": "umap", **MD[spec["md"]],
                        **spec["extra"], "n_epochs": n_epochs,
                        "total_steps_estimate": horizon})
+        arm_seed = int(spec.get("seed", SEED))   # per-arm seed override (e.g. seed-43 replicate)
         model = ParametricUMAP(**kwargs)
         t0 = time.time()
-        model.fit(x, precomputed_edges_path=str(edges), random_state=SEED)
+        model.fit(x, precomputed_edges_path=str(edges), random_state=arm_seed)
         xy = np.asarray(model.transform(x, batch_size=8192), dtype=np.float32)
         wall = time.time() - t0
         np.save(d / "coordinates.npy", xy)
@@ -678,7 +688,7 @@ def train(ds: str) -> int:
             "arm": f"{ds}--{arm}", "rung": ds,
             "overrides": {"low_dim_kernel": "umap", **MD[spec["md"]],
                           **spec["extra"]},
-            "seed": SEED, "dose_multiplier": dose, "horizon_updates": horizon,
+            "seed": arm_seed, "dose_multiplier": dose, "horizon_updates": horizon,
             "positive_lr_updates": realized_updates,
             "pos_per_batch": pos_per_batch,
             "neg_per_batch": neg_per_batch,
