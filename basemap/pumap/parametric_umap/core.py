@@ -115,6 +115,9 @@ class ParametricUMAP:
         # fp16/fp32 X will not fit VRAM can still train. Guarded so that
         # "auto"/unset leaves every existing fp32/fp16 path byte-identical.
         x_residency="auto",
+        # C1: opt-in high-throughput host-int8 transport (pinned slots, combined
+        # gather, cached labels, fused forward). "auto"/off => byte-identical.
+        host_int8_fast_input=False,
         graph_manifest_path=None,
         graph_manifest_sha256=None,
     ):
@@ -213,10 +216,11 @@ class ParametricUMAP:
         # device (fp16 storage on CUDA, fp32 on CPU); False keeps the legacy path.
         self.gpu_resident_data = gpu_resident_data
         self.gpu_resident_vram_budget_gb = gpu_resident_vram_budget_gb
-        if str(x_residency).lower() not in ("auto", "host_int8"):
+        if str(x_residency).lower() not in ("auto", "host_int8", "device_int8"):
             raise ValueError(
-                f"x_residency must be 'auto' or 'host_int8', got {x_residency!r}")
+                f"x_residency must be 'auto', 'host_int8' or 'device_int8', got {x_residency!r}")
         self.x_residency = x_residency
+        self.host_int8_fast_input = bool(host_int8_fast_input)
         self._fast_device_path = False   # set True by _prepare_edge_list_training
         self._X_dev = None               # DeviceArrayDataset when fast path active
         self._max_train_steps = None     # benchmark hook: stop after N global steps
@@ -686,6 +690,57 @@ class ParametricUMAP:
         # gathers + negative sampling on-device. See _decide_gpu_resident.
         n_features = int(X.shape[1])
 
+        # ── Device-int8 residency (opt-in; x_residency="device_int8") ───────
+        # Zero-transport int8: keep the full int8 X + fp16 scales RESIDENT on the
+        # GPU and gather+dequant per-batch ON DEVICE (no per-batch H2D copy).
+        # Guarded so x_residency=="auto" (the default) never enters this branch,
+        # leaving every existing fp32/fp16/host_int8 path byte-identical.
+        if str(self.x_residency).lower() == "device_int8":
+            if edge_set is not None:
+                raise RuntimeError("x_residency='device_int8' incompatible with reject_neighbors")
+            # Fail-closed VRAM pre-check (FIXED per review 2026-08-28): the resident set
+            # is int8 X + the edge arrays the sampler is about to upload + a real margin
+            # for model/opt/activations/rankneg. NEVER silently fall back to host_int8.
+            # (Earlier draft was fail-OPEN: `headroom = budget or (free-need)` — a nonzero
+            # env var made headroom always >0 so the check was DISABLED; unset, it only
+            # asked "does X alone fit", reserving nothing for what OOMs two lines later.)
+            free_b, total_b = torch.cuda.mem_get_info(self.device)
+            need_x = n_train * n_features * 1 + n_train * 2          # int8 codes + fp16 scales
+            edges_bytes = int(len(sources)) * (4 + 4 + 4)            # src+dst i32 + wt f32 on device
+            # margin covers model+optimizer+activations+rankneg rank-order arrays at champion
+            # shapes; the env var RAISES it (stricter), it can NOT bypass the check.
+            margin = max(3.5, float(os.environ.get("DEVICE_INT8_VRAM_MARGIN_GB", "3.5"))) * (1024**3)
+            need_total = need_x + edges_bytes + margin
+            if need_total > free_b:
+                raise RuntimeError(
+                    "device_int8: resident set exceeds free VRAM — X "
+                    f"{need_x/1e9:.1f} GB + edges {edges_bytes/1e9:.1f} GB + margin "
+                    f"{margin/1e9:.1f} GB = {need_total/1e9:.1f} GB > {free_b/1e9:.1f} GB free. "
+                    "Compact edges (CSR/streamed) or use host_int8. "
+                    "[breakdown printed so a 30M attempt shows which term to compact]")
+            per_batch_threshold = int(os.environ.get(
+                "PER_BATCH_EDGE_THRESHOLD", 400_000_000))
+            uwr = positive_source_rows is not None
+            device_uniform_replacement = bool(
+                uwr or (not self.weighted_edge_sampling
+                        and n_pos_edges > per_batch_threshold))
+            reason = "x_residency=device_int8 (zero-transport int8 X resident on device)"
+            logging.info("Edge-list mode: DEVICE-INT8 residency (zero-transport int8 X on device).")
+            _stamp_pipeline("device_int8", "DeviceEdgeSampler", weighted_ok=True,
+                            x_residency="device_int8",
+                            uniform_with_replacement=device_uniform_replacement)
+            di8 = HostInt8ArrayDataset(X, self.device, resident="device")   # int8 X ON device
+            self._X_dev = di8
+            self._fast_device_path = True
+            loader = DeviceEdgeSampler(
+                di8, sources, targets, weights, n_nodes=n_train,
+                pos_ratio=self.pos_ratio, batch_size=self.batch_size, shuffle=True,
+                random_state=random_state, positive_target_mode=self.positive_target_mode,
+                weighted_edge_sampling=self.weighted_edge_sampling,
+                uniform_with_replacement=uwr, positive_source_rows=positive_source_rows,
+                fixed_edges_per_source=fixed_edges_per_source, device=self.device)
+            return di8, loader, n_pos_edges
+
         # ── Host-int8 residency (opt-in; x_residency="host_int8") ───────────
         # Keep X in host RAM as int8 rows + fp16 scales (R0262 encoding) and
         # dequantise per-batch on device. Chosen for maps whose fp16/fp32 X will
@@ -714,7 +769,24 @@ class ParametricUMAP:
                 "host_int8", "DeviceEdgeSampler", weighted_ok=True,
                 x_residency="host_int8",
                 uniform_with_replacement=device_uniform_replacement)
-            hi8 = HostInt8ArrayDataset(X, self.device)
+            if getattr(X, "sealed_int8", False):
+                # No-double-norm guard (see §4): the sealed substrate is already
+                # _norm'd + quantized; assert it and consume its codes/scales
+                # directly (encoded=/scales=), bypassing HostInt8ArrayDataset's
+                # re-encode path entirely. No _norm, no quantize here.
+                assert getattr(X, "_prenormalized", False) is True, (
+                    "sealed_int8 substrate must be pre-normalized; refusing to "
+                    "feed a non-prenormalized sealed X to the host-int8 loader")
+                # Feed the memmaps DIRECTLY (no np.asarray): with fast_input=True
+                # the loader keeps them as plain numpy (page-cache-backed,
+                # zero-copy) and never pins the full matrix — the 30M path.
+                hi8 = HostInt8ArrayDataset(
+                    None, self.device,
+                    encoded=X.encoded, scales=X.scales,
+                    fast_input=self.host_int8_fast_input)
+            else:
+                hi8 = HostInt8ArrayDataset(
+                    X, self.device, fast_input=self.host_int8_fast_input)
             self._X_dev = hi8
             self._fast_device_path = True
             loader = DeviceEdgeSampler(
@@ -727,6 +799,7 @@ class ParametricUMAP:
                 positive_source_rows=positive_source_rows,
                 fixed_edges_per_source=fixed_edges_per_source,
                 device=self.device,
+                fast_host_int8_input=self.host_int8_fast_input,
             )
             return hi8, loader, n_pos_edges
 

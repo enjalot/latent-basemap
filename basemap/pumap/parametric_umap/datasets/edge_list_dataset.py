@@ -164,6 +164,76 @@ def quantize_int8_rows(block):
     return encoded.astype(np.int8), scales
 
 
+class SealedInt8Substrate:
+    """Memmap view over a C2 sealed int8 substrate directory (embeddings.i8 +
+    scales.f16 [+ manifest.json]). Presents `.shape`, `__len__`, and a
+    dequantizing `__getitem__` so it works as X for BOTH `fit` (host_int8 branch
+    reads `.encoded`/`.scales` directly, no re-encode) and `transform` (slices
+    return dequantized fp32 rows, never materializing the whole array).
+
+    Marker attributes let callers assert the no-double-norm contract:
+      * ``sealed_int8`` is True   -> _norm() must refuse it (fail closed).
+      * ``_prenormalized`` is True -> the sealed branch asserts this before use.
+    """
+    sealed_int8 = True
+    _prenormalized = True
+
+    def __init__(self, path, dim=None, verify_hashes=True):
+        import json, os, hashlib
+        path = str(path)
+        i8p = os.path.join(path, "embeddings.i8")
+        scp = os.path.join(path, "scales.f16")
+        manp = os.path.join(path, "manifest.json")
+        rows = None; man = None
+        if os.path.isfile(manp):
+            man = json.loads(open(manp).read())
+            rows, dim = int(man["rows"]), int(man["dim"])
+            if not man.get("normalized_before_quant", False):
+                raise ValueError("sealed substrate manifest is not normalized_before_quant")
+        if dim is None:
+            raise ValueError("SealedInt8Substrate needs dim (manifest.json absent)")
+        i8_bytes = os.path.getsize(i8p); sc_bytes = os.path.getsize(scp)
+        if rows is None:
+            rows = i8_bytes // dim
+        if i8_bytes != rows * dim or sc_bytes != rows * 2:
+            raise ValueError(f"sealed byte geometry mismatch: i8={i8_bytes} sc={sc_bytes} "
+                             f"rows={rows} dim={dim}")
+        # review #9: LOADER VERIFIES HASHES. A sealed substrate built by the
+        # hardened build_int8_substrate.py carries manifest["sha256"]; re-stream
+        # both files (1 MiB chunks, never materialised) and fail closed on any
+        # mismatch before the 30M train trusts a corrupt/tampered/truncated seal.
+        # One-time ~i8_bytes read at open; set verify_hashes=False only for a
+        # throwaway re-open of an already-verified seal in the same process.
+        want = (man or {}).get("sha256")
+        if verify_hashes and want:
+            for fname, want_hex in want.items():
+                h = hashlib.sha256()
+                with open(os.path.join(path, fname), "rb") as f:
+                    for chunk in iter(lambda: f.read(1 << 20), b""):
+                        h.update(chunk)
+                if h.hexdigest() != want_hex:
+                    raise ValueError(f"sealed {fname}: SHA-256 mismatch vs manifest "
+                                     f"(corrupt/tampered seal) at {path}")
+        elif verify_hashes and man is not None:
+            raise ValueError("sealed manifest has no sha256 block — rebuild with the "
+                             "hardened build_int8_substrate.py before training on it")
+        self.encoded = np.memmap(i8p, dtype=np.int8, mode="r", shape=(rows, dim))
+        self.scales = np.memmap(scp, dtype="<f2", mode="r", shape=(rows,))
+        self.shape = (rows, dim)
+
+    def __len__(self):
+        return self.shape[0]
+
+    def __getitem__(self, sl):
+        enc = np.asarray(self.encoded[sl], dtype=np.float32)
+        sc = np.asarray(self.scales[sl], dtype=np.float32)
+        return enc * sc[..., None] if enc.ndim == 2 else enc * sc
+
+
+def load_sealed_int8_substrate(path, dim=None):
+    return SealedInt8Substrate(path, dim=dim)
+
+
 class HostInt8ArrayDataset:
     """Feature matrix held in **host** RAM as int8 rows + exact per-row fp16
     scales; dequantised to fp32 **on device** per gather.
@@ -188,7 +258,14 @@ class HostInt8ArrayDataset:
     host_int8_dataset = True
 
     def __init__(self, X, device, *, encoded=None, scales=None,
-                 encode_chunk=1_000_000):
+                 encode_chunk=1_000_000, resident="host", fast_input=False):
+        # GUARD (review 2026-08-28): device residency and C1's fast_input are mutually
+        # exclusive — gather_pairs reads the HOST-side _enc_np arrays, whose semantics
+        # diverge when the int8 X lives on the device. Fail closed rather than admit an
+        # undefined combined path from a future arm spec.
+        if resident == "device" and fast_input:
+            raise ValueError("HostInt8ArrayDataset: resident='device' and fast_input are "
+                             "mutually exclusive (C1 gather_pairs reads host-side _enc_np).")
         if encoded is None:
             # Encode row-chunks so a memmap-backed X never materialises a full
             # host fp32 copy (respects the >=2 GB no-materialise rule); only one
@@ -216,14 +293,89 @@ class HostInt8ArrayDataset:
                 "fp16 scales")
         self.device = device
         self._pin = "cuda" in str(device)
-        self._i8 = torch.from_numpy(encoded)
-        self._scales = torch.from_numpy(scales)
-        if self._pin:
-            self._i8 = self._i8.pin_memory()
-            self._scales = self._scales.pin_memory()
+        self._resident = resident
+        self._fast_input = bool(fast_input)
+        if self._fast_input:
+            # C1: DO NOT pin or copy the full matrix — that full-matrix pin is
+            # the 30M memlock blocker (~21.5 GiB @ 30M×768 > 15.4 GiB ceiling).
+            # Keep codes/scales as plain numpy (page-cache-backed memmap on the
+            # sealed path, zero-copy) and gather per batch into two small pinned
+            # slots. `np.ascontiguousarray` above is a NO-OP for the already
+            # C-order sealed memmap, so no 21.5 GiB copy happens here.
+            self._enc_np = encoded          # int8 (N, D), C-order (ndarray or memmap)
+            self._sc_np = scales            # fp16 (N,)
+            self._i8 = None                 # no resident full-matrix tensor
+            self._scales = None
+            self._slots = None              # two pinned slots, sized on first gather
+            self._slot_index = 0
+            self._buffer_rows = 0
+        else:
+            self._i8 = torch.from_numpy(encoded)
+            self._scales = torch.from_numpy(scales)
+            if resident == "device":
+                self._i8 = self._i8.to(device)          # full int8 X resident on GPU (one upload)
+                self._scales = self._scales.to(device)
+            elif self._pin:
+                self._i8 = self._i8.pin_memory()
+                self._scales = self._scales.pin_memory()
         self.shape = (int(encoded.shape[0]), int(encoded.shape[1]))
         self.storage_dtype = torch.int8
         self._n = int(encoded.shape[0])
+
+    def _ensure_slots(self, rows):
+        """Allocate the two pinned host slots (M1) once, sized to the batch.
+        `rows` is bounded by batch_size (num_pos+num_neg) and constant across a
+        run, so this allocates exactly once — no growth path, no leak."""
+        if self._slots is not None:
+            if rows > self._buffer_rows:
+                # batch never grows mid-run; treat as a contract violation.
+                raise RuntimeError(
+                    f"gather batch {rows} exceeds slot buffer {self._buffer_rows}")
+            return
+        self._buffer_rows = int(rows)
+        d = self.shape[1]
+        self._slots = []
+        for _ in range(2):
+            si8 = torch.empty((rows, d), dtype=torch.int8, pin_memory=True)
+            di8 = torch.empty_like(si8, pin_memory=True)
+            ssc = torch.empty((rows,), dtype=torch.float16, pin_memory=True)
+            dsc = torch.empty_like(ssc, pin_memory=True)
+            self._slots.append({"src_i8": si8, "dst_i8": di8,
+                                "src_sc": ssc, "dst_sc": dsc, "event": None})
+
+    def gather_pairs(self, src_idx, dst_idx):
+        """Combined endpoint gather for two device LongTensors of equal length.
+        Synchronous (no producer thread): host fancy-index BOTH endpoints into
+        one pinned slot (M1/M2), ONE non-blocking H2D from the pinned slot (M3),
+        dequant + split. Two slots + per-slot CUDA events let the current fill
+        proceed while the previous slot's H2D is still in flight, and overlap the
+        host gather with the GPU compute already queued for the prior batch.
+        Identical dequant arithmetic to two index_select calls. rankneg-agnostic:
+        the caller supplies indices that already include rank-window negatives."""
+        src_np = src_idx.detach().to("cpu", dtype=torch.long).numpy()
+        dst_np = dst_idx.detach().to("cpu", dtype=torch.long).numpy()
+        c = len(src_np)
+        self._ensure_slots(c)
+        si = self._slot_index
+        self._slot_index ^= 1                       # round-robin the two slots
+        slot = self._slots[si]
+        ev = slot["event"]
+        if ev is not None:
+            ev.synchronize()                        # guard: prior H2D on this slot done
+        slot["src_i8"].numpy()[:c] = self._enc_np[src_np]
+        slot["dst_i8"].numpy()[:c] = self._enc_np[dst_np]
+        slot["src_sc"].numpy()[:c] = self._sc_np[src_np]
+        slot["dst_sc"].numpy()[:c] = self._sc_np[dst_np]
+        s_i8 = slot["src_i8"][:c].to(self.device, non_blocking=True)
+        d_i8 = slot["dst_i8"][:c].to(self.device, non_blocking=True)
+        s_sc = slot["src_sc"][:c].to(self.device, non_blocking=True)
+        d_sc = slot["dst_sc"][:c].to(self.device, non_blocking=True)
+        src = s_i8.float() * s_sc.float().view(-1, 1)
+        dst = d_i8.float() * d_sc.float().view(-1, 1)
+        nev = torch.cuda.Event()
+        nev.record(torch.cuda.current_stream(self.device))
+        slot["event"] = nev
+        return src, dst
 
     def __len__(self):
         return self._n
@@ -231,6 +383,10 @@ class HostInt8ArrayDataset:
     def to(self, device):  # int8 rows stay on host; only the dequant target moves
         self.device = device
         self._pin = "cuda" in str(device)
+        if self._fast_input:
+            return self          # no resident matrix to (re-)pin in fast mode
+        if self._resident == "device":
+            return self          # int8 X already resident on device; nothing to (re-)pin
         if self._pin and not self._i8.is_pinned():
             self._i8 = self._i8.pin_memory()
             self._scales = self._scales.pin_memory()
@@ -243,6 +399,23 @@ class HostInt8ArrayDataset:
         arithmetic ``HostInt8MaterializedArray`` performs
         (``round0034_pipeline.py:903``).
         """
+        if self._fast_input:
+            # Epoch-boundary path (rank-order projection / density). No resident
+            # pinned matrix in fast mode: pageable numpy gather -> device.
+            if torch.is_tensor(idx):
+                rows = idx.detach().to("cpu", dtype=torch.long).numpy()
+            else:
+                rows = np.asarray(idx, dtype=np.int64)
+            enc = np.ascontiguousarray(self._enc_np[rows])
+            sc = np.asarray(self._sc_np[rows], dtype=np.float32)
+            rt = torch.from_numpy(enc).to(self.device).float()
+            st = torch.from_numpy(sc).to(self.device).unsqueeze(1)
+            return rt * st
+        if self._resident == "device":
+            idx_dev = idx.to(device=self.device, dtype=torch.long)   # stays on device
+            rows = self._i8.index_select(0, idx_dev).float()          # device gather
+            sc = self._scales.index_select(0, idx_dev).float().unsqueeze(1)
+            return rows * sc                                          # on-device dequant, no H2D
         if not torch.is_tensor(idx):
             idx = torch.as_tensor(np.asarray(idx), dtype=torch.long)
         idx_cpu = idx.detach().to("cpu", dtype=torch.long)
@@ -292,7 +465,7 @@ class DeviceEdgeSampler:
                  uniform_with_replacement=False,
                  positive_source_rows=None,
                  fixed_edges_per_source=None,
-                 device="cpu"):
+                 device="cpu", fast_host_int8_input=False):
         self.dataset = dataset          # DeviceArrayDataset
         self.device = device
         self.n_nodes = int(n_nodes)
@@ -303,6 +476,13 @@ class DeviceEdgeSampler:
         self.source_n_pos = int(len(sources))
         self.num_pos = max(1, int(batch_size * pos_ratio))
         self.num_neg = batch_size - self.num_pos
+        # C1 fast host-int8 transport: only when the dataset supports the
+        # combined gather (HostInt8ArrayDataset with fast_input=True) AND targets
+        # are binary (cached-label path). Off => byte-identical legacy behavior.
+        self._fast_gather = bool(fast_host_int8_input) and hasattr(
+            dataset, "gather_pairs") and positive_target_mode == "binary"
+        self.fused_endpoint_forward = self._fast_gather   # M6; core guards bn/dropout
+        self._cached_labels = None                        # M5, lazily sized
 
         self.positive_source_rows_t = None
         self.fixed_edges_per_source = None
@@ -585,13 +765,30 @@ class DeviceEdgeSampler:
             p_labels = self.weights_t.index_select(0, idx)
 
         neg_src, neg_dst = self._sample_negatives(self.num_neg)
-        neg_labels = torch.zeros(self.num_neg, dtype=torch.float32,
-                                 device=self.device)
-
         all_src = torch.cat([p_src, neg_src])
         all_dst = torch.cat([p_dst, neg_dst])
-        targets = torch.cat([p_labels, neg_labels])
 
+        if self._fast_gather:
+            # M5: cache the constant [ones(num_pos)|zeros(num_neg)] label vector;
+            # rebuild ONLY on a short final batch (perm mode last chunk).
+            n_pos_b = p_src.shape[0]
+            if n_pos_b == self.num_pos:
+                if self._cached_labels is None:
+                    self._cached_labels = torch.cat([
+                        torch.ones(self.num_pos, dtype=torch.float32, device=self.device),
+                        torch.zeros(self.num_neg, dtype=torch.float32, device=self.device)])
+                targets = self._cached_labels
+            else:
+                targets = torch.cat([
+                    torch.ones(n_pos_b, dtype=torch.float32, device=self.device),
+                    torch.zeros(self.num_neg, dtype=torch.float32, device=self.device)])
+            # M3: one combined gather instead of two index_select calls.
+            src_feats, dst_feats = self.dataset.gather_pairs(all_src, all_dst)
+            return src_feats, dst_feats, targets
+
+        neg_labels = torch.zeros(self.num_neg, dtype=torch.float32,
+                                 device=self.device)
+        targets = torch.cat([p_labels, neg_labels])
         src_feats = self.dataset.index_select(all_src)
         dst_feats = self.dataset.index_select(all_dst)
         return src_feats, dst_feats, targets

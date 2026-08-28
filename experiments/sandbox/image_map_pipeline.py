@@ -534,6 +534,9 @@ if os.environ.get("ENABLE_H4096") and not os.path.exists(
 
 
 def _norm(x: np.ndarray) -> np.ndarray:
+    assert not getattr(x, "sealed_int8", False), (
+        "_norm() called on a sealed pre-normalized int8 substrate — "
+        "double-normalize guard (build_int8_substrate already _norm'd it)")
     n = np.linalg.norm(x, axis=1, keepdims=True)
     n[n == 0] = 1.0
     return x / n
@@ -612,13 +615,24 @@ def train(ds: str) -> int:
     from map_renders import binned_counts, render_png, robust_extent
 
     from basemap.pumap.parametric_umap.core import ParametricUMAP
+    from basemap.pumap.parametric_umap.datasets.edge_list_dataset import (
+        load_sealed_int8_substrate)
 
     out = SANDBOX / ds
     edges = out / "edges-k15-fuzzy.npz"
     e = int(len(np.load(edges, mmap_mode="r")["sources"]))
     n_pos_per_batch = max(1, int(round(
         BASE_KWARGS["batch_size"] * BASE_KWARGS["pos_ratio"])))
-    x = _norm(DATASETS[ds]["load"]())
+    sealed = DATASETS[ds].get("sealed_int8_path")
+    if sealed:
+        # Pre-sealed int8 substrate: already _norm'd + quantized at build time.
+        # Load a dequantizing memmap view and DO NOT call _norm (see §4 guard).
+        x = load_sealed_int8_substrate(sealed, dim=DATASETS[ds].get("int8_dim"))
+        assert getattr(x, "_prenormalized", False) is True, (
+            "sealed_int8_path substrate is not pre-normalized; refusing to train")
+        # NB: _norm(...) is intentionally NOT applied on this branch.
+    else:
+        x = _norm(DATASETS[ds]["load"]())
     subsets = DATASETS[ds]["subsets"]() if DATASETS[ds]["subsets"] else None
 
     only = os.environ.get("ONLY_ARM")
