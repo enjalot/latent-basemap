@@ -154,6 +154,11 @@ def _bmix30_2m_subsets():
                    allow_pickle=True)
 
 
+def _bmix10cp_2m_subsets():
+    return np.load("/data/latent-basemap/substrates/minilm-bmix10cp-2m/subsets.npy",
+                   allow_pickle=True)
+
+
 def _reddit_load() -> np.ndarray:
     # every 5th row of the 10M reddit-tldr17 MiniLM embeddings -> 2M sample.
     # Used for knn/fuzzy TRUTH ONLY (the OOD probe projects these rows through
@@ -316,6 +321,20 @@ DATASETS = {
             "/data/latent-basemap/substrates/minilm-bmix30-2m/substrate.f32.npy",
             mmap_mode="r"),
         "subsets": _bmix30_2m_subsets,
+        "arms": {"champion-bs16k": _CHAMPION_500K}},
+    # ---- bmix10cp-2m CODE-PRESERVING social probe (owner 2026-08-28): 10% BALANCED social at 2M
+    # with MATCHED rows vs minilm-mixed-2m — 1.8M base rows IDENTICAL to a subset of that baseline
+    # (fineweb 711,111 / redpajama 444,444 / pile 444,445 / STARCODER 200,000 UNTOUCHED) + 200K
+    # balanced social (50K each reddit/CA/twitter/bluesky, holdout-disjoint offset>=300000). The
+    # 200K displacement is drawn ONLY from fineweb/redpajama/pile PROPORTIONALLY (800:500:500), so
+    # the social 10% is paid entirely from the web/pile budget and the code budget is preserved.
+    # champion-bs16k = _CHAMPION_500K (dose4, rankneg 500K = 25% of 2M), same recipe as the 2M
+    # baseline. Scored on the full probe-register suite (incl. probe-code-heldout).
+    "minilm-bmix10cp-2m": {
+        "load": lambda: np.load(
+            "/data/latent-basemap/substrates/minilm-bmix10cp-2m/substrate.f32.npy",
+            mmap_mode="r"),
+        "subsets": _bmix10cp_2m_subsets,
         "arms": {"champion-bs16k": _CHAMPION_500K}},
     "reddit-2m": {"load": _reddit_load, "subsets": None},
     "communityarchive-2m": {"load": _ca_load, "subsets": None},
