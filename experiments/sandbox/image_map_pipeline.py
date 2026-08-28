@@ -355,6 +355,23 @@ DATASETS = {
             f"/data/latent-basemap/substrates/{a}/subsets.npy", allow_pickle=True)),
         "arms": {"champion-bs16k": _CHAMPION_500K}}
        for arm in ("jina-bmix10-2m", "jina-bmix20-2m", "jina-bmix30-2m", "jina-rmix20-2m")},
+    # ---- jina maximin probe registers (JINA_SWEEP_PROPOSAL.md P-A/P-B/P-C, 2026-08-28):
+    # document-prompted jina-v5-nano holdout probes; probe-only (no arms). The orchestrator builds
+    # each register's knn+fuzzy TRUTH graph; no map trains on them. f16 (N,768) -> float32.
+    **{ds: {
+        "load": (lambda a=ds: np.asarray(np.load(
+            f"/data/latent-basemap/substrates/{a}/substrate.f16.npy",
+            mmap_mode="r"), dtype=np.float32)),
+        "subsets": None}
+       for ds in (
+           "twitter-jina-250k", "bluesky-jina-250k",
+           "probe-fineweb-jina", "probe-rpj-jina", "probe-pile-jina",
+           *(f"probe-lang-{l}-jina" for l in _JINA_LANGS))},
+    "jina-neutral-pooled": {
+        "load": lambda: np.asarray(np.load(
+            "/data/latent-basemap/substrates/jina-neutral-pooled/substrate.f16.npy",
+            mmap_mode="r"), dtype=np.float32),
+        "subsets": None},
     "jina-multi-6m": {
         "load": lambda: np.array(np.load(
             _JINA_PROMPTED / "substrate-6250k.f16.npy", mmap_mode="r"),
