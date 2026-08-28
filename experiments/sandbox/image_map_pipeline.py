@@ -732,32 +732,28 @@ def train(ds: str) -> int:
                        **spec["extra"], "n_epochs": n_epochs,
                        "total_steps_estimate": horizon})
         arm_seed = int(spec.get("seed", SEED))   # per-arm seed override (e.g. seed-43 replicate)
+        import torch, hashlib as _hashlib   # train() has no module-level torch (the :611 import is elsewhere)
         # 4th-review P0.1 (2026-08-28): SEED the torch init before construction/fit. This runner
         # previously NEVER seeded (unlike knobs_2m:643), so every image-runner arm trained from a
         # random init — conflating init variance into every same-seed comparison. Seed here so the
-        # init (in ParametricUMAP/_init_model) is reproducible; record it for lifetime auditability.
+        # init (in ParametricUMAP/_init_model, called INSIDE fit) is reproducible.
         torch.manual_seed(arm_seed)
         torch.cuda.manual_seed_all(arm_seed)
         model = ParametricUMAP(**kwargs)
-        # init-state hash: materialize the post-init weights (idempotent) + hash them, then RE-SEED
-        # so fit()'s own _init_model reproduces the hashed init exactly. Two same-seed runs must
-        # print the same init_state_sha256 — the seeded-ness proof.
-        import hashlib as _hashlib
-        init_state_sha = None
-        try:
-            if getattr(model, "model", None) is None and hasattr(model, "_init_model"):
-                model._init_model(int(x.shape[1]))
-            mdl = getattr(model, "model", None)
-            if mdl is not None:
-                _h = _hashlib.sha256()
-                for p in mdl.parameters():
-                    _h.update(np.ascontiguousarray(p.detach().cpu().numpy()).tobytes())
-                init_state_sha = _h.hexdigest()[:16]
-            torch.manual_seed(arm_seed); torch.cuda.manual_seed_all(arm_seed)
-        except Exception as _e:
-            init_state_sha = f"err:{type(_e).__name__}"
         t0 = time.time()
         model.fit(x, precomputed_edges_path=str(edges), random_state=arm_seed)
+        # Seeded-ness fingerprint: a PRE-train init hash would need to call _init_model early, which
+        # violates core.py's admission-before-allocation guard (L0.5, core.py:407). So we fingerprint
+        # the TRAINED weights instead — same seed+config reproduces it iff init AND training are
+        # deterministic. (A true pre-init hash needs a core.py hook — flagged for follow-on.)
+        state_sha = None
+        try:
+            _h = _hashlib.sha256()
+            for p in model.model.parameters():
+                _h.update(np.ascontiguousarray(p.detach().cpu().numpy()).tobytes())
+            state_sha = _h.hexdigest()[:16]
+        except Exception as _e:
+            state_sha = f"err:{type(_e).__name__}"
         xy = np.asarray(model.transform(x, batch_size=8192), dtype=np.float32)
         wall = time.time() - t0
         np.save(d / "coordinates.npy", xy)
@@ -790,7 +786,7 @@ def train(ds: str) -> int:
             "arm": f"{ds}--{arm}", "rung": ds,
             "overrides": {"low_dim_kernel": "umap", **MD[spec["md"]],
                           **spec["extra"]},
-            "seed": arm_seed, "torch_seeded": True, "init_state_sha256": init_state_sha,
+            "seed": arm_seed, "torch_seeded": True, "trained_state_sha256": state_sha,
             "dose_multiplier": dose, "horizon_updates": horizon,
             "positive_lr_updates": realized_updates,
             "pos_per_batch": pos_per_batch,
