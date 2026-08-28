@@ -56,6 +56,26 @@ SEGMENTS = [
     ("h3072-int8",     {"hidden_dim": 3072, "x_residency": "host_int8"}),
 ]
 
+# --batchscan (owner 2026-08-28): does batch amortize the fixed per-batch int8 transport
+# overhead the way width did (0.639→0.769)? bs16/32/64K × h2048/h3072 × int8/resident,
+# reporting samples/s (ups×batch) + int8:resident ratio per batch. SCOPED EXCEPTION to the
+# don't-revisit "bs32K no benefit" — that result was fp16-RESIDENT MiniLM D384 on the OLD
+# partially-invalidated bench; it does NOT cover int8-transport jina-D768 batch-scaling.
+BATCH_SCAN_BATCHES = (16384, 32768, 65536)
+BATCH_SCAN_WIDTHS = (2048, 3072)
+BATCHSCAN_SEGMENTS = [
+    (f"h{w}-bs{b // 1024}k-{'int8' if r == 'host_int8' else 'resident'}",
+     {"hidden_dim": w, "x_residency": r, "batch_size": b})
+    for w in BATCH_SCAN_WIDTHS for b in BATCH_SCAN_BATCHES
+    for r in ("auto", "host_int8")
+]
+BATCHSCAN_PROVENANCE = (
+    "SCOPED EXCEPTION to don't-revisit 'bs32K no benefit': that was fp16-resident MiniLM "
+    "D384 on the OLD partially-invalidated perf bench; this measures int8-TRANSPORT jina "
+    "D768 batch-scaling, a different question. Owner-authorized 2026-08-28. Not editing the "
+    "don't-revisit list/config — provenance recorded here."
+)
+
 
 def _ensure_paths():
     # repo root (for `basemap`), experiments, and sandbox — delta_updates_per_s
@@ -129,13 +149,18 @@ def delta_updates_per_s(label: str, overrides: dict, X, e: int) -> dict:
 
 
 def main() -> int:
-    OUT.mkdir(parents=True, exist_ok=True)
-    which = sys.argv[1] if len(sys.argv) > 1 else None
+    args = sys.argv[1:]
+    batchscan = "--batchscan" in args
+    which = next((a for a in args if not a.startswith("--")), None)
+    segments = BATCHSCAN_SEGMENTS if batchscan else SEGMENTS
+    out_dir = (OUT.parent / "perf-bench-jina-batchscan") if batchscan else OUT
+    out_dir.mkdir(parents=True, exist_ok=True)
     X, e = _load_jina()
-    print(f"jina substrate {X.shape} dtype={X.dtype}; edges={e}", flush=True)
+    print(f"jina substrate {X.shape} dtype={X.dtype}; edges={e}"
+          + (" [BATCHSCAN]" if batchscan else ""), flush=True)
 
     rows = {}
-    for label, ov in SEGMENTS:
+    for label, ov in segments:
         if which and label != which:
             continue
         try:
@@ -145,41 +170,62 @@ def main() -> int:
                  "error": f"{type(ex).__name__}: {str(ex)[:200]}"}
         rows[label] = r
         print(json.dumps(r), flush=True)
-        (OUT / f"{label}.json").write_text(json.dumps(r, indent=1))
+        (out_dir / f"{label}.json").write_text(json.dumps(r, indent=1))
 
-    # gate-2 ratios per width (int8 / resident); PASS iff >= 0.85 at every width.
-    gate2 = {}
-    for w in ("h2048", "h3072"):
-        res = rows.get(f"{w}-resident", {}).get("updates_per_s")
-        i8 = rows.get(f"{w}-int8", {}).get("updates_per_s")
-        ratio = (round(i8 / res, 3) if res and i8 else None)
-        gate2[w] = {"resident_ups": res, "int8_ups": i8, "ratio": ratio,
-                    "pass": (ratio is not None and ratio >= GATE2_RATIO)}
-    all_measured = all(v["ratio"] is not None for v in gate2.values())
-    verdict = ("PASS" if all_measured and all(v["pass"] for v in gate2.values())
-               else ("FAIL" if all_measured else "INCOMPLETE"))
+    if batchscan:
+        # per-(width,batch): int8/resident ratio + samples/s (ups×batch). Does a bigger
+        # batch amortize the fixed int8 transport overhead enough to clear 0.85?
+        grid = {}
+        for w in BATCH_SCAN_WIDTHS:
+            for b in BATCH_SCAN_BATCHES:
+                bk = b // 1024
+                ru = rows.get(f"h{w}-bs{bk}k-resident", {}).get("updates_per_s")
+                iu = rows.get(f"h{w}-bs{bk}k-int8", {}).get("updates_per_s")
+                grid[f"h{w}-bs{bk}k"] = {
+                    "resident_ups": ru, "int8_ups": iu,
+                    "resident_samples_s": (round(ru * b) if ru else None),
+                    "int8_samples_s": (round(iu * b) if iu else None),
+                    "ratio": (round(iu / ru, 3) if ru and iu else None),
+                    "clears_0.85": bool(ru and iu and iu / ru >= GATE2_RATIO)}
+        if not which:
+            (out_dir / "batchscan-results.json").write_text(json.dumps({
+                "schema": "perf-bench-jina-batchscan-2026-08-28",
+                "shape": {"dataset": DS, "dim": int(X.shape[1]), "rows": int(X.shape[0])},
+                "gate2_ratio_threshold": GATE2_RATIO, "provenance": BATCHSCAN_PROVENANCE,
+                "grid": grid, "segments": rows}, indent=1))
+            print(f"\nbatchscan grid: {json.dumps(grid)}", flush=True)
+    else:
+        # gate-2 ratios per width (int8 / resident); PASS iff >= 0.85 at every width.
+        gate2 = {}
+        for w in ("h2048", "h3072"):
+            res = rows.get(f"{w}-resident", {}).get("updates_per_s")
+            i8 = rows.get(f"{w}-int8", {}).get("updates_per_s")
+            ratio = (round(i8 / res, 3) if res and i8 else None)
+            gate2[w] = {"resident_ups": res, "int8_ups": i8, "ratio": ratio,
+                        "pass": (ratio is not None and ratio >= GATE2_RATIO)}
+        all_measured = all(v["ratio"] is not None for v in gate2.values())
+        verdict = ("PASS" if all_measured and all(v["pass"] for v in gate2.values())
+                   else ("FAIL" if all_measured else "INCOMPLETE"))
+        if not which:
+            (OUT / "results.json").write_text(json.dumps({
+                "schema": "perf-bench-jina-gate2-2026-08-27",
+                "shape": {"dataset": DS, "dim": int(X.shape[1]),
+                          "rows": int(X.shape[0]), "edges": e},
+                "delta_updates": list(DELTA_UPDATES), "gate2_ratio_threshold": GATE2_RATIO,
+                "segments": rows, "gate2": gate2, "gate2_verdict": verdict,
+                "note": "gate 2 (throughput) ONLY; int8 / fp16-resident updates/s at jina "
+                        "D768, within-run delta segments. int8 TAX (gate 3) is the "
+                        "champion-bs16k-hostint8 parity ARM. --batchscan for bs16/32/64K.",
+            }, indent=1))
+            print(f"\ngate2: {json.dumps(gate2)}\nverdict: {verdict}", flush=True)
 
-    if not which:
-        out = {
-            "schema": "perf-bench-jina-gate2-2026-08-27",
-            "shape": {"dataset": DS, "dim": int(X.shape[1]),
-                      "rows": int(X.shape[0]), "edges": e},
-            "delta_updates": list(DELTA_UPDATES), "gate2_ratio_threshold": GATE2_RATIO,
-            "segments": rows, "gate2": gate2, "gate2_verdict": verdict,
-            "note": "gate 2 (throughput) ONLY; int8 updates/s / fp16-resident "
-                    "updates/s at jina D768, within-run delta segments. The int8 "
-                    "TAX (gate 3) is the champion-bs16k-hostint8 parity ARM, not a "
-                    "segment here. Excludes compile/tf32/bs32k (don't-revisit).",
-        }
-        (OUT / "results.json").write_text(json.dumps(out, indent=1))
-        print(f"\ngate2: {json.dumps(gate2)}\nverdict: {verdict}", flush=True)
-    # FAIL LOUDLY (non-zero) when a segment errored or the gate could not be
-    # measured — a fail-closed orchestrator must NOT read null gate-2 as success.
+    # FAIL LOUDLY (non-zero) when a segment errored — a fail-closed orchestrator must not
+    # read null throughput as success.
     errored = [k for k, v in rows.items() if isinstance(v, dict) and v.get("error")]
     if errored:
         print(f"ERROR: {len(errored)} segment(s) failed: {errored} — non-zero exit", flush=True)
         return 1
-    if not which and verdict == "INCOMPLETE":
+    if not which and not batchscan and verdict == "INCOMPLETE":
         print("ERROR: gate2 INCOMPLETE (unmeasured) — non-zero exit", flush=True)
         return 1
     return 0
