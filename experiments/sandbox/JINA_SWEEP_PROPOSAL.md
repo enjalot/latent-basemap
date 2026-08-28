@@ -38,21 +38,34 @@ EN registers (the language floor's EN anchor). ~100-250k each.
 
 ## Sweep proper (queues after the MiniLM ceiling arms + prereqs)
 
-**Base:** 1M jina multilingual base = the existing champion mixture (EN fw/RPJ/pile +
-20 langs × 50k), i.e. `multi-1m.f16.npy` composition. NOTE: the jina prompted set has
-NO code corpus (unlike MiniLM's starcoder 10%), so there is no code register on the
-jina side — the code-displacement question is MiniLM-specific.
+**Base (REDESIGNED — LANGUAGE-PRESERVING, delegate URGENT 2026-08-28):** the jina-multi-2m
+composition = **1M EN (fw/RPJ/pile) + 20 languages × 50k (1M ML) = 2M**. NOT the 1M
+`multi-1m` (which is 20×50k = ALL ML, NO EN — a 1M pure-ML base has no EN to displace, so
+it would FORCE language-displacement). The 2M base gives a full 1M EN block to absorb the
+social displacement while holding every language block fixed.
 
-**MATCHED-DISPLACEMENT ladder (delegate 2026-08-27 — upgrade over MiniLM screening).**
-Build the 1M base ONCE. Every mixed arm = the SAME 1M base rows with a seed-42 chosen
-share DISPLACED by social — base rows BIT-IDENTICAL across all arms, social share the
-SOLE variable (exactly the bmix30-2m matched design, applied to the whole ladder). So
-the jina ladder is matched/sealed-grade from the start, not screening-grade.
+**CODE-PRESERVING = LANGUAGE-PRESERVING (the bmix10cp mechanism transfers).** MiniLM proved
+that displacement KILLS whatever SMALL register's budget it eats: code died because social
+displaced its 10% budget across the whole base, and the ENTIRE bmix30/40/50 ladder lost the
+maximin monotonically to code collapse — while bmix10cp (displace ONLY the large non-code
+corpora, code held identical) WON the maximin. On the jina side the SMALL registers are the
+20 per-language blocks (50k each), and LANGUAGES ARE THE CORE OF THE JINA MAXIMIN. So social
+MUST displace ONLY the three large EN corpora; every per-language block is held IDENTICAL to
+the 0% baseline across every arm. A proportional-across-the-whole-base displacement would
+re-learn the code lesson at ~6 arms' cost (language floors collapse exactly like code did).
 
-**Share ladder (balanced family):** {0, 10, 20, 30} (+40/50 IFF the MiniLM ceiling arms
-show worst-register still rising past 30% — if MiniLM turns over at 40, jina stops at 30).
-balanced share s displaces s×1M base rows, replaced by s/4 each of reddit/CA/twitter/
-bluesky (holdout-disjoint ≥300k). The 0% arm = the undisplaced base.
+**MATCHED, LANGUAGE-PRESERVING ladder.** Build the 2M base ONCE. Every mixed arm = the SAME
+base rows with a seed-42 share of the EN 1M displaced by social — the 20 language blocks
+(50k each) BIT-IDENTICAL across all arms, EN rows a matched subset, social share the sole
+variable (the bmix10cp construction: displace only the large corpora, preserve the small ones).
+
+**Share ladder (balanced family):** {0, 10, 20, 30} (+40/50 gated as before). balanced share
+s displaces s×2M rows drawn ONLY from the EN 1M, PROPORTIONALLY across fw/RPJ/pile, replaced
+by s/4 each of reddit/CA/twitter/bluesky (holdout-disjoint ≥300k). ALL 20 language blocks
+(50k each) UNTOUCHED — count identical to the 0% baseline in every arm. The 0% arm = the
+undisplaced base. **Manifest MUST verify: per-language row counts identical across all arms**
+(the language-preservation proof, analogous to bmix10cp's starcoder==200k proof). At the max
+share the EN block must not be over-drawn: 30% of 2M = 600k social ≤ the 1M EN — OK to ~50%.
 
 **Transfer check:** ONE reddit-only point at 20% (rmix-jina-20) — tests whether the
 MiniLM "balance beats volume" finding transfers to jina space.
@@ -68,10 +81,13 @@ WORST register (likely a low-resource language or a social corpus) is least bad.
 Interior-optimum + per-register delta-vs-0% reported as in the MiniLM sweep.
 
 ## HEADs / paths
-- Substrates: substrates/jina-bmix{10,20,30[,40,50]}-1m/, substrates/jina-rmix20-1m/
-- Base 0%: reuse the existing jina-multi... 1M champion map if one exists at this exact
-  recipe+seed; else train jina-multi-1m/champion-bs16k as the 0% point (mirrors how the
-  MiniLM 0% = minilm-mix-1m/rankfrac-25). CONFIRM which before the sweep.
+- Substrates: substrates/jina-bmix{10,20,30[,40,50]}-2m/, substrates/jina-rmix20-2m/ (2M base now).
+- Base 0% = the jina-multi-2m champion map (the undisplaced 2M base: 1M EN + 20×50k langs). This is
+  the EXISTING jina-multi-2m/champion-bs16k (0.6426 / v2 0.6830) — reuse it as the 0% arm (its
+  substrate IS the undisplaced base), so no fresh 0% train needed. The mixed arms displace only its
+  EN 1M. (SUPERSEDES the 2026-08-27 ruling (a) "train jina-multi-1m 0%": the 1M pure-ML base is
+  incompatible with language-preserving displacement, so the base moves to the 2M EN+lang composition
+  whose 0% map already exists.) Per-lang probe size (b) 100k, gating (c), pool size (d) unchanged.
 - Builders (to write, all CPU except embeds/truths): a jina variant of
   build_mixture_substrates.py (jina pools + multi base, f16), a jina lang/EN probe
   builder (reuse p2_jina_embed.py + image_map_pipeline knn/fuzzy), a jina mixture_probe
