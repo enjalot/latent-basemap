@@ -682,10 +682,15 @@ sealed bitwise sub-check already PASS).
 **Gate 2 — throughput ≥ 85% of RESIDENT at the true jina shape.** The int8 path's
 updates/s must be ≥ 85% of the fp16/fp32-RESIDENT path measured at the *actual*
 jina D768 batch geometry (not a MiniLM D384 proxy, not the 30M round0034 D-shape).
-This is what makes int8 admission worth its quality cost. **Status: UNMEASURED at
-the jina shape** — the §5 A/B measures transport (int8-fast vs int8-control), not
-int8-vs-RESIDENT throughput; a jina-shape resident-vs-int8 bench is required
-(folds into the #12 perf-tail rebuild at jina D768 h2048/h3072).
+This is what makes int8 admission worth its quality cost. **Status: MEASURED (perf_
+bench_jina, 2026-08-28), FAILS** — legacy-transport int8 vs fp16-resident:
+h2048 **0.639** (54.0→34.5 ups), h3072 **0.769** (29.4→22.6 ups), both < 0.85. The
+ratio improves with width (a wider MLP amortizes the fixed int8 transport/dequant
+overhead) — most closeable at h3072. int8 also saves ~30% VRAM (7.15/10.16 vs
+10.22/13.23 GB), the reason it is mandatory at 30M. THIS is now the binding 30M
+constraint (gate 3 turned favorable), and C1's fast-input port is the designed
+lever: the §5 A/B (fast-input-int8 vs legacy-int8 control) must lift these ratios
+toward ≥0.85-of-RESIDENT while keeping the favorable quality.
 
 **Gate 3 — quality within ±0.005 of RESIDENT (the int8 tax).** The int8-QUANTIZED
 substrate's FFR must be within ±0.005 of the fp16-RESIDENT substrate at the same
