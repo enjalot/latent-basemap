@@ -264,12 +264,16 @@ def main(argv: list[str]) -> int:
             n6 = len(X6)
             xy = np.asarray(model.transform(X6, batch_size=8192), dtype=np.float32)
             np.save(coords_dir / f"{pfx}__proj-6250k.npy", xy)
-            # P0.3c: this is the OPTIMISTIC projection case — a baseline_N head
-            # projecting the larger 6.25M substrate whose first baseline_N rows are
-            # the head's byte-identical nested-prefix training set. Split FFR into
-            # training MEMBER (query index < baseline_N) vs UNSEEN so the number is
-            # honest. sp["overall"] == the old quick_ffr_v2 number (same queries).
-            sp = quick_ffr_v2_split(xy, edges6, n6, member_cutoff=baseline_N,
+            # P0.3c (corrected 2026-08-29): the OPTIMISTIC projection case. The head's
+            # training rows are a MEMBER of the 6.25M target — but the composition is by
+            # STRIDE, not a 1M prefix: MiniLM-2M is the nested prefix of 6.25M, and the
+            # smaller heads are STRIDES of that 2M (1M = every-2nd row, 500K = every-4th),
+            # NOT prefixes (minilm-mix-1m is p4_slice_substrates stride=2, not a prefix).
+            # So members = {0, stride, 2*stride, ...} below 2M, exact by construction.
+            _stride = 2_000_000 // baseline_N          # 2m->1, 1m->2, 500k->4
+            proj_member_mask = np.zeros(n6, dtype=bool)
+            proj_member_mask[0:2_000_000:_stride] = True
+            sp = quick_ffr_v2_split(xy, edges6, n6, member_mask=proj_member_mask,
                                     knn_indices_path=(knn6 if knn6 else None))
             ffr = float(sp["overall"])
             proj["proj_6250k"] = {
@@ -278,9 +282,10 @@ def main(argv: list[str]) -> int:
                 "member_frac": sp["member_frac"],
                 "n_member_queries": sp["n_member"], "n_unseen_queries": sp["n_unseen"],
                 "member_note": (
-                    f"head trained on the first {baseline_N:,} nested-prefix rows; "
-                    f"query index < {baseline_N:,} = training member (in-sample, "
-                    f"optimistic), >= = unseen. member_frac ~ baseline_N/N."),
+                    f"{baseline_N:,}-row head = stride-{_stride} subsample of the 2M "
+                    f"nested-prefix of 6.25M; members = indices 0,{_stride},{2*_stride},... "
+                    f"below 2,000,000 (exact by construction, NOT a 1M prefix). "
+                    f"member_frac ~ {baseline_N:,}/N."),
                 "rows": n6, "extrap": round(n6 / baseline_N, 3),
                 "instrument": "FFR@0.1%-of-N (full-rung 6.25M sealed truth)",
                 "truth": str(edges6), "knn_indices": (str(knn6) if knn6 else None),
