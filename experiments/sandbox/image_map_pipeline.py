@@ -309,7 +309,20 @@ DATASETS = {
                                    "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
                                              "pos_ratio": 0.10, "rankneg_window": 500_000,
                                              "batch_size": 16384, "hidden_dim": 3072,
-                                             "neck_fraction": 0.625}}}},
+                                             "neck_fraction": 0.625}},
+                               # 4th-review P0.1 FLOOR (delegate 2026-08-29): resident-D768 determinism
+                               # twins via the explicit-horizon mechanism (H=200K, ~30-60min each vs the
+                               # full champion wall). Same readout as the D384 twins — trained_state_sha256
+                               # equality => the resident floor is ZERO at D768 too; init hash must match.
+                               # Seed defaults to 42 (no override). resident (no x_residency).
+                               "floor-resident-h200k-a": {"md": "000", "dose": 0, "horizon": 200_000,
+                                   "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                             "pos_ratio": 0.10, "rankneg_window": 500_000,
+                                             "batch_size": 16384}},
+                               "floor-resident-h200k-b": {"md": "000", "dose": 0, "horizon": 200_000,
+                                   "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                             "pos_ratio": 0.10, "rankneg_window": 500_000,
+                                             "batch_size": 16384}}}},
     # ---- bmix30-2m FINALIST CONFIRMATION (owner 2026-08-27): social-mixture sweep winner
     # (bmix30 = 30% balanced social) replicated at 2M with MATCHED rows vs minilm-mixed-2m — 1.4M
     # base rows IDENTICAL to a subset of that baseline + 600K balanced social (150K each
@@ -335,7 +348,16 @@ DATASETS = {
             "/data/latent-basemap/substrates/minilm-bmix10cp-2m/substrate.f32.npy",
             mmap_mode="r"),
         "subsets": _bmix10cp_2m_subsets,
-        "arms": {"champion-bs16k": _CHAMPION_500K}},
+        "arms": {"champion-bs16k": _CHAMPION_500K,
+                 # 4th-review P0.1 FLOOR (delegate 2026-08-29): resident-D384 determinism twins.
+                 # Two SEEDED (42) same-config champion runs into distinct dirs. PRIMARY readout is
+                 # trained_state_sha256 EQUALITY — identical => the resident floor is literally ZERO
+                 # (every same-seed cross-config comparison becomes exact, no statistical banding);
+                 # |Δmaximin| is the fallback floor only if the trained hashes differ. init_state_sha256
+                 # MUST match across the twins either way (the seeding proof). Determinism is a PATH
+                 # property, so this cheap D384 champion arm answers the resident question for all D384.
+                 "floor-resident-a": _CHAMPION_500K,
+                 "floor-resident-b": _CHAMPION_500K}},
     "reddit-2m": {"load": _reddit_load, "subsets": None},
     "communityarchive-2m": {"load": _ca_load, "subsets": None},
     "minilm-redditmix-2m": {"load": _redditmix_load,
@@ -742,10 +764,10 @@ def train(ds: str) -> int:
         model = ParametricUMAP(**kwargs)
         t0 = time.time()
         model.fit(x, precomputed_edges_path=str(edges), random_state=arm_seed)
-        # Seeded-ness fingerprint: a PRE-train init hash would need to call _init_model early, which
-        # violates core.py's admission-before-allocation guard (L0.5, core.py:407). So we fingerprint
-        # the TRAINED weights instead — same seed+config reproduces it iff init AND training are
-        # deterministic. (A true pre-init hash needs a core.py hook — flagged for follow-on.)
+        # Seeded-ness fingerprint: model.init_state_sha256 (core.py hook, landed bb6e1e7) is the true
+        # PRE-init hash — reproducible at fixed seed, isolates init variance. This post-fit hash of the
+        # TRAINED weights is the complementary end-to-end fingerprint: same seed+config reproduces it
+        # IFF init AND training are both deterministic (the resident-floor question the twins measure).
         state_sha = None
         try:
             _h = _hashlib.sha256()
