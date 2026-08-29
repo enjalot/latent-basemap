@@ -194,6 +194,7 @@ def main(argv: list[str]) -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from image_map_pipeline import _norm  # noqa: F401
     from knobs_2m import quick_ffr_v2 as quick_ffr  # v2 truth-selection
+    from knobs_2m import quick_ffr_v2_split  # P0.3c member/unseen split
     from basemap.pumap.parametric_umap.core import ParametricUMAP
 
     coords_dir = SANDBOX / f"{arm}-jina-confirm-coords"
@@ -256,14 +257,28 @@ def main(argv: list[str]) -> int:
             n6 = len(X6)
             xy = np.asarray(model.transform(X6, batch_size=8192), dtype=np.float32)
             np.save(coords_dir / f"{pfx}__proj-jina6m.npy", xy)
-            ffr = float(quick_ffr(xy, JINA6M_TRUTH, n6,
-                                  knn_indices_path=(knn6 if knn6 else None)))
+            # P0.3c: OPTIMISTIC projection case — a 2M (BASELINE_N) head projecting
+            # the larger jina-6m substrate whose first BASELINE_N rows are the head's
+            # byte-identical nested-prefix training set. Split FFR into training
+            # MEMBER (query index < BASELINE_N) vs UNSEEN so the number is honest.
+            # sp["overall"] == the old quick_ffr_v2 number (same queries).
+            sp = quick_ffr_v2_split(xy, JINA6M_TRUTH, n6, member_cutoff=BASELINE_N,
+                                    knn_indices_path=(knn6 if knn6 else None))
+            ffr = float(sp["overall"])
             proj["jina_6m_transform"] = {
-                "ffr_v2": ffr, "rows": n6, "extrap": round(n6 / BASELINE_N, 3),
+                "ffr_v2": ffr,
+                "ffr_v2_member": sp["member"], "ffr_v2_unseen": sp["unseen"],
+                "member_frac": sp["member_frac"],
+                "n_member_queries": sp["n_member"], "n_unseen_queries": sp["n_unseen"],
+                "member_note": (
+                    f"head trained on the first {BASELINE_N:,} nested-prefix rows; "
+                    f"query index < {BASELINE_N:,} = training member (in-sample, "
+                    f"optimistic), >= = unseen. member_frac ~ BASELINE_N/N."),
+                "rows": n6, "extrap": round(n6 / BASELINE_N, 3),
                 "instrument": "FFR@0.1%-of-N (jina-6m sealed truth)",
                 "truth": str(JINA6M_TRUTH),
                 "knn_indices": (str(knn6) if knn6 else None),
-                "truth_mode": getattr(quick_ffr, "last_truth_mode", "?"),
+                "truth_mode": sp["truth_mode"],
                 "coords_label": f"{pfx}__proj-jina6m",
                 "wall_s": round(time.time() - t0, 1)}
             print(f"  proj jina-6m (x{n6/BASELINE_N:.2f}): FFR {ffr:.4f} "

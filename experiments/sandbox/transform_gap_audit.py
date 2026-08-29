@@ -45,6 +45,11 @@ SB = Path("/data/latent-basemap/sandbox")
 SLICE_N = 2_000_000
 SLICE_SEED = 42
 K_TRUE = 15
+# All transform pairs use the 2M-trained head (head2m). The nested rungs are
+# byte-identical prefixes, so a query into a larger substrate with index <
+# HEAD_TRAIN_N was a TRAINING MEMBER of that head (in-sample / optimistic);
+# index >= HEAD_TRAIN_N is UNSEEN (P0.3c member/unseen split).
+HEAD_TRAIN_N = 2_000_000
 
 
 class NormMemmap:
@@ -157,7 +162,7 @@ def main() -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from image_map_pipeline import DATASETS, _norm
-    from knobs_2m import quick_ffr_v2
+    from knobs_2m import quick_ffr_v2, quick_ffr_v2_split  # noqa: F401
     try:
         # P0.3(a) 4th-review fix: analysis_v2.collapse(path) expects a FILE PATH (np.load's it),
         # but we have the coords array in-memory — passing the array silently errored -> collapse
@@ -173,8 +178,20 @@ def main() -> int:
     coords_dir = SB / "transform-gap-coords"
     coords_dir.mkdir(parents=True, exist_ok=True)
 
-    def _score(xy, rows, truth=None, kidx=None):
-        out = {"ffr_v2": float(quick_ffr_v2(xy, truth or kidx, rows, knn_indices_path=kidx))}
+    def _score(xy, rows, truth=None, kidx=None, member_cutoff=None, member_mask=None):
+        # P0.3c member/unseen split: PROJECTION scoring is optimistic because the
+        # nested rungs are byte-identical prefixes, so some queries were IN the
+        # head's training set. quick_ffr_v2_split reuses quick_ffr_v2's exact query
+        # sampling/truth/disc, so out["ffr_v2"] == the old quick_ffr_v2 number.
+        sp = quick_ffr_v2_split(xy, truth or kidx, rows, member_cutoff=member_cutoff,
+                                member_mask=member_mask, knn_indices_path=kidx)
+        out = {"ffr_v2": float(sp["overall"])}
+        if member_cutoff is not None or member_mask is not None:
+            out["ffr_v2_member"] = sp["member"]
+            out["ffr_v2_unseen"] = sp["unseen"]
+            out["member_frac"] = sp["member_frac"]
+            out["n_member_queries"] = sp["n_member"]
+            out["n_unseen_queries"] = sp["n_unseen"]
         if collapse_frac is not None:
             try:
                 out["collapse"] = float(collapse_frac(xy))
@@ -211,9 +228,14 @@ def main() -> int:
             xy = np.asarray(model.transform(X, batch_size=8192), dtype=np.float32)
             np.save(coords_dir / f"{p['space']}__{p['rung']}__xform-from-{p['head']}.npy", xy)
             kidx = p.get("knn_indices")
-            transform_score = _score(xy, n, truth=p.get("truth"), kidx=kidx)
+            # transform: 2M head projecting the full N-row rung -> member iff query
+            # index < HEAD_TRAIN_N (nested-prefix training rows). trained: trained
+            # on the FULL rung, so member_cutoff=n makes ~all queries members.
+            transform_score = _score(xy, n, truth=p.get("truth"), kidx=kidx,
+                                     member_cutoff=HEAD_TRAIN_N)
             ref_xy = np.asarray(np.load(ref_coords), dtype=np.float32)
-            trained_score = _score(ref_xy, n, truth=p.get("truth"), kidx=kidx)
+            trained_score = _score(ref_xy, n, truth=p.get("truth"), kidx=kidx,
+                                   member_cutoff=n)
             instrument = "FFR@0.1%-of-N (full-rung sealed truth)"
         else:
             # 2M-slice: subsample, fresh in-slice k15, score both at disc=0.1%-of-2M
@@ -233,8 +255,13 @@ def main() -> int:
             np.save(coords_dir / f"{p['space']}__{p['rung']}__xform-from-{p['head']}.npy", xy)
             ref_full = np.load(ref_coords, mmap_mode="r")
             ref_xy = np.asarray(ref_full[idx], dtype=np.float32)
-            transform_score = _score(xy, n, kidx=kfile)
-            trained_score = _score(ref_xy, n, kidx=kfile)
+            # SLICE: queries are subsample POSITIONS, not original indices, so we
+            # bucket via a mask over the subsample: a subsample row is a training
+            # member of the 2M head iff its ORIGINAL index < HEAD_TRAIN_N. trained
+            # was trained on the full big rung -> member_cutoff=n = all members.
+            member_mask = np.asarray(idx) < HEAD_TRAIN_N
+            transform_score = _score(xy, n, kidx=kfile, member_mask=member_mask)
+            trained_score = _score(ref_xy, n, kidx=kfile, member_cutoff=n)
             instrument = "FFR@0.1%-of-2M-slice (fresh in-slice truth)"
 
         try:

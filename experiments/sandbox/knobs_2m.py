@@ -598,6 +598,149 @@ def quick_ffr_v2(xy: np.ndarray, edges_path, rows: int,
     return hits / max(total, 1)
 
 
+def quick_ffr_v2_split(xy: np.ndarray, edges_path, rows: int,
+                       member_cutoff=None, member_mask=None,
+                       n_queries: int = 20_000, k_true: int = 15,
+                       knn_indices_path=None) -> dict:
+    """Member/unseen split of quick_ffr_v2 (P0.3c, external review 2026-08-29).
+
+    PROJECTION scoring (a small-N head transforms a larger-N substrate, then FFR
+    vs the larger substrate's own truth) is OPTIMISTIC: the nested rungs are
+    byte-identical prefixes, so some of the larger substrate's rows were IN the
+    head's training set (in-sample). This splits the FFR into training MEMBER vs
+    UNSEEN so the number is honest.
+
+      - member_cutoff (int): a query is a MEMBER iff its index < member_cutoff.
+        Use for full-rung projection where the head trained on the first
+        `member_cutoff` (nested-prefix) rows of the substrate being scored.
+      - member_mask (bool array over `rows`): a query is a MEMBER iff
+        member_mask[query_index]. Use for the 2M-slice case where the query
+        index is a subsample POSITION, not the original corpus index — pass
+        member_mask = (subsample_original_idx < head_train_N).
+    Exactly one of the two is normally provided; if neither is given, member and
+    unseen are None (overall only).
+
+    Reuses quick_ffr_v2's EXACT query sampling (np.random.default_rng(0)), truth
+    selection (exact knn_indices.npy where present, else top-k by fuzzy weight),
+    disc = rows*0.1%, and self-exclusion, so the returned ``overall`` equals
+    quick_ffr_v2 on the same inputs (verified by the P0.3c synthetic check).
+
+    Returns {overall, member, unseen, member_frac, n_member, n_unseen,
+    n_scored, truth_mode}. member/unseen are micro-averaged recall WITHIN each
+    bucket (None when the bucket has no scored queries). member_frac is the
+    fraction of scored queries that are training members.
+    """
+    from scipy.spatial import cKDTree
+
+    edges_path = Path(edges_path)
+    rng = np.random.default_rng(0)
+    queries = rng.choice(rows, size=min(n_queries, rows), replace=False)
+
+    # --- high-D truth: exact knn_indices.npy where present, else top-k by weight
+    # (byte-for-byte the same resolution + ordering as quick_ffr_v2) ---
+    truth_by_query: dict = {}
+    exact_idx = None
+    if knn_indices_path is None:
+        cand = edges_path.parent / "knn_indices.npy"
+        knn_indices_path = cand if cand.is_file() else False
+    if knn_indices_path:
+        knn_indices_path = Path(knn_indices_path)
+        if knn_indices_path.is_file():
+            exact_idx = np.load(knn_indices_path, mmap_mode="r")
+            if exact_idx.shape[0] != rows:
+                exact_idx = None
+
+    truth_mode = "exact" if exact_idx is not None else "weight"
+    if exact_idx is not None:
+        for q in queries:
+            t = np.asarray(exact_idx[q][:k_true], dtype=np.int64)
+            truth_by_query[q] = t[t != q]
+    else:
+        with np.load(edges_path) as z:
+            names = z.files
+            src_name = next(n for n in ("sources", "src", "rows") if n in names)
+            dst_name = next(n for n in ("destinations", "dst", "cols", "targets")
+                            if n in names)
+            w_name = next((n for n in ("weights", "data", "vals", "values")
+                           if n in names), None)
+            sources = z[src_name]
+            dests = z[dst_name]
+            weights = z[w_name] if w_name is not None else None
+        order = np.argsort(sources, kind="stable")
+        sources = sources[order]
+        dests = dests[order]
+        weights = weights[order] if weights is not None else None
+        starts = np.searchsorted(sources, np.arange(rows))
+        ends = np.searchsorted(sources, np.arange(rows), side="right")
+        for q in queries:
+            d = dests[starts[q]:ends[q]]
+            keep = d != q
+            d = d[keep]
+            if len(d) == 0:
+                truth_by_query[q] = d.astype(np.int64)
+                continue
+            if weights is not None:
+                w = weights[starts[q]:ends[q]][keep]
+                if len(d) > k_true:
+                    top = np.argpartition(w, len(w) - k_true)[-k_true:]
+                    d = d[top]
+                else:
+                    d = d
+            else:
+                d = d[:k_true]
+            truth_by_query[q] = d.astype(np.int64)
+
+    # --- 2D disc neighbors, query excluded from its own budget ---
+    disc = max(int(rows * 0.001), 1)
+    tree = cKDTree(xy)
+    _, near = tree.query(xy[queries], k=disc + 1, workers=8)
+    near = np.atleast_2d(near)
+
+    def _is_member(q):
+        if member_mask is not None:
+            return bool(member_mask[q])
+        if member_cutoff is not None:
+            return int(q) < int(member_cutoff)
+        return None
+
+    hits_m = tot_m = nq_m = 0
+    hits_u = tot_u = nq_u = 0
+    for qi, q in enumerate(queries):
+        truth = truth_by_query[q]
+        if len(truth) == 0:
+            continue
+        nbrs = near[qi]
+        nbrs = nbrs[nbrs != q]
+        h = int(np.isin(truth, nbrs).sum())
+        t = int(len(truth))
+        mem = _is_member(q)
+        if mem is False:
+            hits_u += h
+            tot_u += t
+            nq_u += 1
+        else:  # member (True) — or None (no split requested) counts as member-side
+            hits_m += h
+            tot_m += t
+            nq_m += 1
+
+    total = tot_m + tot_u
+    overall = (hits_m + hits_u) / max(total, 1)
+    split_requested = member_mask is not None or member_cutoff is not None
+    n_scored = nq_m + nq_u
+    out = {
+        "overall": overall,
+        "member": (hits_m / tot_m) if (split_requested and tot_m) else None,
+        "unseen": (hits_u / tot_u) if (split_requested and tot_u) else None,
+        "member_frac": (nq_m / max(n_scored, 1)) if split_requested else None,
+        "n_member": int(nq_m) if split_requested else None,
+        "n_unseen": int(nq_u) if split_requested else None,
+        "n_scored": int(n_scored),
+        "truth_mode": truth_mode,
+    }
+    quick_ffr_v2_split.last_truth_mode = truth_mode
+    return out
+
+
 def run_arm(arm: str, dry_run: bool, seed: int = SEED, rung_name: str = "2m") -> int:
     rung = RUNGS[rung_name]
     overrides = dict(ARMS[arm])

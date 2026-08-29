@@ -175,6 +175,7 @@ def main(argv: list[str]) -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from image_map_pipeline import DATASETS, _norm  # noqa: F401 (parity w/ bmix30)
     from knobs_2m import quick_ffr_v2 as quick_ffr  # v2 truth-selection
+    from knobs_2m import quick_ffr_v2_split  # P0.3c member/unseen split
 
     from basemap.pumap.parametric_umap.core import ParametricUMAP
 
@@ -263,13 +264,27 @@ def main(argv: list[str]) -> int:
             n6 = len(X6)
             xy = np.asarray(model.transform(X6, batch_size=8192), dtype=np.float32)
             np.save(coords_dir / f"{pfx}__proj-6250k.npy", xy)
-            ffr = float(quick_ffr(xy, edges6, n6,
-                                  knn_indices_path=(knn6 if knn6 else None)))
+            # P0.3c: this is the OPTIMISTIC projection case — a baseline_N head
+            # projecting the larger 6.25M substrate whose first baseline_N rows are
+            # the head's byte-identical nested-prefix training set. Split FFR into
+            # training MEMBER (query index < baseline_N) vs UNSEEN so the number is
+            # honest. sp["overall"] == the old quick_ffr_v2 number (same queries).
+            sp = quick_ffr_v2_split(xy, edges6, n6, member_cutoff=baseline_N,
+                                    knn_indices_path=(knn6 if knn6 else None))
+            ffr = float(sp["overall"])
             proj["proj_6250k"] = {
-                "ffr_v2": ffr, "rows": n6, "extrap": round(n6 / baseline_N, 3),
+                "ffr_v2": ffr,
+                "ffr_v2_member": sp["member"], "ffr_v2_unseen": sp["unseen"],
+                "member_frac": sp["member_frac"],
+                "n_member_queries": sp["n_member"], "n_unseen_queries": sp["n_unseen"],
+                "member_note": (
+                    f"head trained on the first {baseline_N:,} nested-prefix rows; "
+                    f"query index < {baseline_N:,} = training member (in-sample, "
+                    f"optimistic), >= = unseen. member_frac ~ baseline_N/N."),
+                "rows": n6, "extrap": round(n6 / baseline_N, 3),
                 "instrument": "FFR@0.1%-of-N (full-rung 6.25M sealed truth)",
                 "truth": str(edges6), "knn_indices": (str(knn6) if knn6 else None),
-                "truth_mode": getattr(quick_ffr, "last_truth_mode", "?"),
+                "truth_mode": sp["truth_mode"],
                 "coords_label": f"{pfx}__proj-6250k",
                 "wall_s": round(time.time() - t0, 1)}
             print(f"  proj 6.25M (x{n6/baseline_N:.2f}): FFR {ffr:.4f} "

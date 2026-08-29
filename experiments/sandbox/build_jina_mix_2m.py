@@ -63,6 +63,15 @@ DIM = 768
 SEED = 42
 TOTAL = 2_000_000
 HOLDOUT = 300_000               # social rows drawn from global index >= 300000
+# The jina social POOL FILES already begin at global corpus row HOLDOUT: jina_
+# social_pools.py builds each pool from read_range(offset=HOLDOUT), so pool-file
+# local row 0 == global corpus row HOLDOUT. Therefore a mixture social row's TRUE
+# global corpus index = POOL_GLOBAL_BASE + pool_local_index (a SINGLE HOLDOUT
+# offset). P0.4 double-offset bug (external review 2026-08-29): the old code
+# recorded provenance src = pool_local and the manifest labelled that as the
+# global index, silently dropping this pool base -> reported offsets were 300000
+# short of the true global. See the social-fill + manifest blocks below.
+POOL_GLOBAL_BASE = HOLDOUT       # pool-file row 0 == global corpus row HOLDOUT
 
 SUBSTRATES = Path("/data/latent-basemap/substrates")
 _JINA_PROMPTED = SUBSTRATES / "jina-prompted"
@@ -104,7 +113,10 @@ POOL_DIR = {
 }
 SOCIAL_CODE = {"reddit": 1, "CA": 2, "twitter": 3, "bluesky": 4}
 # provenance: origin 0 = base row (src = base index 0..1999999; [0:1M)=EN, [1M:2M)=ML);
-# origin 1..4 = social corpus code (src = pool global row index).
+# origin 1..4 = social corpus code (src = POOL-LOCAL row index within the holdout-
+# excluded pool file; the TRUE global corpus index = src + POOL_GLOBAL_BASE). The
+# pool-local convention is kept (uniform with the 4 already-built arms); the
+# manifest records both the pool-local index and the true global offset.
 PROV_DTYPE = np.dtype([("origin", "u1"), ("src", "<i8")])
 
 # arm registry ---------------------------------------------------------------
@@ -136,9 +148,20 @@ def _pool_shards(corpus: str):
 
 
 def _sample_pool_rows(shards, n: int, rng, offset: int, dim: int = DIM):
-    """Gather ``n`` uniform-random rows without replacement from the pool's global
-    row space restricted to global index >= ``offset``. Returns (rows_f16, gidx,
-    record). Per-shard gathers in ascending local order for memmap locality."""
+    """Gather ``n`` uniform-random rows without replacement from the pool file,
+    restricted to POOL-LOCAL index >= ``offset``. Returns (rows_f16, pool_local,
+    record) where ``pool_local`` is the row index WITHIN the pool file (NOT a
+    global corpus index). Per-shard gathers in ascending local order for memmap
+    locality.
+
+    P0.4 note: the pool file already excludes the first HOLDOUT global rows (it
+    begins at global corpus row POOL_GLOBAL_BASE), so passing ``offset=HOLDOUT``
+    here is a REDUNDANT, conservative extra holdout on TOP of the pool base — it
+    is NOT the pool base and must not be conflated with it. Callers recover the
+    TRUE global corpus index as ``pool_local + POOL_GLOBAL_BASE`` (a single base
+    offset). Disjointness from the probe holdout is guaranteed by the pool base
+    alone (every pool row is global >= POOL_GLOBAL_BASE), independent of this
+    extra ``offset``."""
     shard_rows = [int(s.shape[0]) for s in shards]
     total = int(sum(shard_rows))
     avail = total - offset
@@ -347,24 +370,30 @@ def main(argv: list[str]) -> int:
     # fill social ------------------------------------------------------------
     pos = ml_start + ML_1M
     social_records = {}
-    social_min_gidx = {}
+    social_min_local = {}        # pool-local index min (what provenance src stores)
+    social_min_global = {}       # TRUE global corpus index min = local + POOL_GLOBAL_BASE
     for corpus in SOCIAL:               # fixed rng order reddit,CA,twitter,bluesky
         n = social.get(corpus, 0)
         if n == 0:
             continue
         shards = _pool_shards(corpus)
-        rows, gidx, rec = _sample_pool_rows(shards, n, rng, offset=HOLDOUT)
-        assert gidx.min() >= HOLDOUT, (corpus, int(gidx.min()))
+        rows, pool_local, rec = _sample_pool_rows(shards, n, rng, offset=HOLDOUT)
+        assert pool_local.min() >= HOLDOUT, (corpus, int(pool_local.min()))
+        # provenance src stays the POOL-LOCAL index (uniform with the already-built
+        # arms). TRUE global corpus index = pool_local + POOL_GLOBAL_BASE (SINGLE
+        # base offset; do NOT add HOLDOUT a second time — that was the P0.4 bug).
         out[pos:pos + n] = rows
         prov["origin"][pos:pos + n] = SOCIAL_CODE[corpus]
-        prov["src"][pos:pos + n] = gidx.astype(np.int64)
+        prov["src"][pos:pos + n] = pool_local.astype(np.int64)
         subsets[pos:pos + n] = corpus
         social_records[corpus] = rec
-        social_min_gidx[corpus] = int(gidx.min())
+        social_min_local[corpus] = int(pool_local.min())
+        social_min_global[corpus] = int(pool_local.min()) + POOL_GLOBAL_BASE
         pos += n
         print(f"    {corpus}: +{n:,} rows (pool {rec['train_pool']:,} of "
-              f"{rec['total_rows']:,}, offset {HOLDOUT:,}, min_gidx "
-              f"{social_min_gidx[corpus]:,})", flush=True)
+              f"{rec['total_rows']:,}, extra-holdout {HOLDOUT:,}, min pool-local "
+              f"{social_min_local[corpus]:,} -> min TRUE global "
+              f"{social_min_global[corpus]:,})", flush=True)
         del rows, shards
     assert pos == TOTAL, pos
 
@@ -415,14 +444,23 @@ def main(argv: list[str]) -> int:
     matched_ok = bool(np.array_equal(en_src_after, retained_en))
     assert matched_ok, "retained-EN provenance != champion EN[retained]"
 
-    # PROOF 3 (social holdout): every social row global index >= 300000.
-    social_min_after = {}
+    # PROOF 3 (social holdout / disjointness): every social row's TRUE global
+    # corpus index >= POOL_GLOBAL_BASE (300000), which is > the 250k probe holdout
+    # front, so pool and probe are disjoint. provenance src stores the POOL-LOCAL
+    # index; TRUE global = src + POOL_GLOBAL_BASE. The pool base ALONE guarantees
+    # disjointness (every pool row is global >= POOL_GLOBAL_BASE); the sampler's
+    # extra HOLDOUT restriction only pushes pool-local >= HOLDOUT (true global
+    # >= 2*HOLDOUT), a redundant conservative margin (the P0.4 double offset).
+    social_min_local_after = {}      # pool-local (what src stores)
+    social_min_global_after = {}     # TRUE global corpus index
     for c in social:
         code = SOCIAL_CODE[c]
-        g = pv["src"][pv["origin"] == code]
+        g = pv["src"][pv["origin"] == code]      # pool-local index
         assert (ss[pv["origin"] == code] == c).all()
-        social_min_after[c] = int(g.min())
-        assert g.min() >= HOLDOUT, (c, int(g.min()))
+        social_min_local_after[c] = int(g.min())
+        social_min_global_after[c] = int(g.min()) + POOL_GLOBAL_BASE
+        assert g.min() >= 0, (c, int(g.min()))                       # within pool
+        assert social_min_global_after[c] >= POOL_GLOBAL_BASE, c     # disjoint from probes
     social_total_after = int((pv["origin"] >= 1).sum())
     assert social_total_after == D, social_total_after
 
@@ -455,7 +493,11 @@ def main(argv: list[str]) -> int:
         "displaced_share_of_corpus": displaced_share,
         "social_counts": social,
         "composition_counts": comp,
-        "provenance_dtype": "[('origin','u1'),('src','<i8')]  origin 0=base(src=base idx),1..4=social(src=pool gidx)",
+        "provenance_dtype": ("[('origin','u1'),('src','<i8')]  origin 0=base"
+                             "(src=base corpus idx 0..1999999), 1..4=social"
+                             "(src=POOL-LOCAL row index; TRUE global corpus index "
+                             "= src + pool_global_base)"),
+        "pool_global_base": POOL_GLOBAL_BASE,
         "social_codes": SOCIAL_CODE,
         "finite": bool(finite),
         "language_preservation_proof": {
@@ -486,11 +528,25 @@ def main(argv: list[str]) -> int:
         },
         "social_holdout_proof": {
             "holdout_rows": HOLDOUT,
-            "rule": "every social row global index >= 300000 (offset-restricted sampler)",
-            "min_global_index_at_draw": social_min_gidx,
-            "min_global_index_after_shuffle": social_min_after,
+            "pool_global_base": POOL_GLOBAL_BASE,
+            "rule": ("every social row's TRUE global corpus index "
+                     ">= pool_global_base (300000) > the 250k probe holdout front "
+                     "-> pool and probe disjoint. TRUE global = provenance src "
+                     "(pool-local) + pool_global_base."),
+            "double_offset_note": (
+                "P0.4 fix (external review 2026-08-29): provenance src stores the "
+                "POOL-LOCAL index; the pool file already begins at global "
+                f"{POOL_GLOBAL_BASE} (jina_social_pools reads global>={POOL_GLOBAL_BASE}), "
+                "so TRUE global = src + pool_global_base (a SINGLE base offset, not "
+                "doubled). The sampler's redundant offset=HOLDOUT restriction "
+                "additionally forces pool-local >= HOLDOUT, so observed true global "
+                ">= 2*HOLDOUT here; disjointness holds from the pool base regardless."),
+            "min_pool_local_index_at_draw": social_min_local,
+            "min_true_global_index_at_draw": social_min_global,
+            "min_pool_local_index_after_shuffle": social_min_local_after,
+            "min_true_global_index_after_shuffle": social_min_global_after,
             "social_total_rows": social_total_after,
-            "all_ge_holdout": True,
+            "all_true_global_ge_pool_base": True,
         },
         "social_per_corpus": social_records,
         "outputs": {
@@ -508,7 +564,7 @@ def main(argv: list[str]) -> int:
     print(f"[en-proportional] displaced shares: "
           f"{ {k: round(v,4) for k,v in displaced_share.items()} }")
     print(f"[matched] retained-EN provenance == champion[retained]: {matched_ok}")
-    print(f"[social>=300000] after-shuffle mins: {social_min_after}")
+    print(f"[social] after-shuffle min TRUE global (src+base): {social_min_global_after}")
     del a
     return 0
 
