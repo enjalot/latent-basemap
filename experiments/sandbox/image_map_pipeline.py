@@ -459,7 +459,27 @@ DATASETS = {
                 "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                           "rankneg_window": 1_562_500, "batch_size": 16384,
                           "hidden_dim": 2048, "gpu_resident_vram_budget_gb": 22.0}},
+            # P1.6 SEEDED direct 6.25M reference (delegate 2026-08-29): the existing champion-bs16k
+            # here is UNSEEDED (0.6686 artifact); retrain seeded so the head-size comparison is exact.
+            # Same champion recipe (rankneg 1,562,500 = 25% of 6.25M). Becomes the canonical jina-6m map.
+            "p16-ref-s42": {"md": "000", "dose": 4,
+                "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                          "rankneg_window": 1_562_500, "batch_size": 16384,
+                          "gpu_resident_vram_budget_gb": 22.0}},
         }},
+    # P1.6 head-size experiment (delegate 2026-08-29): the nested composition-matched 4M head
+    # (build_jina_4m_head.py -> seed-42 64%-per-span draw of the 6.25M; member_indices.npy records
+    # exact 6.25M membership). champion recipe fraction-scaled to 25% of 4M = rankneg 1,000,000, seed 42.
+    "jina-4m-head": {
+        "load": lambda: np.array(np.load(
+            "/data/latent-basemap/substrates/jina-4m-head/substrate.f16.npy",
+            mmap_mode="r"), dtype=np.float32),
+        "subsets": lambda: np.load(
+            "/data/latent-basemap/substrates/jina-4m-head/subsets.npy", allow_pickle=True),
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+                     "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                               "rankneg_window": 1_000_000, "batch_size": 16384,
+                               "gpu_resident_vram_budget_gb": 22.0}}}},
     # P4 mini-ladders (owner 2026-08-25): nested MiniLM sub-2M substrates
     # (every-kth-row, mixture-preserving) for (i) rankneg-fraction @1M and
     # (ii) dose-vs-N @500K+1M. Champion recipe = fneg10+tanh4+pos10+bs16k, md000.
