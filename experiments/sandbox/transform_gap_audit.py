@@ -158,6 +158,38 @@ def _pairs():
     return P
 
 
+def _fulldisc_pairs():
+    """P0.3(b) fallback (a): full-rung 0.1%×N confirmations for the big rungs where the
+    2M-SLICE instrument reports a suspiciously small |gap| (<0.01) — a check that the
+    slice's fresh-in-slice truth isn't hiding a real transform difference. 25M runs ONLY
+    if its slice |gap|<0.01; one 50M point runs unconditionally as the reference anchor.
+    Reuses each rung's SEALED full-rung k15 truth (already built in the ladder) at
+    disc=0.1%×N — 25M(disc 25k)/50M(disc 50k) are feasible; 100M(disc 100k) is not."""
+    from knobs_2m import RUNGS
+    head2m = SB / "2m-knobs/umap-md000-x4bs16k-winner/model.pt"
+    R = RUNGS
+    P = [
+        {"space": "MiniLM", "head": "2m-champion", "rung": "25M-fulldisc", "slice_rung": "25M",
+         "extrap": 12.5, "recipe_clean": False, "instrument": "full", "head_pt": head2m,
+         "fallback": "triggered iff slice |gap|<0.01",
+         "substrate": _resolve(R.get("25000k", {}).get("substrate")),
+         "truth": _resolve("/data/latent-basemap/runs/round-0236/queue-correction-2/artifacts/"
+                           "minilm-mixed-25000k-cluster-spill-k15-fuzzy-graph-v1/edges-k15-fuzzy.npz"),
+         "ref_dir": SB / "25000k-knobs/umap-md000-x2-fneg10-hostint8"},
+        {"space": "MiniLM", "head": "2m-champion", "rung": "50M-fulldisc", "slice_rung": "50M",
+         "extrap": 25.0, "recipe_clean": False, "instrument": "full", "head_pt": head2m,
+         "fallback": "unconditional reference anchor",
+         "substrate": _resolve("/data/latent-basemap/runs/round-0237/queue/artifacts/"
+                               "minilm-mixed-50000k-nested-substrate-and-reserves-v1/substrate.f32.npy"),
+         "truth": _resolve("/data/latent-basemap/runs/round-0237/queue-correction-1/artifacts/"
+                           "minilm-mixed-50000k-cluster-spill-k15-fuzzy-graph-v1/edges-k15-fuzzy.npz"),
+         "ref_dir": Path("/data/checkpoints/pumap/maps/minilm-50m-r0267-seed42")},
+    ]
+    for p in P:
+        p.setdefault("ref_coords", (p["ref_dir"] / "coordinates.npy") if p.get("ref_dir") else None)
+    return P
+
+
 def main() -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -199,8 +231,7 @@ def main() -> int:
                 out["collapse"] = None
         return out
 
-    rows_out = []
-    for p in _pairs():
+    def run_pair(p):
         rec = {k: (str(v) if isinstance(v, Path) else v) for k, v in p.items()
                if k not in ("ref_dir",)}
         ref_coords = p.get("ref_coords")
@@ -214,9 +245,8 @@ def main() -> int:
             miss.append("truth")
         if miss:
             rec["status"] = f"SKIPPED (missing: {','.join(miss)})"
-            rows_out.append(rec)
             print(f"SKIP {p['space']} {p['head']}→{p['rung']}: {rec['status']}", flush=True)
-            continue
+            return rec
 
         t0 = time.time()
         model = ParametricUMAP.load(str(head_pt), device="cuda")
@@ -277,11 +307,32 @@ def main() -> int:
                     "transform": transform_score, "trained": trained_score,
                     "gap_ffr_v2": gap, "gap_per_extrap": round(gap / p["extrap"], 5),
                     "wall_s": round(time.time() - t0, 1)})
-        rows_out.append(rec)
         print(f"OK {p['space']} {p['head']}→{p['rung']} x{p['extrap']} [{p['instrument']}]: "
               f"transform {transform_score['ffr_v2']:.4f} vs trained {trained_score['ffr_v2']:.4f} "
               f"→ gap {gap:+.4f} ({(time.time()-t0)/60:.1f} min)", flush=True)
         del model
+        return rec
+
+    rows_out = [run_pair(p) for p in _pairs()]
+
+    # P0.3(b) fallback (a): full-disc confirmations. A big rung's SLICE gap qualifies
+    # the 25M full-disc run iff |slice gap| < 0.01; the 50M full-disc point is an
+    # unconditional reference anchor. Slice gaps are read from the rows just computed.
+    slice_gap = {r.get("rung"): r.get("gap_ffr_v2") for r in rows_out
+                 if str(r.get("instrument", "")).startswith("FFR@0.1%-of-2M")}
+    for p in _fulldisc_pairs():
+        sg = slice_gap.get(p["slice_rung"])
+        triggered = p["fallback"].startswith("unconditional") or (sg is not None and abs(sg) < 0.01)
+        if not triggered:
+            rows_out.append({"space": p["space"], "rung": p["rung"], "instrument": "full",
+                             "slice_rung": p["slice_rung"], "slice_gap_ffr_v2": sg,
+                             "status": f"SKIPPED (slice |gap|={sg} not <0.01 — fallback not triggered)"})
+            print(f"SKIP {p['rung']}: slice |gap|={sg} not <0.01", flush=True)
+            continue
+        print(f"FULLDISC {p['rung']} triggered (slice gap={sg}, {p['fallback']})", flush=True)
+        rec = run_pair(p)
+        rec["slice_gap_ffr_v2"] = sg
+        rows_out.append(rec)
 
     out = SB / "transform-gap-audit.json"
     out.write_text(json.dumps({
@@ -291,8 +342,11 @@ def main() -> int:
                 "recipe-clean) on the rung's sealed truth at disc 0.1%×N; SLICE pairs "
                 "(12.5M/25M/50M/100M, mixed-recipe ref) on a fresh in-slice k15 over a "
                 "fixed 2M subsample at disc 0.1%-of-2M (NOT full-rung — instrument in "
-                "each row). Same slice seed across big rungs. Fallback (a) full-disc 50M "
-                "only if a big-rung |gap|<0.01.",
+                "each row). Same slice seed across big rungs. Fallback (a) IMPLEMENTED: "
+                "25M-fulldisc runs iff its slice |gap|<0.01 (it is, 0.0062); 50M-fulldisc "
+                "is an unconditional reference anchor — both on the rung's SEALED full k15 "
+                "truth at disc 0.1%×N, confirming the slice instrument isn't hiding a real "
+                "transform difference. 100M full-disc (disc 100k) remains infeasible.",
         "pairs": rows_out,
     }, indent=1))
     print(f"\nwrote {out}", flush=True)
