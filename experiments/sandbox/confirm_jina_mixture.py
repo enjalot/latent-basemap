@@ -163,13 +163,36 @@ def _resolve_registers():
     return resolved
 
 
+def _resolve_p15_jina():
+    """P1.5 two-seed override (4th-review, delegate 2026-08-29): score an explicit seeded
+    (baseline, treatment) jina pair — both trained through THIS runner so the same-seed
+    comparison is EXACT (resident-D768 floor=0). arm := P15_PREFIX so the output filename is
+    {P15_PREFIX}-jina-confirm-results.json. Returns (MAPS, bmix_key, social_pct, arm) or None."""
+    base = os.environ.get("P15_BASELINE_MODEL")
+    if not base:
+        return None
+    arm = os.environ["P15_PREFIX"]
+    bmix_key = os.environ.get("P15_TREATMENT_KEY", "treatment")
+    social_pct = int(os.environ.get("P15_SOCIAL_PCT", "10"))
+    maps = {
+        BASELINE_KEY: {"model": Path(base), "prefix": "baseline", "social_pct": 0},
+        bmix_key: {"model": Path(os.environ["P15_TREATMENT_MODEL"]), "prefix": arm,
+                   "social_pct": social_pct},
+    }
+    return maps, bmix_key, social_pct, arm
+
+
 def main(argv: list[str]) -> int:
-    arm = (argv[1] if len(argv) > 1 else os.environ.get("MIXTURE_MAP", "")).strip()
-    if not arm:
-        raise SystemExit(
-            "usage: confirm_jina_mixture.py <jina-mixture-arm>  (or env "
-            f"MIXTURE_MAP); supported: {sorted(ARM_REGISTRY)}")
-    MAPS, BMIX_KEY, social_pct = resolve_arm(arm)
+    p15 = _resolve_p15_jina()
+    if p15 is not None:
+        MAPS, BMIX_KEY, social_pct, arm = p15
+    else:
+        arm = (argv[1] if len(argv) > 1 else os.environ.get("MIXTURE_MAP", "")).strip()
+        if not arm:
+            raise SystemExit(
+                "usage: confirm_jina_mixture.py <jina-mixture-arm>  (or env "
+                f"MIXTURE_MAP); supported: {sorted(ARM_REGISTRY)}")
+        MAPS, BMIX_KEY, social_pct = resolve_arm(arm)
 
     reg_status = _resolve_registers()
 
@@ -185,7 +208,8 @@ def main(argv: list[str]) -> int:
     print("[projector] jina_neutral_pooled (SECONDARY, skip-clean-if-absent):")
     print(f"    {'OK  ' if neutral_ready else 'PEND'} sub={NEUTRAL_SUB} "
           f"truth={NEUTRAL_TRUTH} (ready={neutral_ready})")
-    print(f"\n[maps] baseline: {BASELINE_MODEL} (exists={BASELINE_MODEL.exists()})")
+    _base_model = MAPS[BASELINE_KEY]["model"]  # P15-aware (may differ from module BASELINE_MODEL)
+    print(f"\n[maps] baseline: {_base_model} (exists={_base_model.exists()})")
     print(f"[maps] mixture {arm}: {MAPS[BMIX_KEY]['model']} "
           f"(exists={MAPS[BMIX_KEY]['model'].exists()})")
 

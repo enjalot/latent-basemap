@@ -625,6 +625,20 @@ DATASETS = {
         "subsets": None},
 }
 
+# ---- P1.5 JINA finalist two-seed cells (4th-review, delegate 2026-08-29). Full champion, same
+# runner (image_map_pipeline) so same-seed comparisons are EXACT (resident-D768 floor=0). The
+# existing champion-bs16k on each substrate was UNSEEDED (pre-fix) + the h200k floor twins are
+# short-horizon, so none is reusable on the jina side — all 4 cells are fresh SEEDED full-champion
+# trains: baseline (0% social, jina-multi-2m) @{42,43} + bmix10 (jina-bmix10-2m) @{42,43}. Added
+# post-construction because jina-bmix10-2m's arms come from the substrate comprehension above. ----
+DATASETS["jina-multi-2m"]["arms"].update({
+    "p15-baseline-s42": _CHAMPION_500K,
+    "p15-baseline-s43": {**_CHAMPION_500K, "seed": 43}})
+DATASETS["jina-bmix10-2m"]["arms"] = {
+    **DATASETS["jina-bmix10-2m"]["arms"],
+    "p15-bmix10-s42": _CHAMPION_500K,
+    "p15-bmix10-s43": {**_CHAMPION_500K, "seed": 43}}
+
 # capacity-curve calibration (owner 2026-08-24, DEFERRED-to-LAST 2026-08-25): IDENTICAL to
 # champion-bs16k (rankneg_window 1.5625M, bs16k, dose x4) + hidden_dim=4096. ~14h (width mult
 # ~3.1-3.3x). ENV-GATED so the branch-suite's no-ONLY_ARM jina-6m stage (trains all dict arms)

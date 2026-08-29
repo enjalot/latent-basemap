@@ -24,10 +24,20 @@ SB = Path("/data/latent-basemap/sandbox")
 
 
 def _load(prefix_stem, seed):
-    p = SB / f"{prefix_stem}-s{seed}-confirm-results.json"
-    if not p.exists():
-        return None, str(p)
-    return json.loads(p.read_text()), str(p)
+    # MiniLM scorer -> {stem}-s{seed}-confirm-results.json; jina -> ...-jina-confirm-results.json
+    for suffix in ("-confirm-results.json", "-jina-confirm-results.json"):
+        p = SB / f"{prefix_stem}-s{seed}{suffix}"
+        if p.exists():
+            return json.loads(p.read_text()), str(p)
+    return None, str(SB / f"{prefix_stem}-s{seed}-*confirm-results.json")
+
+
+def _proj_key(proj):
+    # MiniLM projector = proj_6250k; jina primary projector = jina_6m_transform.
+    for k in ("proj_6250k", "jina_6m_transform"):
+        if k in proj:
+            return proj.get(k)
+    return None
 
 
 def _sign(x, tol=0.0):
@@ -59,8 +69,8 @@ def main(argv):
             "worst_delta": d.get("worst_register_delta_mix_minus_baseline"),
             "mean_delta": d.get("mean_delta_mix_minus_baseline"),
             "per_register_delta": d.get("per_register_delta_mix_minus_baseline"),
-            "proj_6250k_delta": proj.get("proj_6250k"),
-            "proj_a1neutral_delta": proj.get("a1_neutral"),
+            "proj_6250k_delta": _proj_key(proj),   # proj_6250k (MiniLM) or jina_6m_transform (jina)
+            "proj_secondary_delta": proj.get("a1_neutral", proj.get("jina_neutral_pooled")),
             "maximin_winner": d.get("maximin_winner"),
         }
 
