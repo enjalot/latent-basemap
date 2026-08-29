@@ -786,7 +786,9 @@ def train(ds: str) -> int:
             "arm": f"{ds}--{arm}", "rung": ds,
             "overrides": {"low_dim_kernel": "umap", **MD[spec["md"]],
                           **spec["extra"]},
-            "seed": arm_seed, "torch_seeded": True, "trained_state_sha256": state_sha,
+            "seed": arm_seed, "torch_seeded": True,
+            "init_state_sha256": getattr(model, "init_state_sha256", None),  # P0.1 core hook (pre-init, isolates init)
+            "trained_state_sha256": state_sha,  # post-fit fingerprint (init+training)
             "dose_multiplier": dose, "horizon_updates": horizon,
             "positive_lr_updates": realized_updates,
             "pos_per_batch": pos_per_batch,

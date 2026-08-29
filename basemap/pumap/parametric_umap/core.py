@@ -267,6 +267,16 @@ class ParametricUMAP:
             ).to(self.device)
         else:
             raise ValueError(f"Unknown architecture: {self.architecture}")
+        # 4th-review P0.1 (2026-08-29): hash the freshly-initialized weights -> lifetime
+        # seeded-ness audit. Runs AFTER core's own _init_model (no admission-guard conflict,
+        # unlike an external pre-call). A PRE-init hash isolates INIT variance unambiguously:
+        # a post-fit hash can't distinguish an unseeded init from a nondeterministic training
+        # path — the exact confound the 4th review caught. Surfaced to summaries + the save dict.
+        import hashlib as _hl
+        _h = _hl.sha256()
+        for _p in self.model.parameters():
+            _h.update(np.ascontiguousarray(_p.detach().cpu().numpy()).tobytes())
+        self.init_state_sha256 = _h.hexdigest()[:16]
 
     def _low_dim_qs(self, src, dst):
         """Low-D similarity q_ij for an edge batch, per ``self.low_dim_kernel``.
@@ -2577,6 +2587,7 @@ class ParametricUMAP:
             'model_state_dict': self.model.state_dict(),
             'architecture': self.architecture,
             'neck_fraction': self.neck_fraction,
+            'init_state_sha256': getattr(self, 'init_state_sha256', None),  # P0.1 seeded-init audit
             'input_dim': self.input_dim,
             'n_components': self.n_components,
             'hidden_dim': self.hidden_dim,

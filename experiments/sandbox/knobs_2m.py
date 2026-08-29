@@ -820,6 +820,7 @@ def run_arm(arm: str, dry_run: bool, seed: int = SEED, rung_name: str = "2m") ->
     actual_positive_pairs = realized_updates * num_pos
     summary = {
         "arm": arm, "rung": rung_name, "overrides": overrides, "seed": seed,
+        "init_state_sha256": getattr(model, "init_state_sha256", None),  # P0.1 core hook (pre-init)
         "n_components": kwargs.get("n_components", 2),
         "dose_multiplier": dose_mult, "horizon_updates": horizon,
         "positive_lr_updates": realized_updates,
