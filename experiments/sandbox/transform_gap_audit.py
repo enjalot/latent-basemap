@@ -159,7 +159,13 @@ def main() -> int:
     from image_map_pipeline import DATASETS, _norm
     from knobs_2m import quick_ffr_v2
     try:
-        from analysis_v2 import collapse as collapse_frac
+        # P0.3(a) 4th-review fix: analysis_v2.collapse(path) expects a FILE PATH (np.load's it),
+        # but we have the coords array in-memory — passing the array silently errored -> collapse
+        # was ALL NULL. map_quality() takes the array directly.
+        from analysis_v2 import map_quality as _map_quality
+
+        def collapse_frac(xy):
+            return _map_quality(xy)["collapse"]["r10_over_radius_times_sqrt_n"]
     except Exception:
         collapse_frac = None
     from basemap.pumap.parametric_umap.core import ParametricUMAP
