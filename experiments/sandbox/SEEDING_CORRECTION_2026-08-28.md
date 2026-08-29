@@ -50,3 +50,39 @@ same-seed floor is UNMEASURED until a seeded same-seed×2 repeat (queued).
 - P1: two-seed controlled reruns of the FINALISTS only (jina baseline-vs-bmix10, MiniLM
   baseline-vs-bmix10cp) with group-level gates + projection as a required non-regression gate.
   Only after those do the bmix10/bmix10cp "wins" and the device-int8 parity get re-sealed (or not).
+
+---
+
+## Update 2026-08-29 — P0.1 core init-hash hook + P0.3(b) full-disc transform gap
+
+### init-hash hook (commit bb6e1e7) supersedes the post-fit-only fingerprint
+`core.py._init_model` now hashes the freshly-initialized weights → `self.init_state_sha256`
+(runs AFTER core's own init, so no L0.5 admission-guard conflict — the reason the earlier
+external pre-call attempt failed). This is the TRUE pre-init hash: at fixed seed it is
+reproducible (42==42=046ccfe2…) and seed-sensitive (43=b05fcba3…), so it isolates INIT
+variance unambiguously — a property the post-fit `trained_state_sha256` cannot give (post-fit
+varies with training nondeterminism even at fixed seed). Surfaced into both runners' summaries
++ the checkpoint save_dict. The resident-floor twins (D384/D768, same-seed×2) use init-match as
+the seeding proof and trained-match as the zero-floor test; result in `floor-result.json`.
+
+### P0.3(b) — the 2M-SLICE transform-gap instrument UNDERSTATED the gap 2-3× (commit 09e2daa)
+The transform-gap audit's big-rung numbers came from a 2M random subsample with a FRESH
+in-slice k15 truth. The full-disc fallback (score the head-transformed FULL rung against the
+rung's SEALED full k15 truth at disc 0.1%×N) shows the slice was OPTIMISTIC:
+
+| rung | slice gap | FULL-DISC gap | transform FFR | trained FFR | retention | unseen≈overall |
+| ---- | --------- | ------------- | ------------- | ----------- | --------- | -------------- |
+| 25M  | 0.0062    | **0.0194**    | 0.4720        | 0.4914      | 96.0%     | 0.4703 vs 0.4720 |
+| 50M  | 0.0196    | **0.0380**    | 0.4839        | 0.5219      | 92.7%     | 0.4823 vs 0.4839 |
+
+A fresh k15 within a 2M-of-N subsample keeps only ~4-8% of each row's true neighbors → a
+sparser/easier "truth" that flatters both maps and compresses their difference. **Corrections:**
+- The projector "small head serves the atlas" retention is ~93-96% (full-disc), NOT the
+  slice-based ~98%. The product still works; the honest number is lower.
+- member_frac tiny (8.2%/4.2%) and UNSEEN ≈ OVERALL at both rungs → the projection quality is
+  genuine out-of-sample, not inflated by nested-prefix training members.
+- gap/extrap ≈ constant (0.00155/0.00152) → gap scales ~linearly; 100M (50× extrap) ≈ 0.076
+  gap / ~87% retention by LINEAR EXTRAPOLATION (100M full-disc infeasible — a caveat, not a
+  measurement).
+- SURVIVING line 45 above ("~0.01−0.03 at 12.5−100M ... holds") is REVISED: the true full-disc
+  gaps are ~0.02−0.04 at 25−50M; the qualitative "gap stays small / saturates" still holds.
