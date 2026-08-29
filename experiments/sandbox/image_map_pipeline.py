@@ -243,6 +243,31 @@ DATASETS = {
                                "champion-bs16k-deviceint8": {**_CHAMPION_500K,
                                    "extra": {**_CHAMPION_500K["extra"],
                                              "x_residency": "device_int8"}},
+                               # 4th-review P0.1 INT8-FLOOR twins (delegate 2026-08-29): resident came
+                               # back BITWISE-DETERMINISTIC at both D384+D768 (floor=0), so per the decision
+                               # tree we now band the device-int8 parity with the int8-path floor. Same H=200K
+                               # short-horizon as the resident-D768 twins (apples-to-apples), seed 42. host×2
+                               # gives the host_int8 self-floor; device×2 gives the device_int8 self-floor;
+                               # device-vs-host FFR delta (RE-measured seeded, replacing the unseeded 0.0025)
+                               # is judged against those floors. If host_a==host_b and dev_a==dev_b by trained
+                               # hash, both int8 paths are deterministic and the device-vs-host delta is a REAL
+                               # (bug-or-genuine) divergence; else the nonzero self-floor bands it.
+                               "floor-hostint8-h200k-a": {"md": "000", "dose": 0, "horizon": 200_000,
+                                   "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                                             "rankneg_window": 500_000, "batch_size": 16384,
+                                             "x_residency": "host_int8"}},
+                               "floor-hostint8-h200k-b": {"md": "000", "dose": 0, "horizon": 200_000,
+                                   "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                                             "rankneg_window": 500_000, "batch_size": 16384,
+                                             "x_residency": "host_int8"}},
+                               "floor-deviceint8-h200k-a": {"md": "000", "dose": 0, "horizon": 200_000,
+                                   "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                                             "rankneg_window": 500_000, "batch_size": 16384,
+                                             "x_residency": "device_int8"}},
+                               "floor-deviceint8-h200k-b": {"md": "000", "dose": 0, "horizon": 200_000,
+                                   "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                                             "rankneg_window": 500_000, "batch_size": 16384,
+                                             "x_residency": "device_int8"}},
                                # determinism CONTROL (2026-08-28): identical to champion-bs16k-hostint8
                                # (seed 42, host_int8), distinct out-dir. Its FFR vs champion-bs16k-hostint8
                                # measures the run-to-run GPU non-determinism FLOOR at fixed config — the

@@ -20,6 +20,18 @@ PAIRS = {
                       "minilm-bmix10cp-2m/floor-resident-b"),
     "resident-D768": ("jina-multi-2m/floor-resident-h200k-a",
                       "jina-multi-2m/floor-resident-h200k-b"),
+    # int8-path self-floors (H=200K, apples-to-apples with resident-D768)
+    "host_int8-D768": ("jina-multi-2m/floor-hostint8-h200k-a",
+                       "jina-multi-2m/floor-hostint8-h200k-b"),
+    "device_int8-D768": ("jina-multi-2m/floor-deviceint8-h200k-a",
+                         "jina-multi-2m/floor-deviceint8-h200k-b"),
+}
+# device-vs-host cross comparison (different compute paths — a trained-hash MATCH would mean
+# device_int8 is bitwise-identical to host_int8; a mismatch is expected and its magnitude must
+# be read via FFR, not hashes). Keyed name -> (device arm, host arm).
+CROSS = {
+    "device_int8-vs-host_int8-D768": ("jina-multi-2m/floor-deviceint8-h200k-a",
+                                      "jina-multi-2m/floor-hostint8-h200k-a"),
 }
 
 
@@ -60,6 +72,25 @@ def main():
         print(f"[{space}] init {'MATCH' if rec['init_match'] else 'MISMATCH'} "
               f"({ia} vs {ib}) | trained {'MATCH' if rec['trained_match'] else 'DIFFER'} "
               f"({ta} vs {tb}) -> {rec['verdict']}", flush=True)
+    # device-vs-host cross: hash match => bitwise-identical paths (perfect parity); mismatch is
+    # expected (different compute) and its quality magnitude needs FFR scoring, flagged here.
+    out["cross"] = {}
+    for name, (dev, host) in CROSS.items():
+        da, ha = _load(dev), _load(host)
+        if da is None or ha is None:
+            out["cross"][name] = {"status": "INCOMPLETE"}
+            continue
+        dt, ht = da.get("trained_state_sha256"), ha.get("trained_state_sha256")
+        rec = {"device_arm": dev, "host_arm": host, "device_trained_sha": dt, "host_trained_sha": ht,
+               "trained_match": bool(dt and dt == ht)}
+        rec["note"] = ("BITWISE-IDENTICAL to host_int8 — perfect parity, no FFR check needed"
+                       if rec["trained_match"] else
+                       "different trained weights (expected: distinct gather/dequant path) — "
+                       "device-vs-host QUALITY parity must be read via FFR (confirm_jina_mixture), "
+                       "banded by the host_int8/device_int8 self-floors above")
+        out["cross"][name] = rec
+        print(f"[cross {name}] trained {'MATCH' if rec['trained_match'] else 'DIFFER'} "
+              f"({dt} vs {ht}) -> {rec['note']}", flush=True)
     out["all_resident_deterministic"] = all_deterministic
     out["implication"] = (
         "both spaces deterministic -> resident floors are 0; measure int8 same-seed x2 "
