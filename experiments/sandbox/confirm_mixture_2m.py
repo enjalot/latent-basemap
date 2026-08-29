@@ -163,13 +163,39 @@ def _resolve_6250k():
     return sub, edges, knn
 
 
+def _resolve_p15():
+    """P1.5 two-seed override (4th-review, delegate 2026-08-29): score an explicit
+    (baseline_model, treatment_model) SEEDED pair — both trained through THIS runner so
+    the same-seed comparison is EXACT (resident floor=0). Env-driven so the orchestrator
+    can call the scorer once per seed. Returns the same 6-tuple as resolve_arm, or None."""
+    base = os.environ.get("P15_BASELINE_MODEL")
+    if not base:
+        return None
+    prefix = os.environ["P15_PREFIX"]                       # e.g. p15-minilm-bmix10cp-s42
+    bmix_key = os.environ.get("P15_TREATMENT_KEY", "treatment")
+    baseline_N = int(os.environ.get("P15_BASELINE_N", "2000000"))
+    scale = os.environ.get("P15_SCALE", "2m")
+    baseline_map_name = os.environ.get("P15_BASELINE_NAME", base)
+    maps = {
+        BASELINE_KEY: {"model": Path(base), "prefix": "baseline", "social_pct": 0},
+        bmix_key: {"model": Path(os.environ["P15_TREATMENT_MODEL"]), "prefix": prefix,
+                   "social_pct": int(os.environ.get("P15_SOCIAL_PCT", "10"))},
+    }
+    return maps, bmix_key, prefix, scale, baseline_N, baseline_map_name
+
+
 def main(argv: list[str]) -> int:
-    arm = (argv[1] if len(argv) > 1 else os.environ.get("MIXTURE_MAP", "")).strip()
-    if not arm:
-        raise SystemExit(
-            "usage: confirm_mixture_2m.py <mixture-arm>  (or env MIXTURE_MAP); "
-            f"supported: {sorted(ARM_REGISTRY)}")
-    MAPS, BMIX_KEY, prefix, scale, baseline_N, baseline_map_name = resolve_arm(arm)
+    p15 = _resolve_p15()
+    if p15 is not None:
+        MAPS, BMIX_KEY, prefix, scale, baseline_N, baseline_map_name = p15
+        arm = f"P15:{prefix}"
+    else:
+        arm = (argv[1] if len(argv) > 1 else os.environ.get("MIXTURE_MAP", "")).strip()
+        if not arm:
+            raise SystemExit(
+                "usage: confirm_mixture_2m.py <mixture-arm>  (or env MIXTURE_MAP); "
+                f"supported: {sorted(ARM_REGISTRY)}")
+        MAPS, BMIX_KEY, prefix, scale, baseline_N, baseline_map_name = resolve_arm(arm)
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))

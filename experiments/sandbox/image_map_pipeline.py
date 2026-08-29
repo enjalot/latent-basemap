@@ -374,6 +374,8 @@ DATASETS = {
             mmap_mode="r"),
         "subsets": _bmix10cp_2m_subsets,
         "arms": {"champion-bs16k": _CHAMPION_500K,
+                 # P1.5 bmix10cp@43 (the seed-43 treatment cell; @42 = floor-resident-a reuse).
+                 "p15-bmix10cp-s43": {**_CHAMPION_500K, "seed": 43},
                  # 4th-review P0.1 FLOOR (delegate 2026-08-29): resident-D384 determinism twins.
                  # Two SEEDED (42) same-config champion runs into distinct dirs. PRIMARY readout is
                  # trained_state_sha256 EQUALITY — identical => the resident floor is literally ZERO
@@ -544,7 +546,11 @@ DATASETS = {
             "/data/latent-basemap/runs/round-0216/queue-correction-3/artifacts/"
             "minilm-mixed-2m-substrate-and-exact-k15-graph-v1/substrate.f32.npy",
             mmap_mode="r"),
-        "subsets": None},
+        "subsets": None,
+        # P1.5 finalist BASELINE (0% social) two-seed cells, trained through THIS runner so the
+        # same-seed comparison vs the bmix10cp treatment is EXACT (resident floor=0). full champion.
+        "arms": {"p15-baseline-s42": _CHAMPION_500K,
+                 "p15-baseline-s43": {**_CHAMPION_500K, "seed": 43}}},
     # P3 curation validation loop (owner 2026-08-25): (b) curated + (c) random 2M
     # substrates (built by p3_build_and_scorecard.py from the same f32 shards as (a),
     # mix 40/25/25/10 — precision constant across the triple). Trained with the SAME
