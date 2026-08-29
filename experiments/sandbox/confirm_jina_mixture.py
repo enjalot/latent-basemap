@@ -219,7 +219,10 @@ def main(argv: list[str]) -> int:
     from image_map_pipeline import _norm  # noqa: F401
     from knobs_2m import quick_ffr_v2 as quick_ffr  # v2 truth-selection
     from knobs_2m import quick_ffr_v2_split  # P0.3c member/unseen split
+    from jina_head_membership import member_mask_2m  # P1.6: exact 2M old-block-prefix mask
     from basemap.pumap.parametric_umap.core import ParametricUMAP
+
+    _MEMBER_MASK_2M = member_mask_2m()  # length 6,250,000; exact old-block-prefix members
 
     coords_dir = SANDBOX / f"{arm}-jina-confirm-coords"
     coords_dir.mkdir(parents=True, exist_ok=True)
@@ -281,12 +284,14 @@ def main(argv: list[str]) -> int:
             n6 = len(X6)
             xy = np.asarray(model.transform(X6, batch_size=8192), dtype=np.float32)
             np.save(coords_dir / f"{pfx}__proj-jina6m.npy", xy)
-            # P0.3c: OPTIMISTIC projection case — a 2M (BASELINE_N) head projecting
-            # the larger jina-6m substrate whose first BASELINE_N rows are the head's
-            # byte-identical nested-prefix training set. Split FFR into training
-            # MEMBER (query index < BASELINE_N) vs UNSEEN so the number is honest.
-            # sp["overall"] == the old quick_ffr_v2 number (same queries).
-            sp = quick_ffr_v2_split(xy, JINA6M_TRUTH, n6, member_cutoff=BASELINE_N,
+            # P1.6 correction (2026-08-29): the member set is NOT the first BASELINE_N
+            # CONTIGUOUS rows. The 6.25M is ordered [EN old||new]x3 then [lang old||new]x20,
+            # so a 2M head's training rows are the OLD-block PREFIXES scattered at each span
+            # start (jina_head_membership.member_mask_2m), NOT rows 0:2M (which are ~2M of EN).
+            # OVERALL FFR is UNAFFECTED (same queries/truth/disc); only the member/unseen SPLIT
+            # changes. For MIXTURE arms the mask is approximate (displaced EN rows are counted
+            # member though replaced by OOD social) — noted below.
+            sp = quick_ffr_v2_split(xy, JINA6M_TRUTH, n6, member_mask=_MEMBER_MASK_2M,
                                     knn_indices_path=(knn6 if knn6 else None))
             ffr = float(sp["overall"])
             proj["jina_6m_transform"] = {
@@ -295,9 +300,10 @@ def main(argv: list[str]) -> int:
                 "member_frac": sp["member_frac"],
                 "n_member_queries": sp["n_member"], "n_unseen_queries": sp["n_unseen"],
                 "member_note": (
-                    f"head trained on the first {BASELINE_N:,} nested-prefix rows; "
-                    f"query index < {BASELINE_N:,} = training member (in-sample, "
-                    f"optimistic), >= = unseen. member_frac ~ BASELINE_N/N."),
+                    "member = EXACT old-block-prefix rows of the 6.25M (member_mask_2m), "
+                    "NOT the first 2M contiguous rows. For mixture arms the mask is "
+                    "approximate (displaced-EN positions counted member though replaced by "
+                    "OOD social); overall FFR is exact regardless."),
                 "rows": n6, "extrap": round(n6 / BASELINE_N, 3),
                 "instrument": "FFR@0.1%-of-N (jina-6m sealed truth)",
                 "truth": str(JINA6M_TRUTH),
