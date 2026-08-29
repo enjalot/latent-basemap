@@ -86,3 +86,20 @@ sparser/easier "truth" that flatters both maps and compresses their difference. 
   measurement).
 - SURVIVING line 45 above ("~0.01−0.03 at 12.5−100M ... holds") is REVISED: the true full-disc
   gaps are ~0.02−0.04 at 25−50M; the qualitative "gap stays small / saturates" still holds.
+
+### Floor result (P0.1) + int8 re-seal — the invalid floors are RETIRED
+`floor-result.json`: resident-D384 (e944eca4), resident-D768 (4bc231c1), host_int8-D768 (7d1b01c5),
+device_int8-D768 (7d1b01c5) are ALL same-seed BITWISE-DETERMINISTIC (a==b) → every resident/int8
+floor is ZERO. Cross device_int8 == host_int8 (7d1b01c5) BITWISE-IDENTICAL → device-int8 parity
+re-seals exactly. The 0.0184 AND 0.0025 numbers were pure unseeded-init variance and are RETIRED.
+device-int8 stays the 30M gate-2 answer (throughput 0.987 + bitwise-identical quality to host_int8).
+The int8 trained hash (7d1b01c5) ≠ resident (4bc231c1) is the genuine deterministic int8 weight tax.
+
+### P1.5 MiniLM finalist — the provisional bmix10cp "win" is RESOLVED: NO-ADOPT
+Two-seed seeded reruns (p15-minilm-verdict.json), resident floor=0 so per-seed comparisons EXACT:
+- OWN-MAP maximin: bmix10cp wins BOTH seeds (worst_delta +0.0071 s42 / +0.0025 s43, same sign;
+  mean +0.0127/+0.0064; social registers +0.03−0.04; code-heldout holds → code-preserving worked).
+- PROJECTION (6.25M projector maximin): REGRESSES both seeds (−0.0019 s42 / −0.0100 s43).
+- VERDICT: NO-ADOPT (own-map win but projection non-regression GATE fails). Baseline stands. The
+  earlier provisional "+0.0037 bmix10cp win" is superseded: it's an own-map effect that does NOT
+  transfer to the atlas projector. jina finalist (bmix10) two-seed verdict pending.
