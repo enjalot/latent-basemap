@@ -46,8 +46,11 @@ def main():
         changed = False
         for key, pinfo in projs.items():
             j6 = (pinfo or {}).get("jina_6m_transform")
-            if not isinstance(j6, dict) or "ffr_v2_member" not in j6:
+            # Process any projector with an overall FFR: files with a WRONG (contiguous) split get
+            # corrected; older files with NO split get the correct one emitted (both from coords).
+            if not isinstance(j6, dict) or j6.get("ffr_v2") is None:
                 continue
+            had_split = "ffr_v2_member" in j6
             pfx = "baseline" if key.startswith("baseline") else arm
             coords = coords_dir / f"{pfx}__proj-jina6m.npy"
             old = {"member": j6.get("ffr_v2_member"), "unseen": j6.get("ffr_v2_unseen"),
@@ -66,11 +69,13 @@ def main():
                 j6["n_unseen_queries"] = sp["n_unseen"]
                 j6["member_split_corrected"] = {
                     "reemitted_from_coords": str(coords), "overall_unchanged": bool(ok),
-                    "prior_wrong_split": old,
-                    "note": "member = exact old-block-prefix mask; prior split used contiguous 2M cutoff"}
+                    "prior_split": old if had_split else None,
+                    "note": ("member = exact old-block-prefix mask; "
+                             + ("prior split used the WRONG contiguous 2M cutoff"
+                                if had_split else "no split existed before — emitted now"))}
                 changed = True
-                print(f"  {fp.name} [{key}]: re-emitted member {old['member']}->{sp['member']} "
-                      f"unseen {old['unseen']}->{sp['unseen']} (overall unchanged={ok})", flush=True)
+                print(f"  {fp.name} [{key}]: {'corrected' if had_split else 'ADDED'} split "
+                      f"member->{sp['member']} unseen->{sp['unseen']} (overall unchanged={ok})", flush=True)
             else:
                 j6["member_split_corrected"] = {
                     "reemitted_from_coords": None, "prior_wrong_split": old,
