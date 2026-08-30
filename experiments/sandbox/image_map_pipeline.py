@@ -407,6 +407,15 @@ DATASETS = {
             f"/data/latent-basemap/substrates/draw-univ-{ss}/provenance.npy", allow_pickle=False)["corpus"]),
         "arms": {"champion-bs16k": _CHAMPION_500K}}
        for s in ("A", "B", "C")},
+    # ---- image-space universality (owner 2026-08-30): sisap-CLIP D768, 4 disjoint 2M slices
+    # (build_draw_univ_image.py; img-univ-proofs.json). A/B/C = heads (champion@42, rankneg 500K),
+    # D = shared neutral eval (truth only, no train). Validity gate: the 3 head inits equal (D768).
+    **{f"img-univ-{s}": {
+        "load": (lambda ss=s: np.load(
+            f"/data/latent-basemap/substrates/img-univ-{ss}/substrate.f32.npy", mmap_mode="r")),
+        "subsets": None,
+        **({"arms": {"champion-bs16k": _CHAMPION_500K}} if s in ("A", "B", "C") else {})}
+       for s in ("A", "B", "C", "D")},
     "reddit-2m": {"load": _reddit_load, "subsets": None},
     "communityarchive-2m": {"load": _ca_load, "subsets": None},
     "minilm-redditmix-2m": {"load": _redditmix_load,
