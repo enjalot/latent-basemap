@@ -125,3 +125,11 @@ p16-headsize-results.json. Composition-matched heads (exact member/unseen masks)
 Monotone in size on EVERY axis (FFR up, fog/collapse/occupancy down). Neither small head clears the
 deploy gate (≤0.01 gap OR ≥97% retention, no group −0.005) — the atlas needs training at scale, not a
 projected small head. 4M near-boundary → seed-43 replicate of the decisive cell (jina-4m-head/champion-s43).
+4M SEED-43 REPLICATE (SEALED): 4M@42 gap 0.0369/ret 0.9477 vs 4M@43 gap 0.0371/ret 0.9474 — agree
+within 0.0003, BOTH FAIL. The near-boundary verdict is seed-robust; 4M reproducibly misses the gate.
+
+### Draw universality (MiniLM 2M) — substrate-draw is not a quality lever
+draw-univ-score.json: 3 disjoint composition-matched 2M draws, same seed (init bit-identical). a1 FFR
+draw-variance 0.0037 (std 0.0017) < seed-variance 0.0080; procrustes mean-pointdev ~0.0012 (draw ≈ seed);
+member advantage ~0.065. A single 2M draw is trustworthy. (Image-space sisap-CLIP replication built +
+proven, queued.)
