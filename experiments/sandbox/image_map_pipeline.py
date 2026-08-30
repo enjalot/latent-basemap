@@ -335,6 +335,18 @@ DATASETS = {
                                              "pos_ratio": 0.10, "rankneg_window": 500_000,
                                              "batch_size": 16384, "hidden_dim": 3072,
                                              "neck_fraction": 0.625}},
+                               # P2 seeded ARCH PAIR (delegate 2026-08-30): the existing arch arms were
+                               # UNSEEDED (pre-fix); these seed-42 twins seal the width-ladder (+0.0128)
+                               # + neck (−0.0008) deltas with exact numbers. Same recipes, seed 42.
+                               "p2-x8-h2048-s42": {"md": "000", "dose": 8,
+                                   "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                             "pos_ratio": 0.10, "rankneg_window": 500_000,
+                                             "batch_size": 16384}},
+                               "p2-x8-h3072n625-s42": {"md": "000", "dose": 8,
+                                   "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                             "pos_ratio": 0.10, "rankneg_window": 500_000,
+                                             "batch_size": 16384, "hidden_dim": 3072,
+                                             "neck_fraction": 0.625}},
                                # 4th-review P0.1 FLOOR (delegate 2026-08-29): resident-D768 determinism
                                # twins via the explicit-horizon mechanism (H=200K, ~30-60min each vs the
                                # full champion wall). Same readout as the D384 twins — trained_state_sha256
