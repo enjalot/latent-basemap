@@ -865,7 +865,20 @@ def train(ds: str) -> int:
         torch.cuda.manual_seed_all(arm_seed)
         model = ParametricUMAP(**kwargs)
         t0 = time.time()
-        model.fit(x, precomputed_edges_path=str(edges), random_state=arm_seed)
+        # env-gated resumable checkpointing (#11): CHECKPOINT_EVERY_EPOCHS>0 writes per-arm epoch
+        # checkpoints to <arm>/ckpt and auto-resumes from the newest one (bitwise-invisible). Opt-in
+        # so normal short runs pay nothing; enable for long/preemptible runs (arch, flagship, scale).
+        _ck_every = int(os.environ.get("CHECKPOINT_EVERY_EPOCHS", "0") or 0)
+        _fit_kw = {}
+        if _ck_every > 0:
+            _ckd = d / "ckpt"; _ckd.mkdir(parents=True, exist_ok=True)
+            _existing = sorted(_ckd.glob("ckpt-epoch*.pt"),
+                               key=lambda p: int(p.stem.split("epoch")[1]))
+            _fit_kw = {"checkpoint_every_epochs": _ck_every, "checkpoint_dir": str(_ckd)}
+            if _existing:
+                _fit_kw["resume_from"] = str(_existing[-1])
+                print(f"{ds}/{arm}: RESUMING from {_existing[-1].name}", flush=True)
+        model.fit(x, precomputed_edges_path=str(edges), random_state=arm_seed, **_fit_kw)
         # Seeded-ness fingerprint: model.init_state_sha256 (core.py hook, landed bb6e1e7) is the true
         # PRE-init hash — reproducible at fixed seed, isolates init variance. This post-fit hash of the
         # TRAINED weights is the complementary end-to-end fingerprint: same seed+config reproduces it
