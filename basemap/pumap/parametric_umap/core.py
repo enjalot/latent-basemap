@@ -1391,9 +1391,18 @@ class ParametricUMAP:
             cache_negatives_path=None,
             use_wandb=False,
             wandb_project=None,
-            wandb_run_name=None):
+            wandb_run_name=None,
+            checkpoint_every_epochs=0,
+            checkpoint_dir=None,
+            resume_from=None):
         """
         Fit the model using X as training data.
+
+        Resumable checkpointing (#11, opt-in default-off): checkpoint_every_epochs>0 writes an
+        epoch-boundary checkpoint (model+optimizer+scheduler+scaler+ALL RNG streams+loop counters) to
+        checkpoint_dir every N epochs. resume_from=<ckpt path> restores and continues. Acceptance bar:
+        resume is BITWISE-INVISIBLE (final trained_state_sha256 identical to the uninterrupted twin).
+        DEVICE path only (the production path); raises if enabled on other paths.
 
         Parameters
         ----------
@@ -1866,7 +1875,89 @@ class ParametricUMAP:
         # 0.6dev sandbox: annealed runs start at the weakened kernel; every
         # other run keeps the exact kernel from step 0.
         self._kernel_exp = 0.25 if self.kernel_anneal_frac > 0 else 1.0
-        for epoch in range(self.n_epochs):
+        # ── #11 resumable checkpointing (opt-in, default-off, DEVICE path only) ──
+        # Epoch-boundary state: every RNG stream the loop reads (torch global cpu+cuda, the sampler
+        # gen, the 3 aux gens np+torch) + model/optimizer/scheduler/scaler + loop counters. Acceptance
+        # bar: resume is bitwise-invisible to trained_state_sha256. See CHECKPOINTING_DESIGN.md.
+        _ckpt_on = int(checkpoint_every_epochs or 0) > 0 or bool(resume_from)
+        if _ckpt_on and not self._fast_device_path:
+            raise NotImplementedError(
+                "checkpointing is implemented for the DEVICE path only (the production >6h path); "
+                "the current run is on a non-device path.")
+
+        def _ckpt_state(cur_epoch, cur_global_step):
+            import numpy as _np
+            def _npst(rng): return None if rng is None else rng.get_state()
+            def _tgst(g): return None if g is None else g.get_state().cpu()
+            return {
+                "schema": "pumap-ckpt-2026-08-30", "epoch": int(cur_epoch),
+                "global_step": int(cur_global_step),
+                "init_state_sha256": getattr(self, "init_state_sha256", None),
+                "config": {"n_epochs": self.n_epochs, "lr_horizon": lr_horizon,
+                           "batch_size": self.batch_size, "architecture": self.architecture,
+                           "random_state": int(random_state)},
+                "model": self.model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "scaler": (scaler.state_dict() if scaler is not None else None),
+                "torch_rng": torch.get_rng_state(),
+                "cuda_rng": (torch.cuda.get_rng_state_all() if 'cuda' in str(self.device) else None),
+                "loader_gen": _tgst(getattr(loader, "gen", None)),
+                "mn_gen": _tgst(mn_gen), "mn_rng": _npst(mn_rng),
+                "dens_gen": _tgst(dens_gen), "dens_rng": _npst(dens_rng),
+                "hold_gen": _tgst(hold_gen), "hold_rng": _npst(hold_rng),
+                "train_stats": dict(self._train_stats),
+            }
+
+        def _write_ckpt(cur_epoch, cur_global_step):
+            import os as _os
+            _os.makedirs(checkpoint_dir, exist_ok=True)
+            _path = _os.path.join(checkpoint_dir, f"ckpt-epoch{cur_epoch}.pt")
+            _tmp = f"{_path}.tmp.{_os.getpid()}"
+            torch.save(_ckpt_state(cur_epoch, cur_global_step), _tmp)
+            _os.replace(_tmp, _path)   # atomic
+            # keep last 2
+            _cks = sorted(_os.path.join(checkpoint_dir, f) for f in _os.listdir(checkpoint_dir)
+                          if f.startswith("ckpt-epoch") and f.endswith(".pt"))
+            for _old in _cks[:-2]:
+                try: _os.remove(_old)
+                except OSError: pass
+            logging.info("checkpoint written: %s (global_step=%d)", _path, cur_global_step)
+
+        start_epoch = 0
+        if resume_from:
+            _ck = torch.load(resume_from, map_location=self.device, weights_only=False)
+            _cfg = _ck.get("config", {})
+            if _cfg.get("random_state") != int(random_state) or _cfg.get("lr_horizon") != lr_horizon:
+                raise ValueError(f"resume config mismatch: ckpt {_cfg} vs current "
+                                 f"seed={random_state} lr_horizon={lr_horizon}")
+            self.model.load_state_dict(_ck["model"])
+            optimizer.load_state_dict(_ck["optimizer"])
+            scheduler.load_state_dict(_ck["scheduler"])
+            if scaler is not None and _ck.get("scaler") is not None:
+                scaler.load_state_dict(_ck["scaler"])
+            torch.set_rng_state(_ck["torch_rng"].to("cpu", torch.uint8))
+            if _ck.get("cuda_rng") is not None and 'cuda' in str(self.device):
+                torch.cuda.set_rng_state_all([s.to("cpu", torch.uint8) for s in _ck["cuda_rng"]])
+            def _setg(g, st):
+                if g is not None and st is not None:
+                    g.set_state(st.to("cpu", torch.uint8))
+            _setg(getattr(loader, "gen", None), _ck.get("loader_gen"))
+            _setg(mn_gen, _ck.get("mn_gen"));  _setg(dens_gen, _ck.get("dens_gen"))
+            _setg(hold_gen, _ck.get("hold_gen"))
+            if _ck.get("mn_rng") is not None: mn_rng.set_state(_ck["mn_rng"])
+            if _ck.get("dens_rng") is not None: dens_rng.set_state(_ck["dens_rng"])
+            if _ck.get("hold_rng") is not None: hold_rng.set_state(_ck["hold_rng"])
+            global_step = int(_ck["global_step"])
+            self._train_stats.update(_ck["train_stats"])
+            start_epoch = int(_ck["epoch"])
+            logging.info("RESUMED from %s at epoch %d (global_step=%d)",
+                         resume_from, start_epoch, global_step)
+
+        for epoch in range(start_epoch, self.n_epochs):
+            if (checkpoint_every_epochs and checkpoint_dir and epoch > start_epoch
+                    and epoch % int(checkpoint_every_epochs) == 0):
+                _write_ckpt(epoch, global_step)
             if self.rankneg_window > 0 and hasattr(loader, "set_rank_order"):
                 # 0.6dev sandbox: re-project the CURRENT embedding on a fresh
                 # random direction and re-rank, EVERY epoch including the first
