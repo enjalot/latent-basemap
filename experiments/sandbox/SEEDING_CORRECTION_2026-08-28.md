@@ -102,4 +102,14 @@ Two-seed seeded reruns (p15-minilm-verdict.json), resident floor=0 so per-seed c
 - PROJECTION (6.25M projector maximin): REGRESSES both seeds (−0.0019 s42 / −0.0100 s43).
 - VERDICT: NO-ADOPT (own-map win but projection non-regression GATE fails). Baseline stands. The
   earlier provisional "+0.0037 bmix10cp win" is superseded: it's an own-map effect that does NOT
-  transfer to the atlas projector. jina finalist (bmix10) two-seed verdict pending.
+  transfer to the atlas projector.
+
+### P1.5 jina finalist (bmix10) — NO-ADOPT (double reason)
+Two-seed seeded reruns (p15-jina-verdict.json), resident-D768 floor=0:
+- maximin SPLIT SIGN: seed42 +0.0079 (bmix10 wins), seed43 −0.0001 (baseline wins) → seed-scale,
+  no-adopt. AND projection regresses both seeds (proj_6250k −0.0135/−0.0141).
+- Social registers gain robustly both seeds (reddit/twitter/bluesky/ca +0.01−0.03); EN base pays
+  the displacement (fineweb/pile −0.005−0.012); languages small/mixed.
+- VERDICT: NO-ADOPT. Undisplaced baseline stands for BOTH spaces (MiniLM + jina). The provisional
+  jina "+0.001 bmix10 win" is superseded. Two-seed + projection-gate caught what a single-seed
+  single-metric read would have "confirmed."
