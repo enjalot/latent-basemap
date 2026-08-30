@@ -48,14 +48,17 @@ BASELINE_PROV = Path("/data/latent-basemap/runs/round-0216/queue-correction-3/ar
                      "minilm-mixed-2m-substrate-and-exact-k15-graph-v1/provenance.npy")
 CODE_HELDOUT_PROV = SUBSTRATES / "probe-code-heldout" / "provenance.npy"
 A1_PROV = SUBSTRATES / "a1-common-neutral" / "provenance.npy"
-# a1-common-neutral draws from the SAME base corpora (codes 0-3) as the slices — NOT common-corpus —
-# so it MUST be excluded from the draw (verified: its corpus codes are [0,1,2,3]). code-heldout is
-# starcoder(3) only. Every base corpus excludes the baseline + a1; starcoder also excludes code-heldout.
+# COORD-exclusion (same (corpus-code, sorted-shard, row) system as our draw): baseline (all corpora)
+# + code-heldout (starcoder). a1-common-neutral draws from the SAME base corpora but with an
+# INCOMPATIBLE coordinate system (its code ordering differs — verified: a1 code0 maxshard 149 vs
+# fineweb's 99), so a1 CANNOT be coord-excluded; it is excluded by CONTENT (row-hash) instead, which
+# is coordinate-system-independent. ~250k a1 rows over the pools => ~thousands of incidental content
+# hits in a fresh 6M draw, so content-exclusion is REQUIRED, not cosmetic.
 EXCLUDE_SOURCES = {
-    "fineweb": [BASELINE_PROV, A1_PROV],
-    "redpajama": [BASELINE_PROV, A1_PROV],
-    "pile": [BASELINE_PROV, A1_PROV],
-    "starcoder": [BASELINE_PROV, A1_PROV, CODE_HELDOUT_PROV],
+    "fineweb": [BASELINE_PROV],
+    "redpajama": [BASELINE_PROV],
+    "pile": [BASELINE_PROV],
+    "starcoder": [BASELINE_PROV, CODE_HELDOUT_PROV],
 }
 # eval sets to PROVE disjointness against (exact where provenance exists). Slices are codes 0-3;
 # social (reddit/ca/twitter/bluesky) + wiki/ccweb/ccscience have no provenance and are built from
@@ -110,6 +113,13 @@ def _draw_distinct(rng, T, k):
     return acc[:k]
 
 
+def _void_view(a):
+    """(n, DIM) f32 -> (n,) void scalars for EXACT whole-row set ops (content identity,
+    coordinate-system-independent)."""
+    a = np.ascontiguousarray(a, dtype=np.float32)
+    return a.view(np.dtype((np.void, a.dtype.itemsize * a.shape[1]))).ravel()
+
+
 def _gather(shards, gidx, shard_offsets):
     """Gather rows at sorted global indices; per-shard ascending for memmap locality."""
     n = gidx.shape[0]
@@ -136,8 +146,13 @@ def main():
     rng = np.random.default_rng(SEED)
     t0 = time.time()
 
-    # --- per-corpus disjoint 3x draw from the complement of excluded coords ---
-    draws = {c: {} for c in FILL_ORDER}   # corpus -> {slice -> global idx array}
+    # a1-common-neutral rows as void scalars for EXACT content exclusion (coord-incompatible).
+    a1_rows = np.asarray(np.load(A1_PROV.parent / "substrate.f32.npy", mmap_mode="r"), dtype=np.float32)
+    a1_void = _void_view(a1_rows)
+    print(f"  a1 content set: {a1_void.shape[0]:,} rows", flush=True)
+
+    # --- per-corpus: draw (coord-excl) -> gather -> CONTENT-exclude a1 -> collect `need`, split A/B/C ---
+    collected = {c: {} for c in FILL_ORDER}   # corpus -> slice -> (rows, shard_u16, local_i64)
     corpus_meta = {}
     for c in FILL_ORDER:
         shards = _corpus_shards(c)
@@ -149,28 +164,32 @@ def main():
             excl = np.union1d(excl, _prov_globals(src, code, offs))
         excl_sorted = np.unique(excl)
         need = PER_SLICE[c] * 3
-        # draw a buffer (need + room to survive excluded-coord removal), filter, take `need`
-        buf = need + excl_sorted.shape[0] + 100_000
+        buf = int(need * 1.3) + excl_sorted.shape[0] + 200_000
         cand = _draw_distinct(rng, T, min(buf, T))
-        keep = cand[~np.isin(cand, excl_sorted, assume_unique=False)][:need]
-        if keep.shape[0] < need:
-            raise SystemExit(f"{c}: only {keep.shape[0]} after exclusion, need {need}")
+        cand = cand[~np.isin(cand, excl_sorted, assume_unique=False)]   # coord-exclude baseline/heldout
+        rows, shard_of, local = _gather(shards, cand, offs)
+        keep = ~np.isin(_void_view(rows), a1_void)                      # content-exclude a1
+        a1_hits = int((~keep).sum())
+        rows, shard_of, local = rows[keep][:need], shard_of[keep][:need], local[keep][:need]
+        if rows.shape[0] < need:
+            raise SystemExit(f"{c}: only {rows.shape[0]} after exclusions, need {need} (raise buf)")
         for i, s in enumerate(SLICES):
-            draws[c][s] = np.sort(keep[i * PER_SLICE[c]:(i + 1) * PER_SLICE[c]])
-        corpus_meta[c] = {"pool_rows": T, "excluded": int(excl_sorted.shape[0]),
-                          "per_slice": PER_SLICE[c], "shards": len(sr)}
-        print(f"  {c}: pool {T:,} excl {excl_sorted.shape[0]:,} -> 3x{PER_SLICE[c]:,} drawn", flush=True)
+            sl = slice(i * PER_SLICE[c], (i + 1) * PER_SLICE[c])   # random partition (_draw_distinct shuffled)
+            collected[c][s] = (rows[sl], shard_of[sl], local[sl])
+        corpus_meta[c] = {"pool_rows": T, "coord_excluded": int(excl_sorted.shape[0]),
+                          "a1_content_hits_removed": a1_hits, "per_slice": PER_SLICE[c], "shards": len(sr)}
+        print(f"  {c}: pool {T:,} coord-excl {excl_sorted.shape[0]:,} a1-content-hits {a1_hits} "
+              f"-> 3x{PER_SLICE[c]:,}", flush=True)
+        del rows, shard_of, local, cand
 
-    # --- assemble + write each slice ---
-    slice_prov = {}
+    # --- assemble + write each slice (FILL_ORDER concat) ---
+    slice_prov, slice_void = {}, {}
     for s in SLICES:
         d = SUBSTRATES / f"draw-univ-{s}"
         d.mkdir(parents=True, exist_ok=True)
         parts, provs = [], []
         for c in FILL_ORDER:
-            shards = _corpus_shards(c)
-            offs, _ = _shard_offsets(shards)
-            rows, shard_of, local = _gather(shards, draws[c][s], offs)
+            rows, shard_of, local = collected[c][s]
             parts.append(rows)
             pr = np.empty(rows.shape[0], dtype=PROV_DTYPE)
             pr["corpus"] = CORPUS_CODE[c]; pr["shard"] = shard_of; pr["row"] = local
@@ -181,26 +200,24 @@ def main():
         np.save(d / "substrate.f32.npy", sub)
         np.save(d / "provenance.npy", prov)
         slice_prov[s] = prov
+        slice_void[s] = _void_view(sub)
         print(f"  slice {s}: wrote substrate {sub.shape} + provenance ({prov.shape[0]:,})", flush=True)
-        del sub, parts
 
     # --- PROOFS ---
     def _keys(prov):
-        # pack (corpus,shard,row) -> a python set of tuples for exact intersection
         return set(zip(prov["corpus"].tolist(), prov["shard"].tolist(), prov["row"].tolist()))
     keysets = {s: _keys(slice_prov[s]) for s in SLICES}
     pairwise = {}
     for a, b in (("A", "B"), ("A", "C"), ("B", "C")):
-        inter = len(keysets[a] & keysets[b])
-        pairwise[f"{a}∩{b}"] = inter
+        pairwise[f"{a}∩{b}"] = len(keysets[a] & keysets[b])
     eval_overlap = {}
-    for name, pth in EVAL_PROV.items():
-        if not Path(pth).exists():
-            eval_overlap[name] = "no provenance (cross-corpus by design)"
-            continue
-        ep = np.load(pth, mmap_mode="r", allow_pickle=False)
-        eks = _keys(ep)
-        eval_overlap[name] = {s: len(keysets[s] & eks) for s in SLICES}
+    # probe-code-heldout: coord-compatible -> exact (corpus,shard,row) intersection.
+    ep = np.load(CODE_HELDOUT_PROV, mmap_mode="r", allow_pickle=False)
+    eks = _keys(ep)
+    eval_overlap["probe-code-heldout"] = {"method": "coord", **{s: len(keysets[s] & eks) for s in SLICES}}
+    # a1-common-neutral: coord-INCOMPATIBLE -> exact CONTENT (void-row) intersection.
+    eval_overlap["a1-common-neutral"] = {"method": "content",
+                                         **{s: int(np.isin(slice_void[s], a1_void).sum()) for s in SLICES}}
     # cross-corpus safety: which corpus codes appear in slices vs the eval provenances
     slice_codes = sorted(set(int(c) for s in SLICES for c in np.unique(slice_prov[s]["corpus"])))
     proofs = {
@@ -208,21 +225,24 @@ def main():
         "pairwise_slice_intersections": pairwise,
         "pairwise_disjoint": all(v == 0 for v in pairwise.values()),
         "eval_set_overlap": eval_overlap,
-        "eval_disjoint": all(isinstance(v, str) or all(x == 0 for x in v.values())
-                             for v in eval_overlap.values()),
+        "eval_disjoint": all(all(v[s] == 0 for s in SLICES) for v in eval_overlap.values()),
         "slice_corpus_codes": slice_codes,
-        "note": ("base slices are corpus codes 0-3 (fineweb/rpj/pile/starcoder); social register probes "
-                 "(reddit/ca/twitter/bluesky) + common-corpus probes (wiki/ccweb/ccscience/a1) are "
-                 "DIFFERENT corpora, hence disjoint by corpus code — verified exactly where provenance "
-                 "exists (probe-code-heldout, a1-common-neutral). Baseline coords excluded per corpus so "
-                 "slices are independent draws, not a seed-42 replay of the baseline."),
+        "note": ("base slices are corpus codes 0-3 (fineweb/rpj/pile/starcoder). probe-code-heldout is "
+                 "starcoder(3) — proven disjoint by EXACT coord (corpus,shard,row) intersection. "
+                 "a1-common-neutral draws from the same base corpora but with an INCOMPATIBLE coord "
+                 "system, so it is CONTENT-excluded (exact void-row equality) and its overlap is proven "
+                 "by content. social probes (reddit/ca/twitter/bluesky) + wiki/ccweb/ccscience are from "
+                 "DIFFERENT pools (social/common-corpus), disjoint by corpus, no base-pool coords. "
+                 "Baseline coords coord-excluded per corpus so slices are independent draws, not a "
+                 "seed-42 replay of the baseline. Same seed 42 for all three trains -> init hashes MUST "
+                 "match (validity gate, checked at score time)."),
         "corpus_meta": corpus_meta, "wall_s": round(time.time() - t0, 1),
     }
     (SUBSTRATES / "draw-univ-proofs.json").write_text(json.dumps(proofs, indent=1))
     for s in SLICES:
         man = {"slice": s, "rows": 2_000_000, "mix": PER_SLICE, "seed": SEED,
                "pairwise_slice_intersections": pairwise,
-               "eval_set_overlap": {k: (v if isinstance(v, str) else v[s]) for k, v in eval_overlap.items()},
+               "eval_set_overlap": {k: {"method": v["method"], "overlap": v[s]} for k, v in eval_overlap.items()},
                "corpus_meta": corpus_meta}
         (SUBSTRATES / f"draw-univ-{s}" / "manifest.json").write_text(json.dumps(man, indent=1))
 
