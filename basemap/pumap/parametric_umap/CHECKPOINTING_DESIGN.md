@@ -55,10 +55,15 @@ params immediately after load == the twin's params at the same epoch boundary. G
 stream was missed (the hash diverges) — that's the point.
 
 ## Open questions to resolve at implementation
-- **Q1 sampler RNG**: does DeviceEdgeSampler / edge_list_dataset reshuffle per epoch from a torch
-  Generator whose state advances (→ must capture+restore state) or re-seed per epoch from a fixed
-  seed (→ only epoch index needed)? Read datasets/edge_list_dataset.py + DeviceEdgeSampler. This
-  determines whether epoch-boundary restore is sufficient. (host_int8/device_int8 samplers too.)
+- **Q1 sampler RNG — RESOLVED**: both samplers use ONE PERSISTENT, ADVANCING generator (NOT per-epoch
+  re-seed): DeviceEdgeSampler.`gen` = torch.Generator(device), manual_seed(random_state) once
+  (edge_list_dataset.py:585-586); the per-epoch `torch.randperm(..., generator=self.gen)` (:642) and
+  every per-batch negative draw (:605-739) advance it continuously. CPU EdgeSampler.`rng` =
+  np.random.RandomState(random_state), advances across epochs (:834, :851). So the checkpoint captures
+  `sampler.gen.get_state()` (device) / `sampler.rng.get_state()` (cpu) at the epoch boundary and
+  restores it → the next epoch's randperm + negatives reproduce exactly. Epoch-boundary restore IS
+  sufficient. host_int8/device_int8 share DeviceEdgeSampler's gen. Need a fit()-level handle to the
+  sampler (built in _prepare_edge_list_training ~397; expose as self._edge_sampler).
 - **Q2 cudnn.benchmark=True** (line 1723): algo autotuning. Resident determinism at floor=0 held WITH
   benchmark on, so algo selection is stable given fixed shapes → resume (same shapes) is fine. Verify
   in the acceptance test; if it flakes, set benchmark=False under checkpointing.
