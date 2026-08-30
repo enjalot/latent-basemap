@@ -385,6 +385,16 @@ DATASETS = {
                  # property, so this cheap D384 champion arm answers the resident question for all D384.
                  "floor-resident-a": _CHAMPION_500K,
                  "floor-resident-b": _CHAMPION_500K}},
+    # ---- substrate-draw universality (owner 2026-08-30): 3 disjoint composition-matched 2M slices
+    # (build_draw_universality.py; proofs in draw-univ-proofs.json). Same champion recipe + seed 42 ->
+    # the three init_state_sha256 MUST be equal (validity gate); any output difference is the DATA DRAW.
+    **{f"draw-univ-{s}": {
+        "load": (lambda ss=s: np.load(
+            f"/data/latent-basemap/substrates/draw-univ-{ss}/substrate.f32.npy", mmap_mode="r")),
+        "subsets": (lambda ss=s: np.load(
+            f"/data/latent-basemap/substrates/draw-univ-{ss}/provenance.npy", allow_pickle=False)["corpus"]),
+        "arms": {"champion-bs16k": _CHAMPION_500K}}
+       for s in ("A", "B", "C")},
     "reddit-2m": {"load": _reddit_load, "subsets": None},
     "communityarchive-2m": {"load": _ca_load, "subsets": None},
     "minilm-redditmix-2m": {"load": _redditmix_load,
