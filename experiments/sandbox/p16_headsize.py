@@ -19,6 +19,7 @@ register group mean drops > 0.005. Output: /data/latent-basemap/sandbox/p16-head
 GPU script; queue behind other GPU work.
 """
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -59,6 +60,9 @@ def main():
         "direct-6250k": {"model": SB / "jina-multi-6m/p16-ref-s42/model.pt",
                          "mask": "all", "N": 6_250_000},
     }
+    # P1.6 seed-43 replicate of the near-boundary 4M cell: point the 4M head at an alternate model.
+    if os.environ.get("P16_4M_MODEL"):
+        HEADS["4M"]["model"] = Path(os.environ["P16_4M_MODEL"])
     for h, info in HEADS.items():
         if not Path(info["model"]).exists():
             print(f"[warn] {h} model missing: {info['model']}", flush=True)
@@ -175,7 +179,7 @@ def main():
                   f"proj_ok {proj_ok} groups_ok {grp_ok} -> {'PASS' if passes else 'FAIL'}"
                   f"{' (near boundary: seed-43 the decisive cell)' if near_boundary else ''}", flush=True)
 
-    out = SB / "p16-headsize-results.json"
+    out = SB / os.environ.get("P16_OUT", "p16-headsize-results.json")
     out.write_text(json.dumps({
         "schema": "p16-headsize-2026-08-29", "seed": 42,
         "gate": {"proj_gap_max": GATE_GAP, "retention_min": GATE_RETENTION,

@@ -49,3 +49,19 @@ bit-identical init → any FFR/geometry difference is the data draw alone. Full 
   aligned per-point deviation + spread-ratio = geometric agreement; (3) cross-vs-self member advantage
   (head-A on slice-B truth [unseen] vs head-B on slice-B truth [member]).
 - Context table: draw-variance side-by-side with P1.5 seed-variance (same substrate, seeds 42/43).
+
+## RESULT (draw-univ-score.json, 2026-08-30)
+Validity gate PASSES: all three inits bit-identical (`cb6fb9a944e4ec3b`) → every difference is the data draw.
+- **Data-draw variance < seed variance**: a1 FFR range across A/B/C = **0.0037** (std 0.0017) vs baseline
+  @42-vs-@43 = **0.0080**. Swapping the entire disjoint 2M substrate moves quality ~½ as much as
+  changing the seed. At 2M composition-matched the substrate draw is essentially a NON-lever.
+- **Geometry** (procrustes on a1, 250k pts): mean per-point deviation ~0.0012 across ALL pairs
+  (draw pairs AND the seed pair) — geometrically draw ≈ seed ≈ tiny; spread-ratio 1.03–1.10.
+- **Member advantage** (self in-sample − cross unseen): +0.062 / +0.069 / +0.069 (A/B/C). Each head
+  scores ~0.50 on its own slice, ~0.44 on any disjoint slice; cross-FFRs tight (0.434–0.441) =
+  draw-universal generalization.
+- Load-bearing: the a1 content-exclusion (19,435 rows) kept those out of the cross (unseen) numbers;
+  otherwise they'd be in-sample members corrupting the member-advantage measure.
+Takeaways: (1) a single 2M draw is trustworthy (substrate-draw is not a quality lever); (2) ~0.065
+in-sample optimism at 2M; (3) seed is the larger (still small, 0.008) variance axis — matches P1.5's
+two-seed robustness framing.
