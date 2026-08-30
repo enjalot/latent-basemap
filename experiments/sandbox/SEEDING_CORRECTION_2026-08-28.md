@@ -113,3 +113,15 @@ Two-seed seeded reruns (p15-jina-verdict.json), resident-D768 floor=0:
 - VERDICT: NO-ADOPT. Undisplaced baseline stands for BOTH spaces (MiniLM + jina). The provisional
   jina "+0.001 bmix10 win" is superseded. Two-seed + projection-gate caught what a single-seed
   single-metric read would have "confirmed."
+
+### P1.6 head-size (jina) — head SIZE matters; small heads don't serve the atlas
+p16-headsize-results.json. Composition-matched heads (exact member/unseen masks) vs the SEEDED direct
+6.25M reference (0.7054 — now the canonical jina-6m map, replaces unseeded 0.6686):
+| head | proj FFR | unseen | collapse | fog | occ | retention | gate |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 2M | 0.6172 | 0.5800 | 1.017 | 0.238 | 0.265 | 87.5% | FAIL |
+| 4M | 0.6684 | 0.6455 | 1.010 | 0.112 | 0.209 | 94.8% | FAIL (near-boundary → seed-43) |
+| direct | 0.7054 | — | 0.895 | 0.106 | 0.125 | ref | — |
+Monotone in size on EVERY axis (FFR up, fog/collapse/occupancy down). Neither small head clears the
+deploy gate (≤0.01 gap OR ≥97% retention, no group −0.005) — the atlas needs training at scale, not a
+projected small head. 4M near-boundary → seed-43 replicate of the decisive cell (jina-4m-head/champion-s43).

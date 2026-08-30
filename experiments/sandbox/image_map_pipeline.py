@@ -489,6 +489,12 @@ DATASETS = {
         "arms": {"champion-bs16k": {"md": "000", "dose": 4,
                      "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                                "rankneg_window": 1_000_000, "batch_size": 16384,
+                               "gpu_resident_vram_budget_gb": 22.0}},
+                 # P1.6 near-boundary replicate: 4M is within 2x of the retention gate (94.8% vs 97%),
+                 # so the preregistered rule calls a seed-43 replicate of THIS decisive cell.
+                 "champion-s43": {"md": "000", "dose": 4, "seed": 43,
+                     "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                               "rankneg_window": 1_000_000, "batch_size": 16384,
                                "gpu_resident_vram_budget_gb": 22.0}}}},
     # P4 mini-ladders (owner 2026-08-25): nested MiniLM sub-2M substrates
     # (every-kth-row, mixture-preserving) for (i) rankneg-fraction @1M and
