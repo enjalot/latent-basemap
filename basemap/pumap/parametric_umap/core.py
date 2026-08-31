@@ -1910,15 +1910,19 @@ class ParametricUMAP:
             }
 
         def _write_ckpt(cur_epoch, cur_global_step):
-            import os as _os
+            import os as _os, re as _re
             _os.makedirs(checkpoint_dir, exist_ok=True)
             _path = _os.path.join(checkpoint_dir, f"ckpt-epoch{cur_epoch}.pt")
             _tmp = f"{_path}.tmp.{_os.getpid()}"
             torch.save(_ckpt_state(cur_epoch, cur_global_step), _tmp)
             _os.replace(_tmp, _path)   # atomic
-            # keep last 2
-            _cks = sorted(_os.path.join(checkpoint_dir, f) for f in _os.listdir(checkpoint_dir)
-                          if f.startswith("ckpt-epoch") and f.endswith(".pt"))
+            # keep last 2 — sort by the INTEGER epoch, NOT the string (else "epoch8" sorts after
+            # "epoch10" and the newest checkpoints get pruned while stale single-digit ones survive).
+            def _epnum(_p):
+                _m = _re.search(r"ckpt-epoch(\d+)\.pt$", _p)
+                return int(_m.group(1)) if _m else -1
+            _cks = sorted((_os.path.join(checkpoint_dir, f) for f in _os.listdir(checkpoint_dir)
+                           if f.startswith("ckpt-epoch") and f.endswith(".pt")), key=_epnum)
             for _old in _cks[:-2]:
                 try: _os.remove(_old)
                 except OSError: pass

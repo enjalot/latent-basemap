@@ -31,6 +31,14 @@ def main():
     from knobs_2m import BASE_KWARGS, MD
     from basemap.pumap.parametric_umap.core import ParametricUMAP
 
+    # regression: keep-last-2 must sort by INTEGER epoch (string sort kept stale single-digit ckpts
+    # while pruning epoch10+; caught in the arch run, fixed 2026-08-31).
+    import re as _re
+    _names = ["ckpt-epoch8.pt", "ckpt-epoch9.pt", "ckpt-epoch10.pt", "ckpt-epoch14.pt"]
+    _kept = sorted(_names, key=lambda p: int(_re.search(r"ckpt-epoch(\d+)\.pt$", p).group(1)))[-2:]
+    assert _kept == ["ckpt-epoch10.pt", "ckpt-epoch14.pt"], f"keep-last-2 int-sort regressed: {_kept}"
+    print("[regression] keep-last-2 int-sort OK", flush=True)
+
     ds = "probe-lang-arb_Arab-jina"
     sub = SUBSTRATES / ds / "substrate.f16.npy"
     edges = SB / ds / "edges-k15-fuzzy.npz"
