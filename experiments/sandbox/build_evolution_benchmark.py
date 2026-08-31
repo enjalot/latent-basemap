@@ -129,7 +129,10 @@ def main():
                                       a1_void).sum())
     ch = np.load(CODE_HELDOUT_PROV, mmap_mode="r"); chk = _keys(ch)
     codeheldout_overlap = {t: len(ks[t] & chk) for t in IN_DIST}
-    reddit_holdout_ok = bool(int((prov_by_t["T3"]["row"] < REDDIT_HOLDOUT).sum()) == 0)
+    # reddit disjoint from its 300k GLOBAL holdout: reconstruct global = roffs[shard] + local_row
+    # (provenance stores the LOCAL row, not the global index — checking row<300k was wrong).
+    _r_global = roffs[prov_by_t["T3"]["shard"].astype(np.int64)] + prov_by_t["T3"]["row"]
+    reddit_holdout_ok = bool(int((_r_global < REDDIT_HOLDOUT).sum()) == 0)
     proofs = {
         "schema": "evolbench-proofs-2026-08-31", "seed": SEED, "T0_scale": T0_SCALE, "tranche": TRANCHE,
         "final_corpus": T0_SCALE * 2, "mix": MIX,
