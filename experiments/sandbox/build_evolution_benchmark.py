@@ -40,7 +40,10 @@ REDDIT_HOLDOUT = 300_000                       # front slice reserved for the re
 IN_DIST = ("T0", "T1", "T2", "T4", "T5")       # base-corpus snapshots (T0 5x, tranches 1x)
 OUT = Path("/data/latent-basemap/substrates/evolbench")
 # per base-corpus counts: T0 = MIX*T0_SCALE; each in-dist tranche = MIX*TRANCHE.
-EXCLUDE = {c: ([A1_PROV] + ([CODE_HELDOUT_PROV] if c == "starcoder" else [])) for c in BASE_ORDER}
+# COORD-exclude only coord-COMPATIBLE probe provenances: code-heldout (starcoder, same shard system).
+# a1-common-neutral is coord-INCOMPATIBLE (different code ordering) -> excluded by CONTENT (a1_void)
+# during the gather, NOT here (putting it here indexes OOB shards).
+EXCLUDE = {c: ([CODE_HELDOUT_PROV] if c == "starcoder" else []) for c in BASE_ORDER}
 
 
 def _cnt(scale, corpus):  # exact per-corpus count for a snapshot of `scale` rows at the mix
