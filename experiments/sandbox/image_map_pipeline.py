@@ -441,7 +441,7 @@ DATASETS = {
         "subsets": None,
         **({"arms": {"champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
-                        "rankneg_window": 1_250_000, "batch_size": 16384,   # 25% of T0=5M
+                        "rankneg_window": 1_000_000, "batch_size": 16384,   # 25% of T0=4M
                         "gpu_resident_vram_budget_gb": 22.0}}}} if k == 0 else {})}
        for k in range(6)},
     "reddit-2m": {"load": _reddit_load, "subsets": None},
