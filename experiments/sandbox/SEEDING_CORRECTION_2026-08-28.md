@@ -128,6 +128,17 @@ projected small head. 4M near-boundary → seed-43 replicate of the decisive cel
 4M SEED-43 REPLICATE (SEALED): 4M@42 gap 0.0369/ret 0.9477 vs 4M@43 gap 0.0371/ret 0.9474 — agree
 within 0.0003, BOTH FAIL. The near-boundary verdict is seed-robust; 4M reproducibly misses the gate.
 
+### P2 seeded arch pair (jina 2M) — h3072-neck625 vs h2048, capacity reallocation
+p2-arch-jina-confirm-results.json (seed 42, both checkpointed, PCIe x16). h3072-neck625 (wider +
+bottleneck) vs h2048:
+- maximin (worst reg = cmn_Hani): 0.0763 → 0.0845 = **+0.0083** (h3072 WINS the maximin); mean **−0.003**.
+- Coherent capacity REALLOCATION toward hard non-Latin scripts (jpn +0.019, cmn +0.008, hin +0.004),
+  away from Latin (ind −0.021, ell −0.013, swe −0.010, pol −0.009, kor −0.007, deu −0.007). ±0.02 swings
+  are above the ~0.008 seed band → the direction is real; a genuine maximin-vs-mean tradeoff.
+- On the standing maximin criterion h3072 modestly confirms, but the NET maximin delta is at seed scale
+  (cross-arch, single seed). FLAGSHIP: recommend a seed-43 arch replicate before committing the 17h
+  x8-h3072 6.25M run (two-seed discipline, per P1.5/P1.6). Now checkpointable → 17h is safe.
+
 ### Draw universality (MiniLM 2M) — substrate-draw is not a quality lever
 draw-univ-score.json: 3 disjoint composition-matched 2M draws, same seed (init bit-identical). a1 FFR
 draw-variance 0.0037 (std 0.0017) < seed-variance 0.0080; procrustes mean-pointdev ~0.0012 (draw ≈ seed);
