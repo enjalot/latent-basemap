@@ -347,6 +347,18 @@ DATASETS = {
                                              "pos_ratio": 0.10, "rankneg_window": 500_000,
                                              "batch_size": 16384, "hidden_dim": 3072,
                                              "neck_fraction": 0.625}},
+                               # P2 arch SEED-43 replicate (delegate 2026-08-30): the maximin win
+                               # (+0.0083) is at seed-variance scale + cross-arch, so a 2nd seed confirms
+                               # the sign before the 17h flagship. Verdict: sign agreement -> seal h3072.
+                               "p2-x8-h2048-s43": {"md": "000", "dose": 8, "seed": 43,
+                                   "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                             "pos_ratio": 0.10, "rankneg_window": 500_000,
+                                             "batch_size": 16384}},
+                               "p2-x8-h3072n625-s43": {"md": "000", "dose": 8, "seed": 43,
+                                   "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0,
+                                             "pos_ratio": 0.10, "rankneg_window": 500_000,
+                                             "batch_size": 16384, "hidden_dim": 3072,
+                                             "neck_fraction": 0.625}},
                                # 4th-review P0.1 FLOOR (delegate 2026-08-29): resident-D768 determinism
                                # twins via the explicit-horizon mechanism (H=200K, ~30-60min each vs the
                                # full champion wall). Same readout as the D384 twins — trained_state_sha256
