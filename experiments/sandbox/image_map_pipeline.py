@@ -439,10 +439,12 @@ DATASETS = {
                                mmap_mode="r"), dtype=np.float32)
             for t in (["T0"] + [f"T{j}" for j in range(1, kk + 1)])])),
         "subsets": None,
-        **({"arms": {"champion-bs16k": {"md": "000", "dose": 4,
+        # every Sk gets a champion arm (rankneg = 25% of Sk size = 4M + k*800k) — S0 is arm-A's T0 head,
+        # S3 is the drift-triggered retrain head, and S1/S2/S4/S5 support the retrain-every ceiling bound.
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
-                        "rankneg_window": 1_000_000, "batch_size": 16384,   # 25% of T0=4M
-                        "gpu_resident_vram_budget_gb": 22.0}}}} if k == 0 else {})}
+                        "rankneg_window": int(0.25 * (4_000_000 + k * 800_000)), "batch_size": 16384,
+                        "gpu_resident_vram_budget_gb": 22.0}}}}
        for k in range(6)},
     "reddit-2m": {"load": _reddit_load, "subsets": None},
     "communityarchive-2m": {"load": _ca_load, "subsets": None},
