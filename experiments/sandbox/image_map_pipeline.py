@@ -428,6 +428,22 @@ DATASETS = {
         "subsets": None,
         **({"arms": {"champion-bs16k": _CHAMPION_500K}} if s in ("A", "B", "C") else {})}
        for s in ("A", "B", "C", "D")},
+    # ---- corpus-evolution benchmark (plan §2, owner 2026-08-31). Snapshots Sk = T0 ∪ T1..Tk
+    # (tranche order T1,T2,T3=reddit-OOD,T4,T5). LAZY-CONCAT load (no 69GB of duplicate files):
+    # concatenates the per-tranche substrate memmaps into RAM only when called (knn/transform).
+    # Arm A trains ONLY the T0 head (evolbench-S0 champion, rankneg=25% of T0); Sk are for truth +
+    # transform + arm-B cuVS. rankneg fraction-scaled per snapshot for any Sk that trains.
+    **{f"evolbench-S{k}": {
+        "load": (lambda kk=k: np.concatenate([
+            np.asarray(np.load(f"/data/latent-basemap/substrates/evolbench/{t}/substrate.f32.npy",
+                               mmap_mode="r"), dtype=np.float32)
+            for t in (["T0"] + [f"T{j}" for j in range(1, kk + 1)])])),
+        "subsets": None,
+        **({"arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 1_250_000, "batch_size": 16384,   # 25% of T0=5M
+                        "gpu_resident_vram_budget_gb": 22.0}}}} if k == 0 else {})}
+       for k in range(6)},
     "reddit-2m": {"load": _reddit_load, "subsets": None},
     "communityarchive-2m": {"load": _ca_load, "subsets": None},
     "minilm-redditmix-2m": {"load": _redditmix_load,
