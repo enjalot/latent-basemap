@@ -38,12 +38,23 @@ def _load_Sk(k):
                            mmap_mode="r"), dtype=np.float32) for t in parts]))
 
 
-def _procrustes(src, ref, src_shared):
-    mu_s = src_shared.mean(0); mu_r = ref.mean(0)
-    A = src_shared - mu_s; B = ref - mu_r
+def _fit_procrustes(src_shared, ref_shared):
+    """Fit the similarity transform (scale*R + t) aligning src_shared->ref_shared (both the SAME shared
+    points, row-aligned). Returns (mu_s, scaleR, mu_r) to APPLY to any coords in the src head's frame:
+    (X - mu_s) @ scaleR + mu_r. Fit ONCE at a head switch, then reused for every snapshot that head
+    produces — otherwise later snapshots of the same head stay in the head's RAW frame while the previous
+    (aligned) snapshot is in the aligned frame, injecting a spurious churn spike at the first non-switch
+    snapshot after a retrain (the 2026-09-01 S4=0.945 artifact)."""
+    mu_s = src_shared.mean(0); mu_r = ref_shared.mean(0)
+    A = src_shared - mu_s; B = ref_shared - mu_r
     U, S, Vt = np.linalg.svd(A.T @ B); R = U @ Vt
     scale = S.sum() / max((A ** 2).sum(), 1e-9)
-    return (src - mu_s) @ (scale * R) + mu_r
+    return mu_s, (scale * R).astype(np.float32), mu_r
+
+
+def _apply_xform(src, xform):
+    mu_s, scaleR, mu_r = xform
+    return ((src - mu_s) @ scaleR + mu_r).astype(np.float32)
 
 
 def main():
@@ -55,22 +66,26 @@ def main():
         SCHEDULE[0] = str(SB / "evolbench-S0/champion-bs16k/model.pt")
     outd = SB / f"evolbench-armA-{LABEL}"; outd.mkdir(parents=True, exist_ok=True)
     manifest = {"schema": "evolbench-armA-2026-08-31", "label": LABEL, "schedule": {str(k): v for k, v in SCHEDULE.items()}, "snapshots": []}
-    active = None; active_k = None; prev_coords = None; prev_n = 0
+    active = None; active_k = None; active_xform = None; prev_coords = None; prev_n = 0
     for k in range(K + 1):
         if k in SCHEDULE:                       # head switch (retrain) at this snapshot
             active = ParametricUMAP.load(SCHEDULE[k], device="cuda"); active_k = k
+            active_xform = None                 # refit the alignment for the NEW head at this snapshot
         X = _load_Sk(k); n = int(X.shape[0])
         t0 = time.time()
         coords = np.asarray(active.transform(X, batch_size=8192), dtype=np.float32)
         wall = time.time() - t0
         switched = (active_k == k) and (prev_coords is not None)
-        if switched:                            # align the new head's frame to the previous snapshot
-            coords = _procrustes(coords, prev_coords, coords[:prev_n])
+        if switched and active_xform is None:   # fit ONCE at the switch: shared points -> prev timeline
+            active_xform = _fit_procrustes(coords[:prev_n], prev_coords)
+        if active_xform is not None:            # apply this head's alignment to EVERY snapshot it makes
+            coords = _apply_xform(coords, active_xform)
         np.save(outd / f"coords-S{k}.npy", coords)
         manifest["snapshots"].append({"k": k, "n": n, "transform_wall_s": round(wall, 2),
                                       "head_switch": bool(active_k == k), "active_head_k": active_k})
         print(f"armA[{LABEL}] S{k}: n={n:,} transform {wall:.1f}s "
-              f"{'(RETRAIN switch, procrustes)' if switched else '(frozen)'}", flush=True)
+              f"{'(RETRAIN switch, procrustes fit)' if switched else ('(aligned frame)' if active_xform is not None else '(frozen)')}",
+              flush=True)
         prev_coords = coords; prev_n = n
         del X
     (outd / "manifest.json").write_text(json.dumps(manifest, indent=1))
