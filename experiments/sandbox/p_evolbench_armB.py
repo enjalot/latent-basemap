@@ -25,10 +25,16 @@ from pathlib import Path
 import numpy as np
 
 SB = Path("/data/latent-basemap/sandbox")
-OUTD = SB / "evolbench-armB"
+OUTD = Path(os.environ.get("EVOLBENCH_ARMB_DIR", str(SB / "evolbench-armB")))
+SUBDIR = os.environ.get("EVOLBENCH_SUBDIR", "/data/latent-basemap/substrates/evolbench")
 K = int(os.environ.get("EVOLBENCH_K", "5"))
 EPOCHS = int(os.environ.get("EVOLBENCH_EPOCHS", "500"))
-DIM = 384
+# UMAP config: MiniLM-384 best = exact graph (random_state forces brute_force) + spectral + 500ep
+# (diagnostic matrix 2026-09-01: nn_descent recall 0.5 @384 makes it unfair there). D768 run overrides
+# with nn_descent (recall 0.997 @768 -> fast AND competitive). Override via EVOLBENCH_ARMB_UMAP_KW (JSON).
+UMAP_KW = json.loads(os.environ.get("EVOLBENCH_ARMB_UMAP_KW",
+    '{"n_neighbors":15,"n_components":2,"min_dist":0.1,"random_state":0,"init":"spectral"}'))
+UMAP_KW.setdefault("n_epochs", EPOCHS)
 
 
 def _norm(x):
@@ -40,7 +46,7 @@ def _load_Sk(k):
     # Sk = concat([T0, T1, .., Tk]) in that order (first n_{k-1} rows = S_{k-1}).
     parts = ["T0"] + [f"T{j}" for j in range(1, k + 1)]
     return _norm(np.concatenate([
-        np.asarray(np.load(f"/data/latent-basemap/substrates/evolbench/{t}/substrate.f32.npy",
+        np.asarray(np.load(f"{SUBDIR}/{t}/substrate.f32.npy",
                            mmap_mode="r"), dtype=np.float32) for t in parts]))
 
 
@@ -74,8 +80,8 @@ def run_worker(k):
     stop = threading.Event(); peak = [0.0]
     th = threading.Thread(target=_peak_vram, args=(stop, peak), daemon=True); th.start()
     t0 = time.time()
-    um = UMAP(n_neighbors=15, n_components=2, n_epochs=EPOCHS, min_dist=0.1, random_state=42,
-              build_algo="nn_descent")
+    print(f"armB S{k} UMAP kw={UMAP_KW}", flush=True)
+    um = UMAP(**UMAP_KW)
     coords = np.asarray(um.fit_transform(X), dtype=np.float32)
     wall = time.time() - t0
     stop.set(); th.join(timeout=2)
