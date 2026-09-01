@@ -39,7 +39,11 @@ def main():
 
     out = {"schema": "evolbench-tradesurface-2026-08-31", "arms": {}}
     for label, cfg in arms.items():
-        d = Path(cfg["dir"]); man = json.loads((d / "manifest.json").read_text())
+        d = Path(cfg["dir"])
+        mp = next((d / nm for nm in ("manifest.json", "armB-manifest.json") if (d / nm).exists()), None)
+        if mp is None:
+            raise SystemExit(f"no manifest (manifest.json / armB-manifest.json) in {d}")
+        man = json.loads(mp.read_text())
         wall_key = "transform_wall_s" if cfg["kind"] == "A" else "wall_s"
         snaps = {s["k"]: s for s in man["snapshots"]}
         rows = []; cum_churn = 0.0; prev = None; prev_n = 0
