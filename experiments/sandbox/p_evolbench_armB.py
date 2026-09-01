@@ -6,13 +6,19 @@ feasible path; out-of-core deadlocks in cuml 25.02), then procrustes-align its l
 snapshot's layout on the SHARED unchanged points. Sk's concat order is [T0,T1,..,Tk], so the first
 n_{k-1} rows ARE S_{k-1} in the same order → the shared points are exactly coords[:n_{k-1}].
 
-Emits per snapshot: aligned coords (for the scorer's churn + quality), wall (placement latency), peak VRAM
-(cost proxy). Churn itself (displacement of the shared points vs the previous snapshot, cumulative) is
-computed by the scorer from these coords — measured against the PREVIOUS snapshot (not T0) so arm B's
-repeated reshuffles accumulate rather than cancel [overseer 2026-08-31].
+ARCHITECTURE (2026-09-01): each snapshot's UMAP runs in its OWN fresh SUBPROCESS (--snapshot k). This
+mirrors the feasibility_cuvs.py path that PROVED in-core nn_descent fits (4M/6M/8M OK, 8M=26GB). Running
+all six in one process OOM'd at S1 (4.8M on top of S0's residue) because cuml/RMM device memory is not
+released synchronously between fits. Subprocess-per-snapshot guarantees clean GPU state per Sk — and arm
+B is a full-rerun-per-snapshot baseline anyway, so this is semantically identical. The driver reads each
+worker's RAW coords and does the numpy procrustes alignment (no GPU) itself.
 
-Env: EVOLBENCH_K (default 5), EVOLBENCH_EPOCHS (default 500), EVOLBENCH_DIR. Output coords ->
-<sandbox>/evolbench-armB/coords-S{k}.npy + armB-manifest.json.
+Emits per snapshot: aligned coords (for the scorer's churn + quality), wall (placement latency), peak VRAM
+(cost proxy). Churn is computed by the scorer vs the PREVIOUS snapshot (not T0) so arm B's repeated
+reshuffles accumulate rather than cancel [overseer 2026-08-31].
+
+Env: EVOLBENCH_K (default 5), EVOLBENCH_EPOCHS (default 500). Output coords ->
+<sandbox>/evolbench-armB/coords-S{k}.npy + armB-manifest.json (worker intermediates: raw-S{k}.npy, meta-S{k}.json).
 """
 import json, os, subprocess, sys, threading, time
 from pathlib import Path
@@ -45,7 +51,7 @@ def _procrustes_align(src, ref_shared, src_shared):
     A = src_shared - mu_s; B = ref_shared - mu_r
     U, S, Vt = np.linalg.svd(A.T @ B)
     R = U @ Vt
-    scale = S.sum() / (A ** 2).sum()
+    scale = S.sum() / max((A ** 2).sum(), 1e-9)
     return (src - mu_s) @ (scale * R) + mu_r
 
 
@@ -57,37 +63,64 @@ def _peak_vram(stop, peak):
             peak[0] = max(peak[0], int(u.decode().splitlines()[0]) / 1024.0)
         except Exception:
             pass
-        time.sleep(1.0)
+        time.sleep(0.5)
 
 
-def main():
+def run_worker(k):
+    """ONE snapshot's UMAP in a fresh process. Saves raw-S{k}.npy + meta-S{k}.json. Frees GPU on exit."""
     from cuml.manifold import UMAP
     OUTD.mkdir(parents=True, exist_ok=True)
-    manifest = {"schema": "evolbench-armB-2026-08-31", "epochs": EPOCHS, "snapshots": []}
+    X = _load_Sk(k); n = int(X.shape[0])
+    stop = threading.Event(); peak = [0.0]
+    th = threading.Thread(target=_peak_vram, args=(stop, peak), daemon=True); th.start()
+    t0 = time.time()
+    um = UMAP(n_neighbors=15, n_components=2, n_epochs=EPOCHS, min_dist=0.1, random_state=42,
+              build_algo="nn_descent")
+    coords = np.asarray(um.fit_transform(X), dtype=np.float32)
+    wall = time.time() - t0
+    stop.set(); th.join(timeout=2)
+    np.save(OUTD / f"raw-S{k}.npy", coords)
+    (OUTD / f"meta-S{k}.json").write_text(json.dumps(
+        {"k": k, "n": n, "wall_s": round(wall, 1), "peak_vram_gb": round(peak[0], 2)}))
+    print(f"armB S{k}: n={n:,} wall={wall:.0f}s vram={peak[0]:.1f}GB (worker)", flush=True)
+    return 0
+
+
+def run_driver():
+    """Spawn a fresh worker per snapshot (clean GPU each), then align + assemble the manifest."""
+    OUTD.mkdir(parents=True, exist_ok=True)
+    for k in range(K + 1):
+        raw = OUTD / f"raw-S{k}.npy"
+        if not raw.exists():   # idempotent: reuse a worker output that already landed
+            rc = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--snapshot", str(k)],
+                                 check=False).returncode
+            if rc != 0:
+                raise SystemExit(f"armB worker S{k} FAILED rc={rc}")
+        if not raw.exists():
+            raise SystemExit(f"armB worker S{k} produced no raw-S{k}.npy")
+    # alignment (CPU/numpy): each Sk aligned to the PREVIOUS aligned snapshot on the shared first-n_{k-1}
+    manifest = {"schema": "evolbench-armB-2026-09-01", "epochs": EPOCHS, "snapshots": []}
     prev_coords = None; prev_n = 0; cum_cost = 0.0
     for k in range(K + 1):
-        X = _load_Sk(k); n = int(X.shape[0])
-        stop = threading.Event(); peak = [0.0]
-        th = threading.Thread(target=_peak_vram, args=(stop, peak), daemon=True); th.start()
-        t0 = time.time()
-        um = UMAP(n_neighbors=15, n_components=2, n_epochs=EPOCHS, min_dist=0.1, random_state=42,
-                  build_algo="nn_descent")
-        coords = np.asarray(um.fit_transform(X), dtype=np.float32)
-        wall = time.time() - t0
-        stop.set(); th.join(timeout=2); cum_cost += wall
-        # procrustes-align to PREVIOUS snapshot on the shared first-n_{k-1} points
-        if prev_coords is not None:
-            coords = _procrustes_align(coords, prev_coords, coords[:prev_n])
+        raw = np.asarray(np.load(OUTD / f"raw-S{k}.npy"), dtype=np.float32); n = int(raw.shape[0])
+        meta = json.loads((OUTD / f"meta-S{k}.json").read_text())
+        cum_cost += float(meta["wall_s"])
+        coords = raw if prev_coords is None else _procrustes_align(raw, prev_coords, raw[:prev_n])
         np.save(OUTD / f"coords-S{k}.npy", coords)
-        manifest["snapshots"].append({"k": k, "n": n, "wall_s": round(wall, 1),
-                                      "peak_vram_gb": round(peak[0], 2),
-                                      "cum_gpu_s": round(cum_cost, 1)})
-        print(f"armB S{k}: n={n:,} wall={wall:.0f}s vram={peak[0]:.1f}GB (cum {cum_cost:.0f}s)", flush=True)
+        manifest["snapshots"].append({"k": k, "n": n, "wall_s": meta["wall_s"],
+                                      "peak_vram_gb": meta["peak_vram_gb"], "cum_gpu_s": round(cum_cost, 1)})
+        print(f"armB S{k}: n={n:,} wall={meta['wall_s']}s vram={meta['peak_vram_gb']}GB "
+              f"(cum {cum_cost:.0f}s) aligned", flush=True)
         prev_coords = coords; prev_n = n
-        del X, um
     (OUTD / "armB-manifest.json").write_text(json.dumps(manifest, indent=1))
     print(f"\nwrote {OUTD}/armB-manifest.json ({K+1} snapshots)", flush=True)
     return 0
+
+
+def main():
+    if len(sys.argv) >= 3 and sys.argv[1] == "--snapshot":
+        return run_worker(int(sys.argv[2]))
+    return run_driver()
 
 
 if __name__ == "__main__":
