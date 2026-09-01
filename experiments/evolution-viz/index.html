@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>evolution viewer</title>
+<style>
+  :root { --bg:#0e1116; --panel:#161b23; --edge:#2a3140; --fg:#d7dde8;
+          --dim:#8b93a7; --acc:#ffb347; }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--fg);
+         font:13px/1.45 "Source Sans 3",system-ui,sans-serif; height:100vh;
+         display:flex; flex-direction:column; overflow:hidden; }
+  header { display:flex; gap:12px; align-items:center; padding:8px 12px;
+           border-bottom:1px solid var(--edge); flex-wrap:wrap; }
+  header h1 { font-size:15px; font-weight:600; }
+  select,button { background:var(--panel); color:var(--fg);
+    border:1px solid var(--edge); border-radius:6px; padding:5px 8px;
+    font:inherit; cursor:pointer; }
+  .hint { color:var(--dim); font-size:12px; }
+  #scrub { display:flex; gap:4px; align-items:center; }
+  #scrub .snap { width:44px; text-align:center; padding:4px 0;
+    border:1px solid var(--edge); border-radius:6px; cursor:pointer;
+    background:var(--panel); }
+  #scrub .snap.on { border-color:var(--acc); color:var(--acc); }
+  #main { flex:1; display:flex; min-height:0; }
+  .col { flex:1; display:flex; flex-direction:column; min-width:0;
+         border-right:1px solid var(--edge); }
+  .bar { display:flex; gap:8px; align-items:center; padding:6px 10px;
+         background:var(--panel); border-bottom:1px solid var(--edge); }
+  .stats { font-size:12px; color:var(--dim); padding:2px 10px 4px;
+           background:var(--panel); border-bottom:1px solid var(--edge); }
+  .stats b { color:var(--acc); }
+  .stage { position:relative; flex:1; min-height:0; }
+  .stage canvas { position:absolute; inset:0; width:100%; height:100%; }
+  #legend { padding:6px 12px; border-top:1px solid var(--edge);
+    display:flex; gap:18px; align-items:center; flex-wrap:wrap;
+    font-size:12px; color:var(--dim); }
+  .sw { display:inline-block; width:10px; height:10px; border-radius:2px;
+        margin-right:4px; vertical-align:-1px; }
+  #rings { display:flex; gap:14px; align-items:center; }
+  .ringlab { display:flex; align-items:center; gap:5px; }
+  .ring { display:inline-block; border:1.5px solid; border-radius:50%; }
+</style></head><body>
+<header>
+  <h1>evolution viewer</h1>
+  <label>view <select id="view">
+    <option value="density">density</option>
+    <option value="cohorts">arrival cohorts</option>
+    <option value="churn">churn (last transition)</option>
+  </select></label>
+  <span id="scrub"></span>
+  <button id="play">▶ play</button>
+  <span class="hint">S0=4M start · +800K/tranche · T3=reddit injection ·
+    same frame per arm, motion on screen is real motion · drag pan, wheel
+    zoom, dbl-click reset</span>
+</header>
+<div id="main">
+  <div class="col" id="colA"></div>
+  <div class="col" id="colB"></div>
+</div>
+<div id="legend"></div>
+<script>
+"use strict";
+let META = null, SNAP = 0, playing = null;
+const state = { view: "density" };
+const F16 = (() => {  // f16 -> f32 LUT
+  const t = new Float32Array(65536), b = new ArrayBuffer(4),
+        u = new Uint32Array(b), f = new Float32Array(b);
+  for (let h = 0; h < 65536; h++) {
+    const s = (h & 0x8000) << 16, e = (h & 0x7c00) >> 10, m = h & 0x3ff;
+    if (e === 0) u[0] = s; else if (e === 31) u[0] = s | 0x7f800000;
+    else u[0] = s | ((e + 112) << 23) | (m << 13);
+    t[h] = f[0];
+  }
+  return t;
+})();
+
+/* ---------- GL core (compare-page lineage) ---------- */
+function sh(gl, t, s) { const o = gl.createShader(t); gl.shaderSource(o, s);
+  gl.compileShader(o); if (!gl.getShaderParameter(o, gl.COMPILE_STATUS))
+    throw gl.getShaderInfoLog(o); return o; }
+function prog(gl, v, f) { const p = gl.createProgram();
+  gl.attachShader(p, sh(gl, gl.VERTEX_SHADER, v));
+  gl.attachShader(p, sh(gl, gl.FRAGMENT_SHADER, f)); gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS))
+    throw gl.getProgramInfoLog(p); return p; }
+const VS = `#version 300 es
+layout(location=0) in vec2 pos; layout(location=1) in float attr;
+uniform vec2 uS,uT; uniform float uPt; out float vA;
+void main(){ vA=attr; gl_Position=vec4(pos*uS+uT,0.,1.); gl_PointSize=uPt; }`;
+const FS_ACC = `#version 300 es
+precision highp float; uniform float uAdd; in float vA; out vec4 o;
+void main(){ vec2 d=gl_PointCoord-.5; if(dot(d,d)>.25) discard;
+  o=vec4(uAdd, uAdd*vA, 0., uAdd); }`;
+const VS_Q = `#version 300 es
+layout(location=0) in vec2 q; out vec2 vUV;
+void main(){ vUV=q*.5+.5; gl_Position=vec4(q,0.,1.); }`;
+const FS_SCREEN = `#version 300 es
+precision highp float; uniform sampler2D uD;
+uniform float uG,uMode; in vec2 vUV; out vec4 o;
+vec3 ramp(float t){ const vec3 c0=vec3(.05,.063,.086),c1=vec3(.13,.22,.42),
+  c2=vec3(.12,.49,.55),c3=vec3(.29,.76,.42),c4=vec3(.95,.90,.35),
+  c5=vec3(1.,1.,.95); float x=t*5.; vec3 c=mix(c0,c1,clamp(x,0.,1.));
+  c=mix(c,c2,clamp(x-1.,0.,1.)); c=mix(c,c3,clamp(x-2.,0.,1.));
+  c=mix(c,c4,clamp(x-3.,0.,1.)); return mix(c,c5,clamp(x-4.,0.,1.)); }
+// cohort LUT: 0 T0 slate, 1-2 greens, 3 reddit RED, 4-5 violets
+vec3 cohort(float t){
+  if(t<0.5) return vec3(.42,.50,.62); if(t<1.5) return vec3(.35,.72,.45);
+  if(t<2.5) return vec3(.20,.60,.38); if(t<3.5) return vec3(1.,.30,.22);
+  if(t<4.5) return vec3(.62,.45,.85); return vec3(.48,.35,.72); }
+// churn: gray (still) -> amber -> hot
+vec3 churn(float t){ t=clamp(t,0.,1.);
+  return mix(vec3(.35,.40,.48), mix(vec3(1.,.70,.20), vec3(1.,.15,.10),
+    clamp(t*2.-1.,0.,1.)), clamp(t*2.,0.,1.)); }
+void main(){ vec4 px=texture(uD,vUV); float d=px.r;
+  float v=clamp(log(1.+d*exp(uG))/7.,0.,1.);
+  if(uMode<0.5){ o=vec4(ramp(v),1.); return; }
+  float m=px.g/max(px.r,1e-9);
+  vec3 c = uMode<1.5 ? cohort(m*5.) : churn(m);
+  o=vec4(c*max(v,.05)*1.5,1.); }`;
+const VS_LINE = `#version 300 es
+layout(location=0) in vec4 quad;  // x0,y0,x1,y1 normalized shorts
+uniform vec2 uS,uT; out float vT;
+void main(){ vec2 p = (gl_VertexID % 2 == 0) ? quad.xy : quad.zw;
+  vT = float(gl_VertexID % 2);
+  gl_Position = vec4(p*uS+uT, 0., 1.); }`;
+const FS_LINE = `#version 300 es
+precision highp float; in float vT; out vec4 o;
+void main(){ o = vec4(1., .55+.4*vT, .15, .10+.18*vT); }`;
+
+function makePanel(colId, key, defArm) {
+  const col = document.getElementById(colId);
+  col.innerHTML = `
+    <div class="bar"><b style="color:var(--acc)">${key}</b>
+      <select class="arm"></select></div>
+    <div class="stats"></div>
+    <div class="stage"><canvas class="gl"></canvas>
+      <canvas class="ov"></canvas></div>`;
+  const p = { key, col, arm: defArm, view: { z: .92, tx: 0, ty: 0 },
+    sel: col.querySelector(".arm"), stats: col.querySelector(".stats"),
+    glc: col.querySelector(".gl"), ovc: col.querySelector(".ov"),
+    cache: {}, n: 0, dirty: true };
+  const gl = p.gl = p.glc.getContext("webgl2", { antialias: false });
+  gl.getExtension("EXT_color_buffer_float");
+  p.R = { pAcc: prog(gl, VS, FS_ACC), pScr: prog(gl, VS_Q, FS_SCREEN),
+    pLine: prog(gl, VS_LINE, FS_LINE),
+    vboP: gl.createBuffer(), vboA: gl.createBuffer(),
+    vboQuad: gl.createBuffer(), vboLine: gl.createBuffer(),
+    vaoP: gl.createVertexArray(), vaoQ: gl.createVertexArray(),
+    vaoL: gl.createVertexArray(), fb: null, tex: null, fw: 0, fh: 0,
+    nLine: 0 };
+  gl.bindVertexArray(p.R.vaoQ);
+  gl.bindBuffer(gl.ARRAY_BUFFER, p.R.vboQuad);
+  gl.bufferData(gl.ARRAY_BUFFER,
+    new Float32Array([-1,-1,1,-1,-1,1,1,1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+  bindNav(p);
+  return p;
+}
+
+async function fetchBin(url, Type) {
+  const r = await fetch(url);
+  if (!r.ok) return null;
+  return new Type(await r.arrayBuffer());
+}
+async function loadSnap(p, arm, k) {
+  const key = `${arm}/S${k}`;
+  if (!p.cache[key]) {
+    const coords = await fetchBin(`data/${arm}/S${k}.bin`, Int16Array);
+    const disp = k > 0
+      ? await fetchBin(`data/${arm}/disp-S${k-1}.bin`, Uint16Array) : null;
+    const trails = k > 0
+      ? await fetchBin(`data/${arm}/trails-S${k-1}.bin`, Int16Array) : null;
+    p.cache[key] = { coords, disp, trails };
+  }
+  return p.cache[key];
+}
+function cohortAttr(n) {
+  // rows are T0 | T1 | ... — attr = tranche index / 5
+  const a = new Float32Array(n);
+  const t0 = META.t0, tr = META.tranche;
+  for (let i = 0; i < n; i++)
+    a[i] = i < t0 ? 0 : Math.min(5, 1 + Math.floor((i - t0) / tr)) / 5;
+  return a;
+}
+function churnAttr(d, n) {
+  const a = new Float32Array(n);
+  if (d) {
+    const m = d.length;
+    for (let i = 0; i < m; i++) {
+      const v = F16[d[i]];
+      a[i] = Math.min(1, v / 1.0);   // 1.0 radius = saturated hot
+    }
+    for (let i = m; i < n; i++) a[i] = 0;  // new arrivals: still
+  }
+  return a;
+}
+async function refresh(p) {
+  const arm = p.arm, am = META.arms[arm];
+  if (!am || !am.snaps.includes(SNAP)) { p.stats.textContent = "n/a"; return; }
+  const { coords, disp, trails } = await loadSnap(p, arm, SNAP);
+  if (!coords) return;
+  const n = coords.length / 2;
+  p.n = n;
+  const gl = p.gl, R = p.R;
+  gl.bindBuffer(gl.ARRAY_BUFFER, R.vboP);
+  gl.bufferData(gl.ARRAY_BUFFER, coords, gl.STATIC_DRAW);
+  const attr = state.view === "cohorts" ? cohortAttr(n)
+    : state.view === "churn" ? churnAttr(disp, n) : new Float32Array(n);
+  gl.bindBuffer(gl.ARRAY_BUFFER, R.vboA);
+  gl.bufferData(gl.ARRAY_BUFFER, attr, gl.STATIC_DRAW);
+  gl.bindVertexArray(R.vaoP);
+  gl.bindBuffer(gl.ARRAY_BUFFER, R.vboP);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.SHORT, true, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, R.vboA);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+  R.nLine = 0;
+  if (state.view === "churn" && trails) {
+    R.nLine = trails.length / 4;
+    gl.bindVertexArray(R.vaoL);
+    gl.bindBuffer(gl.ARRAY_BUFFER, R.vboLine);
+    gl.bufferData(gl.ARRAY_BUFFER, trails, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 4, gl.SHORT, true, 0, 0);
+    gl.bindVertexArray(null);
+  }
+  const c = am.churn[String(SNAP - 1)];
+  p.stats.innerHTML = `S${SNAP} · n ${(n/1e6).toFixed(1)}M` + (c
+    ? ` · frame-relative churn mean <b>${c.mean}</b> p95 <b>${c.p95}</b>`
+    : ` · (initial snapshot)`);
+  p.dirty = true;
+}
+function draw(p) {
+  const gl = p.gl, R = p.R;
+  const w = p.glc.clientWidth * devicePixelRatio | 0,
+        h = p.glc.clientHeight * devicePixelRatio | 0;
+  if (!w || !h || !p.n) return;
+  if (p.glc.width !== w || p.glc.height !== h) {
+    p.glc.width = w; p.glc.height = h; }
+  if (R.fw !== w || R.fh !== h) {
+    if (R.tex) { gl.deleteTexture(R.tex); gl.deleteFramebuffer(R.fb); }
+    R.tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, R.tex);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RG32F, w, h);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    R.fb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, R.fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0,
+      gl.TEXTURE_2D, R.tex, 0);
+    R.fw = w; R.fh = h;
+  }
+  const v = p.view, aspect = w / h;
+  const S = [v.z / aspect, v.z], T = [v.tx, v.ty];
+  const pt = Math.max(1.5, Math.min(7, v.z * 1.15)) * devicePixelRatio;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, R.fb);
+  gl.viewport(0, 0, w, h);
+  gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+  gl.useProgram(R.pAcc);
+  gl.uniform2fv(gl.getUniformLocation(R.pAcc, "uS"), S);
+  gl.uniform2fv(gl.getUniformLocation(R.pAcc, "uT"), T);
+  gl.uniform1f(gl.getUniformLocation(R.pAcc, "uPt"), pt);
+  gl.uniform1f(gl.getUniformLocation(R.pAcc, "uAdd"), 1.0);
+  gl.bindVertexArray(R.vaoP);
+  gl.drawArrays(gl.POINTS, 0, p.n);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, w, h);
+  gl.disable(gl.BLEND);
+  gl.useProgram(R.pScr);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, R.tex);
+  gl.uniform1i(gl.getUniformLocation(R.pScr, "uD"), 0);
+  gl.uniform1f(gl.getUniformLocation(R.pScr, "uG"),
+    0.6 + Math.min(0.5 * Math.log(Math.max(1, v.z * v.z)), 3.0));
+  gl.uniform1f(gl.getUniformLocation(R.pScr, "uMode"),
+    state.view === "density" ? 0 : state.view === "cohorts" ? 1 : 2);
+  gl.bindVertexArray(R.vaoQ);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  if (R.nLine) {
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    gl.useProgram(R.pLine);
+    gl.uniform2fv(gl.getUniformLocation(R.pLine, "uS"), S);
+    gl.uniform2fv(gl.getUniformLocation(R.pLine, "uT"), T);
+    gl.bindVertexArray(R.vaoL);
+    gl.drawArraysInstanced ? gl.drawArrays(gl.LINES, 0, R.nLine * 2)
+      : gl.drawArrays(gl.LINES, 0, R.nLine * 2);
+  }
+  gl.bindVertexArray(null);
+}
+function bindNav(p) {
+  const el = p.ovc; let drag = null;
+  el.addEventListener("pointerdown", e => { drag = [e.clientX, e.clientY];
+    el.setPointerCapture(e.pointerId); });
+  el.addEventListener("pointermove", e => {
+    if (!drag) return;
+    const r = el.getBoundingClientRect();
+    p.view.tx += (e.clientX - drag[0]) / r.width * 2;
+    p.view.ty -= (e.clientY - drag[1]) / r.height * 2;
+    drag = [e.clientX, e.clientY]; p.dirty = true;
+  });
+  el.addEventListener("pointerup", () => drag = null);
+  el.addEventListener("wheel", e => {
+    e.preventDefault();
+    const f = Math.exp(-e.deltaY * 0.0016);
+    p.view.z *= f; p.dirty = true;
+  }, { passive: false });
+  el.addEventListener("dblclick", () => {
+    p.view = { z: .92, tx: 0, ty: 0 }; p.dirty = true; });
+}
+
+/* ---------- wiring ---------- */
+const A = makePanel("colA", "A", "armA-triggered");
+const B = makePanel("colB", "B", "armB-cuvs");
+function setSnap(k) {
+  SNAP = k;
+  document.querySelectorAll("#scrub .snap").forEach((el, i) =>
+    el.classList.toggle("on", i === k));
+  refresh(A); refresh(B);
+}
+document.getElementById("view").onchange = e => {
+  state.view = e.target.value; refresh(A); refresh(B); legend();
+};
+document.getElementById("play").onclick = () => {
+  if (playing) { clearInterval(playing); playing = null;
+    document.getElementById("play").textContent = "▶ play"; return; }
+  document.getElementById("play").textContent = "⏸ pause";
+  playing = setInterval(() => setSnap((SNAP + 1) % 6), 900);
+};
+function legend() {
+  const L = document.getElementById("legend");
+  if (state.view === "cohorts") {
+    L.innerHTML = `<span><span class="sw" style="background:#6b7f9e"></span>T0 (initial 4M)</span>
+      <span><span class="sw" style="background:#59b873"></span>T1</span>
+      <span><span class="sw" style="background:#33995f"></span>T2</span>
+      <span><span class="sw" style="background:#ff4d38"></span><b>T3 = reddit (OOD)</b></span>
+      <span><span class="sw" style="background:#9e73d9"></span>T4</span>
+      <span><span class="sw" style="background:#7a59b8"></span>T5</span>
+      <span class="hint">where each arrival wave landed — does the OOD register get territory or smear?</span>`;
+  } else if (state.view === "churn") {
+    const px = r => Math.max(3, Math.round(r * 180));
+    L.innerHTML = `<span><span class="sw" style="background:#5a6675"></span>still</span>
+      <span><span class="sw" style="background:#ffb347"></span>moving</span>
+      <span><span class="sw" style="background:#ff2617"></span>≥1 map-radius</span>
+      <span class="hint">points colored by how far they moved in the LAST transition;
+      amber trails = sampled old→new paths</span>
+      <span id="rings">reference (diameter at unit zoom):
+      <span class="ringlab"><span class="ring" style="width:${px(.0034)}px;height:${px(.0034)}px;border-color:#59b873"></span>anchored 0.0034</span>
+      <span class="ringlab"><span class="ring" style="width:${px(.369)}px;height:${px(.369)}px;border-color:#ffb347"></span>retrain 0.369</span>
+      <span class="ringlab"><span class="ring" style="width:${px(1)}px;height:${px(1)}px;border-color:#ff2617"></span>1 radius</span></span>
+      <span class="hint">frame-relative churn = displacement / S0 map radius — official per-pair numbers live in the trade surface; trails show raw motion</span>`;
+  } else {
+    L.innerHTML = `<span class="hint">density heatmap — structure per snapshot.
+    Switch views: <b>cohorts</b> shows where arrivals landed; <b>churn</b> shows
+    what moved. The frozen arm should be pixel-still; cuVS reshuffles every
+    step; the triggered arm moves once, at the S3 drift retrain.</span>`;
+  }
+}
+(async function init() {
+  META = await (await fetch("data/cohorts.json")).json();
+  const arms = Object.keys(META.arms);
+  for (const p of [A, B]) {
+    p.sel.innerHTML = arms.map(a => `<option>${a}</option>`).join("");
+    p.sel.value = arms.includes(p.arm) ? p.arm : arms[0];
+    p.arm = p.sel.value;
+    p.sel.onchange = () => { p.arm = p.sel.value; refresh(p); };
+  }
+  const sc = document.getElementById("scrub");
+  sc.innerHTML = [0,1,2,3,4,5].map(k =>
+    `<span class="snap" data-k="${k}">S${k}${k===3?" 🔺":""}</span>`).join("");
+  sc.querySelectorAll(".snap").forEach(el =>
+    el.onclick = () => setSnap(+el.dataset.k));
+  legend();
+  setSnap(0);
+  (function loop() {
+    for (const p of [A, B]) if (p.dirty) { p.dirty = false; draw(p); }
+    requestAnimationFrame(loop);
+  })();
+  new ResizeObserver(() => { A.dirty = B.dirty = true; })
+    .observe(document.getElementById("main"));
+})();
+</script>
+</body></html>
