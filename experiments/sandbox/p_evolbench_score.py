@@ -31,7 +31,7 @@ def _radius(xy):
 
 def main():
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from _paths import ensure_paths; ensure_paths()  # repo root on sys.path (parents[2], not [1])
     from knobs_2m import quick_ffr_v2, quick_ffr_v2_split
     arms = json.loads(os.environ.get("ARMS_JSON", "{}"))
     if not arms:

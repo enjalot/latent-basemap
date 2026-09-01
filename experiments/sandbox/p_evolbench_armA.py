@@ -48,7 +48,7 @@ def _procrustes(src, ref, src_shared):
 
 def main():
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from _paths import ensure_paths; ensure_paths()  # repo root on sys.path (parents[2], not [1])
     from basemap.pumap.parametric_umap.core import ParametricUMAP
     # default S0 head path if schedule[0] is empty
     if not SCHEDULE.get(0):
