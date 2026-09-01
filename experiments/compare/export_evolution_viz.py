@@ -33,8 +33,8 @@ ARMS = {
     "armA-frozen": SB / "evolbench-armA-frozen",
     "armA-triggered": SB / "evolbench-armA-triggered",
     "armB-cuvs": SB / "evolbench-armB",
-    "comp-umap-frozen": SB / "evolbench-comp-frozen-transform",
-    "comp-umap-full": SB / "evolbench-comp-full-timeline",
+    "comp-umap-frozen": SB / "evolbench-competitor-umap-frozen_transform",
+    "comp-umap-full": SB / "evolbench-competitor-umap-full_timeline",
 }
 
 
