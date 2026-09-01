@@ -278,6 +278,26 @@ class ParametricUMAP:
             _h.update(np.ascontiguousarray(_p.detach().cpu().numpy()).tobytes())
         self.init_state_sha256 = _h.hexdigest()[:16]
 
+    def _apply_warm_start(self, warm_start_state):
+        """Load prior weights into the freshly-allocated model for a WARM-START fine-tune.
+
+        Invoked in fit() AFTER the edge-list admission guard (which requires self.model is None so the
+        graph/pipeline/weight fail-closed checks run before any GPU commit) and AFTER _init_model, so a
+        warm-start does not trip the guard the way a pre-loaded model would. Accepts a state_dict or a
+        path to a saved head/checkpoint (extracts model_state/state_dict). Records warm_start_sha256 for
+        the run manifest (the fine-tune's starting point, distinct from init_state_sha256)."""
+        import hashlib as _hl, torch as _t
+        sd = warm_start_state
+        if isinstance(sd, (str, bytes)):
+            obj = _t.load(sd, map_location=self.device, weights_only=False)
+            sd = obj.get("model_state", obj.get("state_dict", obj)) if isinstance(obj, dict) else obj
+        self.model.load_state_dict(sd)
+        _h = _hl.sha256()
+        for _p in self.model.parameters():
+            _h.update(np.ascontiguousarray(_p.detach().cpu().numpy()).tobytes())
+        self.warm_start_sha256 = _h.hexdigest()[:16]
+        logging.info("WARM-START applied: weights loaded, state sha256=%s", self.warm_start_sha256)
+
     def _low_dim_qs(self, src, dst):
         """Low-D similarity q_ij for an edge batch, per ``self.low_dim_kernel``.
 
@@ -1394,7 +1414,8 @@ class ParametricUMAP:
             wandb_run_name=None,
             checkpoint_every_epochs=0,
             checkpoint_dir=None,
-            resume_from=None):
+            resume_from=None,
+            warm_start_state=None):
         """
         Fit the model using X as training data.
 
@@ -1516,6 +1537,8 @@ class ParametricUMAP:
                     self.rankneg_window, self.rankneg_exclude_neighbors)
             if self.model is None:
                 self._init_model(n_features)
+            if warm_start_state is not None:   # warm-start AFTER admission+alloc (guard needs model=None
+                self._apply_warm_start(warm_start_state)   # at admission; weights injected here, pre-train)
             logging.info("Model parameters: %d", sum(p.numel() for p in self.model.parameters()))
             neg_desc = "on-the-fly"
         else:
@@ -1525,6 +1548,8 @@ class ParametricUMAP:
 
             if self.model is None:
                 self._init_model(X.shape[1])
+            if warm_start_state is not None:
+                self._apply_warm_start(warm_start_state)
 
             # Load or compute P_sym
             if precomputed_p_sym_path is not None:
