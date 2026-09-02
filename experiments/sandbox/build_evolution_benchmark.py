@@ -38,7 +38,7 @@ REDDIT_PATH = f"{E}/reddit-tldr17-chunked-120-all-MiniLM-L6-v2/train"
 REDDIT_CODE = 4
 REDDIT_HOLDOUT = 300_000                       # front slice reserved for the reddit probe
 IN_DIST = ("T0", "T1", "T2", "T4", "T5")       # base-corpus snapshots (T0 5x, tranches 1x)
-OUT = Path("/data/latent-basemap/substrates/evolbench")
+OUT = Path(os.environ.get("EVOLBENCH_OUT_DIR", "/data/latent-basemap/substrates/evolbench"))  # 2nd draw -> evolbench-draw2
 # per base-corpus counts: T0 = MIX*T0_SCALE; each in-dist tranche = MIX*TRANCHE.
 # COORD-exclude only coord-COMPATIBLE probe provenances: code-heldout (starcoder, same shard system).
 # a1-common-neutral is coord-INCOMPATIBLE (different code ordering) -> excluded by CONTENT (a1_void)

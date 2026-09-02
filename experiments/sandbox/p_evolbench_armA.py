@@ -23,6 +23,7 @@ import numpy as np
 SB = Path("/data/latent-basemap/sandbox")
 K = int(os.environ.get("EVOLBENCH_K", "5"))
 LABEL = os.environ.get("ARM_LABEL", "frozen")
+SUBDIR = os.environ.get("EVOLBENCH_SUBDIR", "/data/latent-basemap/substrates/evolbench")  # 2nd-draw -> evolbench-draw2
 SCHEDULE = {int(k): v for k, v in json.loads(os.environ.get("SCHEDULE_JSON", '{"0": ""}')).items()}
 
 
@@ -34,7 +35,7 @@ def _norm(x):
 def _load_Sk(k):
     parts = ["T0"] + [f"T{j}" for j in range(1, k + 1)]
     return _norm(np.concatenate([
-        np.asarray(np.load(f"/data/latent-basemap/substrates/evolbench/{t}/substrate.f32.npy",
+        np.asarray(np.load(f"{SUBDIR}/{t}/substrate.f32.npy",
                            mmap_mode="r"), dtype=np.float32) for t in parts]))
 
 
