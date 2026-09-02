@@ -41,7 +41,7 @@ def _decompose(xy_w, xy_f, cl, cent_f, rad):
     Tc /= np.maximum(cnt[:, None], 1)
     Tci = Tc[cl].astype(np.float32)
     coh = np.einsum("ij,ij->i", Tci, Tci)                          # ‖T_c‖² per point
-    int = np.einsum("ij,ij->i", D - Tci, D - Tci)                  # ‖Δ−T_c‖² per point
+    intn = np.einsum("ij,ij->i", D - Tci, D - Tci)                 # ‖Δ−T_c‖² per point
     # membership churn: nearest frozen centroid at frozen-pos (=cl) vs at w-pos
     from scipy.spatial import cKDTree
     tree = cKDTree(cent_f)
@@ -49,7 +49,7 @@ def _decompose(xy_w, xy_f, cl, cent_f, rad):
     changed = (cl_w != cl)
 
     def _split(mask):
-        c = float(coh[mask].sum()); i = float(int[mask].sum()); tot = c + i
+        c = float(coh[mask].sum()); i = float(intn[mask].sum()); tot = c + i
         return {"n": int(mask.sum()),
                 "churn_mean": round(float(np.linalg.norm(D[mask], axis=1).mean()) / max(rad, 1e-9), 5),
                 "coherent_frac": round(c / tot, 4) if tot else None,
