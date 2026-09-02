@@ -37,6 +37,19 @@ ARMS = {
     "comp-umap-full": SB / "evolbench-competitor-umap-full_timeline",
 }
 
+# λ-frontier pseudo-arm: "snapshots" are the anchor-weight ladder at the T3
+# (reddit-injection) scenario, frozen → loosening anchors → full retrain, so
+# the morph slider walks the frontier instead of time. Endpoints per
+# pplan_lambda_sweep.sh: w=inf = armA-frozen S3, w=0 = armA-triggered S3.
+# 3ep budget variants excluded to keep the path monotone in w.
+LAMBDA_WS = ["100", "50", "20", "10", "5", "2", "1",
+             "0.5", "0.25", "0.1", "0.05", "0.02"]
+LAMBDA_LADDER = (
+    [("w=∞ frozen", SB / "evolbench-armA-frozen/coords-S3.npy")]
+    + [(f"w={t}", SB / f"lambda/coords-w{t}.npy") for t in LAMBDA_WS]
+    + [("w=0 retrain", SB / "evolbench-armA-triggered/coords-S3.npy")]
+)
+
 
 def load_snap(d: Path, k: int) -> np.ndarray | None:
     for name in (f"coords-S{k}.npy", f"raw-S{k}.npy"):
@@ -48,11 +61,27 @@ def load_snap(d: Path, k: int) -> np.ndarray | None:
     return None
 
 
+def lambda_snaps() -> tuple[dict[int, np.ndarray], list[str]]:
+    snaps, labels = {}, []
+    for k, (label, f) in enumerate(LAMBDA_LADDER):
+        if not f.exists():
+            continue  # ladder cells land incrementally; export what's there
+        xy = np.load(f, mmap_mode="r")
+        if xy.ndim == 2 and xy.shape[1] == 2:
+            snaps[len(labels)] = np.asarray(xy, dtype=np.float32)
+            labels.append(label)
+    return snaps, labels
+
+
 def main() -> int:
     OUT.mkdir(parents=True, exist_ok=True)
     meta = {"snapshots": SNAP_N, "t0": T0_N, "tranche": TRANCHE, "arms": {}}
-    for arm, d in ARMS.items():
-        snaps = {k: load_snap(d, k) for k in range(6)}
+    jobs = [(arm, {k: load_snap(d, k) for k in range(6)}, None)
+            for arm, d in ARMS.items()]
+    lam, lam_labels = lambda_snaps()
+    if lam:
+        jobs.append(("lambda-frontier", lam, lam_labels))
+    for arm, snaps, step_labels in jobs:
         snaps = {k: v for k, v in snaps.items() if v is not None}
         if not snaps:
             print(f"{arm}: no snapshots, skip")
@@ -69,6 +98,8 @@ def main() -> int:
         span = np.maximum(hi - lo, 1e-9)
         arm_meta = {"snaps": sorted(snaps), "lo": list(lo),
                     "span": list(span), "churn": {}}
+        if step_labels:
+            arm_meta["step_labels"] = step_labels
         # radius normalization consistent with the churn metric (p90 of S0)
         s0 = snaps.get(0)
         R = float(np.percentile(

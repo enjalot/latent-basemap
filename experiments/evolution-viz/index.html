@@ -69,6 +69,14 @@ const COH = [[.42,.50,.62],[.30,.75,.44],[.16,.58,.60],[1,.28,.20],
 const COHX = COH.map(c => `rgb(${c.map(v=>Math.round(v*255)).join(",")})`);
 const NAMES = ["T0 base","T1","T2","T3 reddit","T4 ml","T5 ml"];
 let META = null, K = 5, LERP = 1, playing = null;
+// step label: timeline arms are S0..S5; pseudo-arms (lambda-frontier) carry
+// their own step_labels (w-ladder). Panel A's arm names the global controls.
+const SLAB = (k, arm) =>
+  META?.arms[arm ?? A.arm]?.step_labels?.[k] ?? ("S" + k);
+const KMAX = () => Math.max(...[A, B].map(p => {
+  const am = META?.arms[p.arm];
+  return am ? Math.max(...am.snaps) : 5;
+}));
 const state = { view: "cohorts", vis: [1,1,1,1,1,1], fr: 34 };
 const F16 = (() => { const t=new Float32Array(65536),b=new ArrayBuffer(4),
   u=new Uint32Array(b),f=new Float32Array(b);
@@ -193,7 +201,7 @@ function cohortIdx(i) {
 }
 async function refresh(p) {
   const am = META.arms[p.arm];
-  if (!am || !am.snaps.includes(K)) { p.stats.textContent = "n/a at S"+K; p.n=0; p.dirty=true; return; }
+  if (!am || !am.snaps.includes(K)) { p.stats.textContent = "n/a at step "+K; p.n=0; p.dirty=true; return; }
   const cur = await snap(p, p.arm, K);
   const prv = K > 0 && am.snaps.includes(K-1) ? await snap(p, p.arm, K-1) : null;
   const dm = await disp(p, p.arm, K);
@@ -238,7 +246,7 @@ async function refresh(p) {
     gl.bindVertexArray(null);
   }
   const c = am.churn[String(K-1)];
-  p.stats.innerHTML = `S${K} · n ${(n/1e6).toFixed(1)}M` +
+  p.stats.innerHTML = `${SLAB(K, p.arm)} · n ${(n/1e6).toFixed(1)}M` +
     (c ? ` · frame-relative churn mean <b>${c.mean}</b> p95 <b>${c.p95}</b>` : "");
   p.dirty = true;
 }
@@ -391,7 +399,7 @@ function chipRender() {
     el.style.color = active? COHX[i] : "var(--dim)";
   });
   document.getElementById("lerplab").textContent =
-    K>0 ? `S${K-1}→S${K}` : "S0";
+    K>0 ? `${SLAB(K-1)}→${SLAB(K)}` : SLAB(0);
 }
 function setK(k, lerpTo=1) {
   K=k; LERP=lerpTo;
@@ -403,7 +411,7 @@ document.getElementById("view").onchange=e=>{
 document.getElementById("lerp").oninput=e=>{
   LERP=+e.target.value; A.dirty=B.dirty=true; };
 document.getElementById("fr").oninput=e=>{ state.fr=+e.target.value; };
-document.getElementById("stepf").onclick=()=>setK(Math.min(K+1,5),1);
+document.getElementById("stepf").onclick=()=>setK(Math.min(K+1,KMAX()),1);
 document.getElementById("stepb").onclick=()=>setK(Math.max(K-1,0),1);
 document.getElementById("play").onclick=()=>{
   if (playing){ cancelAnimationFrame(playing); playing=null;
@@ -413,7 +421,7 @@ document.getElementById("play").onclick=()=>{
   setK(0,1);
   const step=()=>{
     t+=0.02;
-    if (t>=1.25){ t=0; k++; if(k>5){ playing=null;
+    if (t>=1.25){ t=0; k++; if(k>KMAX()){ playing=null;
       document.getElementById("play").textContent="▶ play"; return; }
       setK(k,0); }
     LERP=Math.min(1,t);
@@ -426,9 +434,9 @@ document.getElementById("play").onclick=()=>{
 function foot() {
   const f=document.getElementById("foot");
   if (state.view==="churn")
-    f.innerHTML=`<span class="hint">points colored by displacement into S${K}
+    f.innerHTML=`<span class="hint">points colored by displacement into ${SLAB(K)}
       (gray still → amber → red ≥1 map-radius). Drag <b>morph</b> to watch the
-      transition S${K-1}→S${K}. Official churn numbers: trade surface.</span>`;
+      transition ${K>0?SLAB(K-1)+"→":""}${SLAB(K)}. Official churn numbers: trade surface.</span>`;
   else if (state.view==="cohorts")
     f.innerHTML=`<span class="hint">chips above: click to toggle a cohort
       layer (isolate additions); the chip colors ARE the legend. T3 red =
@@ -443,7 +451,11 @@ function foot() {
   for (const p of [A,B]) {
     p.sel.innerHTML=arms.map(a=>`<option>${a}</option>`).join("");
     p.sel.value=arms.includes(p.arm)?p.arm:arms[0]; p.arm=p.sel.value;
-    p.sel.onchange=()=>{p.arm=p.sel.value; refresh(p);};
+    p.sel.onchange=()=>{
+      p.arm=p.sel.value;
+      const mx=KMAX();
+      if (K>mx) setK(mx,1); else { chipRender(); refresh(p); foot(); }
+    };
   }
   const chips=document.getElementById("chips");
   chips.innerHTML=NAMES.map((nm,i)=>
