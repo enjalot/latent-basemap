@@ -7,14 +7,20 @@ Plus MEMBERSHIP churn = fraction whose nearest frozen centroid changes between i
 Report the coherent/internal split per w across the ladder, per cohort (base [0:N2] vs reddit [N2:N]).
 Prediction: anchored cells' tiny churn is mostly COHERENT; the retrain's 0.37 is heavily INTERNAL.
 Usage: p_evolbench_churn_decomp.py [k]   (default k=1000). Output: evolbench-churn-decomp.json"""
-import json, sys, glob
+import json, sys, glob, os
 from pathlib import Path
 import numpy as np
 
 SB = Path("/data/latent-basemap/sandbox")
-N2 = 5_600_000; N = 6_400_000; KDEF = 1000
-FROZEN = SB / "evolbench-armA-frozen/coords-S3.npy"
-TRIGGERED = SB / "evolbench-armA-triggered/coords-S3.npy"   # w=0 full-retrain endpoint
+# dims env-parameterized for the D768 track (T0=2M, tranche 400k -> N2=2.8M, N=3.2M) vs MiniLM defaults.
+N2 = int(os.environ.get("EVOLBENCH_N2", "5600000")); N = int(os.environ.get("EVOLBENCH_N", "6400000"))
+KDEF = 1000
+FROZEN = SB / os.environ.get("EVOLBENCH_DECOMP_FROZEN", "evolbench-armA-frozen/coords-S3.npy")
+TRIGGERED = SB / os.environ.get("EVOLBENCH_DECOMP_TRIGGERED", "evolbench-armA-triggered/coords-S3.npy")
+# EVOLBENCH_DECOMP_CELLS: optional json {tag: coords_path_rel_to_SB}. When set, decompose exactly these
+# (D768 uses {"triggered": armA-d768-triggered-v2/coords-S3.npy, "armB": evolbench-d768-armB/coords-S3.npy})
+# vs FROZEN; otherwise the default md000 ladder (lambda cells + the retrain endpoint).
+_CELLS_ENV = os.environ.get("EVOLBENCH_DECOMP_CELLS", "")
 
 
 def _procrustes_fit(src, ref):
@@ -69,17 +75,20 @@ def main():
     km = MiniBatchKMeans(n_clusters=k, random_state=0, batch_size=10000, n_init=3, max_iter=100)
     cl = km.fit_predict(xy_f); cent_f = km.cluster_centers_.astype(np.float32)
 
-    # the ladder: all λ cells + the full-retrain endpoint (w=0)
-    cells = []
-    for f in sorted(glob.glob(str(SB / "lambda/coords-w*.npy"))):
-        tag = Path(f).stem.replace("coords-w", "")
-        cells.append((tag, np.asarray(np.load(f), np.float32)))
+    # cells to decompose: explicit set (D768 arms) or the default md000 ladder (λ cells + retrain endpoint)
+    if _CELLS_ENV:
+        cells = [(tag, np.asarray(np.load(SB / rel), np.float32)) for tag, rel in json.loads(_CELLS_ENV).items()]
+    else:
+        cells = [(Path(f).stem.replace("coords-w", ""), np.asarray(np.load(f), np.float32))
+                 for f in sorted(glob.glob(str(SB / "lambda/coords-w*.npy")))]
+        cells.append(("0(retrain)", np.asarray(np.load(TRIGGERED), np.float32)))
     out = {"schema": "evolbench-churn-decomp-2026-09-02", "k": k, "frozen_radius_p90": round(rad, 4),
+           "dims": {"N2": N2, "N": N}, "frozen": str(FROZEN.relative_to(SB)),
            "note": "coherent=rigid cluster translation; internal=member reshuffle; energy-exact split.",
            "cells": {}}
-    print(f"=== CHURN DECOMPOSITION (k={k}) ===", flush=True)
+    print(f"=== CHURN DECOMPOSITION (k={k}, N2={N2:,} N={N:,}) ===", flush=True)
     print(f"{'cell':>12} {'cohort':>7} {'churn':>8} {'coh%':>7} {'int%':>7} {'memb%':>7}", flush=True)
-    for tag, xy_w in cells + [("0(retrain)", np.asarray(np.load(TRIGGERED), np.float32))]:
+    for tag, xy_w in cells:
         dec = _decompose(xy_w, xy_f, cl, cent_f, rad)
         out["cells"][tag] = dec
         for coh in ("overall", "base", "reddit"):
@@ -87,7 +96,8 @@ def main():
             print(f"{tag:>12} {coh:>7} {d['churn_mean']:>8.4f} "
                   f"{(d['coherent_frac'] or 0)*100:>6.1f}% {(d['internal_frac'] or 0)*100:>6.1f}% "
                   f"{d['membership_churn']*100:>6.1f}%", flush=True)
-    outp = SB / "evolbench-churn-decomp.json"; outp.write_text(json.dumps(out, indent=1, default=str))
+    outp = SB / os.environ.get("EVOLBENCH_DECOMP_OUT", "evolbench-churn-decomp.json")
+    outp.write_text(json.dumps(out, indent=1, default=str))
     print(f"wrote {outp}", flush=True)
     return 0
 

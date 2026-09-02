@@ -21,7 +21,10 @@ LAMBDA_DIR = SB / os.environ.get("EVOLBENCH_FOR_LAMBDADIR", "lambda")
 FROZEN_DIR = SB / os.environ.get("EVOLBENCH_FOR_FROZEN", "evolbench-armA-frozen")
 OOD_CODE = int(os.environ.get("EVOLBENCH_FOR_OODCODE", "4"))   # injected-cohort corpus code (reddit=4)
 E = "/data/embeddings"
-N0 = 4_000_000; N2 = 5_600_000; N = 6_400_000
+# dims env-parameterized for the D768 track (N0=2M, N2=2.8M, N=3.2M) vs MiniLM defaults.
+N0 = int(os.environ.get("EVOLBENCH_N0", "4000000"))
+N2 = int(os.environ.get("EVOLBENCH_N2", "5600000"))
+N = int(os.environ.get("EVOLBENCH_N", "6400000"))
 SHARD = 500_000
 CORPUS_NAME = {0: "fineweb", 1: "redpajama", 2: "pile", 3: "starcoder", 4: "reddit", 5: "ca", 7: "bluesky"}
 CHUNK_DIR = {  # row-aligned chunk parquets (chunk_text col); missing dirs fail-closed (no NN reconstruction)
@@ -139,9 +142,11 @@ def _resolve(pr, corpus, k):
 def main():
     wtag = sys.argv[1] if len(sys.argv) > 1 else "0.02"
     suffix = os.environ.get("EVOLBENCH_FOR_TAG", "")   # e.g. "-ca" so ood outputs don't collide with reddit
-    cw = LAMBDA_DIR / f"coords-w{wtag}.npy"
+    # coords to analyze: a direct path (D768 = the triggered arm's S3 map) or the λ cell in LAMBDA_DIR
+    cw = Path(os.environ["EVOLBENCH_FOR_COORDS"]) if os.environ.get("EVOLBENCH_FOR_COORDS") \
+        else LAMBDA_DIR / f"coords-w{wtag}.npy"
     if not cw.is_file():
-        raise SystemExit(f"λ map absent: {cw}")
+        raise SystemExit(f"map absent: {cw}")
     xy_w = np.asarray(np.load(cw), np.float32)
     xy_f = np.asarray(np.load(FROZEN_DIR / "coords-S3.npy"), np.float32)
     # align w -> frozen on the ANCHORED base rows [0:N2] (the pinned frame the service uses)
@@ -149,7 +154,9 @@ def main():
     xy_wa = _apply(xy_w.astype(np.float64), fit).astype(np.float32)
     disp = np.linalg.norm(xy_wa - xy_f, axis=1)                    # per-row displacement vs frozen
 
-    prov = _load_prov()
+    # provenance is OPTIONAL: absent (e.g. the D768 substrate) -> geometry only, sucked-in attribution +
+    # text spot-check FAIL-CLOSED (annotated; never NN-reconstructed across embedding spaces).
+    prov = _load_prov() if (SUBROOT / "T3" / "provenance.npy").exists() else None
     reddit = np.arange(N2, N)
     rpts = xy_wa[reddit]
     labels, ginfo = _grid_blobs(rpts)
@@ -194,31 +201,36 @@ def main():
         end_near = np.linalg.norm(xy_wa[base_rows] - cen, axis=1) < rad      # base rows ending inside blob
         moved = disp[base_rows] > np.percentile(disp[base_rows], 99)         # top-1% displaced base rows
         sucked = base_rows[end_near & moved]
-        src = {CORPUS_NAME.get(int(c), str(c)): int((prov[sucked]["corpus"] == c).sum())
-               for c in np.unique(prov[sucked]["corpus"])} if len(sucked) else {}
+        src = ({CORPUS_NAME.get(int(c), str(c)): int((prov[sucked]["corpus"] == c).sum())
+               for c in np.unique(prov[sucked]["corpus"])} if (prov is not None and len(sucked))
+               else ({"_fail_closed": "no substrate provenance — source attribution unavailable"} if prov is None else {}))
         out["sucked_in"][bname] = {"n": int(len(sucked)), "blob_radius": round(float(rad), 3),
             "source_datasets": src,
             "mean_displacement": round(float(disp[sucked].mean()), 3) if len(sucked) else None,
             "max_displacement": round(float(disp[sucked].max()), 3) if len(sucked) else None}
 
-    # (d) semantic spot-check: per blob, reddit member texts (most central 100) + stationary-adjacent base (50)
-    for bname in ("blob1", "blob2"):
-        if bname not in centroids:
-            continue
-        cen = centroids[bname]; rows = groups[bname]
-        d2c = np.linalg.norm(xy_wa[rows] - cen, axis=1)
-        central = rows[np.argsort(d2c)[:100]]                      # 100 most-central reddit members
-        rtext = _resolve(prov[central], OOD_CODE, 100)
-        # stationary-adjacent base rows: base rows inside the blob radius with SMALL displacement
-        rad = np.percentile(d2c, 90)
-        base_near = base_rows[np.linalg.norm(xy_wa[base_rows] - cen, axis=1) < rad]
-        stationary = base_near[disp[base_near] < np.percentile(disp[base_rows], 50)][:50]
-        # group stationary base rows by corpus, resolve text per corpus (fail-closed each; shard=file idx)
-        stext = [_resolve(prov[stationary[prov[stationary]["corpus"] == c]], int(c), 25)
-                 for c in np.unique(prov[stationary]["corpus"])]
-        out["spot_check"][bname] = {"reddit_members": rtext, "stationary_adjacent_base": stext}
+    # (d) semantic spot-check: per blob, reddit member texts + stationary-adjacent base. Needs provenance;
+    # FAIL-CLOSED (no NN reconstruction) when absent (D768 substrate has none, and jina reddit is chunked-500
+    # with no text parquets on disk anyway).
+    if prov is None:
+        out["spot_check"] = {"_fail_closed": "no substrate provenance for this space (e.g. D768); text "
+                             "spot-check unavailable. NOT reconstructed by embedding-NN (cross-space + forbidden)."}
+    else:
+        for bname in ("blob1", "blob2"):
+            if bname not in centroids:
+                continue
+            cen = centroids[bname]; rows = groups[bname]
+            d2c = np.linalg.norm(xy_wa[rows] - cen, axis=1)
+            central = rows[np.argsort(d2c)[:100]]                      # 100 most-central reddit members
+            rtext = _resolve(prov[central], OOD_CODE, 100)
+            rad = np.percentile(d2c, 90)
+            base_near = base_rows[np.linalg.norm(xy_wa[base_rows] - cen, axis=1) < rad]
+            stationary = base_near[disp[base_near] < np.percentile(disp[base_rows], 50)][:50]
+            stext = [_resolve(prov[stationary[prov[stationary]["corpus"] == c]], int(c), 25)
+                     for c in np.unique(prov[stationary]["corpus"])]
+            out["spot_check"][bname] = {"reddit_members": rtext, "stationary_adjacent_base": stext}
 
-    outp = SB / f"evolbench-blob-forensics{suffix}-w{wtag}.json"
+    outp = SB / os.environ.get("EVOLBENCH_FOR_OUT", f"evolbench-blob-forensics{suffix}-w{wtag}.json")
     outp.write_text(json.dumps(out, indent=1, default=str))
     # console summary
     print(f"=== BLOB FORENSICS w={wtag} ===", flush=True)
