@@ -8,8 +8,10 @@ import sys, glob, json, time
 from pathlib import Path
 import numpy as np
 
-EVOL = Path("/data/latent-basemap/substrates/evolbench")
-N_BASE = 5_600_000; SHARD = 500_000
+import os
+# base dir env-parameterized: MiniLM OOD uses evolbench (N_BASE 5.6M); jina OOD uses evolbench-d768 (2.8M).
+EVOL = Path(os.environ.get("EVOLBENCH_BASE_DIR", "/data/latent-basemap/substrates/evolbench"))
+N_BASE = int(os.environ.get("EVOLBENCH_N_BASE", "5600000")); SHARD = 500_000
 
 
 def _void(a):
@@ -32,13 +34,22 @@ def main():
     files = sorted(glob.glob(emb_glob))
     if not files:
         raise SystemExit(f"no embeddings at {emb_glob}")
+    # POOL_OFFSET: when the embeddings are a pre-sliced social POOL (e.g. ca-jina-pool = communityarchive-
+    # tweets[offset:]), map each pool row back to its GLOBAL text-corpus row so provenance -> chunk_text is
+    # correct: global = POOL_OFFSET + running_index -> shard = global//SHARD, row = global%SHARD.
+    pool_offset = int(os.environ.get("EVOLBENCH_POOL_OFFSET", "0"))
     rows = []; prov = []; got = 0
     for si, f in enumerate(files):
         a = np.asarray(np.load(f, mmap_mode="r"), dtype=np.float32)
         take = min(len(a), n - got)
         rows.append(a[:take]);
         pr = np.empty(take, dtype=[("corpus", "u1"), ("shard", "<u2"), ("row", "<i8")])
-        pr["corpus"] = code; pr["shard"] = si; pr["row"] = np.arange(take, dtype=np.int64)
+        pr["corpus"] = code
+        if pool_offset:
+            g = pool_offset + got + np.arange(take, dtype=np.int64)   # global text-corpus row
+            pr["shard"] = (g // SHARD).astype("<u2"); pr["row"] = (g % SHARD)
+        else:
+            pr["shard"] = si; pr["row"] = np.arange(take, dtype=np.int64)
         prov.append(pr); got += take
         if got >= n:
             break

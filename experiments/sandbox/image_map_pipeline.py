@@ -487,6 +487,18 @@ DATASETS = {
                         "rankneg_window": int(0.25 * 6_400_000), "batch_size": 16384,
                         "gpu_resident_vram_budget_gb": 22.0}}}}
        for nm in ("ca", "bluesky")},
+    # jina OOD battery (jina redux, 2026-09-02): D768-scale (768-dim, T0=2M base, T3'=400k swap corpus from
+    # the existing jina social pool). evolbench-ood-jina-<nm>-S3 truth on substrates/evolbench-ood-jina-<nm>.
+    **{f"evolbench-ood-jina-{nm}-S3": {
+        "load": (lambda nm=nm: np.concatenate([
+            np.asarray(np.load(f"/data/latent-basemap/substrates/evolbench-ood-jina-{nm}/{t}/substrate.f32.npy",
+                               mmap_mode="r"), dtype=np.float32) for t in ("T0", "T1", "T2", "T3")])),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": int(0.25 * 3_200_000), "batch_size": 16384,
+                        "gpu_resident_vram_budget_gb": 22.0}}}}
+       for nm in ("ca",)},
     # D768 (jina) evolution benchmark (5th review corrected build): T0=2M (jina-multi-2m = P1.5@42 head's
     # training set) + 5x400k -> 4M. Truths for all Sk; S3 = the drift-triggered retrain head (champion arm).
     # arm-A T0 head = the existing P1.5@42 (jina-multi-2m/p15-baseline-s42), NOT trained here.

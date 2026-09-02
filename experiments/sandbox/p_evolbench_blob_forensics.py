@@ -168,6 +168,7 @@ def main():
     T3vecs = np.asarray(np.load(SUBROOT / "T3" / "substrate.f32.npy", mmap_mode="r"), np.float32)
 
     out = {"schema": "evolbench-blob-forensics-2026-09-02", "w": wtag, "grid": ginfo,
+           "_chunking": os.environ.get("EVOLBENCH_CHUNKING", ""),   # per-corpus chunk convention (cross-space read)
            "row_layout": {"base": [0, N2], "reddit": [N2, N]}, "groups": {}, "sucked_in": {}, "spot_check": {}}
 
     # (a)/(b) per group: blob1, blob2, diffuse, + base baseline

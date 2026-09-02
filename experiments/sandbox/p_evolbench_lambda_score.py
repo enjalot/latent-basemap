@@ -97,6 +97,7 @@ def main():
     for r in rows:
         r["ood_gain"] = round((r["reddit_ffr"] or 0) - (frozen_reddit or 0), 4)
     out = {"schema": "evolbench-lambda-frontier-2026-09-01",
+           "_chunking": os.environ.get("EVOLBENCH_CHUNKING", ""),   # per-corpus chunk convention (cross-space read)
            "_PROVISIONAL": "PROVISIONAL-PENDING-VALIDATION (single seed; noise floor = MiniLM S0-head seed-43, deferred batch)",
            "note": "Service pricing tiers: placement=seconds (frozen), OOD-absorption=fine-tune minutes (cells), full-retrain=hours.",
            "frontier": rows}
