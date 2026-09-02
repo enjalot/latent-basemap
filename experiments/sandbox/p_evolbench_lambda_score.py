@@ -62,12 +62,21 @@ def main():
     # endpoint: frozen (w=inf)
     rows.append({**_score_map(SB / "evolbench-armA-frozen/coords-S3.npy", s2, knn, FROZEN_COST_MIN, "w=inf(frozen)"), "w": float("inf")})
     # sweep cells
-    for f in sorted(glob.glob(str(SB / "lambda/coords-w*.npy")),
-                    key=lambda p: -float(Path(p).stem.replace("coords-w", "") or 0)):
+    def _wkey(p):   # sort by the leading numeric part of the tag; non-numeric tags sort last
+        t = Path(p).stem.replace("coords-w", "")
+        try:
+            return -float(t.split("-")[0].split("_")[0])
+        except ValueError:
+            return 1.0
+    for f in sorted(glob.glob(str(SB / "lambda/coords-w*.npy")), key=_wkey):
         tag = Path(f).stem.replace("coords-w", "")
         man = json.loads((SB / f"lambda/manifest-w{tag}.json").read_text())
         cost = float(man.get("train_wall_s", 0)) / 60.0
-        rows.append({**_score_map(f, s2, knn, cost, f"w={tag}"), "w": float(tag),
+        try:
+            wval = float(tag.split("-")[0].split("_")[0])
+        except ValueError:
+            wval = tag
+        rows.append({**_score_map(f, s2, knn, cost, f"w={tag}"), "w": wval,
                      "warm_start_hash": man.get("warm_start_state_hash"),
                      "trained_hash": man.get("trained_state_hash"), "gen_key": man.get("gen_key")})
     # endpoint: full retrain (w=0)

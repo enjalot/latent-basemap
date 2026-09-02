@@ -84,7 +84,7 @@ def main():
     train_wall = time.time() - t0
     trained_hash = _state_hash(pumap.model)
     coords = np.asarray(pumap.transform(X, batch_size=8192), dtype=np.float32)
-    tag = "inf" if w == float("inf") else (f"{w:g}")
+    tag = os.environ.get("EVOLBENCH_LAMBDA_TAG") or ("inf" if w == float("inf") else f"{w:g}")
     np.save(OUTD / f"coords-w{tag}.npy", coords)
     key = gen_key.artifact_key({"kind": "lambda-cell", "w": w, "n_epochs": n_epochs, "seed": SEED,
                                 "s0_head": warm_hash, "anchor": gen_key.file_digest(ANCHOR),
