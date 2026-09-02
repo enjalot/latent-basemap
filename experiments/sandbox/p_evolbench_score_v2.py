@@ -20,6 +20,7 @@ import numpy as np
 SB = Path("/data/latent-basemap/sandbox")
 K = int(os.environ.get("EVOLBENCH_K", "5"))
 REDDIT_K = int(os.environ.get("REDDIT_K", "3"))
+TRUTH_PREFIX = os.environ.get("EVOLBENCH_TRUTH_PREFIX", "evolbench")   # "evolbench-d768" for the D768 run
 NQ = int(os.environ.get("N_QUERIES", "60000"))
 KT = 15
 
@@ -69,7 +70,7 @@ def main():
         rows = []; cum_churn = 0.0; prev = None; prev_n = 0; cum_cost = 0.0; last_switch = 0
         for k in sorted(ns):
             xy = np.asarray(np.load(d / f"coords-S{k}.npy"), dtype=np.float32); n = ns[k]
-            knn = np.load(SB / f"evolbench-S{k}" / "knn_indices.npy", mmap_mode="r")
+            knn = np.load(SB / f"{TRUTH_PREFIX}-S{k}" / "knn_indices.npy", mmap_mode="r")
             churn_mean = churn_p95 = 0.0
             if prev is not None:
                 disp = np.linalg.norm(xy[:prev_n] - prev, axis=1) / max(_radius(prev), 1e-9)
@@ -108,7 +109,7 @@ def main():
         out["arms"][label] = {"kind": cfg["kind"], "trajectory": rows, "last_switch_k": last_switch,
                               "head_gpu_h": head_gpu_h.get(label, 0.0), "total_gpu_h_incl_heads": cost_h,
                               "post_update_ffr": rows[-1]["quality"]["ffr"] if rows else None}
-    OUT = SB / "evolbench-tradesurface-v2.json"
+    OUT = SB / os.environ.get("EVOLBENCH_OUT", "evolbench-tradesurface-v2.json")
     OUT.write_text(json.dumps(out, indent=1, default=lambda o: o.item() if hasattr(o, "item") else str(o)))
     print("\n=== TRADE SURFACE v2 ===", flush=True)
     for label, a in out["arms"].items():

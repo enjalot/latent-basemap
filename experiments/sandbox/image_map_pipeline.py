@@ -446,6 +446,20 @@ DATASETS = {
                         "rankneg_window": int(0.25 * (4_000_000 + k * 800_000)), "batch_size": 16384,
                         "gpu_resident_vram_budget_gb": 22.0}}}}
        for k in range(6)},
+    # D768 (jina) evolution benchmark (5th review corrected build): T0=2M (jina-multi-2m = P1.5@42 head's
+    # training set) + 5x400k -> 4M. Truths for all Sk; S3 = the drift-triggered retrain head (champion arm).
+    # arm-A T0 head = the existing P1.5@42 (jina-multi-2m/p15-baseline-s42), NOT trained here.
+    **{f"evolbench-d768-S{k}": {
+        "load": (lambda kk=k: np.concatenate([
+            np.asarray(np.load(f"/data/latent-basemap/substrates/evolbench-d768/{t}/substrate.f32.npy",
+                               mmap_mode="r"), dtype=np.float32)
+            for t in (["T0"] + [f"T{j}" for j in range(1, kk + 1)])])),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": int(0.25 * (2_000_000 + k * 400_000)), "batch_size": 16384,
+                        "gpu_resident_vram_budget_gb": 22.0}}}}
+       for k in range(6)},
     "reddit-2m": {"load": _reddit_load, "subsets": None},
     "communityarchive-2m": {"load": _ca_load, "subsets": None},
     "minilm-redditmix-2m": {"load": _redditmix_load,
