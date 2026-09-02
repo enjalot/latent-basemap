@@ -451,7 +451,14 @@ DATASETS = {
               **({"champion-bs16k-s43": {"md": "000", "dose": 4, "seed": 43,
                     "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                               "rankneg_window": int(0.25 * (4_000_000 + k * 800_000)), "batch_size": 16384,
-                              "gpu_resident_vram_budget_gb": 22.0}}} if k in (0, 3) else {})}}
+                              "gpu_resident_vram_budget_gb": 22.0}}} if k in (0, 3) else {}),
+              # md010 kernel probe (owner 2026-09-02): champion recipe, kernel swapped md000->md010 only.
+              # T0 head (k==0) -> whitespace-for-insertion theory: more inter-cluster room may improve OOD
+              # reception AND reduce sink formation. Truths/edges are kernel-independent (reused).
+              **({"champion-md010-bs16k": {"md": "010", "dose": 4,
+                    "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                              "rankneg_window": int(0.25 * 4_000_000), "batch_size": 16384,
+                              "gpu_resident_vram_budget_gb": 22.0}}} if k == 0 else {})}}
        for k in range(6)},
     # 2nd-timeline DRAW (draw-variance robustness, overseer 2026-09-02): identical schema to evolbench-S{k}
     # but a DIFFERENT tranche split (EVOLBENCH_DRAW_SEED=43 -> substrates/evolbench-draw2/). Truths + heads
@@ -467,6 +474,19 @@ DATASETS = {
                         "rankneg_window": int(0.25 * (4_000_000 + k * 800_000)), "batch_size": 16384,
                         "gpu_resident_vram_budget_gb": 22.0}}}}
        for k in range(6)},
+    # OOD battery (owner item 4, 2026-09-02): fixed-w=0.02, swap the T3 injection corpus. Same T0/T1/T2 as
+    # the evolbench draw1 timeline (symlinked, bit-identical); T3 = 800k of the swap corpus. Truth built here
+    # on the S3' concatenation -> sandbox/evolbench-ood-<nm>-S3/. Codes: CA=5, bluesky=7 (bmix convention).
+    **{f"evolbench-ood-{nm}-S3": {
+        "load": (lambda nm=nm: np.concatenate([
+            np.asarray(np.load(f"/data/latent-basemap/substrates/evolbench-ood-{nm}/{t}/substrate.f32.npy",
+                               mmap_mode="r"), dtype=np.float32) for t in ("T0", "T1", "T2", "T3")])),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": int(0.25 * 6_400_000), "batch_size": 16384,
+                        "gpu_resident_vram_budget_gb": 22.0}}}}
+       for nm in ("ca", "bluesky")},
     # D768 (jina) evolution benchmark (5th review corrected build): T0=2M (jina-multi-2m = P1.5@42 head's
     # training set) + 5x400k -> 4M. Truths for all Sk; S3 = the drift-triggered retrain head (champion arm).
     # arm-A T0 head = the existing P1.5@42 (jina-multi-2m/p15-baseline-s42), NOT trained here.

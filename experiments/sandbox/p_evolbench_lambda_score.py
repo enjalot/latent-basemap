@@ -12,8 +12,13 @@ import numpy as np
 
 SB = Path("/data/latent-basemap/sandbox")
 N0 = 4_000_000; N2 = 5_600_000; N = 6_400_000
-S2_LAYOUT = SB / "evolbench-armA-frozen" / "coords-S2.npy"
-S3_KNN = SB / "evolbench-S3" / "knn_indices.npy"
+# env-parameterized for the md010 kernel probe: its cells pin to (and churn against) the md010 frozen S2
+# layout, its frozen endpoint is the md010 head, and it has no full-retrain endpoint (skipped if absent).
+import os
+FROZEN_DIR = SB / os.environ.get("EVOLBENCH_FROZEN_DIR", "evolbench-armA-frozen")
+LAMBDA_DIR = SB / os.environ.get("EVOLBENCH_LAMBDA_DIR", "lambda")
+S2_LAYOUT = FROZEN_DIR / "coords-S2.npy"
+S3_KNN = SB / os.environ.get("EVOLBENCH_S3_KNN_DS", "evolbench-S3") / "knn_indices.npy"
 RETRAIN_COST_MIN = 313.0   # S3 head full train = 5.21 GPU-h (armA-triggered's retrain)
 FROZEN_COST_MIN = 0.1      # frozen: placement only (seconds)
 
@@ -60,7 +65,7 @@ def main():
     knn = np.load(S3_KNN, mmap_mode="r")
     rows = []
     # endpoint: frozen (w=inf)
-    rows.append({**_score_map(SB / "evolbench-armA-frozen/coords-S3.npy", s2, knn, FROZEN_COST_MIN, "w=inf(frozen)"), "w": float("inf")})
+    rows.append({**_score_map(FROZEN_DIR / "coords-S3.npy", s2, knn, FROZEN_COST_MIN, "w=inf(frozen)"), "w": float("inf")})
     # sweep cells
     def _wkey(p):   # sort by the leading numeric part of the tag; non-numeric tags sort last
         t = Path(p).stem.replace("coords-w", "")
@@ -68,9 +73,9 @@ def main():
             return -float(t.split("-")[0].split("_")[0])
         except ValueError:
             return 1.0
-    for f in sorted(glob.glob(str(SB / "lambda/coords-w*.npy")), key=_wkey):
+    for f in sorted(glob.glob(str(LAMBDA_DIR / "coords-w*.npy")), key=_wkey):
         tag = Path(f).stem.replace("coords-w", "")
-        man = json.loads((SB / f"lambda/manifest-w{tag}.json").read_text())
+        man = json.loads((LAMBDA_DIR / f"manifest-w{tag}.json").read_text())
         cost = float(man.get("train_wall_s", 0)) / 60.0
         try:
             wval = float(tag.split("-")[0].split("_")[0])
@@ -79,8 +84,10 @@ def main():
         rows.append({**_score_map(f, s2, knn, cost, f"w={tag}"), "w": wval,
                      "warm_start_hash": man.get("warm_start_state_hash"),
                      "trained_hash": man.get("trained_state_hash"), "gen_key": man.get("gen_key")})
-    # endpoint: full retrain (w=0)
-    rows.append({**_score_map(SB / "evolbench-armA-triggered/coords-S3.npy", s2, knn, RETRAIN_COST_MIN, "w=0(full-retrain)"), "w": 0.0})
+    # endpoint: full retrain (w=0) — present only for the md000 timeline; md010 probe overlays on md000's.
+    _retrain = SB / "evolbench-armA-triggered/coords-S3.npy"
+    if _retrain.is_file() and os.environ.get("EVOLBENCH_SKIP_RETRAIN_ENDPOINT") != "1":
+        rows.append({**_score_map(_retrain, s2, knn, RETRAIN_COST_MIN, "w=0(full-retrain)"), "w": 0.0})
     frozen_reddit = rows[0]["reddit_ffr"]
     for r in rows:
         r["ood_gain"] = round((r["reddit_ffr"] or 0) - (frozen_reddit or 0), 4)
@@ -88,7 +95,7 @@ def main():
            "_PROVISIONAL": "PROVISIONAL-PENDING-VALIDATION (single seed; noise floor = MiniLM S0-head seed-43, deferred batch)",
            "note": "Service pricing tiers: placement=seconds (frozen), OOD-absorption=fine-tune minutes (cells), full-retrain=hours.",
            "frontier": rows}
-    OUT = SB / "evolbench-lambda-frontier.json"; OUT.write_text(json.dumps(out, indent=1, default=str))
+    OUT = SB / os.environ.get("EVOLBENCH_LAMBDA_OUT", "evolbench-lambda-frontier.json"); OUT.write_text(json.dumps(out, indent=1, default=str))
     print("\n=== λ-FRONTIER (churn, OOD-gain, cost) ===", flush=True)
     print(f"{'cell':>16} {'churn':>8} {'reddit':>7} {'OODgain':>8} {'overall':>8} {'T0ret':>7} {'cost_min':>9}", flush=True)
     for r in rows:

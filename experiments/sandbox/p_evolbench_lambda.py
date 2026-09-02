@@ -20,11 +20,13 @@ import numpy as np
 
 SB = Path("/data/latent-basemap/sandbox")
 SUBDIR = os.environ.get("EVOLBENCH_SUBDIR", "/data/latent-basemap/substrates/evolbench")
-S0_HEAD = SB / "evolbench-S0/champion-bs16k/model.pt"
-S3_EDGES = SB / "evolbench-S3/edges-k15-fuzzy.npz"
-ANCHOR = SB / "lambda/s2_anchor.npz"
-OUTD = SB / "lambda"
-SEED = 42
+# head/anchor/output env-parameterized for the md010 kernel probe (owner 2026-09-02): a different T0 head
+# (md010) warm-starts from its own weights and pins to its own S2 layout, writing to a distinct dir.
+S0_HEAD = Path(os.environ.get("EVOLBENCH_LAMBDA_HEAD", str(SB / "evolbench-S0/champion-bs16k/model.pt")))
+S3_EDGES = Path(os.environ.get("EVOLBENCH_LAMBDA_EDGES", str(SB / "evolbench-S3/edges-k15-fuzzy.npz")))
+ANCHOR = Path(os.environ.get("EVOLBENCH_LAMBDA_ANCHOR", str(SB / "lambda/s2_anchor.npz")))
+OUTD = Path(os.environ.get("EVOLBENCH_LAMBDA_OUTD", str(SB / "lambda")))
+SEED = int(os.environ.get("EVOLBENCH_LAMBDA_SEED", "42"))
 
 
 def _norm(x):
