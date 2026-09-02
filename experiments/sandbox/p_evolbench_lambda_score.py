@@ -10,8 +10,12 @@ import json, glob
 from pathlib import Path
 import numpy as np
 
+import os
 SB = Path("/data/latent-basemap/sandbox")
-N0 = 4_000_000; N2 = 5_600_000; N = 6_400_000
+# dims env-parameterized for the D768/jina track (N0=2M, N2=2.8M, N=3.2M) vs MiniLM defaults.
+N0 = int(os.environ.get("EVOLBENCH_N0", "4000000"))
+N2 = int(os.environ.get("EVOLBENCH_N2", "5600000"))
+N = int(os.environ.get("EVOLBENCH_N", "6400000"))
 # env-parameterized for the md010 kernel probe: its cells pin to (and churn against) the md010 frozen S2
 # layout, its frozen endpoint is the md010 head, and it has no full-retrain endpoint (skipped if absent).
 import os
@@ -19,7 +23,7 @@ FROZEN_DIR = SB / os.environ.get("EVOLBENCH_FROZEN_DIR", "evolbench-armA-frozen"
 LAMBDA_DIR = SB / os.environ.get("EVOLBENCH_LAMBDA_DIR", "lambda")
 S2_LAYOUT = FROZEN_DIR / "coords-S2.npy"
 S3_KNN = SB / os.environ.get("EVOLBENCH_S3_KNN_DS", "evolbench-S3") / "knn_indices.npy"
-RETRAIN_COST_MIN = 313.0   # S3 head full train = 5.21 GPU-h (armA-triggered's retrain)
+RETRAIN_COST_MIN = float(os.environ.get("EVOLBENCH_RETRAIN_COST_MIN", "313.0"))   # S3 head full train (min)
 FROZEN_COST_MIN = 0.1      # frozen: placement only (seconds)
 
 
@@ -84,8 +88,9 @@ def main():
         rows.append({**_score_map(f, s2, knn, cost, f"w={tag}"), "w": wval,
                      "warm_start_hash": man.get("warm_start_state_hash"),
                      "trained_hash": man.get("trained_state_hash"), "gen_key": man.get("gen_key")})
-    # endpoint: full retrain (w=0) — present only for the md000 timeline; md010 probe overlays on md000's.
-    _retrain = SB / "evolbench-armA-triggered/coords-S3.npy"
+    # endpoint: full retrain (w=0). Path env-overridable (D768 = armA-d768-triggered-v2/coords-S3.npy);
+    # md010 probe skips it (overlays on md000's). md000 default is the triggered arm.
+    _retrain = SB / os.environ.get("EVOLBENCH_RETRAIN_COORDS", "evolbench-armA-triggered/coords-S3.npy")
     if _retrain.is_file() and os.environ.get("EVOLBENCH_SKIP_RETRAIN_ENDPOINT") != "1":
         rows.append({**_score_map(_retrain, s2, knn, RETRAIN_COST_MIN, "w=0(full-retrain)"), "w": 0.0})
     frozen_reddit = rows[0]["reddit_ffr"]
