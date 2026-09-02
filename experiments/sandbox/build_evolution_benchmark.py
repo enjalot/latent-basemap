@@ -23,7 +23,7 @@ from build_draw_universality import (  # vetted helpers
     DIM, PROV_DTYPE, CORPUS_CODE as BASE_CODE, BASELINE_PROV, CODE_HELDOUT_PROV, A1_PROV)
 
 E = "/data/embeddings"
-SEED = 42
+SEED = int(os.environ.get("EVOLBENCH_DRAW_SEED", "42"))   # 2nd-timeline draw = a different tranche split
 T0_SCALE = int(os.environ.get("T0_SCALE", "5000000"))
 TRANCHE = T0_SCALE // 5                       # 20% of T0
 MIX = {"fineweb": 0.40, "redpajama": 0.25, "pile": 0.25, "starcoder": 0.10}

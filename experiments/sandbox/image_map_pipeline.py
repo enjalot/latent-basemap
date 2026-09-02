@@ -444,7 +444,14 @@ DATASETS = {
         "arms": {"champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                         "rankneg_window": int(0.25 * (4_000_000 + k * 800_000)), "batch_size": 16384,
-                        "gpu_resident_vram_budget_gb": 22.0}}}}
+                        "gpu_resident_vram_budget_gb": 22.0}},
+              # validation batch (2026-09-02): seed-43 twin of the S0/S3 heads. S0 -> optimizer-only churn
+              # FLOOR (identical data, reseed); S3 -> the finalist retrain-corner seed delta vs the λ margin
+              # rule. Only k in {0,3} (arm-A's frozen + triggered heads); same recipe, seed 43, distinct dir.
+              **({"champion-bs16k-s43": {"md": "000", "dose": 4, "seed": 43,
+                    "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                              "rankneg_window": int(0.25 * (4_000_000 + k * 800_000)), "batch_size": 16384,
+                              "gpu_resident_vram_budget_gb": 22.0}}} if k in (0, 3) else {})}}
        for k in range(6)},
     # D768 (jina) evolution benchmark (5th review corrected build): T0=2M (jina-multi-2m = P1.5@42 head's
     # training set) + 5x400k -> 4M. Truths for all Sk; S3 = the drift-triggered retrain head (champion arm).
