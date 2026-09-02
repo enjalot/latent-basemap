@@ -133,6 +133,22 @@ def main() -> int:
         meta["arms"][arm] = arm_meta
         print(f"{arm}: {len(snaps)} snapshots exported "
               f"(churn means: {[v['mean'] for v in arm_meta['churn'].values()]})")
+    # attach frontier metrics to the lambda arm (matched by w; 3ep excluded)
+    front = SB / "evolbench-lambda-frontier.json"
+    lam_meta = meta["arms"].get("lambda-frontier")
+    if lam_meta and front.exists():
+        byw = {}
+        for r in json.loads(front.read_text())["frontier"]:
+            if "-3ep" in r.get("label", ""):
+                continue
+            byw[str(float(r["w"]))] = {
+                k: r.get(k) for k in ("reddit_ffr", "ood_gain", "churn_mean",
+                                      "overall_ffr", "cost_gpu_min")}
+        def _wkey(lbl: str) -> str:
+            t = lbl.split()[0].split("=")[1]
+            return "inf" if t == "∞" else str(float(t))
+        lam_meta["metrics"] = [byw.get(_wkey(l))
+                               for l in lam_meta["step_labels"]]
     (OUT / "cohorts.json").write_text(json.dumps(meta))
     print(f"-> {OUT}")
     return 0

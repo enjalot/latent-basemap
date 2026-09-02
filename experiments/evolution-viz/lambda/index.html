@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>λ-frontier compare</title>
+<style>
+  :root { --bg:#0e1116; --panel:#161b23; --edge:#2a3140; --fg:#d7dde8;
+          --dim:#8b93a7; --acc:#ffb347; }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--fg);
+         font:13px/1.45 "Source Sans 3",system-ui,sans-serif; height:100vh;
+         display:flex; flex-direction:column; overflow:hidden; }
+  header { display:flex; gap:10px; align-items:center; padding:8px 12px;
+           border-bottom:1px solid var(--edge); flex-wrap:wrap; }
+  header h1 { font-size:15px; font-weight:600; }
+  select,button { background:var(--panel); color:var(--fg);
+    border:1px solid var(--edge); border-radius:6px; padding:5px 8px;
+    font:inherit; cursor:pointer; }
+  .hint { color:var(--dim); font-size:12px; }
+  #chips { display:flex; gap:4px; }
+  .chip { min-width:52px; text-align:center; padding:4px 6px;
+    border:2px solid var(--edge); border-radius:7px; cursor:pointer;
+    background:var(--panel); user-select:none; font-weight:600; }
+  .chip.off { opacity:.32; border-style:dashed; }
+  #lerpbox { display:flex; align-items:center; gap:6px; }
+  #lerp { width:170px; }
+  #main { flex:1; display:flex; min-height:0; }
+  .col { flex:1; display:flex; flex-direction:column; min-width:0;
+         border-right:1px solid var(--edge); }
+  .bar { display:flex; gap:8px; align-items:center; padding:6px 10px;
+         background:var(--panel); border-bottom:1px solid var(--edge); }
+  .stats { font-size:12px; color:var(--dim); padding:2px 10px 4px;
+           background:var(--panel); border-bottom:1px solid var(--edge); }
+  .stats b { color:var(--acc); }
+  .stage { position:relative; flex:1; min-height:0; }
+  .stage canvas { position:absolute; inset:0; width:100%; height:100%; }
+  .stage .ov { cursor:crosshair; }
+  #foot { padding:6px 12px; border-top:1px solid var(--edge);
+    display:flex; gap:16px; align-items:center; flex-wrap:wrap;
+    font-size:12px; color:var(--dim); }
+</style></head><body>
+<header>
+  <h1>λ-frontier compare</h1>
+  <label>view <select id="view">
+    <option value="cohorts" selected>arrival cohorts</option>
+    <option value="dvf">Δ vs frozen</option>
+    <option value="density">density</option>
+  </select></label>
+  <span id="chips"></span>
+  <span id="lerpbox"><span class="hint">morph frozen→w</span>
+    <input type="range" id="lerp" min="0" max="1" step="0.01" value="1"></span>
+  <label class="hint">Δ gain <select id="dgain">
+    <option value="1">1×</option><option value="10" selected>10×</option>
+    <option value="50">50×</option>
+  </select></label>
+  <span class="hint">🔦 hover = flashlight (same rows on both panels)
+    · radius <input type="range" id="fr" min="10" max="90"
+    value="34" style="width:60px"> · drag pan · wheel zoom · dbl-click
+    reset</span>
+</header>
+<div id="main">
+  <div class="col" id="colA"></div>
+  <div class="col" id="colB"></div>
+</div>
+<div id="foot"></div>
+<script>
+"use strict";
+// Both panels read the SAME lambda-frontier export (one shared quant frame),
+// so cameras, morphs and flashlight rows are directly comparable. Each panel
+// picks a w; morph interpolates every point from its FROZEN (w=∞) position
+// to its position under that w — i.e. new data projected through the frozen
+// head, then loosening by the anchor weight.
+const DATA = "../evolution/data/lambda-frontier";
+const COHJ = "../evolution/data/cohorts.json";
+const COH = [[.42,.50,.62],[.30,.75,.44],[.16,.58,.60],[1,.28,.20]];
+const COHX = COH.map(c => `rgb(${c.map(v=>Math.round(v*255)).join(",")})`);
+const NAMES = ["T0 base","T1","T2","T3 reddit"];
+let META = null, LAM = null, LERP = 1, DGAIN = 10;
+const state = { view: "cohorts", vis: [1,1,1,1], fr: 34 };
+const bins = {};          // shared position cache: k -> Int16Array
+const dvfCache = {};      // k -> {attr: Float32Array (clamped Δ/R), coh: [4 means]}
+
+function sh(gl,t,s){const o=gl.createShader(t);gl.shaderSource(o,s);
+  gl.compileShader(o);if(!gl.getShaderParameter(o,gl.COMPILE_STATUS))
+    throw gl.getShaderInfoLog(o);return o;}
+function prog(gl,v,f){const p=gl.createProgram();
+  gl.attachShader(p,sh(gl,gl.VERTEX_SHADER,v));
+  gl.attachShader(p,sh(gl,gl.FRAGMENT_SHADER,f));gl.linkProgram(p);
+  if(!gl.getProgramParameter(p,gl.LINK_STATUS))
+    throw gl.getProgramInfoLog(p);return p;}
+
+const VS = `#version 300 es
+layout(location=0) in vec2 pos;      // position under this panel's w
+layout(location=1) in vec2 posPrev;  // frozen (w=inf) position
+layout(location=2) in float attr;    // cohort idx (0-3) or Δ 0..1
+uniform vec2 uS,uT; uniform float uPt,uLerp; uniform float uVis[4];
+uniform float uMode;
+out float vA;
+void main(){
+  vA = attr;
+  if (uMode > 0.5 && uMode < 1.5 && uVis[int(attr + 0.5)] < 0.5) {
+    gl_Position = vec4(2.,2.,2.,1.); gl_PointSize = 0.; return; }
+  vec2 p = mix(posPrev, pos, uLerp);
+  gl_Position = vec4(p*uS+uT, 0., 1.); gl_PointSize = uPt; }`;
+const FS_ACC = `#version 300 es
+precision highp float; uniform float uAdd,uMode; in float vA;
+out vec4 o;
+vec3 cohortC(float i){
+  if(i<0.5) return vec3(.42,.50,.62); if(i<1.5) return vec3(.30,.75,.44);
+  if(i<2.5) return vec3(.16,.58,.60); return vec3(1.,.28,.20); }
+vec3 dvfC(float t){ t=clamp(t,0.,1.);
+  return mix(vec3(.35,.40,.48), mix(vec3(1.,.70,.20), vec3(1.,.15,.10),
+    clamp(t*2.-1.,0.,1.)), clamp(t*2.,0.,1.)); }
+void main(){ vec2 d=gl_PointCoord-.5; if(dot(d,d)>.25) discard;
+  vec3 c = uMode<0.5 ? vec3(1.) : uMode<1.5 ? cohortC(vA) : dvfC(vA);
+  o = vec4(c*uAdd, uAdd); }`;
+const VS_Q = `#version 300 es
+layout(location=0) in vec2 q; out vec2 vUV;
+void main(){ vUV=q*.5+.5; gl_Position=vec4(q,0.,1.); }`;
+const FS_SCREEN = `#version 300 es
+precision highp float; uniform sampler2D uD;
+uniform float uG,uMode; in vec2 vUV; out vec4 o;
+vec3 ramp(float t){ const vec3 c0=vec3(.05,.063,.086),c1=vec3(.13,.22,.42),
+  c2=vec3(.12,.49,.55),c3=vec3(.29,.76,.42),c4=vec3(.95,.90,.35),
+  c5=vec3(1.,1.,.95); float x=t*5.; vec3 c=mix(c0,c1,clamp(x,0.,1.));
+  c=mix(c,c2,clamp(x-1.,0.,1.)); c=mix(c,c3,clamp(x-2.,0.,1.));
+  c=mix(c,c4,clamp(x-3.,0.,1.)); return mix(c,c5,clamp(x-4.,0.,1.)); }
+void main(){ vec4 px=texture(uD,vUV); float d=px.a;
+  float v=clamp(log(1.+d*exp(uG))/7.,0.,1.);
+  if(uMode<0.5){ o=vec4(ramp(v),1.); return; }
+  vec3 c = px.rgb/max(px.a,1e-9);
+  o=vec4(c*max(v,.05)*1.5,1.); }`;
+const FS_SEL = `#version 300 es
+precision highp float; uniform vec4 uC; out vec4 o;
+void main(){ vec2 d=gl_PointCoord-.5; if(dot(d,d)>.25) discard; o=uC; }`;
+const VS_SEL = `#version 300 es
+layout(location=0) in vec2 pos; layout(location=1) in vec2 posPrev;
+uniform vec2 uS,uT; uniform float uPt,uLerp;
+void main(){ vec2 p=mix(posPrev,pos,uLerp);
+  gl_Position=vec4(p*uS+uT,0.,1.); gl_PointSize=uPt; }`;
+
+function makePanel(colId, key, defK) {
+  const col = document.getElementById(colId);
+  col.innerHTML = `
+    <div class="bar"><b style="color:var(--acc)">${key}</b>
+      <select class="wsel"></select></div>
+    <div class="stats"></div>
+    <div class="stage"><canvas class="gl"></canvas>
+      <canvas class="ov"></canvas></div>`;
+  const p = { key, k: defK, view: { z:.92, tx:0, ty:0 },
+    sel: col.querySelector(".wsel"), stats: col.querySelector(".stats"),
+    glc: col.querySelector(".gl"), ovc: col.querySelector(".ov"),
+    n: 0, cur: null, prev: null, dirty: true };
+  const gl = p.gl = p.glc.getContext("webgl2", { antialias: false });
+  gl.getExtension("EXT_color_buffer_float");
+  p.R = { pAcc: prog(gl,VS,FS_ACC), pScr: prog(gl,VS_Q,FS_SCREEN),
+    pSel: prog(gl,VS_SEL,FS_SEL),
+    vboCur: gl.createBuffer(), vboPrev: gl.createBuffer(),
+    vboAttr: gl.createBuffer(), vboQuad: gl.createBuffer(),
+    iboHover: gl.createBuffer(), nHover: 0,
+    vaoP: gl.createVertexArray(), vaoQ: gl.createVertexArray(),
+    vaoH: gl.createVertexArray(), fb:null, tex:null, fw:0, fh:0 };
+  gl.bindVertexArray(p.R.vaoQ);
+  gl.bindBuffer(gl.ARRAY_BUFFER, p.R.vboQuad);
+  gl.bufferData(gl.ARRAY_BUFFER,
+    new Float32Array([-1,-1,1,-1,-1,1,1,1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
+  gl.bindVertexArray(null);
+  bindNav(p);
+  return p;
+}
+async function fetchBin(url, T) {
+  const r = await fetch(url); if (!r.ok) return null;
+  return new T(await r.arrayBuffer());
+}
+async function snap(k) {
+  if (!(k in bins)) bins[k] = await fetchBin(`${DATA}/S${k}.bin`, Int16Array);
+  return bins[k];
+}
+function cohortIdx(i) {
+  const t0 = META.t0, tr = META.tranche;
+  return i < t0 ? 0 : Math.min(3, 1 + Math.floor((i - t0) / tr));
+}
+async function dvf(k) {
+  // per-point displacement from the FROZEN map, in map-radius units
+  // (frame-relative: computed from the shared quantized coords).
+  if (k in dvfCache) return dvfCache[k];
+  const cur = await snap(k), frz = await snap(0);
+  if (!cur || !frz) return null;
+  const n = cur.length / 2;
+  // radius in quant units: LAM.radius is in raw map units; quant scale is
+  // 65535/span per axis — use the mean axis scale as the isotropic approx.
+  const sx = 65535 / LAM.span[0], sy = 65535 / LAM.span[1];
+  const Rq = LAM.radius * (sx + sy) / 2;
+  const attr = new Float32Array(n), coh = [0,0,0,0], cnt = [0,0,0,0];
+  for (let i = 0; i < n; i++) {
+    const dx = (cur[i<<1] - frz[i<<1]),
+          dy = (cur[(i<<1)|1] - frz[(i<<1)|1]);
+    const d = Math.sqrt(dx*dx + dy*dy) / Rq;
+    attr[i] = d;
+    const c = cohortIdx(i); coh[c] += d; cnt[c]++;
+  }
+  const out = { attr, coh: coh.map((s,i)=>cnt[i]?s/cnt[i]:0) };
+  dvfCache[k] = out;
+  return out;
+}
+async function refresh(p) {
+  const K = p.k;
+  const cur = await snap(K), frz = await snap(0);
+  if (!cur) { p.stats.textContent = "no data"; return; }
+  const n = cur.length / 2;
+  const attr = new Float32Array(n);
+  let dv = null;
+  if (state.view === "dvf") {
+    dv = await dvf(K);
+    for (let i = 0; i < n; i++) attr[i] = Math.min(1, dv.attr[i] * DGAIN);
+  } else {
+    for (let i = 0; i < n; i++) attr[i] = cohortIdx(i);
+  }
+  const gl = p.gl, R = p.R;
+  p.n = n; p.cur = cur; p.prev = frz || cur;
+  gl.bindBuffer(gl.ARRAY_BUFFER, R.vboCur);
+  gl.bufferData(gl.ARRAY_BUFFER, cur, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, R.vboPrev);
+  gl.bufferData(gl.ARRAY_BUFFER, p.prev, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, R.vboAttr);
+  gl.bufferData(gl.ARRAY_BUFFER, attr, gl.STATIC_DRAW);
+  for (const vao of [R.vaoP, R.vaoH]) {
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, R.vboCur);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0,2,gl.SHORT,true,0,0);
+    gl.bindBuffer(gl.ARRAY_BUFFER, R.vboPrev);
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1,2,gl.SHORT,true,0,0);
+    if (vao === R.vaoP) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, R.vboAttr);
+      gl.enableVertexAttribArray(2);
+      gl.vertexAttribPointer(2,1,gl.FLOAT,false,0,0);
+    } else gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, R.iboHover);
+    gl.bindVertexArray(null);
+  }
+  const m = LAM.metrics ? LAM.metrics[K] : null;
+  let s = `<b>${LAM.step_labels[K]}</b> · n ${(n/1e6).toFixed(1)}M`;
+  if (m) s += ` · reddit FFR <b>${m.reddit_ffr}</b>` +
+    ` (gain ${m.ood_gain>=0?"+":""}${(+m.ood_gain).toFixed(4)})` +
+    ` · churn <b>${(+m.churn_mean).toFixed(4)}</b>` +
+    ` · ${Math.round(m.cost_gpu_min)} GPU-min`;
+  else if (K > 0) s += ` · <i>metrics pending rescore</i>`;
+  if (state.view === "dvf" && dv)
+    s += `<br>mean Δ vs frozen — base <b>${dv.coh[0].toFixed(4)}</b>` +
+      ` · T1 ${dv.coh[1].toFixed(4)} · T2 ${dv.coh[2].toFixed(4)}` +
+      ` · reddit <b style="color:${COHX[3]}">${dv.coh[3].toFixed(4)}</b>` +
+      ` map-radii`;
+  p.stats.innerHTML = s;
+  p.dirty = true;
+}
+function setHover(p, ids) {
+  const gl = p.gl, R = p.R;
+  R.nHover = ids ? ids.length : 0;
+  if (R.nHover) {
+    gl.bindVertexArray(R.vaoH);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, R.iboHover);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, ids, gl.DYNAMIC_DRAW);
+    gl.bindVertexArray(null);
+  }
+  p.dirty = true;
+}
+function draw(p) {
+  const gl = p.gl, R = p.R;
+  const w = p.glc.clientWidth*devicePixelRatio|0,
+        h = p.glc.clientHeight*devicePixelRatio|0;
+  if (!w || !h || !p.n) return;
+  if (p.glc.width!==w||p.glc.height!==h){p.glc.width=w;p.glc.height=h;}
+  if (R.fw!==w||R.fh!==h){
+    if(R.tex){gl.deleteTexture(R.tex);gl.deleteFramebuffer(R.fb);}
+    R.tex=gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D,R.tex);
+    gl.texStorage2D(gl.TEXTURE_2D,1,gl.RGBA32F,w,h);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+    R.fb=gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER,R.fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,
+      gl.TEXTURE_2D,R.tex,0);
+    R.fw=w;R.fh=h;
+  }
+  const v=p.view, aspect=w/h;
+  const S=[v.z/aspect,v.z], T=[v.tx,v.ty];
+  const pt=Math.max(1.5,Math.min(7,v.z*1.15))*devicePixelRatio;
+  const mode = state.view==="density"?0:state.view==="cohorts"?1:2;
+  gl.bindFramebuffer(gl.FRAMEBUFFER,R.fb);
+  gl.viewport(0,0,w,h);
+  gl.clearColor(0,0,0,0); gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.enable(gl.BLEND); gl.blendFunc(gl.ONE,gl.ONE);
+  gl.useProgram(R.pAcc);
+  gl.uniform2fv(gl.getUniformLocation(R.pAcc,"uS"),S);
+  gl.uniform2fv(gl.getUniformLocation(R.pAcc,"uT"),T);
+  gl.uniform1f(gl.getUniformLocation(R.pAcc,"uPt"),pt);
+  gl.uniform1f(gl.getUniformLocation(R.pAcc,"uAdd"),1.0);
+  gl.uniform1f(gl.getUniformLocation(R.pAcc,"uLerp"),LERP);
+  gl.uniform1f(gl.getUniformLocation(R.pAcc,"uMode"),mode);
+  gl.uniform1fv(gl.getUniformLocation(R.pAcc,"uVis"),state.vis);
+  gl.bindVertexArray(R.vaoP);
+  gl.drawArrays(gl.POINTS,0,p.n);
+  gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+  gl.viewport(0,0,w,h);
+  gl.disable(gl.BLEND);
+  gl.useProgram(R.pScr);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D,R.tex);
+  gl.uniform1i(gl.getUniformLocation(R.pScr,"uD"),0);
+  gl.uniform1f(gl.getUniformLocation(R.pScr,"uG"),
+    0.6+Math.min(0.5*Math.log(Math.max(1,v.z*v.z)),3.0));
+  gl.uniform1f(gl.getUniformLocation(R.pScr,"uMode"),mode);
+  gl.bindVertexArray(R.vaoQ);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+  if (R.nHover) {
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
+    gl.useProgram(R.pSel);
+    gl.uniform2fv(gl.getUniformLocation(R.pSel,"uS"),S);
+    gl.uniform2fv(gl.getUniformLocation(R.pSel,"uT"),T);
+    gl.uniform1f(gl.getUniformLocation(R.pSel,"uPt"),Math.max(2.2,pt*1.25));
+    gl.uniform1f(gl.getUniformLocation(R.pSel,"uLerp"),LERP);
+    gl.uniform4f(gl.getUniformLocation(R.pSel,"uC"),1,.9,.35,.42);
+    gl.bindVertexArray(R.vaoH);
+    gl.drawElements(gl.POINTS,R.nHover,gl.UNSIGNED_INT,0);
+  }
+  gl.bindVertexArray(null);
+}
+function screenToData(p, px, py) {
+  const w=p.ovc.clientWidth,h=p.ovc.clientHeight,v=p.view,aspect=w/h;
+  const cx=(px/w)*2-1, cy=1-(py/h)*2;
+  return [(cx-v.tx)/(v.z/aspect),(cy-v.ty)/v.z];
+}
+function scanCircle(p, cx, cy, rx, ry) {
+  const cur=p.cur, prv=p.prev, t=LERP, out=[];
+  const cxq=cx*32767, cyq=cy*32767, rxq=Math.max(rx*32767,1e-6),
+        ryq=Math.max(ry*32767,1e-6);
+  const coh = state.view==="cohorts";
+  for (let i=0,n=p.n;i<n;i++){
+    if (coh && !state.vis[cohortIdx(i)]) continue;
+    const x=prv[i<<1]+(cur[i<<1]-prv[i<<1])*t;
+    const y=prv[(i<<1)|1]+(cur[(i<<1)|1]-prv[(i<<1)|1])*t;
+    const dx=(x-cxq)/rxq, dy=(y-cyq)/ryq;
+    if (dx*dx+dy*dy<=1) out.push(i);
+  }
+  return new Uint32Array(out);
+}
+function bindNav(p) {
+  const el=p.ovc; let drag=null, moved=false, raf=null;
+  el.addEventListener("pointerdown",e=>{drag=[e.clientX,e.clientY];
+    moved=false; el.setPointerCapture(e.pointerId);});
+  el.addEventListener("pointermove",e=>{
+    const r=el.getBoundingClientRect();
+    if (drag){
+      const dx=e.clientX-drag[0],dy=e.clientY-drag[1];
+      if (Math.abs(dx)+Math.abs(dy)>3) moved=true;
+      if (moved){ p.view.tx+=dx/r.width*2; p.view.ty-=dy/r.height*2;
+        drag=[e.clientX,e.clientY]; p.dirty=true; }
+    }
+    drawRing(p, e.clientX-r.left, e.clientY-r.top);
+    if (!raf && p.cur) raf=requestAnimationFrame(()=>{
+      raf=null;
+      const [cx,cy]=screenToData(p,e.clientX-r.left,e.clientY-r.top);
+      const [ex,ey]=screenToData(p,e.clientX-r.left+state.fr,
+                                  e.clientY-r.top+state.fr);
+      const ids=scanCircle(p,cx,cy,Math.abs(ex-cx),Math.abs(ey-cy));
+      const other=p===A?B:A;
+      setHover(p,ids); if (other.n) setHover(other,ids);
+    });
+  });
+  el.addEventListener("pointerleave",()=>{
+    drawRing(p,null); setHover(A,null); setHover(B,null); });
+  el.addEventListener("pointerup",e=>{el.releasePointerCapture(e.pointerId);
+    drag=null;});
+  el.addEventListener("wheel",e=>{e.preventDefault();
+    p.view.z*=Math.exp(-e.deltaY*0.0016); p.dirty=true;},{passive:false});
+  el.addEventListener("dblclick",()=>{p.view={z:.92,tx:0,ty:0};p.dirty=true;});
+}
+function drawRing(p, x, y) {
+  const c=p.ovc, w=c.clientWidth*devicePixelRatio|0,
+        h=c.clientHeight*devicePixelRatio|0;
+  if (c.width!==w||c.height!==h){c.width=w;c.height=h;}
+  const g=c.getContext("2d"); g.clearRect(0,0,w,h);
+  if (x==null) return;
+  g.strokeStyle="rgba(255,220,90,.85)"; g.lineWidth=1.6*devicePixelRatio;
+  g.beginPath();
+  g.arc(x*devicePixelRatio,y*devicePixelRatio,state.fr*devicePixelRatio,0,7);
+  g.stroke();
+}
+
+/* ---------- wiring ---------- */
+const A = makePanel("colA","A",10);   // default w=0.1 (best cheap cell)
+const B = makePanel("colB","B",13);   // default w=0 retrain
+function chipRender() {
+  document.querySelectorAll(".chip").forEach((el,i)=>{
+    const active = state.vis[i];
+    el.classList.toggle("off",!active);
+    el.style.borderColor = active? COHX[i] : "var(--edge)";
+    el.style.color = active? COHX[i] : "var(--dim)";
+  });
+}
+document.getElementById("view").onchange=e=>{
+  state.view=e.target.value; refresh(A); refresh(B); foot(); };
+document.getElementById("lerp").oninput=e=>{
+  LERP=+e.target.value; A.dirty=B.dirty=true; };
+document.getElementById("dgain").onchange=e=>{
+  DGAIN=+e.target.value;
+  if (state.view==="dvf"){ refresh(A); refresh(B); } };
+document.getElementById("fr").oninput=e=>{ state.fr=+e.target.value; };
+function foot() {
+  const f=document.getElementById("foot");
+  if (state.view==="dvf")
+    f.innerHTML=`<span class="hint">points colored by how far they sit from
+      their FROZEN (w=∞) position under this panel's w — gray still → amber →
+      red (≥ 1/gain map-radii; Δ gain magnifies the subtle cells). The
+      per-cohort means in each stats line show whether the reddit injection
+      loosens more than the base corpus. Morph slides frozen→w.</span>`;
+  else if (state.view==="cohorts")
+    f.innerHTML=`<span class="hint">chips: click to toggle a cohort, dbl-click
+      to solo. Solo <b style="color:${COHX[3]}">T3 reddit</b> and drag morph to
+      watch the new data leave its frozen-head placement as anchors loosen.
+      Pick a w per panel to compare along the frontier.</span>`;
+  else f.innerHTML=`<span class="hint">density heatmap; morph slides each
+      panel frozen→its w.</span>`;
+}
+(async function init(){
+  META=await (await fetch(COHJ)).json();
+  LAM=META.arms["lambda-frontier"];
+  if(!LAM){ document.getElementById("foot").textContent=
+    "lambda-frontier export missing — run export_evolution_viz.py"; return; }
+  for (const p of [A,B]) {
+    p.sel.innerHTML=LAM.snaps.map(k=>
+      `<option value="${k}">${LAM.step_labels[k]}</option>`).join("");
+    p.sel.value=String(Math.min(p.k, Math.max(...LAM.snaps)));
+    p.k=+p.sel.value;
+    p.sel.onchange=()=>{p.k=+p.sel.value; refresh(p);};
+  }
+  const chips=document.getElementById("chips");
+  chips.innerHTML=NAMES.map((nm,i)=>
+    `<span class="chip" data-i="${i}" style="border-color:${COHX[i]};color:${COHX[i]}">${nm}</span>`).join("");
+  chips.querySelectorAll(".chip").forEach(el=>{
+    el.onclick=()=>{
+      const i=+el.dataset.i;
+      state.vis[i]=state.vis[i]?0:1;
+      chipRender(); refresh(A); refresh(B);
+    };
+    el.ondblclick=()=>{
+      const i=+el.dataset.i;
+      const solo = state.vis.reduce((s,v)=>s+v,0)===1 && state.vis[i];
+      for (let j=0;j<4;j++) state.vis[j]=solo?1:(j===i?1:0);
+      chipRender(); refresh(A); refresh(B);
+    };
+  });
+  chipRender(); foot();
+  refresh(A); refresh(B);
+  (function loop(){
+    for (const p of [A,B]) if (p.dirty){p.dirty=false;draw(p);}
+    requestAnimationFrame(loop);
+  })();
+  new ResizeObserver(()=>{A.dirty=B.dirty=true;})
+    .observe(document.getElementById("main"));
+})();
+</script>
+</body></html>
