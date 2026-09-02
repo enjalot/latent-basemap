@@ -41,6 +41,10 @@
 </style></head><body>
 <header>
   <h1>evolution viewer</h1>
+  <label>space <select id="space">
+    <option value="data" selected>minilm-384</option>
+    <option value="data-d768">jina-768</option>
+  </select></label>
   <label>view <select id="view">
     <option value="cohorts" selected>arrival cohorts</option>
     <option value="density">density</option>
@@ -68,7 +72,7 @@ const COH = [[.42,.50,.62],[.30,.75,.44],[.16,.58,.60],[1,.28,.20],
              [.65,.45,.88],[.95,.62,.20]];
 const COHX = COH.map(c => `rgb(${c.map(v=>Math.round(v*255)).join(",")})`);
 const NAMES = ["T0 base","T1","T2","T3 reddit","T4 ml","T5 ml"];
-let META = null, K = 5, LERP = 1, playing = null;
+let META = null, K = 5, LERP = 1, playing = null, BASE = "data";
 // step label: timeline arms are S0..S5; pseudo-arms (lambda-frontier) carry
 // their own step_labels (w-ladder). Panel A's arm names the global controls.
 const SLAB = (k, arm) =>
@@ -183,16 +187,16 @@ async function fetchBin(url, T) {
   return new T(await r.arrayBuffer());
 }
 async function snap(p, arm, k) {
-  const key = `${arm}/S${k}`;
+  const key = `${BASE}/${arm}/S${k}`;
   if (!(key in p.cache))
-    p.cache[key] = await fetchBin(`data/${arm}/S${k}.bin`, Int16Array);
+    p.cache[key] = await fetchBin(`${BASE}/${arm}/S${k}.bin`, Int16Array);
   return p.cache[key];
 }
 async function disp(p, arm, k) {  // displacement INTO snapshot k
-  const key = `${arm}/d${k}`;
+  const key = `${BASE}/${arm}/d${k}`;
   if (!(key in p.cache))
     p.cache[key] = k > 0
-      ? await fetchBin(`data/${arm}/disp-S${k-1}.bin`, Uint16Array) : null;
+      ? await fetchBin(`${BASE}/${arm}/disp-S${k-1}.bin`, Uint16Array) : null;
   return p.cache[key];
 }
 function cohortIdx(i) {
@@ -445,10 +449,12 @@ function foot() {
       snapshot; morph slider interpolates positions from the previous
       snapshot.</span>`;
 }
-(async function init(){
-  META=await (await fetch("data/cohorts.json")).json();
+async function loadSpace(base){
+  BASE=base;
+  META=await (await fetch(`${base}/cohorts.json`)).json();
   const arms=Object.keys(META.arms);
   for (const p of [A,B]) {
+    p.cache={};
     p.sel.innerHTML=arms.map(a=>`<option>${a}</option>`).join("");
     p.sel.value=arms.includes(p.arm)?p.arm:arms[0]; p.arm=p.sel.value;
     p.sel.onchange=()=>{
@@ -457,6 +463,13 @@ function foot() {
       if (K>mx) setK(mx,1); else { chipRender(); refresh(p); foot(); }
     };
   }
+  const mx=KMAX();
+  if (K>mx) K=mx;
+  chipRender(); refresh(A); refresh(B); foot();
+}
+document.getElementById("space").onchange=e=>loadSpace(e.target.value);
+(async function init(){
+  await loadSpace("data");
   const chips=document.getElementById("chips");
   chips.innerHTML=NAMES.map((nm,i)=>
     `<span class="chip" data-i="${i}" style="border-color:${COHX[i]};color:${COHX[i]}">${nm}</span>`).join("");

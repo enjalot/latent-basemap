@@ -41,6 +41,10 @@
 </style></head><body>
 <header>
   <h1>λ-frontier compare</h1>
+  <label>space <select id="space">
+    <option value="data" selected>minilm-384</option>
+    <option value="data-d768">jina-768</option>
+  </select></label>
   <label>view <select id="view">
     <option value="cohorts" selected>arrival cohorts</option>
     <option value="dvf">Δ vs frozen</option>
@@ -70,8 +74,9 @@
 // picks a w; morph interpolates every point from its FROZEN (w=∞) position
 // to its position under that w — i.e. new data projected through the frozen
 // head, then loosening by the anchor weight.
-const DATA = "../evolution/data/lambda-frontier";
-const COHJ = "../evolution/data/cohorts.json";
+let BASE = "data";
+const DATA = () => `../evolution/${BASE}/lambda-frontier`;
+const COHJ = () => `../evolution/${BASE}/cohorts.json`;
 const COH = [[.42,.50,.62],[.30,.75,.44],[.16,.58,.60],[1,.28,.20]];
 const COHX = COH.map(c => `rgb(${c.map(v=>Math.round(v*255)).join(",")})`);
 const NAMES = ["T0 base","T1","T2","T3 reddit"];
@@ -175,8 +180,10 @@ async function fetchBin(url, T) {
   return new T(await r.arrayBuffer());
 }
 async function snap(k) {
-  if (!(k in bins)) bins[k] = await fetchBin(`${DATA}/S${k}.bin`, Int16Array);
-  return bins[k];
+  const key = `${BASE}/${k}`;
+  if (!(key in bins))
+    bins[key] = await fetchBin(`${DATA()}/S${k}.bin`, Int16Array);
+  return bins[key];
 }
 function cohortIdx(i) {
   const t0 = META.t0, tr = META.tranche;
@@ -185,7 +192,8 @@ function cohortIdx(i) {
 async function dvf(k) {
   // per-point displacement from the FROZEN map, in map-radius units
   // (frame-relative: computed from the shared quantized coords).
-  if (k in dvfCache) return dvfCache[k];
+  const ck = `${BASE}/${k}`;
+  if (ck in dvfCache) return dvfCache[ck];
   const cur = await snap(k), frz = await snap(0);
   if (!cur || !frz) return null;
   const n = cur.length / 2;
@@ -202,7 +210,7 @@ async function dvf(k) {
     const c = cohortIdx(i); coh[c] += d; cnt[c]++;
   }
   const out = { attr, coh: coh.map((s,i)=>cnt[i]?s/cnt[i]:0) };
-  dvfCache[k] = out;
+  dvfCache[ck] = out;
   return out;
 }
 async function refresh(p) {
@@ -427,18 +435,27 @@ function foot() {
   else f.innerHTML=`<span class="hint">density heatmap; morph slides each
       panel frozen→its w.</span>`;
 }
-(async function init(){
-  META=await (await fetch(COHJ)).json();
+async function loadSpace(base){
+  BASE=base;
+  META=await (await fetch(COHJ())).json();
   LAM=META.arms["lambda-frontier"];
   if(!LAM){ document.getElementById("foot").textContent=
-    "lambda-frontier export missing — run export_evolution_viz.py"; return; }
+    "no lambda-frontier export for this space yet"; A.n=B.n=0;
+    A.stats.textContent=B.stats.textContent="no data";
+    A.dirty=B.dirty=true; return; }
+  const mx=Math.max(...LAM.snaps);
   for (const p of [A,B]) {
     p.sel.innerHTML=LAM.snaps.map(k=>
       `<option value="${k}">${LAM.step_labels[k]}</option>`).join("");
-    p.sel.value=String(Math.min(p.k, Math.max(...LAM.snaps)));
+    p.sel.value=String(Math.min(p.k, mx));
     p.k=+p.sel.value;
     p.sel.onchange=()=>{p.k=+p.sel.value; refresh(p);};
   }
+  foot(); refresh(A); refresh(B);
+}
+document.getElementById("space").onchange=e=>loadSpace(e.target.value);
+(async function init(){
+  await loadSpace("data");
   const chips=document.getElementById("chips");
   chips.innerHTML=NAMES.map((nm,i)=>
     `<span class="chip" data-i="${i}" style="border-color:${COHX[i]};color:${COHX[i]}">${nm}</span>`).join("");
