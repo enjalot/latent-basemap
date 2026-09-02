@@ -50,6 +50,7 @@
   <span id="lerpbox"><span class="hint">morph</span>
     <input type="range" id="lerp" min="0" max="1" step="0.01" value="1">
     <span class="hint" id="lerplab">S→S</span></span>
+  <button id="stepb">⏮</button><button id="stepf">⏭</button>
   <button id="play">▶ play</button>
   <span class="hint">🔦 hover = flashlight (same rows lit on the other
     panel) · radius <input type="range" id="fr" min="10" max="90"
@@ -89,18 +90,30 @@ layout(location=0) in vec2 pos;      // current snapshot
 layout(location=1) in vec2 posPrev;  // previous snapshot (or == pos)
 layout(location=2) in float attr;    // cohort idx (0-5) or churn 0..1
 uniform vec2 uS,uT; uniform float uPt,uLerp; uniform float uVis[6];
-uniform float uMode;                 // 1=cohorts (attr=cohort), else pass
-out float vA;
+uniform float uMode; uniform int uPrevN;
+out float vA; out float vF;
 void main(){
   vA = attr;
+  vF = (gl_VertexID >= uPrevN) ? uLerp : 1.0;   // arrivals fade in
   if (uMode > 0.5 && uVis[int(attr + 0.5)] < 0.5) {
     gl_Position = vec4(2.,2.,2.,1.); gl_PointSize = 0.; return; }
   vec2 p = mix(posPrev, pos, uLerp);
   gl_Position = vec4(p*uS+uT, 0., 1.); gl_PointSize = uPt; }`;
 const FS_ACC = `#version 300 es
-precision highp float; uniform float uAdd; in float vA; out vec4 o;
+precision highp float; uniform float uAdd,uMode; in float vA; in float vF;
+out vec4 o;
+vec3 cohortC(float i){
+  if(i<0.5) return vec3(.42,.50,.62); if(i<1.5) return vec3(.30,.75,.44);
+  if(i<2.5) return vec3(.16,.58,.60); if(i<3.5) return vec3(1.,.28,.20);
+  if(i<4.5) return vec3(.65,.45,.88); return vec3(.95,.62,.20); }
+vec3 churnC(float t){ t=clamp(t,0.,1.);
+  return mix(vec3(.35,.40,.48), mix(vec3(1.,.70,.20), vec3(1.,.15,.10),
+    clamp(t*2.-1.,0.,1.)), clamp(t*2.,0.,1.)); }
 void main(){ vec2 d=gl_PointCoord-.5; if(dot(d,d)>.25) discard;
-  o=vec4(uAdd, uAdd*vA, 0., uAdd); }`;
+  if (vF <= 0.004) discard;
+  vec3 c = uMode<0.5 ? vec3(1.) : uMode<1.5 ? cohortC(vA) : churnC(vA);
+  float a = uAdd * vF;
+  o = vec4(c*a, a); }`;
 const VS_Q = `#version 300 es
 layout(location=0) in vec2 q; out vec2 vUV;
 void main(){ vUV=q*.5+.5; gl_Position=vec4(q,0.,1.); }`;
@@ -112,18 +125,10 @@ vec3 ramp(float t){ const vec3 c0=vec3(.05,.063,.086),c1=vec3(.13,.22,.42),
   c5=vec3(1.,1.,.95); float x=t*5.; vec3 c=mix(c0,c1,clamp(x,0.,1.));
   c=mix(c,c2,clamp(x-1.,0.,1.)); c=mix(c,c3,clamp(x-2.,0.,1.));
   c=mix(c,c4,clamp(x-3.,0.,1.)); return mix(c,c5,clamp(x-4.,0.,1.)); }
-vec3 cohort(float i){
-  if(i<0.5) return vec3(.42,.50,.62); if(i<1.5) return vec3(.30,.75,.44);
-  if(i<2.5) return vec3(.16,.58,.60); if(i<3.5) return vec3(1.,.28,.20);
-  if(i<4.5) return vec3(.65,.45,.88); return vec3(.95,.62,.20); }
-vec3 churnC(float t){ t=clamp(t,0.,1.);
-  return mix(vec3(.35,.40,.48), mix(vec3(1.,.70,.20), vec3(1.,.15,.10),
-    clamp(t*2.-1.,0.,1.)), clamp(t*2.,0.,1.)); }
-void main(){ vec4 px=texture(uD,vUV); float d=px.r;
+void main(){ vec4 px=texture(uD,vUV); float d=px.a;
   float v=clamp(log(1.+d*exp(uG))/7.,0.,1.);
   if(uMode<0.5){ o=vec4(ramp(v),1.); return; }
-  float m=px.g/max(px.r,1e-9);
-  vec3 c = uMode<1.5 ? cohort(m) : churnC(m);
+  vec3 c = px.rgb/max(px.a,1e-9);
   o=vec4(c*max(v,.05)*1.5,1.); }`;
 const FS_SEL = `#version 300 es
 precision highp float; uniform vec4 uC; out vec4 o;
@@ -210,6 +215,7 @@ async function refresh(p) {
   }
   const gl = p.gl, R = p.R;
   p.n = n; p.cur = cur; p.prev = prevBuf;
+  p.prevN = prv ? prv.length / 2 : n;
   gl.bindBuffer(gl.ARRAY_BUFFER, R.vboCur);
   gl.bufferData(gl.ARRAY_BUFFER, cur, gl.STATIC_DRAW);
   gl.bindBuffer(gl.ARRAY_BUFFER, R.vboPrev);
@@ -257,7 +263,7 @@ function draw(p) {
     if(R.tex){gl.deleteTexture(R.tex);gl.deleteFramebuffer(R.fb);}
     R.tex=gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D,R.tex);
-    gl.texStorage2D(gl.TEXTURE_2D,1,gl.RG32F,w,h);
+    gl.texStorage2D(gl.TEXTURE_2D,1,gl.RGBA32F,w,h);
     gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
     R.fb=gl.createFramebuffer();
@@ -280,7 +286,8 @@ function draw(p) {
   gl.uniform1f(gl.getUniformLocation(R.pAcc,"uPt"),pt);
   gl.uniform1f(gl.getUniformLocation(R.pAcc,"uAdd"),1.0);
   gl.uniform1f(gl.getUniformLocation(R.pAcc,"uLerp"),LERP);
-  gl.uniform1f(gl.getUniformLocation(R.pAcc,"uMode"),mode===1?1:0);
+  gl.uniform1f(gl.getUniformLocation(R.pAcc,"uMode"),mode);
+  gl.uniform1i(gl.getUniformLocation(R.pAcc,"uPrevN"),p.prevN|0);
   gl.uniform1fv(gl.getUniformLocation(R.pAcc,"uVis"),state.vis);
   gl.bindVertexArray(R.vaoP);
   gl.drawArrays(gl.POINTS,0,p.n);
@@ -396,6 +403,8 @@ document.getElementById("view").onchange=e=>{
 document.getElementById("lerp").oninput=e=>{
   LERP=+e.target.value; A.dirty=B.dirty=true; };
 document.getElementById("fr").oninput=e=>{ state.fr=+e.target.value; };
+document.getElementById("stepf").onclick=()=>setK(Math.min(K+1,5),1);
+document.getElementById("stepb").onclick=()=>setK(Math.max(K-1,0),1);
 document.getElementById("play").onclick=()=>{
   if (playing){ cancelAnimationFrame(playing); playing=null;
     document.getElementById("play").textContent="▶ play"; return; }
