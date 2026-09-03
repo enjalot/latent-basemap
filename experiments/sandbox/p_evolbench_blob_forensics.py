@@ -26,7 +26,8 @@ N0 = int(os.environ.get("EVOLBENCH_N0", "4000000"))
 N2 = int(os.environ.get("EVOLBENCH_N2", "5600000"))
 N = int(os.environ.get("EVOLBENCH_N", "6400000"))
 SHARD = 500_000
-CORPUS_NAME = {0: "fineweb", 1: "redpajama", 2: "pile", 3: "starcoder", 4: "reddit", 5: "ca", 7: "bluesky"}
+CORPUS_NAME = {0: "fineweb", 1: "redpajama", 2: "pile", 3: "starcoder", 4: "reddit", 5: "ca", 7: "bluesky",
+               255: "no-provenance"}
 CHUNK_DIR = {  # row-aligned chunk parquets (chunk_text col); missing dirs fail-closed (no NN reconstruction)
     "reddit": f"{E.replace('/embeddings','/chunks')}/reddit-tldr17-chunked-120",
     "fineweb": "/data/chunks/fineweb-edu-sample-10BT-chunked-120",
@@ -54,8 +55,20 @@ def _apply(xy, fit):
 
 
 def _load_prov():
-    return np.concatenate([np.load(SUBROOT / t / "provenance.npy", allow_pickle=False)
-                           for t in ("T0", "T1", "T2", "T3")])
+    # robust to tranches WITHOUT provenance (e.g. jina-CA reuses d768 base T0/T1/T2, which have no
+    # provenance.npy -> the symlinks dangle). Synthesize corpus=255 ("no-provenance") for those rows so the
+    # T3 OOD-cohort text still resolves while base attribution/text FAIL-CLOSED (255 -> _resolve fail-closes).
+    PDT = [("corpus", "u1"), ("shard", "<u2"), ("row", "<i8")]
+    parts = []
+    for t in ("T0", "T1", "T2", "T3"):
+        pf = SUBROOT / t / "provenance.npy"
+        if pf.exists():                                   # False for a dangling symlink or a missing file
+            parts.append(np.load(pf, allow_pickle=False))
+        else:
+            n = int(np.load(SUBROOT / t / "substrate.f32.npy", mmap_mode="r").shape[0])
+            ph = np.zeros(n, dtype=PDT); ph["corpus"] = 255
+            parts.append(ph)
+    return np.concatenate(parts)
 
 
 def _grid_blobs(pts, bins=512, dens_pct=99.0):
