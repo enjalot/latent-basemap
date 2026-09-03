@@ -531,6 +531,17 @@ DATASETS = {
                         "rankneg_window": 502_080, "batch_size": 16384,
                         "gpu_resident_vram_budget_gb": 22.0}}}}
        for sp in ("clip", "dino")},
+    # MONET diversity draws (item 3): champion CLIP-512 map per draw arm (random/sscd/annfaiss/theirfaiss),
+    # substrate = pool clip512[arm.idx] assembled by monet_assemble_draw.py. Compared vs the random arm.
+    **{f"monet-draw-{arm}-clip": {
+        "load": (lambda arm=arm: np.asarray(np.load(
+            f"/data2/monet/draws/{arm}-clip.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 500_000, "batch_size": 16384,
+                        "gpu_resident_vram_budget_gb": 22.0}}}}
+       for arm in ("random", "sscd", "annfaiss", "theirfaiss")},
     # ---- jina LANGUAGE-PRESERVING social-mixture sweep (JINA_SWEEP_PROPOSAL.md 2026-08-28):
     # social displaces ONLY the EN 1M (proportional fw/rp/pile); all 20 language blocks held
     # BIT-IDENTICAL to the 0% baseline (jina-multi-2m/champion-bs16k, reused as the 0% arm). f16 (2M,768).
