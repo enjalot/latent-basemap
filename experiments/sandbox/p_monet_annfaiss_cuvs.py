@@ -16,7 +16,7 @@ def _load_int8_chunked(clip, B=1_000_000):
     N, d = clip.shape
     q = np.empty((N, d), np.int8)                       # 9.9GB (int8), no 39.6GB f32 spike
     for s in range(0, N, B):
-        c = np.asarray(clip[s:s+B], np.float32)
+        c = np.array(clip[s:s+B], dtype=np.float32)  # copy: asarray on a ro-memmap gives a ro-view
         c /= np.linalg.norm(c, axis=1, keepdims=True).clip(1e-9)
         q[s:s+B] = np.clip(np.round(c * 127.0), -127, 127).astype(np.int8)
     return q
