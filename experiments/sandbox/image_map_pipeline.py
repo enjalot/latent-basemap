@@ -520,6 +520,17 @@ DATASETS = {
                             "arms": _REDDITMIX_ARMS},
     "sisap-clip-2m-dedup": {"load": _sisap_dedup_load, "subsets": None,
                             "arms": _SISAP_DEDUP_ARMS},
+    # MONET flagship candidate (owner MONET eval 2026-09-03): random 2M draw, CLIP-512 + DINOv2-1536.
+    # laion-768 comparison arm = the existing sisap-clip-2m / img-univ numbers (reuse, do not retrain).
+    **{f"monet-random-{sp}-2m": {
+        "load": (lambda sp=sp: np.asarray(np.load(
+            f"/data2/monet/random-2m/{sp}-substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 502_080, "batch_size": 16384,
+                        "gpu_resident_vram_budget_gb": 22.0}}}}
+       for sp in ("clip", "dino")},
     # ---- jina LANGUAGE-PRESERVING social-mixture sweep (JINA_SWEEP_PROPOSAL.md 2026-08-28):
     # social displaces ONLY the EN 1M (proportional fw/rp/pile); all 20 language blocks held
     # BIT-IDENTICAL to the 0% baseline (jina-multi-2m/champion-bs16k, reused as the 0% arm). f16 (2M,768).
