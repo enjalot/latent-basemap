@@ -20,10 +20,16 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     idxf = OUT / f"{arm}.idx.npy"
     if not idxf.exists():
-        if arm not in ("random", "sscd"):
-            raise SystemExit(f"{arm}.idx.npy missing (produced by p_monet_draws); refuse to fabricate")
-        sscd_nn = np.load(POOL / "sscd_nn.npy"); N = sscd_nn.shape[0]
-        rar = np.ones(N, np.float32) if arm == "random" else np.clip(1.0 - sscd_nn, 1e-4, None).astype(np.float32)
+        # rarity per arm: random=uniform, sscd=1-sscd_nn, annfaiss/theirfaiss=rarity_<arm>.npy (density step)
+        rf = OUT / f"rarity_{arm}.npy"
+        if arm == "random":
+            rar = np.ones(np.load(POOL / "sscd_nn.npy").shape[0], np.float32)
+        elif arm == "sscd":
+            rar = np.clip(1.0 - np.load(POOL / "sscd_nn.npy"), 1e-4, None).astype(np.float32)
+        elif rf.exists():
+            rar = np.load(rf).astype(np.float32)         # annfaiss (cuVS) / theirfaiss (their CPU index)
+        else:
+            raise SystemExit(f"{arm}: no idx and no rarity_{arm}.npy — produced by the density step; refuse to fabricate")
         rng = np.random.default_rng(hash((SEED, arm)) % (2**32))
         idx = np.sort(_gumbel_topk(np.log(np.clip(rar, 1e-8, None).astype(np.float64)), N_DRAW, rng)).astype(np.int64)
         np.save(idxf, idx)
