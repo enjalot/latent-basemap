@@ -542,6 +542,17 @@ DATASETS = {
                         "rankneg_window": 500_000, "batch_size": 16384,
                         "gpu_resident_vram_budget_gb": 22.0}}}}
        for arm in ("random", "sscd", "annfaiss", "theirfaiss")},
+    # score-their-UMAP (competitor datapoint, NOT critical path): truth over the EXACT embeddings of their
+    # 1M umap-1m rows, per space. Our champion trains on the same rows to compare vs their layout (xy.npy).
+    **{f"monet-theirumap-{sp}": {
+        "load": (lambda sp=sp: np.asarray(np.load(
+            f"/data2/monet/theirumap/{sp}.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 250_000, "batch_size": 16384,
+                        "gpu_resident_vram_budget_gb": 22.0}}}}
+       for sp in ("clip", "dino")},
     # ---- jina LANGUAGE-PRESERVING social-mixture sweep (JINA_SWEEP_PROPOSAL.md 2026-08-28):
     # social displaces ONLY the EN 1M (proportional fw/rp/pile); all 20 language blocks held
     # BIT-IDENTICAL to the 0% baseline (jina-multi-2m/champion-bs16k, reused as the 0% arm). f16 (2M,768).
