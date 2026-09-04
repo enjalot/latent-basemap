@@ -60,13 +60,14 @@ def main():
     memo["map_quality"] = {"laion_sisap_clip768": LAION_FFR, "monet_random_clip512": _ffr("monet-random-clip-2m"),
                            "monet_random_dino1536": _ffr("monet-random-dino-2m")}
     probe = json.loads((SB / "monet-probe-reception.json").read_text())["arms"] if (SB / "monet-probe-reception.json").exists() else {}
-    cov = _cluster_coverage()["arms"]
+    # D1 (reviewer 2026-09-04): cluster-coverage PURGED — the "k=10000" label was a k=1000 cache mislabeled
+    # (worse than saturated, not just uninformative). Do not compute or report it. Diversity signal = rare-region
+    # frac + probe recall@15. (_cluster_coverage() left defined but UNUSED.)
     ridx = DRAWS / "random.idx.npy"; rand_i = np.load(ridx) if ridx.exists() else None
     memo["diversity_draws"] = {}
     for arm in ARMS:
         idxf = DRAWS / f"{arm}.idx.npy"; row = {"ffr_cost_axis": _ffr(f"monet-draw-{arm}-clip")}
         row["probe_recall_at_15"] = (probe.get(arm, {}) or {}).get("probe_recall_at_15")
-        row["cluster_coverage"] = cov.get(arm)
         if idxf.exists():
             idx = np.load(idxf); s = sscd[idx]; sf = s[np.isfinite(s)]
             row["rare_region_frac"] = round(float((sf <= q25).mean()), 4)
@@ -99,17 +100,15 @@ def main():
     L = ["# MONET-vs-laion memo (PROVISIONAL, auto-assembled)", "",
          "## 1. Map quality (quick_ffr_v2, each on its own truth)",
          f"- laion sisap-CLIP768 **{mq['laion_sisap_clip768']}** | MONET CLIP-512 {mq['monet_random_clip512']} | MONET DINOv2-1536 **{mq['monet_random_dino1536']}**",
-         "", "## 2. Diversity draws — DECIDING METRICS (fair: identical probe set + reference clustering)",
-         "| arm | cluster coverage (SATURATED) | rare-region frac | probe recall@15 |",
-         "| --- | --- | --- | --- |"]
+         "", "## 2. Diversity draws — DECIDING METRICS (fair: identical probe set)",
+         "| arm | rare-region frac | probe recall@15 |",
+         "| --- | --- | --- |"]
     for arm in ARMS:
         r = memo["diversity_draws"][arm]
         if r.get("_status") == "PENDING":
-            L.append(f"| {arm} | PENDING | | |"); continue
-        cc = r.get("cluster_coverage") or {}
-        cctxt = f"{cc.get('clusters_covered','?')} ({cc.get('rare_clusters_covered','?')}/1000)" if cc and "_status" not in cc else "pending"
-        L.append(f"| {arm} | {cctxt} | {r.get('rare_region_frac')} | {r.get('probe_recall_at_15')} |")
-    L += ["", "> cluster-coverage SATURATES at this 10%-of-pool draw fraction (every arm covers ~all clusters by construction) — see rare-region frac + probe recall@15, the actual diversity + cost signals. Random baseline rare-region ~0.25.",
+            L.append(f"| {arm} | PENDING | |"); continue
+        L.append(f"| {arm} | {r.get('rare_region_frac')} | {r.get('probe_recall_at_15')} |")
+    L += ["", "> cluster-coverage PURGED (D1, reviewer 2026-09-04): its k=10000 label was a k=1000 cache mislabeled — worse than saturated. Diversity signal = rare-region frac + probe recall@15. Random baseline rare-region ~0.25.",
           "", f"> theirfaiss: {memo.get('theirfaiss_note','')}",
           "", "## 3. FFR as a TRADE-CURVE COST axis (NOT a ranking)",
           "| arm | FFR (own truth) | rare-region | mean sscd_nn |", "| --- | --- | --- | --- |"]
