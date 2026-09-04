@@ -64,9 +64,12 @@ def _rarity_theirfaiss(clip, k, cache):
     xq = np.asarray(clip, dtype=np.float32)                    # raw (match their index's build preprocessing)
     n = xq.shape[0]; rar = np.empty(n, np.float32); B = 200_000
     for s in range(0, n, B):
-        D, _ = idx.search(xq[s:s+B], k + 1)                   # L2 dist asc; self may or may not be present
-        d = np.sort(D, axis=1)[:, 1:k+1]                      # drop nearest (self/dup), keep next k
-        rar[s:s+B] = d.mean(1)                                # large mean-dist = rare
+        # metric_type=0 (INNER_PRODUCT) over L2-normalized vectors (verified
+        # 2026-09-04): D = cosine similarities, DESCENDING. col 0 = nearest
+        # (self/dup) -> drop it; missing-result sentinels clipped out.
+        D, _ = idx.search(xq[s:s+B], k + 1)
+        sims = np.clip(D[:, 1:k+1], -1.0, 1.0)
+        rar[s:s+B] = 1.0 - sims.mean(1)                       # larger = rarer (positive, Gumbel-log safe)
         if s % 2_000_000 == 0:
             print(f"  theirfaiss {s:,}/{n:,}", flush=True)
     np.save(cache, rar); return rar
