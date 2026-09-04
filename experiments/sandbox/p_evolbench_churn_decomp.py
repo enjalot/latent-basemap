@@ -37,8 +37,11 @@ def _apply(xy, fit):
 
 def _decompose(xy_w, xy_f, cl, cent_f, rad):
     """Return coherent/internal energy split + membership churn, overall and per cohort."""
-    fit = _procrustes_fit(xy_w[:N2].astype(np.float64), xy_f[:N2].astype(np.float64))
-    wa = _apply(xy_w.astype(np.float64), fit).astype(np.float32)
+    import sys as _s; from pathlib import Path as _P; _s.path.insert(0, str(_P(__file__).resolve().parent))
+    import frame   # item B: RIGID gauge (no scale collapse), replacing the local WITH-SCALE _procrustes_fit
+    _, info = frame.rigid_align(xy_w[:N2].astype(np.float64), xy_f[:N2].astype(np.float64))
+    R = np.asarray(info["R"], np.float64); t = np.asarray(info["t"], np.float64)
+    wa = ((R @ xy_w.astype(np.float64).T).T + t).astype(np.float32)  # apply the shared-row rigid fit to ALL rows
     D = wa - xy_f                                                   # per-point displacement
     K = cent_f.shape[0]
     # cluster translation T_c = mean Δ over members
@@ -70,7 +73,8 @@ def _decompose(xy_w, xy_f, cl, cent_f, rad):
 def main():
     k = int(sys.argv[1]) if len(sys.argv) > 1 else KDEF
     xy_f = np.asarray(np.load(FROZEN), np.float32)
-    rad = float(np.percentile(np.linalg.norm(xy_f - xy_f.mean(0), axis=1), 90))
+    sys.path.insert(0, str(Path(__file__).resolve().parent)); import frame  # item B shared gauge
+    rad = frame.frame_radius(xy_f)
     from sklearn.cluster import MiniBatchKMeans
     km = MiniBatchKMeans(n_clusters=k, random_state=0, batch_size=10000, n_init=3, max_iter=100)
     cl = km.fit_predict(xy_f); cent_f = km.cluster_centers_.astype(np.float32)

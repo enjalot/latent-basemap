@@ -26,17 +26,16 @@ MARGIN_K = 3.0   # a cell must beat 3x the seed floor to be "real"
 # reuse the frontier scorer's exact churn + cohort definitions (same scale = valid margin comparison)
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).parent))
-from p_evolbench_lambda_score import _procrustes, _cohort_ffr, _score_map  # noqa: E402
+from p_evolbench_lambda_score import _cohort_ffr, _score_map  # noqa: E402
+import frame  # item B: RIGID gauge (no scale collapse), shared with score_v2/lambda_score/export_evolution_viz
 
 
 def _floor_churn(a_path, b_path):
-    """Optimizer-only churn: two independent trainings of the SAME map, procrustes-aligned."""
+    """Optimizer-only churn: two independent trainings of the SAME map, RIGID-aligned (item B; was WITH-SCALE)."""
     a = np.asarray(np.load(a_path), dtype=np.float64)
     b = np.asarray(np.load(b_path), dtype=np.float64)
     n = min(a.shape[0], b.shape[0]); a = a[:n]; b = b[:n]
-    rad = np.percentile(np.linalg.norm(b - b.mean(0), axis=1), 90)
-    aligned = _procrustes(a, b)
-    disp = np.linalg.norm(aligned - b, axis=1) / max(rad, 1e-9)
+    disp, _ = frame.churn(a, b)   # rigid-aligned + canonical frame radius
     return {"n": int(n), "churn_mean": round(float(disp.mean()), 5),
             "churn_p95": round(float(np.percentile(disp, 95)), 5)}
 
