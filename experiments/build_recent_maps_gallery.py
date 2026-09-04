@@ -32,6 +32,8 @@ SPECS = [
     {"ds": "monet-draw-theirfaiss-clip","title": "MONET draw:theirfaiss — CLIP (champion)"},
     {"ds": "monet-theirumap-clip",   "title": "their-UMAP rows, OUR champion — CLIP"},
     {"ds": "monet-theirumap-dino",   "title": "their-UMAP rows, OUR champion — DINOv2"},
+    {"ds": "theirumap-published-1m", "title": "THEIR published UMAP-1M layout (Jasper MONET) — flip vs our champion, same rows",
+     "coords_override": "/data2/monet/theirumap/their-layout"},
     {"ds": "monet-neomme-fineweb-2m", "title": "NeoMME-1024 fineweb text — RAW (champion 2M)"},
     {"ds": "monet-neomme-fineweb-2m-centered", "title": "NeoMME-1024 fineweb text — CENTERED (champion 2M)"},
     {"ds": "monet-neomme-pairs-500k", "title": "NeoMME joint image+text 500K — RAW (color by modality)",
@@ -80,7 +82,8 @@ def _color_layers(source, extent, color, data: Path):
 
 
 def build_one(spec) -> dict | None:
-    ds = spec["ds"]; coords_dir = SB / ds / "champion-bs16k"
+    ds = spec["ds"]
+    coords_dir = Path(spec["coords_override"]) if spec.get("coords_override") else SB / ds / "champion-bs16k"
     if not (coords_dir / "coordinates.npy").is_file():
         return None
     map_id = f"{REL}-{ds}"
@@ -123,6 +126,21 @@ def build_one(spec) -> dict | None:
             "rows": rows_all, "colored": spec.get("color", [None])[0] if spec.get("color") else None}
 
 
+def _scan_cards():
+    """Assemble the full card list from ALL built sandbox pages on disk (so --only keeps the index complete)."""
+    cards = []
+    for mdir in sorted((SITE / "viewer").glob(f"{REL}-*")):
+        mf = mdir / "data" / "manifest.json"
+        if not mf.is_file():
+            continue
+        m = json.loads(mf.read_text()); met = m.get("metrics", {})
+        ffr = next((v for k, v in met.items() if "ffr" in k.lower()), None)
+        colored = next((l.get("group") for l in m.get("layers", []) if l.get("group")), None)
+        cards.append({"map_id": mdir.name, "title": m.get("title", mdir.name),
+                      "ffr": ffr, "rows": m.get("rows_total", 0), "colored": colored})
+    return cards
+
+
 def build_index(cards):
     idx = SITE / REL; idx.mkdir(parents=True, exist_ok=True)
     items = "".join(
@@ -160,7 +178,7 @@ def main():
             cards.append(c); print(f"built {c['map_id']} ({c['rows']:,} pts, ffr={c['ffr']}, color={c['colored']})", flush=True)
         else:
             print(f"skip {spec['ds']} (no coords yet)", flush=True)
-    page = build_index(cards)
+    page = build_index(_scan_cards())      # index from ALL built pages, not just this run's
     # post-merge into maps-index.json (union; write_maps_index clobbers)
     mi = SITE / "maps-index.json"
     if mi.is_file():
