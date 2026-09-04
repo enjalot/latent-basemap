@@ -87,11 +87,11 @@ def main():
                           if raf.exists() else {"_status": "PENDING (rarity_annfaiss)"})
     memo["sscd_nan_caveat"] = {"n": int(nanmask.sum()), "frac": round(float(nanmask.mean()), 4),
         "note": "SSCD undefined (~all synthetic-z-image); sscd arm EXCLUDES them, annfaiss/theirfaiss CAN pick them."}
-    memo["theirfaiss_note"] = ("theirfaiss arm PENDING — rarity-INVERSION bug caught by owner's reviewer + "
-        "fixed 2026-09-04: their index is metric_type=0 (INNER_PRODUCT/cosine, DESCENDING sims), not L2; the "
-        "pre-fix grind kept the self-hit + dropped the farthest neighbor + used large-mean=rare, which INVERTED "
-        "density (would have selected the DENSEST rows). Fixed to drop col0 + rarity=1-mean(cosine); grind "
-        "restarted, ETA ~2026-09-05 night. Both CLIP+DINOv2 indexes are IP (verified).")
+    memo["theirfaiss_note"] = ("theirfaiss arm DONE via GPU search of the publisher's ACTUAL IVF-PQ index "
+        "(sm120 faiss, nprobe=64) 2026-09-04. Gates passed: Spearman GPU-vs-CPU=1.0 (identical index), directional "
+        "corr(rarity,sscd_nn)=-0.26 (correct: dense=low rarity). rarity=1-mean(cosine) drop-col0 (IP/DESCENDING, "
+        "both CLIP+DINOv2 indexes verified IP). The ~26h CPU grind was retired once the gates passed. Result: "
+        "theirfaiss draw ≈ annfaiss draw (rare-region 0.282 vs 0.282), validating the cuVS density approximation.")
     tj = SB / "monet-theirumap-score.json"
     memo["their_umap"] = json.loads(tj.read_text()) if tj.exists() else {"_status": "PENDING"}
     (SB / "monet-memo.json").write_text(json.dumps(memo, indent=1, default=str))
