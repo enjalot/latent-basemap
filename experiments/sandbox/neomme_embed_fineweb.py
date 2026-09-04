@@ -45,19 +45,21 @@ def main():
             for x in col.to_pylist():
                 if seen < done:
                     seen += 1; continue
-                if done >= N:
+                if done + len(buf) >= N:   # done advances only at flush — cap on scheduled rows
                     break
                 buf.append(str(x)); seen += 1
                 if len(buf) == B:
                     inp = _enc(buf); emb = model(**inp).dense_embeddings
                     emb = torch.nn.functional.normalize(emb, dim=1).float().cpu().numpy()
-                    sub[done:done+len(buf)] = emb; done += len(buf); buf = []
+                    m = min(len(buf), N - done)
+                    sub[done:done+m] = emb[:m]; done += m; buf = []
                     if done % 100_000 == 0:
                         sub.flush(); donef.write_text(str(done))
                         print(f"  {done:,}/{N:,} ({done/(time.time()-t0):.0f} ch/s)", flush=True)
     if buf and done < N:
         inp = _enc(buf); emb = torch.nn.functional.normalize(model(**inp).dense_embeddings, dim=1).float().cpu().numpy()
-        sub[done:done+len(buf)] = emb; done += len(buf)
+        m = min(len(buf), N - done)
+        sub[done:done+m] = emb[:m]; done += m
     sub.flush(); donef.write_text(str(done))
     (OUT / "manifest.json").write_text(json.dumps({"model": MID, "dim": DIM, "n": int(done),
         "corpus": "fineweb-edu-chunked-120 (first N, same text as MiniLM-384)", "prompt": "document", "dtype": "float32-normed"}, indent=1))
