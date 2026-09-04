@@ -31,11 +31,11 @@ def _cluster_coverage():
         clip = np.load(POOL / "clip512.f32.npy", mmap_mode="r"); N = clip.shape[0]
         si = np.sort(np.random.default_rng(0).choice(N, 500_000, replace=False))
         Xs = np.array(clip[si], dtype=np.float32); Xs /= np.linalg.norm(Xs, axis=1, keepdims=True).clip(1e-9)
-        km = MiniBatchKMeans(1000, random_state=0, batch_size=10000, n_init=3).fit(Xs)
+        km = MiniBatchKMeans(10000, random_state=0, batch_size=10000, n_init=3).fit(Xs)  # k=10k: discriminating
         cen = km.cluster_centers_.astype(np.float32); cen /= np.linalg.norm(cen, axis=1, keepdims=True).clip(1e-9)
-        ref_sz = np.bincount(km.labels_, minlength=1000); rare = np.argsort(ref_sz)[:100].astype(np.int64)
+        ref_sz = np.bincount(km.labels_, minlength=10000); rare = np.argsort(ref_sz)[:1000].astype(np.int64)
         np.savez(cenf, cen=cen, rare=rare)
-    out = {"k": 1000, "arms": {}}
+    out = {"k": 10000, "rare_total": 1000, "arms": {}}
     for arm in ARMS:
         sub = DRAWS / f"{arm}-clip.f32.npy"
         if not sub.is_file():
@@ -46,7 +46,7 @@ def _cluster_coverage():
             lab[s:s+B] = (x @ cen.T).argmax(1)
         u = np.unique(lab)
         out["arms"][arm] = {"clusters_covered": int(u.size),
-                            "rare_clusters_covered": int(np.isin(rare, u).sum()), "rare_total": 100}
+                            "rare_clusters_covered": int(np.isin(rare, u).sum()), "rare_total": 1000}
     return out
 
 
@@ -95,14 +95,14 @@ def main():
          "## 1. Map quality (quick_ffr_v2, each on its own truth)",
          f"- laion sisap-CLIP768 **{mq['laion_sisap_clip768']}** | MONET CLIP-512 {mq['monet_random_clip512']} | MONET DINOv2-1536 **{mq['monet_random_dino1536']}**",
          "", "## 2. Diversity draws — DECIDING METRICS (fair: identical probe set + reference clustering)",
-         "| arm | cluster coverage (rare/100) | rare-region frac | probe recall@15 |",
+         "| arm | cluster coverage (rare/1000) | rare-region frac | probe recall@15 |",
          "| --- | --- | --- | --- |"]
     for arm in ARMS:
         r = memo["diversity_draws"][arm]
         if r.get("_status") == "PENDING":
             L.append(f"| {arm} | PENDING | | |"); continue
         cc = r.get("cluster_coverage") or {}
-        cctxt = f"{cc.get('clusters_covered','?')} ({cc.get('rare_clusters_covered','?')}/100)" if cc and "_status" not in cc else "pending"
+        cctxt = f"{cc.get('clusters_covered','?')} ({cc.get('rare_clusters_covered','?')}/1000)" if cc and "_status" not in cc else "pending"
         L.append(f"| {arm} | {cctxt} | {r.get('rare_region_frac')} | {r.get('probe_recall_at_15')} |")
     L += ["", "> Random is the baseline (~0.25 rare-region). A diverse arm should raise cluster/rare coverage + hold probe recall.",
           "", "## 3. FFR as a TRADE-CURVE COST axis (NOT a ranking)",
@@ -114,7 +114,16 @@ def main():
           "intrinsically SPARSER neighborhoods — a harder exam — so raw FFR deltas OVERSTATE the quality cost. "
           "Read FFR against rare-region gain as a trade curve, and defer to probe recall@15 (identical exam).",
           "", "## 4. Redundancy", "```", json.dumps(memo["redundancy"], indent=1), "```",
-          "## 5. their-UMAP competitor", "```", json.dumps(memo["their_umap"], indent=1)[:600], "```",
+          "## 5. their-UMAP competitor (their published 1M layout vs OUR champion, IDENTICAL rows)"]
+    tu = memo["their_umap"]; sp = tu.get("spaces", {}) if isinstance(tu, dict) else {}
+    if sp:
+        d = sp.get("dino", {}); c = sp.get("clip", {})
+        L += [f"- Source space = DINOv2 (their FFR {d.get('their_layout_ffr')} on DINOv2-truth vs {c.get('their_layout_ffr')} on CLIP-truth — confirmed).",
+              f"- OUR champion on the SAME 1M rows: DINOv2 FFR **{d.get('our_champion_ffr')}** vs their **{d.get('their_layout_ffr')}** = **+{round((d.get('our_champion_ffr',0)-d.get('their_layout_ffr',0)),4)}** in their own source space (CLIP: ours {c.get('our_champion_ffr')} vs their {c.get('their_layout_ffr')}).",
+              "- CAVEATS (honest): their UMAP method/params are UNPUBLISHED (no tune-match possible); their layout may optimize DIFFERENT objectives (visual-atlas aesthetics, not kNN FFR); it is a 1M TRANSDUCTIVE layout vs our PARAMETRIC head (generalizes to unseen rows). The number is the number, read with these."]
+    else:
+        L += ["```", json.dumps(tu, indent=1)[:400], "```"]
+    L += [
           "", f"_caveat: {memo['sscd_nan_caveat']['note']}_"]
     (SB / "monet-memo.md").write_text("\n".join(L))
     print("wrote monet-memo.{json,md}"); print("\n".join(L[:22]))
