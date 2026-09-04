@@ -25,7 +25,7 @@ def main():
         rows = sel[(sel >= lo) & (sel < hi)] - lo          # local rows in this source parquet
         if len(rows) == 0 or si in done:
             continue
-        with fs.open(f"datasets/{REPO}/v1.2.0/{s['path']}", "rb") as fh:
+        with fs.open(f"datasets/{REPO}/{s["path"]}", "rb") as fh:
             t = pq.read_table(fh, columns=["id", "thumbnail", "caption_florence-2-large", "source"])
         sub = t.take(pa.array(rows)); (OUT / f"part-{si:04d}.parquet")
         pq.write_table(sub, OUT / f"part-{si:04d}.parquet")
