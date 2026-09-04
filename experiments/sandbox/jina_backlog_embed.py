@@ -59,6 +59,7 @@ def main():
             break
     if not jobs:
         print("BACKLOG jina: all shards done"); return 0
+    import torch
     from sentence_transformers import SentenceTransformer
     model = SentenceTransformer(MODEL_ID, device="cuda", trust_remote_code=True)
     tokenizer = model.tokenizer
@@ -66,7 +67,7 @@ def main():
     pkey = next((k for k in ("passage", "document") if k in prompts), None)
     for corpus, p, out in jobs:
         texts = [str(x) for x in pq.read_table(p, columns=["chunk_text"]).to_pandas()["chunk_text"].tolist()]
-        t0 = time.time()
+        t0 = time.time(); torch.cuda.reset_peak_memory_stats()
         lens = [len(tokenizer(t, truncation=True, max_length=8192)["input_ids"]) for t in texts]
         embs = [None] * len(texts); nb = 0
         for bidx in _token_budget_batches(lens):
@@ -80,8 +81,11 @@ def main():
             nb += 1
         V = np.stack(embs).astype(np.float16)
         tmp = out.with_suffix(".tmp.npy"); np.save(tmp, V); os.rename(tmp, out)
+        # log both: allocated (live tensors) and reserved (allocator pool) — the OOM cited "27.89GB in use"
+        # ~= reserved+alloc, so reserved is the number comparable to the 32GB knife-edge.
+        peak_alloc = torch.cuda.max_memory_allocated() / 1e9; peak_resv = torch.cuda.max_memory_reserved() / 1e9
         print(f"BACKLOG jina: {corpus}/{out.name} {V.shape} in {nb} tok-budget batches "
-              f"{len(texts)/(time.time()-t0):.0f} ch/s -> {out}", flush=True)
+              f"{len(texts)/(time.time()-t0):.0f} ch/s peak_alloc={peak_alloc:.1f}GB peak_resv={peak_resv:.1f}GB -> {out}", flush=True)
     return 0
 
 
