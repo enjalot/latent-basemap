@@ -88,6 +88,8 @@ def main():
     coords = np.asarray(pumap.transform(X, batch_size=8192), dtype=np.float32)
     tag = os.environ.get("EVOLBENCH_LAMBDA_TAG") or ("inf" if w == float("inf") else f"{w:g}")
     np.save(OUTD / f"coords-w{tag}.npy", coords)
+    if os.environ.get("EVOLBENCH_LAMBDA_SAVE_MODEL"):    # G chain: persist the fine-tuned model for MapState update-from-update
+        pumap.save(str(OUTD / f"model-w{tag}.pt"))
     key = gen_key.artifact_key({"kind": "lambda-cell", "w": w, "n_epochs": n_epochs, "seed": SEED,
                                 "s0_head": warm_hash, "anchor": gen_key.file_digest(ANCHOR),
                                 "s3_edges": gen_key.file_digest(S3_EDGES)})
