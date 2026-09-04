@@ -54,6 +54,7 @@ def _snapshot_ffr(xy, knn_idx, n, cohorts):
 
 def main():
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from frame import churn as _frame_churn   # item B: ONE shared RIGID gauge (rotation-invariant + canonical radius)
     arms = json.loads(os.environ.get("ARMS_JSON", "{}"))
     if not arms:
         raise SystemExit("ARMS_JSON required: {label:{dir,kind}}")
@@ -73,7 +74,9 @@ def main():
             knn = np.load(SB / f"{TRUTH_PREFIX}-S{k}" / "knn_indices.npy", mmap_mode="r")
             churn_mean = churn_p95 = 0.0
             if prev is not None:
-                disp = np.linalg.norm(xy[:prev_n] - prev, axis=1) / max(_radius(prev), 1e-9)
+                # item B: RIGID-aligned churn (rotation-invariant, NO scale collapse) + canonical frame radius,
+                # replacing the raw disp/_radius that conflated rotation with structural churn.
+                disp, _fi = _frame_churn(xy, prev)
                 churn_mean = float(disp.mean()); churn_p95 = float(np.percentile(disp, 95))
                 cum_churn += churn_mean
             active_head_k = snaps.get(k, {}).get("active_head_k", 0 if cfg["kind"] == "A" else k)
