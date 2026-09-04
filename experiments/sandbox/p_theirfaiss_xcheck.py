@@ -18,7 +18,10 @@ def main():
     clip = np.load(POOL / "clip512.f32.npy", mmap_mode="r")
     idx = faiss.read_index(THEIR); idx.nprobe = 64
     D, _ = idx.search(np.ascontiguousarray(clip[samp], np.float32), K + 1)
-    D.sort(axis=1); cpu = D[:, 1:K+1].mean(1)
+    # IP index -> D is cosine sims DESCENDING; col0 = self (drop), next K = neighbors. rarity = 1 - mean(sims),
+    # IDENTICAL to the GPU leg _rarity. (Was: D.sort ascending + mean(sims) — that dropped the FARTHEST, kept
+    # SELF, and returned density not rarity -> negatively correlated with the correct GPU leg, spurious gate fail.)
+    cpu = 1.0 - np.clip(D[:, 1:K+1], -1.0, 1.0).mean(1)
     rho = float(spearmanr(gpu, cpu).statistic); ok = rho >= 0.99
     out = {"arm": "theirfaiss", "n_sample": int(len(samp)), "spearman_gpu_vs_cpu": round(rho, 5),
            "gate": ">=0.99", "PASS": bool(ok),
