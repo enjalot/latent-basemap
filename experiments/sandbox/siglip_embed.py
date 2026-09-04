@@ -59,7 +59,8 @@ def _embed(proc, model, pils):
     inp = proc(images=pils, return_tensors="pt")
     inp = {k: v.cuda() for k, v in inp.items() if hasattr(v, "cuda")}
     with torch.no_grad():
-        f = model.get_image_features(**inp)
+        out = model.get_image_features(**inp)
+        f = out if torch.is_tensor(out) else out.pooler_output   # SigLIP2 returns BaseModelOutputWithPooling (1152-d)
         f = torch.nn.functional.normalize(f, dim=1)
     return f.detach().float().cpu().numpy()
 

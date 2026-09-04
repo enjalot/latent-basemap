@@ -21,14 +21,16 @@ def main():
     thumbs = t["thumbnail"].to_pylist()[:N]; caps = [str(x) for x in t["caption_florence-2-large"].to_pylist()[:N]]
     pils = [Image.open(io.BytesIO(bytes(b))).convert("RGB") for b in thumbs]
     proc = AutoProcessor.from_pretrained(MID); model = AutoModel.from_pretrained(MID, dtype=torch.float16).cuda().eval()
+    def _pool(o):
+        return o if torch.is_tensor(o) else o.pooler_output      # SigLIP2 get_*_features -> BaseModelOutputWithPooling
     def img_emb(ps):
         inp = {k: v.cuda() for k, v in proc(images=ps, return_tensors="pt").items() if hasattr(v, "cuda")}
         with torch.no_grad():
-            return torch.nn.functional.normalize(model.get_image_features(**inp), dim=1).float().cpu().numpy()
+            return torch.nn.functional.normalize(_pool(model.get_image_features(**inp)), dim=1).float().cpu().numpy()
     def txt_emb(ts):
         inp = {k: v.cuda() for k, v in proc(text=ts, padding="max_length", truncation=True, return_tensors="pt").items() if hasattr(v, "cuda")}
         with torch.no_grad():
-            return torch.nn.functional.normalize(model.get_text_features(**inp), dim=1).float().cpu().numpy()
+            return torch.nn.functional.normalize(_pool(model.get_text_features(**inp)), dim=1).float().cpu().numpy()
     ie = np.concatenate([img_emb(pils[s:s+128]) for s in range(0, N, 128)])
     te = np.concatenate([txt_emb(caps[s:s+128]) for s in range(0, N, 128)])
     sims = te @ ie.T                                          # (N,N) caption->image cosine
