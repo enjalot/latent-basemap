@@ -36,6 +36,11 @@ empirically validated by the NeoMME exp-1b/2b centered re-maps.)
 8. **Forensics (as needed).** Blob/sink forensics on suspicious map regions (are dense sinks real topic manifolds
    or junk?). *Failure guarded:* treating a coherent topic cluster as an artifact (or vice-versa).
 
+**Joint-modality note (from NeoMME exp-2/2b):** cross-modal encoders can embed each modality as an intrinsically
+separate sub-manifold — de-coning recovers pair-retrieval cosine but does NOT merge the modalities (exp-2b:
+centered crossmodal frac@k15 still 0.006). A joint image+text basemap would need an explicit cross-modal bridge
+— e.g. inject matched-pair edges into the kNN graph before UMAP (possible **exp-2c**, not launched).
+
 Assets/instruments: `experiments/sandbox/center_substrate.py` (cone removal), `neomme_exp2_analyze.py`
 (`anisotropy_diagnostic`: raw / joint- / per-modality-centered margins + cone_stats), `knobs_2m.quick_ffr_v2`,
 `image_map_pipeline.py` (knn/fuzzy/train).
