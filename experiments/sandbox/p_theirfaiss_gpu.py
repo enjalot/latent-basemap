@@ -26,10 +26,15 @@ def _gpu_index():
 
 
 def _rarity(g, X):
+    # THEIR index is metric_type=0 (INNER_PRODUCT) over L2-normalized vectors -> search returns cosine sims
+    # DESCENDING; col 0 = self/nearest (drop it), next k = real neighbors. rarity = 1 - mean(sims) (far=rare),
+    # matching the CPU _rarity_theirfaiss fix (2026-09-04). [This GPU path is superseded/dead: faiss-gpu-cu12
+    # has no sm_120 kernel on the 5090 — kept correct in case a sm_120 build revives option A.]
     n = X.shape[0]; rar = np.empty(n, np.float32); B = 500_000
     for s in range(0, n, B):
         q = np.ascontiguousarray(X[s:s+B], dtype=np.float32)
-        D, _ = g.search(q, K + 1); D.sort(axis=1); rar[s:s+B] = D[:, 1:K+1].mean(1)
+        D, _ = g.search(q, K + 1)
+        rar[s:s+B] = 1.0 - np.clip(D[:, 1:K+1], -1.0, 1.0).mean(1)
     return rar
 
 

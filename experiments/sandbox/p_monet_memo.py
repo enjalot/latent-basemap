@@ -31,7 +31,7 @@ def _cluster_coverage():
         clip = np.load(POOL / "clip512.f32.npy", mmap_mode="r"); N = clip.shape[0]
         si = np.sort(np.random.default_rng(0).choice(N, 500_000, replace=False))
         Xs = np.array(clip[si], dtype=np.float32); Xs /= np.linalg.norm(Xs, axis=1, keepdims=True).clip(1e-9)
-        km = MiniBatchKMeans(10000, random_state=0, batch_size=10000, n_init=3).fit(Xs)  # k=10k: discriminating
+        km = MiniBatchKMeans(10000, random_state=0, batch_size=50000, n_init=1, max_iter=50).fit(Xs)  # k=10k: discriminating
         cen = km.cluster_centers_.astype(np.float32); cen /= np.linalg.norm(cen, axis=1, keepdims=True).clip(1e-9)
         ref_sz = np.bincount(km.labels_, minlength=10000); rare = np.argsort(ref_sz)[:1000].astype(np.int64)
         np.savez(cenf, cen=cen, rare=rare)
@@ -86,6 +86,11 @@ def main():
                           if raf.exists() else {"_status": "PENDING (rarity_annfaiss)"})
     memo["sscd_nan_caveat"] = {"n": int(nanmask.sum()), "frac": round(float(nanmask.mean()), 4),
         "note": "SSCD undefined (~all synthetic-z-image); sscd arm EXCLUDES them, annfaiss/theirfaiss CAN pick them."}
+    memo["theirfaiss_note"] = ("theirfaiss arm PENDING — rarity-INVERSION bug caught by owner's reviewer + "
+        "fixed 2026-09-04: their index is metric_type=0 (INNER_PRODUCT/cosine, DESCENDING sims), not L2; the "
+        "pre-fix grind kept the self-hit + dropped the farthest neighbor + used large-mean=rare, which INVERTED "
+        "density (would have selected the DENSEST rows). Fixed to drop col0 + rarity=1-mean(cosine); grind "
+        "restarted, ETA ~2026-09-05 night. Both CLIP+DINOv2 indexes are IP (verified).")
     tj = SB / "monet-theirumap-score.json"
     memo["their_umap"] = json.loads(tj.read_text()) if tj.exists() else {"_status": "PENDING"}
     (SB / "monet-memo.json").write_text(json.dumps(memo, indent=1, default=str))
@@ -105,6 +110,7 @@ def main():
         cctxt = f"{cc.get('clusters_covered','?')} ({cc.get('rare_clusters_covered','?')}/1000)" if cc and "_status" not in cc else "pending"
         L.append(f"| {arm} | {cctxt} | {r.get('rare_region_frac')} | {r.get('probe_recall_at_15')} |")
     L += ["", "> Random is the baseline (~0.25 rare-region). A diverse arm should raise cluster/rare coverage + hold probe recall.",
+          "", f"> theirfaiss: {memo.get('theirfaiss_note','')}",
           "", "## 3. FFR as a TRADE-CURVE COST axis (NOT a ranking)",
           "| arm | FFR (own truth) | rare-region | mean sscd_nn |", "| --- | --- | --- | --- |"]
     for arm in ARMS:
