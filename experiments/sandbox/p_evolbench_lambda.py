@@ -35,9 +35,15 @@ def _norm(x):
 
 
 def _load_S3():
-    parts = ["T0", "T1", "T2", "T3"]
-    return _norm(np.concatenate([np.asarray(np.load(f"{SUBDIR}/{t}/substrate.f32.npy", mmap_mode="r"),
-                                            dtype=np.float32) for t in parts]))
+    # EVOLBENCH_LAMBDA_TRANCHE_PATHS: comma-separated ORDERED substrate.f32.npy paths (text-chain generalization,
+    # 2026-09-04) — the chain fits exact cumulative membership per stage (e.g. T0,T1,T3 = 5.6M for OOD-A), NOT the
+    # legacy T0+T1+T2+T3 concat. Default preserves the old behavior for existing lambda callers.
+    tp = os.environ.get("EVOLBENCH_LAMBDA_TRANCHE_PATHS", "")
+    if tp:
+        paths = [p for p in tp.split(",") if p]
+    else:
+        paths = [f"{SUBDIR}/{t}/substrate.f32.npy" for t in ("T0", "T1", "T2", "T3")]
+    return _norm(np.concatenate([np.asarray(np.load(p, mmap_mode="r"), dtype=np.float32) for p in paths]))
 
 
 def _state_hash(model):
