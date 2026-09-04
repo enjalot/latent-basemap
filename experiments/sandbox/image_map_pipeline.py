@@ -549,6 +549,21 @@ DATASETS = {
         "arms": {"champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                         "rankneg_window": 125_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
+    # exp-1b/2b centered re-maps (overseer 2026-09-04): SAME champion recipe on the mean-centered+renormed
+    # substrates (center_substrate.py) to test whether the anisotropic cone was hiding structure. exp-1b: per-
+    # substrate centered 2M text -> FFR vs raw 0.347. exp-2b: per-modality centered 500K joint -> crossmodal frac.
+    "monet-neomme-fineweb-2m-centered": {"load": (lambda: np.asarray(np.load(
+        "/data2/monet/neomme-fineweb-2m-centered/substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 500_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
+    "monet-neomme-pairs-500k-centered": {"load": (lambda: np.asarray(np.load(
+        "/data2/monet/neomme-pairs-500k-centered/substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 125_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
     # MONET diversity draws (item 3): champion CLIP-512 map per draw arm (random/sscd/annfaiss/theirfaiss),
     # substrate = pool clip512[arm.idx] assembled by monet_assemble_draw.py. Compared vs the random arm.
     **{f"monet-draw-{arm}-clip": {

@@ -10,14 +10,15 @@ Deliverables (overseer):
 Reads: coords from the champion map dir; modality.npy / pair_id.npy / substrate from the pairs-500k dir.
 CPU-only (.venv: scipy cKDTree for 2D kNN, chunked cosine for the source sample). Writes exp2_summary.json.
 Usage: neomme_exp2_analyze.py"""
-import json, time
+import os, json, time
 from pathlib import Path
 import numpy as np
 from scipy.spatial import cKDTree
 
 SB = Path("/data/latent-basemap/sandbox")
-MAP = SB / "monet-neomme-pairs-500k" / "champion-bs16k"
-DAT = Path("/data2/monet/neomme-pairs-500k")
+# env-overridable so the centered re-map (exp-2b) reuses this on the centered map+substrate
+MAP = Path(os.environ.get("EXP2_MAP", str(SB / "monet-neomme-pairs-500k" / "champion-bs16k")))
+DAT = Path(os.environ.get("EXP2_DAT", "/data2/monet/neomme-pairs-500k"))
 K = 15; SEED = 42; SAMPLE = 50_000
 
 
