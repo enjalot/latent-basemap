@@ -549,6 +549,22 @@ DATASETS = {
         "arms": {"champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                         "rankneg_window": 125_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
+    # SigLIP2 image probe (owner 2026-09-04): SigLIP2-so400m/256 image embeddings of the EXACT random-2m rows
+    # -> champion map -> FFR decision-grade vs DINOv2 0.826 / CLIP 0.649 on identical rows. Substrate from
+    # siglip_embed.py. rankneg 25% of 2M = 500K. (If cone_stats>0.3, a -centered twin is added like NeoMME.)
+    "monet-siglip-random-2m": {"load": (lambda: np.asarray(np.load(
+        "/data2/monet/siglip-random-2m/substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 500_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
+    # SigLIP2 centered twin — only built if bench cone_mean_norm>0.3 (checklist step 2: report raw+centered).
+    "monet-siglip-random-2m-centered": {"load": (lambda: np.asarray(np.load(
+        "/data2/monet/siglip-random-2m-centered/substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 500_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
     # exp-1b/2b centered re-maps (overseer 2026-09-04): SAME champion recipe on the mean-centered+renormed
     # substrates (center_substrate.py) to test whether the anisotropic cone was hiding structure. exp-1b: per-
     # substrate centered 2M text -> FFR vs raw 0.347. exp-2b: per-modality centered 500K joint -> crossmodal frac.
