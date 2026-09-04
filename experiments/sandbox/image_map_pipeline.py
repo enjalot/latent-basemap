@@ -63,6 +63,14 @@ ARMS = {
 }
 
 
+def _norm_concat(paths) -> np.ndarray:
+    """Ordered L2-normed concat of substrate paths (text-chain cumulative graphs). Row order = paths order, so
+    it matches the anchored fit's EVOLBENCH_LAMBDA_TRANCHE_PATHS load; normed => cosine-knn matches training."""
+    out = np.concatenate([np.asarray(np.load(p, mmap_mode="r"), dtype=np.float32) for p in paths])
+    n = np.linalg.norm(out, axis=1, keepdims=True); n[n == 0] = 1.0
+    return (out / n).astype(np.float32)
+
+
 def _bl_load() -> np.ndarray:
     sub = Path("/data/latent-basemap/substrates/bl-siglip2-1m")
     return np.array(np.load(sub / "substrate.f16.npy", mmap_mode="r"),
@@ -549,6 +557,23 @@ DATASETS = {
         "arms": {"champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                         "rankneg_window": 125_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
+    # Text-chain cumulative graphs (owner plan-basemap-chain, 2026-09-04): knn+fuzzy on the EXACT per-stage
+    # cumulative membership (ordered, provenance-disjoint per chain-manifest.json). OOD-A = T0+T1+T3 (5.6M),
+    # OOD-B = T0+T1+T3+T2+oodca_T3 (7.2M). Load = _norm(ordered concat) — same order the anchored fit uses via
+    # EVOLBENCH_LAMBDA_TRANCHE_PATHS, so rows align. Champion recipe params are placeholders (knn/fuzzy only use
+    # the substrate; the anchored UPDATE runs via p_evolbench_lambda, not train here).
+    "chain-ooda-5m6": {"load": (lambda: _norm_concat([
+        "/data/latent-basemap/substrates/evolbench/T0/substrate.f32.npy",
+        "/data/latent-basemap/substrates/evolbench/T1/substrate.f32.npy",
+        "/data/latent-basemap/substrates/evolbench/T3/substrate.f32.npy"])),
+        "subsets": None, "arms": {}},
+    "chain-oodb-7m2": {"load": (lambda: _norm_concat([
+        "/data/latent-basemap/substrates/evolbench/T0/substrate.f32.npy",
+        "/data/latent-basemap/substrates/evolbench/T1/substrate.f32.npy",
+        "/data/latent-basemap/substrates/evolbench/T3/substrate.f32.npy",
+        "/data/latent-basemap/substrates/evolbench/T2/substrate.f32.npy",
+        "/data/latent-basemap/substrates/evolbench-ood-ca/T3/substrate.f32.npy"])),
+        "subsets": None, "arms": {}},
     # SigLIP2 image probe (owner 2026-09-04): SigLIP2-so400m/256 image embeddings of the EXACT random-2m rows
     # -> champion map -> FFR decision-grade vs DINOv2 0.826 / CLIP 0.649 on identical rows. Substrate from
     # siglip_embed.py. rankneg 25% of 2M = 500K. (If cone_stats>0.3, a -centered twin is added like NeoMME.)
