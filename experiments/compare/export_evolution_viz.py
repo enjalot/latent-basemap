@@ -17,9 +17,13 @@ T0|T1|...|Tk by construction) + arm list + per-arm frame + churn stats.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "sandbox"))
+import frame  # the ONE rigid gauge (review-item B) shared with the scorers
 
 SB = Path("/data/latent-basemap/sandbox")
 TRAIL_SAMPLE = 120_000
@@ -128,11 +132,10 @@ def export_space(name: str, cfg: dict) -> None:
                     "span": list(span), "churn": {}}
         if step_labels:
             arm_meta["step_labels"] = step_labels
-        # radius normalization consistent with the churn metric (p90 of S0)
+        # canonical radius from the shared gauge (frame.py), stored for the
+        # lambda page's dvf normalization
         s0 = snaps.get(0)
-        R = float(np.percentile(
-            np.linalg.norm(s0 - np.median(s0, axis=0), axis=1), 90)) \
-            if s0 is not None else 1.0
+        R = frame.frame_radius(s0) if s0 is not None else 1.0
         arm_meta["radius"] = R
 
         def quant(xy):
@@ -146,7 +149,9 @@ def export_space(name: str, cfg: dict) -> None:
                 continue
             a, b = snaps[k], snaps[k + 1]
             n = min(len(a), len(b))
-            disp = np.linalg.norm(b[:n] - a[:n], axis=1) / max(R, 1e-9)
+            # SAME churn as the scorers: rigid-aligned, prev-radius-normalized
+            disp, _ = frame.churn(b, a[:n])
+            disp = np.asarray(disp, np.float32)
             disp.astype(np.float16).tofile(ad / f"disp-S{k}.bin")
             arm_meta["churn"][str(k)] = {
                 "mean": round(float(disp.mean()), 5),
