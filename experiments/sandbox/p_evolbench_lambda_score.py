@@ -53,10 +53,10 @@ def _cohort_ffr(xy, knn, cohorts, nq=40000):
 
 
 def _score_map(coords_path, s2, knn, cost_min, label):
+    import sys as _sys; from pathlib import Path as _P; _sys.path.insert(0, str(_P(__file__).resolve().parent))
+    from frame import churn as _frame_churn   # item B: RIGID gauge (no scale collapse) + canonical radius, shared with score_v2
     xy = np.asarray(np.load(coords_path), dtype=np.float32); n = xy.shape[0]
-    rad = np.percentile(np.linalg.norm(s2 - s2.mean(0), axis=1), 90)
-    aligned = _procrustes(xy[:N2].astype(np.float64), s2.astype(np.float64))
-    disp = np.linalg.norm(aligned - s2, axis=1) / max(rad, 1e-9)
+    disp, _ = _frame_churn(xy, s2.astype(np.float64))   # was _procrustes WITH-SCALE (collapsed radius 67.5->0.10)
     coh = _cohort_ffr(xy, knn, {"overall": (0, n), "T0_retention": (0, N0), "reddit": (N2, N)})
     return {"label": label, "n": int(n), "churn_mean": round(float(disp.mean()), 5),
             "churn_p95": round(float(np.percentile(disp, 95)), 5),
