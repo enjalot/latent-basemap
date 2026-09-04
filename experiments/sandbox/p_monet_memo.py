@@ -100,7 +100,7 @@ def main():
          "## 1. Map quality (quick_ffr_v2, each on its own truth)",
          f"- laion sisap-CLIP768 **{mq['laion_sisap_clip768']}** | MONET CLIP-512 {mq['monet_random_clip512']} | MONET DINOv2-1536 **{mq['monet_random_dino1536']}**",
          "", "## 2. Diversity draws — DECIDING METRICS (fair: identical probe set + reference clustering)",
-         "| arm | cluster coverage (rare/1000) | rare-region frac | probe recall@15 |",
+         "| arm | cluster coverage (SATURATED) | rare-region frac | probe recall@15 |",
          "| --- | --- | --- | --- |"]
     for arm in ARMS:
         r = memo["diversity_draws"][arm]
@@ -109,7 +109,7 @@ def main():
         cc = r.get("cluster_coverage") or {}
         cctxt = f"{cc.get('clusters_covered','?')} ({cc.get('rare_clusters_covered','?')}/1000)" if cc and "_status" not in cc else "pending"
         L.append(f"| {arm} | {cctxt} | {r.get('rare_region_frac')} | {r.get('probe_recall_at_15')} |")
-    L += ["", "> Random is the baseline (~0.25 rare-region). A diverse arm should raise cluster/rare coverage + hold probe recall.",
+    L += ["", "> cluster-coverage SATURATES at this 10%-of-pool draw fraction (every arm covers ~all clusters by construction) — see rare-region frac + probe recall@15, the actual diversity + cost signals. Random baseline rare-region ~0.25.",
           "", f"> theirfaiss: {memo.get('theirfaiss_note','')}",
           "", "## 3. FFR as a TRADE-CURVE COST axis (NOT a ranking)",
           "| arm | FFR (own truth) | rare-region | mean sscd_nn |", "| --- | --- | --- | --- |"]
