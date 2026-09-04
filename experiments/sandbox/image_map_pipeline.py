@@ -539,6 +539,16 @@ DATASETS = {
         "arms": {"champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                         "rankneg_window": 500_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
+    # NeoMME exp-2 joint-modality (owner NeoMME probe, overseer 2026-09-04): 250K MONET thumbnail+caption pairs
+    # BOTH embedded as NeoMME docs -> 500K joint substrate (rows [0,N)=img, [N,2N)=txt) -> champion map. Then
+    # interleave-vs-islands: pair-distance vs random baseline + cross-modal frac@k15 (neomme_exp2_analyze.py).
+    # rankneg_window = 25% of N=500K = 125K (champion convention).
+    "monet-neomme-pairs-500k": {"load": (lambda: np.asarray(np.load(
+        "/data2/monet/neomme-pairs-500k/substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 125_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
     # MONET diversity draws (item 3): champion CLIP-512 map per draw arm (random/sscd/annfaiss/theirfaiss),
     # substrate = pool clip512[arm.idx] assembled by monet_assemble_draw.py. Compared vs the random arm.
     **{f"monet-draw-{arm}-clip": {
