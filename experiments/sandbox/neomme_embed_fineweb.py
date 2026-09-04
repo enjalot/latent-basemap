@@ -22,14 +22,19 @@ def main():
         print("already complete"); return 0
     proc = NeoMMEProcessor.from_pretrained(MID)
     model = NeoMMEForRetrieval.from_pretrained(MID, dtype=torch.float16).cuda().eval()
+    # Official document form: apply_chat_template(task="document") prepends
+    # the <doc> token (id 5). proc(text=..., task=...) warns-and-IGNORES the
+    # kwarg (verified 2026-09-04, reviewer catch) — never use it.
+    doc_id = proc.tokenizer.convert_tokens_to_ids("<doc>")
+    assert doc_id not in (None, proc.tokenizer.unk_token_id), "no <doc> token"
     def _enc(batch):
-        for kw in ({"text": batch, "task": "document"}, {"text": batch, "prompt_name": "document"}, {"text": batch}):
-            try:
-                inp = proc(**kw, return_tensors="pt", padding=True, truncation=True, max_length=512)
-                return {k: v.cuda() for k, v in inp.items()}
-            except TypeError:
-                continue
-        raise RuntimeError("no processor sig")
+        msgs = [[{"role": "user", "content": [{"type": "text", "text": t}]}]
+                for t in batch]
+        inp = proc.apply_chat_template(
+            msgs, task="document", tokenize=True, return_dict=True,
+            return_tensors="pt", padding=True, truncation=True, max_length=512)
+        assert int(inp["input_ids"][0, 0]) == doc_id, "document form missing <doc>"
+        return {k: v.cuda() for k, v in inp.items() if hasattr(v, "cuda")}
     # stream chunk_text, skipping the first `done` rows
     seen = 0; buf = []; t0 = time.time()
     with torch.no_grad():
