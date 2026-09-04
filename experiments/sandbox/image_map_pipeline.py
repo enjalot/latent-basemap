@@ -531,6 +531,14 @@ DATASETS = {
                         "rankneg_window": 502_080, "batch_size": 16384,
                         "gpu_resident_vram_budget_gb": 22.0}}}}
        for sp in ("clip", "dino")},
+    # NeoMME exp-1 harness column (owner NeoMME probe): NeoMME-260M dense 1024-d over 2M fineweb-edu-chunked-120
+    # (same text as MiniLM-384) -> champion map -> FFR beside MiniLM-384/jina-768.
+    "monet-neomme-fineweb-2m": {"load": (lambda: np.asarray(np.load(
+        "/data2/monet/neomme-fineweb-2m/substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 500_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
     # MONET diversity draws (item 3): champion CLIP-512 map per draw arm (random/sscd/annfaiss/theirfaiss),
     # substrate = pool clip512[arm.idx] assembled by monet_assemble_draw.py. Compared vs the random arm.
     **{f"monet-draw-{arm}-clip": {
