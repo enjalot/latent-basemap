@@ -57,7 +57,8 @@ def main():
                         sub.flush(); donef.write_text(str(done))
                         print(f"  {done:,}/{N:,} ({done/(time.time()-t0):.0f} ch/s)", flush=True)
     if buf and done < N:
-        inp = _enc(buf); emb = torch.nn.functional.normalize(model(**inp).dense_embeddings, dim=1).float().cpu().numpy()
+        with torch.no_grad():   # tail runs OUTSIDE the main loop's no_grad -> was crashing .numpy() on a grad tensor
+            emb = torch.nn.functional.normalize(model(**_enc(buf)).dense_embeddings, dim=1).detach().float().cpu().numpy()
         m = min(len(buf), N - done)
         sub[done:done+m] = emb[:m]; done += m
     sub.flush(); donef.write_text(str(done))
