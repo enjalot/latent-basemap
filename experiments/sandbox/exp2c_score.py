@@ -33,7 +33,13 @@ def _within_ffr(xy, knn, rows_idx, n_total, n_queries=10000, seed=0):
 def main():
     mapdir = Path(sys.argv[1]); dat = Path(sys.argv[2]); label = sys.argv[3]
     xy = np.asarray(np.load(mapdir / "coordinates.npy"), dtype=np.float32)
-    mod = np.load(dat / "modality.npy"); knn = np.load(dat / "knn_indices.npy", mmap_mode="r")
+    mod = np.load(dat / "modality.npy")
+    # ORIGINAL un-injected centered knn = the truth; the pplan copies it into each 2c arm dir (map_dir.parent),
+    # NOT the /data2 dat dir. Fall back to the sandbox centered dir if the arm-local copy is absent.
+    knn_path = mapdir.parent / "knn_indices.npy"
+    if not knn_path.is_file():
+        knn_path = Path("/data/latent-basemap/sandbox/monet-neomme-pairs-500k-centered/knn_indices.npy")
+    knn = np.load(knn_path, mmap_mode="r")
     n_rows = xy.shape[0]; N = n_rows // 2
     span = float(np.linalg.norm(xy.max(0) - xy.min(0)))
     # pair adjacency
