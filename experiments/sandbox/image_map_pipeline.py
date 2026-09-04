@@ -564,6 +564,16 @@ DATASETS = {
         "arms": {"champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                         "rankneg_window": 125_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
+    # exp-2c matched-pair-edge injection sweep (owner-approved 2026-09-04): SAME centered substrate + champion
+    # recipe, but each variant's edges-k15-fuzzy.npz is the centered graph PLUS injected pair edges at
+    # w_pair = {0.5,1,2}x median edge weight (inject_pair_edges.py). Tests pair adjacency vs per-modality fidelity.
+    **{f"monet-neomme-pairs-500k-2c-w{lab}": {"load": (lambda: np.asarray(np.load(
+        "/data2/monet/neomme-pairs-500k-centered/substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 125_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}}
+      for lab in ("05", "1", "2")},
     # MONET diversity draws (item 3): champion CLIP-512 map per draw arm (random/sscd/annfaiss/theirfaiss),
     # substrate = pool clip512[arm.idx] assembled by monet_assemble_draw.py. Compared vs the random arm.
     **{f"monet-draw-{arm}-clip": {
