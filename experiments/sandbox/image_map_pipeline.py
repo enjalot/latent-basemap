@@ -539,6 +539,16 @@ DATASETS = {
                         "rankneg_window": 502_080, "batch_size": 16384,
                         "gpu_resident_vram_budget_gb": 22.0}}}}
        for sp in ("clip", "dino")},
+    # 3D twin of the 2M MONET-CLIP map (owner 2026-09-05, for the viewer's 3D rendering eval): SAME clip-512
+    # substrate + SAME champion recipe/seed, ONLY n_components=3. REUSE the 2M knn/fuzzy graph (dimension-
+    # independent) by symlinking monet-random-clip-2m/{edges-k15-fuzzy.npz,knn_indices.npy} into this dir before
+    # train (zero graph cost). frame.py (2D-only) is skipped in scoring; report FFR-2D vs FFR-3D on the same graph.
+    "monet-random-clip-2m-3d": {
+        "load": (lambda: np.asarray(np.load("/data2/monet/random-2m/clip-substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10, "n_components": 3,
+                        "rankneg_window": 502_080, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
     # NeoMME exp-1 harness column (owner NeoMME probe): NeoMME-260M dense 1024-d over 2M fineweb-edu-chunked-120
     # (same text as MiniLM-384) -> champion map -> FFR beside MiniLM-384/jina-768.
     "monet-neomme-fineweb-2m": {"load": (lambda: np.asarray(np.load(
