@@ -549,6 +549,16 @@ DATASETS = {
         "arms": {"champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10, "n_components": 3,
                         "rankneg_window": 502_080, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
+    # 4M champion (owner 2026-09-05): nested random draw (members = random-2m; +uniform complement -> 4M),
+    # SAME champion recipe as the 2M, rankneg = 25% of 4M = 1,000,000. Substrate + provenance from
+    # monet_draw_4m.py. Scored vs 2M on held-out (val/test outside the 4M union) at the <=0.02 regression gate;
+    # SEPARATE receipts (never overwrite the 2M). Canary via CANARY_STEPS before the full run.
+    "monet-random-clip-4m": {
+        "load": (lambda: np.asarray(np.load("/data2/monet/random-clip-4m/clip-substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 1_000_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
     # NeoMME exp-1 harness column (owner NeoMME probe): NeoMME-260M dense 1024-d over 2M fineweb-edu-chunked-120
     # (same text as MiniLM-384) -> champion map -> FFR beside MiniLM-384/jina-768.
     "monet-neomme-fineweb-2m": {"load": (lambda: np.asarray(np.load(
