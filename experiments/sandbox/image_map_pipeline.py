@@ -637,6 +637,28 @@ DATASETS = {
         "/data/latent-basemap/substrates/evolbench/T2/substrate.f32.npy",
         "/data/latent-basemap/substrates/evolbench-ood-ca/T3/substrate.f32.npy"])),
         "subsets": None, "arms": {}},
+    # longer-chain continuation (queue #2): OrdC adds T4 -> OOD-C adds bluesky (evolbench-ood-bluesky/T3, 800K);
+    # OrdD adds T5 -> OOD-D adds code (probe-code, 250K). Cumulative concats for the #3/#4 graph builds.
+    "chain-oodc-8m8": {"load": (lambda: _norm_concat([
+        "/data/latent-basemap/substrates/evolbench/T0/substrate.f32.npy",
+        "/data/latent-basemap/substrates/evolbench/T1/substrate.f32.npy",
+        "/data/latent-basemap/substrates/evolbench/T3/substrate.f32.npy",
+        "/data/latent-basemap/substrates/evolbench/T2/substrate.f32.npy",
+        "/data/latent-basemap/substrates/evolbench-ood-ca/T3/substrate.f32.npy",
+        "/data/latent-basemap/substrates/evolbench/T4/substrate.f32.npy",
+        "/data/latent-basemap/substrates/evolbench-ood-bluesky/T3/substrate.f32.npy"])),
+        "subsets": None, "arms": {}},
+    "chain-oodd-9m8": {"load": (lambda: _norm_concat([
+        "/data/latent-basemap/substrates/evolbench/T0/substrate.f32.npy",
+        "/data/latent-basemap/substrates/evolbench/T1/substrate.f32.npy",
+        "/data/latent-basemap/substrates/evolbench/T3/substrate.f32.npy",
+        "/data/latent-basemap/substrates/evolbench/T2/substrate.f32.npy",
+        "/data/latent-basemap/substrates/evolbench-ood-ca/T3/substrate.f32.npy",
+        "/data/latent-basemap/substrates/evolbench/T4/substrate.f32.npy",
+        "/data/latent-basemap/substrates/evolbench-ood-bluesky/T3/substrate.f32.npy",
+        "/data/latent-basemap/substrates/evolbench/T5/substrate.f32.npy",
+        "/data/latent-basemap/substrates/probe-code/substrate.f32.npy"])),
+        "subsets": None, "arms": {}},
     # SigLIP2 image probe (owner 2026-09-04): SigLIP2-so400m/256 image embeddings of the EXACT random-2m rows
     # -> champion map -> FFR decision-grade vs DINOv2 0.826 / CLIP 0.649 on identical rows. Substrate from
     # siglip_embed.py. rankneg 25% of 2M = 500K. (If cone_stats>0.3, a -centered twin is added like NeoMME.)
