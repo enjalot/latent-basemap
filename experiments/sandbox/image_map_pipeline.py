@@ -565,6 +565,14 @@ DATASETS = {
             "champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                         "rankneg_window": 1_000_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
+    # sscd-4M 3D twin (owner 2026-09-05): reuse the sscd-4M graph (symlink), n_components=3, otherwise identical.
+    # Completes the six-head matrix ({2M,4M-random,4M-sscd}x{2D,3D}). Common-holdout eval in both dims.
+    "monet-sscd-clip-4m-3d": {
+        "load": (lambda: np.asarray(np.load("/data2/monet/sscd-clip-4m/clip-substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10, "n_components": 3,
+                        "rankneg_window": 1_000_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
     "monet-random-clip-4m": {
         "load": (lambda: np.asarray(np.load("/data2/monet/random-clip-4m/clip-substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
         "subsets": None,
