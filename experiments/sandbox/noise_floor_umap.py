@@ -7,7 +7,7 @@ data (6.4M = T0+T1+T2+T3), identical params, differing only in run randomness ->
 churn between the pair. This bounds how much of the full-UMAP timeline's cumulative churn is growth-response vs
 noise: growth-churn >= measured_timeline - floor.
 
-PARAMS match umap06_diag.py (the baseline umap06dev reference): n_neighbors=15, min_dist=0.1, n_components=2,
+PARAMS match the competitor timeline (p_evolbench_competitor.py): n_neighbors=15, min_dist=0.0, n_components=2,
 metric=cosine. RANDOMNESS choice (documented): random_state=None for BOTH fits — matches the baseline's
 multi-threaded config; setting random_state=42/43 would force umap single-threaded, confounding THREADING with
 randomness (violating the same-implementation requirement) and making 6.4M CPU-infeasible. Two independent
@@ -48,7 +48,7 @@ def main():
 
     def fit(label):
         t0 = time.time()
-        c = np.asarray(umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, metric="cosine",
+        c = np.asarray(umap.UMAP(n_neighbors=15, min_dist=0.0, n_components=2, metric="cosine",
                                  random_state=None).fit_transform(X), np.float32)
         w = time.time() - t0
         print(f"[floor {tag}] fit {label} done {w:.0f}s ({w/60:.1f}min)", flush=True)
@@ -63,7 +63,7 @@ def main():
              "rmsd": info.get("rmsd")}
     out = {"schema": "noise-floor-umap-2026-09-05", "tag": tag, "tranches": tranches, "n_rows": int(n),
            "canary_rows": canary or None,
-           "params": {"lib": f"umap-learn {umap.__version__}", "n_neighbors": 15, "min_dist": 0.1,
+           "params": {"lib": f"umap-learn {umap.__version__}", "n_neighbors": 15, "min_dist": 0.0,
                       "metric": "cosine", "n_components": 2, "random_state": "None (both fits)"},
            "randomness_note": "random_state=None both fits — matches baseline umap06dev threading; 42/43 would "
                               "force single-thread, confounding implementation with randomness (overseer's warning).",
