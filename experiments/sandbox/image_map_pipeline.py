@@ -553,6 +553,18 @@ DATASETS = {
     # SAME champion recipe as the 2M, rankneg = 25% of 4M = 1,000,000. Substrate + provenance from
     # monet_draw_4m.py. Scored vs 2M on held-out (val/test outside the 4M union) at the <=0.02 regression gate;
     # SEPARATE receipts (never overwrite the 2M). Canary via CANARY_STEPS before the full run.
+    # sscd-weighted 4M (queue #1, growth comparison): same recipe as random-4M, sscd-rarity-weighted addition.
+    # Draw/substrate from monet_draw_4m_sscd.py. Scored vs random-4M on the common holdout (outside both unions).
+    "monet-sscd-clip-4m": {
+        "load": (lambda: np.asarray(np.load("/data2/monet/sscd-clip-4m/clip-substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {
+            "canary-h30k": {"md": "000", "dose": 0, "horizon": 30_000,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 1_000_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}},
+            "champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 1_000_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
     "monet-random-clip-4m": {
         "load": (lambda: np.asarray(np.load("/data2/monet/random-clip-4m/clip-substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
         "subsets": None,
