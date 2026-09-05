@@ -574,6 +574,14 @@ DATASETS = {
         "arms": {"champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10, "n_components": 3,
                         "rankneg_window": 1_000_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
+    # image-evolution graph (owner 2026-09-05): 5.08M cumulative = 4M clip-substrate + 1.08M BL thumb-CLIP.
+    # Only knn+fuzzy are run here (produces edges-k15-fuzzy.npz + knn_indices.npy); the anchored UPDATE runs via
+    # p_evolbench_lambda (EVOLBENCH_LAMBDA_EDGES=this dir's edges, ANCHOR=image-evolution-4m-bl-20260905/anchor.npz,
+    # HEAD=gated 4M). Row order = 4M rows [0,4M) then BL [4M,5.08M) — matches the anchor manifest.
+    "image-evo-4m-bl": {
+        "load": (lambda: _norm_concat(["/data2/monet/random-clip-4m/clip-substrate.f32.npy",
+                                       "/data2/monet/bl-clip/bl-clip.f32.npy"])),
+        "subsets": None, "arms": {}},
     # NeoMME exp-1 harness column (owner NeoMME probe): NeoMME-260M dense 1024-d over 2M fineweb-edu-chunked-120
     # (same text as MiniLM-384) -> champion map -> FFR beside MiniLM-384/jina-768.
     "monet-neomme-fineweb-2m": {"load": (lambda: np.asarray(np.load(
