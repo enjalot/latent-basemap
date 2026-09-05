@@ -39,13 +39,14 @@ def main():
     sys.path.insert(0, str(HERE))
     from _paths import ensure_paths; ensure_paths()
     import image_map_pipeline as m
+    from knobs_2m import BASE_KWARGS, MD
     from basemap.pumap.parametric_umap.core import ParametricUMAP
     import torch, math
 
     x = _norm(np.asarray(np.load(SUB, mmap_mode="r"), np.float32))
     champ_extra = m.DATASETS["monet-random-clip-2m"]["arms"]["champion-bs16k"]["extra"]
-    kwargs = dict(m.BASE_KWARGS)
-    kwargs.update({"low_dim_kernel": "umap", **m.MD["000"], **champ_extra,
+    kwargs = dict(BASE_KWARGS)
+    kwargs.update({"low_dim_kernel": "umap", **MD["000"], **champ_extra,
                    "total_steps_estimate": horizon, "n_epochs": max(1, math.ceil(horizon * 16384 * 0.10 / (x.shape[0] * 15)))})
 
     def run(label):
