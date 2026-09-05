@@ -12,13 +12,15 @@ prov_local_row[i]) packed as shard_idx<<16|local_row -> pool-20m-thumbs256. Reco
 
 Usage: project_pool_clip.py. Output: sandbox/monet-clip-fullpool-proj-20260905/{coords.f32.npy, manifest.json}.
 """
-import json, sys, time, hashlib
+import json, os, sys, time, hashlib
 from pathlib import Path
 import numpy as np
 
-CKPT = Path("/data/latent-basemap/sandbox/monet-random-clip-2m/champion-bs16k/model.pt")
+# CKPT/OUT env-parameterized so the SAME streamer serves the 2M-2D head and the 2M-3D head (owner 2026-09-05).
+# coords dim = the model's n_components (2 or 3), detected from the loaded head — NOT hardcoded.
+CKPT = Path(os.environ.get("PROJ_CKPT", "/data/latent-basemap/sandbox/monet-random-clip-2m/champion-bs16k/model.pt"))
 POOL = Path("/data2/monet/pool-20m")
-OUT = Path("/data/latent-basemap/sandbox/monet-clip-fullpool-proj-20260905")
+OUT = Path(os.environ.get("PROJ_OUT", "/data/latent-basemap/sandbox/monet-clip-fullpool-proj-20260905"))
 BATCH = 16384
 
 
@@ -34,8 +36,10 @@ def main():
     print(f"[proj] pool clip {clip.shape} {clip.dtype} | ckpt {CKPT}", flush=True)
     pumap = ParametricUMAP.load(str(CKPT), device="cuda")
     ckpt_sha = hashlib.sha256(CKPT.read_bytes()).hexdigest()[:16]
+    ncomp = int(getattr(pumap, "n_components", 2))
+    print(f"[proj] n_components={ncomp} -> coords ({N:,},{ncomp})", flush=True)
 
-    coords = np.lib.format.open_memmap(OUT / "coords.f32.npy", mode="w+", dtype=np.float32, shape=(N, 2))
+    coords = np.lib.format.open_memmap(OUT / "coords.f32.npy", mode="w+", dtype=np.float32, shape=(N, ncomp))
     t0 = time.time()
     with torch.no_grad():
         pumap.model.eval()
@@ -54,9 +58,9 @@ def main():
     med = np.median(coords[:: max(N // 200000, 1)].astype(np.float64), 0)
     r = np.linalg.norm(coords[:: max(N // 200000, 1)].astype(np.float64) - med, axis=1)
     manifest = {
-        "schema": "monet-clip-fullpool-proj-2026-09-05", "label": "single-seed focused — 2M CLIP head, full-pool projection",
+        "schema": "monet-clip-fullpool-proj-2026-09-05", "label": f"single-seed focused — 2M CLIP head (n_components={ncomp}), full-pool projection",
         "checkpoint": str(CKPT), "checkpoint_sha256_16": ckpt_sha, "trained_on_rows": 2008321,
-        "n_rows": int(N), "coords_file": "coords.f32.npy", "dim": 2, "wall_s": round(wall, 1),
+        "n_rows": int(N), "coords_file": "coords.f32.npy", "dim": ncomp, "wall_s": round(wall, 1),
         "rows_per_s": round(N / wall, 1),
         "row_alignment": "coords[i] <-> pool-20m id.npy[i]; thumb = (prov_shard_idx[i]<<16|prov_local_row[i]) in pool-20m-thumbs256",
         "layout_radius_p50": round(float(np.percentile(r, 50)), 3),

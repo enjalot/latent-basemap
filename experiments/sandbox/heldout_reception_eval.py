@@ -13,14 +13,18 @@ subset); their high-D = pool clip512[heldout], 2D = the full-pool projection coo
 
 Usage: heldout_reception_eval.py [NQ=6000] [SEED=0].
 """
-import json, sys, time
+import json, os, sys, time
 from pathlib import Path
 import numpy as np
 
 POOL = Path("/data2/monet/pool-20m")
 RM = Path("/data2/monet/random-2m")
+# REF_COORDS/PROJ env-parameterized so the same eval scores the 2D and 3D full-pool projections (owner 2026-09-05).
+# The existing-map layout (reference coords) and the projected query coords must be the SAME dimensionality;
+# cKDTree handles 2D or 3D transparently. High-D truth (CLIP) is identical for both.
 CKPT2M = Path("/data/latent-basemap/sandbox/monet-random-clip-2m/champion-bs16k")
-PROJ = Path("/data/latent-basemap/sandbox/monet-clip-fullpool-proj-20260905")
+REF_COORDS = Path(os.environ.get("REF_COORDS", str(CKPT2M / "coordinates.npy")))
+PROJ = Path(os.environ.get("PROJ_DIR", "/data/latent-basemap/sandbox/monet-clip-fullpool-proj-20260905"))
 K = 15
 
 
@@ -37,7 +41,7 @@ def main():
 
     # reference (existing 2M map)
     ref_hd = _norm(np.asarray(np.load(RM / "clip-substrate.f32.npy", mmap_mode="r"), np.float32))
-    ref_2d = np.asarray(np.load(CKPT2M / "coordinates.npy"), np.float64)
+    ref_2d = np.asarray(np.load(REF_COORDS), np.float64)   # existing-map layout (2D or 3D per REF_COORDS)
     n_ref = ref_hd.shape[0]
     assert ref_2d.shape[0] == n_ref, f"ref mismatch {ref_2d.shape} vs {n_ref}"
     print(f"[recep] reference (existing map): {n_ref:,} rows", flush=True)
@@ -64,30 +68,27 @@ def main():
     tree = cKDTree(ref_2d)
     print(f"[recep] index+tree built {time.time()-t0:.0f}s", flush=True)
 
+    disc = max(int(round(n_ref * 0.001)), K)   # 0.1%-of-existing-map 2D disc, matching quick_ffr_at_0.1pct
+    print(f"[recep] 2D disc = {disc} (0.1% of {n_ref:,}); high-D truth k={K}", flush=True)
+
     def recall_at_k(positions, exclude_self_in_ref):
         rng = np.random.default_rng(seed)
         q = rng.choice(positions, size=min(nq, positions.size), replace=False)
-        q_hd = _norm(np.asarray(pool_clip[np.sort(q)], np.float32))  # sorted for memmap locality
-        qs = np.sort(q)
+        qs = np.sort(q)                                              # sorted for memmap locality
+        q_hd = _norm(np.asarray(pool_clip[qs], np.float32))
         q_2d = np.asarray(coords[qs], np.float64)
-        # high-D truth among reference (k+1 to drop self when member)
-        kk = K + (1 if exclude_self_in_ref else 0)
-        _, hd = index.search(q_hd, kk)
-        # 2D neighbors among reference
-        _, d2 = tree.query(q_2d, k=kk, workers=-1)
+        # high-D truth: K nearest among the existing map (drop self for members)
+        _, hd = index.search(q_hd, K + (1 if exclude_self_in_ref else 0))
+        # 2D neighborhood: the 0.1%-disc among the existing map's layout (FFR convention)
+        _, d2 = tree.query(q_2d, k=disc + (1 if exclude_self_in_ref else 0), workers=-1)
         rec = np.empty(qs.size)
         for i in range(qs.size):
             h = hd[i]; t = d2[i]
             if exclude_self_in_ref:
-                # member query row exists in ref; its own ref index is the top hd hit — drop the nearest-identical
-                h = h[h >= 0][:K + 1]
-                t = t[:K + 1]
-                # drop the self match (cos~1 / dist~0): remove the single closest in each
-                h = h[1:K + 1] if h.size > K else h[:K]
-                t = t[1:K + 1] if t.size > K else t[:K]
-            else:
-                h = h[:K]; t = t[:K]
-            rec[i] = len(set(h.tolist()) & set(t.tolist())) / K
+                h = h[1:]; t = t[1:]      # drop the self match (member query is its own nearest)
+            h = h[:K]
+            ds = set(int(x) for x in t)
+            rec[i] = sum(int(x) in ds for x in h) / K
         return float(rec.mean()), int(qs.size)
 
     ho_rec, ho_n = recall_at_k(heldout_pos, exclude_self_in_ref=False)
