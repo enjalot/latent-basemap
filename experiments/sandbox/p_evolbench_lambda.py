@@ -96,6 +96,12 @@ def main():
     np.save(OUTD / f"coords-w{tag}.npy", coords)
     if os.environ.get("EVOLBENCH_LAMBDA_SAVE_MODEL"):    # G chain: persist the fine-tuned model for MapState update-from-update
         pumap.save(str(OUTD / f"model-w{tag}.pt"))
+        # persist the active/holdout anchor split (fit-populated) so the anchor-generalization metric
+        # (holdout <=1.5x active displacement) is scoreable post-hoc — save() doesn't carry these.
+        for attr, nm in (("anchor_holdout_ids_", "anchor_holdout_ids"), ("anchor_ids_", "anchor_active_ids")):
+            v = getattr(pumap, attr, None)
+            if v is not None:
+                np.save(OUTD / f"{nm}.npy", np.asarray(v))
     key = gen_key.artifact_key({"kind": "lambda-cell", "w": w, "n_epochs": n_epochs, "seed": SEED,
                                 "s0_head": warm_hash, "anchor": gen_key.file_digest(ANCHOR),
                                 "s3_edges": gen_key.file_digest(S3_EDGES)})
