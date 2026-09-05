@@ -88,7 +88,11 @@ def _fetch_one(gi, path):
             if attempt == HF_RETRIES - 1:
                 raise RuntimeError(f"{path}: read failed after {HF_RETRIES}: {last}")
             time.sleep(min(120, 3 * 2 ** attempt))
-    clip = np.asarray(t[CLIP_COL].to_pylist(), dtype=np.float32)
+    col = t[CLIP_COL].to_pylist()
+    if col and isinstance(col[0], str):     # encoding variant: some shards store the embedding as a JSON string
+        import json as _json
+        col = [_json.loads(c) for c in col]
+    clip = np.asarray(col, dtype=np.float32)
     if clip.ndim != 2 or clip.shape[1] != 512:
         raise RuntimeError(f"{path}: clip shape {clip.shape}")
     cp = OUT / "clip" / f"{gi:05d}.f32.npy"
