@@ -79,7 +79,9 @@ def main():
     ref_2d = np.asarray(np.load(COORDS), np.float64)
     index = faiss.IndexFlatIP(512); index.add(ref_hd)
     tree = cKDTree(ref_2d)
-    disc = max(int(round(ref_hd.shape[0] * 0.001)), K)
+    # cap the 2D disc at 2000 (was 0.1% of ref): keeps BL reception COMPARABLE across heads of different
+    # training size (2M vs 4M ref) and bounds the KDTree k-query cost (4M's 0.1%=4000 ran ~1h under CPU load).
+    disc = min(max(int(round(ref_hd.shape[0] * 0.001)), K), 2000)
     rng = np.random.default_rng(seed)
 
     def recep_of(hd_all, mask, n):
