@@ -556,7 +556,13 @@ DATASETS = {
     "monet-random-clip-4m": {
         "load": (lambda: np.asarray(np.load("/data2/monet/random-clip-4m/clip-substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
         "subsets": None,
-        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+        "arms": {
+            # canary: short explicit horizon (~10-15min) to prove the 4M substrate+graph train sanely on the
+            # 5090 (no NaN/collapse/OOM at rankneg 1M) BEFORE committing the ~4-6h full run. Gated in the driver.
+            "canary-h30k": {"md": "000", "dose": 0, "horizon": 30_000,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 1_000_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}},
+            "champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                         "rankneg_window": 1_000_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
     # NeoMME exp-1 harness column (owner NeoMME probe): NeoMME-260M dense 1024-d over 2M fineweb-edu-chunked-120
