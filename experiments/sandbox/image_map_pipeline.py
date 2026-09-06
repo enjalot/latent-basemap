@@ -549,13 +549,13 @@ DATASETS = {
     # its OWN knn/fuzzy (different dim). rankneg 1.5M = 25% of 6M. Feeds the 30M device-residency decision.
     "monet-random-dino-6m": {"load": (lambda: np.asarray(np.load(
         "/data2/monet/random-dino-6m/dino-substrate.f16.npy", mmap_mode="r"), dtype=np.float32)),
-        "subsets": None,
+        "prenormalized": True, "subsets": None,
         "arms": {"champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                         "rankneg_window": 1_500_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
     "monet-random-dino-6m-pca768": {"load": (lambda: np.asarray(np.load(
         "/data2/monet/random-dino-6m/pca768-substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
-        "subsets": None,
+        "prenormalized": True, "subsets": None,
         "arms": {"champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                         "rankneg_window": 1_500_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
@@ -1102,7 +1102,9 @@ def knn(ds: str) -> int:
 
     out = SANDBOX / ds
     out.mkdir(parents=True, exist_ok=True)
-    x = _norm(DATASETS[ds]["load"]())
+    # prenormalized substrates (e.g. DINO/CLIP columns, L2=1.0 on disk) skip _norm — it's a no-op that DOUBLES
+    # peak RAM (a full extra copy) at scale. Halves the 6M×1536 load peak ~72GB→~36GB. Correctness-neutral.
+    x = DATASETS[ds]["load"]() if DATASETS[ds].get("prenormalized") else _norm(DATASETS[ds]["load"]())
     n = x.shape[0]
     db = torch.from_numpy(x).half().cuda()
     del x
@@ -1186,6 +1188,8 @@ def train(ds: str) -> int:
         assert getattr(x, "_prenormalized", False) is True, (
             "sealed_int8_path substrate is not pre-normalized; refusing to train")
         # NB: _norm(...) is intentionally NOT applied on this branch.
+    elif DATASETS[ds].get("prenormalized"):
+        x = DATASETS[ds]["load"]()            # pre-normed on disk (L2=1.0) — skip the RAM-doubling _norm no-op
     else:
         x = _norm(DATASETS[ds]["load"]())
     subsets = DATASETS[ds]["subsets"]() if DATASETS[ds]["subsets"] else None
