@@ -15,8 +15,11 @@ import json, os, sys, time, hashlib
 from pathlib import Path
 import numpy as np
 
-POOL_CLIP = Path("/data2/monet/pool-20m/clip512.f32.npy")
-COMP_CLIP = Path("/data2/monet/pool-complement-88m/clip512.f32.npy")
+# Input columns parameterized (owner DINO endgame 2026-09-06): default CLIP-512, override to the DINO-1536 f16
+# columns via POOL_SUB/COMP_SUB. All columns are pre-normed (L2=1.0) so the head's training _norm is matched; the
+# f16 DINO column is cast f16->f32 per chunk in the loop (nil quality impact, recorded).
+POOL_CLIP = Path(os.environ.get("POOL_SUB", "/data2/monet/pool-20m/clip512.f32.npy"))
+COMP_CLIP = Path(os.environ.get("COMP_SUB", "/data2/monet/pool-complement-88m/clip512.f32.npy"))
 CKPT = Path(os.environ["PROJ_CKPT"])
 OUT = Path(os.environ["PROJ_OUT"])
 BATCH = 16384
