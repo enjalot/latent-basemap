@@ -700,6 +700,16 @@ DATASETS = {
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                         "rankneg_window": 125_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}}
       for lab in ("05", "1", "2")},
+    # exp-2c MULTIPLICITY arms (owner 2026-09-06, fixes the inert w_pair sweep): centered substrate + champion
+    # recipe; each dir's edges-k15-fuzzy.npz is the centered graph + pair edges TILED Mx (inject_pair_edges_mult),
+    # 90/10 held-out-pair split. Same load; the injected graph is placed in the dir by run_exp2c.sh before train.
+    **{f"monet-neomme-2c-m{M}": {"load": (lambda: np.asarray(np.load(
+        "/data2/monet/neomme-pairs-500k-centered/substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 125_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}}
+      for M in ("4", "16")},
     # MONET diversity draws (item 3): champion CLIP-512 map per draw arm (random/sscd/annfaiss/theirfaiss),
     # substrate = pool clip512[arm.idx] assembled by monet_assemble_draw.py. Compared vs the random arm.
     **{f"monet-draw-{arm}-clip": {

@@ -47,7 +47,17 @@ def main():
     _, nbr = tree.query(xy, k=K + 1, workers=-1); nb = nbr[:, 1:K + 1]
     cm = (mod[nb] != mod[:, None]).mean()
     partner = np.concatenate([np.arange(N) + N, np.arange(N)])
-    matched_in_knn = float((nb == partner[:, None]).any(1).mean())
+    matched_row = (nb == partner[:, None]).any(1)          # per-row: is the matched partner in the 2D k15?
+    matched_in_knn = float(matched_row.mean())
+    # held-out split (owner exp-2c): pairs whose edge was NOT injected — matched rate on them = GENERALIZATION
+    holdout_split = None
+    if len(sys.argv) > 4 and Path(sys.argv[4]).is_file():
+        ho = np.load(sys.argv[4])                          # held-out pair ids (image row i, text row N+i)
+        ho_rows = np.concatenate([ho, ho + N]); tr_mask = np.ones(2 * N, bool); tr_mask[ho_rows] = False
+        holdout_split = {"matched_partner_holdout": round(float(matched_row[ho_rows].mean()), 4),
+                         "matched_partner_train": round(float(matched_row[tr_mask].mean()), 4),
+                         "n_holdout_pairs": int(ho.size),
+                         "note": "held-out pairs got NO injected edge; their matched rate tests generalization vs memorization"}
     d_match = np.linalg.norm(xy[:N] - xy[N:2 * N], axis=1)
     perm = np.random.default_rng(42).permutation(N)
     d_rand = np.linalg.norm(xy[:N] - xy[N:2 * N][perm], axis=1)
@@ -58,7 +68,8 @@ def main():
            "pair_adjacency": {
                "crossmodal_frac_at_k15": round(float(cm), 4),
                "matched_partner_in_knn_at_k15": round(matched_in_knn, 4),
-               "pair_dist_ratio_2d": round(float(np.median(d_match) / (np.median(d_rand) + 1e-9)), 4)},
+               "pair_dist_ratio_2d": round(float(np.median(d_match) / (np.median(d_rand) + 1e-9)), 4),
+               "holdout_split": holdout_split},
            "quality_guard_within_modality_ffr": {
                "image_ffr": img_ffr, "text_ffr": txt_ffr,
                "note": "FFR of the 2c map vs the ORIGINAL un-injected centered k15 truth, per modality — the "
