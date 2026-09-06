@@ -537,8 +537,28 @@ DATASETS = {
         "arms": {"champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                         "rankneg_window": 502_080, "batch_size": 16384,
+                        "gpu_resident_vram_budget_gb": 22.0}},
+              # seed-43 twin (overseer 2026-09-06): image-side seed-variance band; reuses the seed-independent graph.
+              "champion-bs16k-seed43": {"md": "000", "dose": 4, "seed": 43,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 502_080, "batch_size": 16384,
                         "gpu_resident_vram_budget_gb": 22.0}}}}
        for sp in ("clip", "dino")},
+    # 6M DINO ladder rung — residency experiment (owner spec via overseer 2026-09-06): two arms on the nested 6M
+    # DINO draw. full-1536 = fp16 substrate; pca768 = PCA-768 preprocessed (exp_dino_6m_pca.py) + renormed. Each has
+    # its OWN knn/fuzzy (different dim). rankneg 1.5M = 25% of 6M. Feeds the 30M device-residency decision.
+    "monet-random-dino-6m": {"load": (lambda: np.asarray(np.load(
+        "/data2/monet/random-dino-6m/dino-substrate.f16.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 1_500_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
+    "monet-random-dino-6m-pca768": {"load": (lambda: np.asarray(np.load(
+        "/data2/monet/random-dino-6m/pca768-substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 1_500_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
     # 3D twin of the 2M MONET-CLIP map (owner 2026-09-05, for the viewer's 3D rendering eval): SAME clip-512
     # substrate + SAME champion recipe/seed, ONLY n_components=3. REUSE the 2M knn/fuzzy graph (dimension-
     # independent) by symlinking monet-random-clip-2m/{edges-k15-fuzzy.npz,knn_indices.npy} into this dir before
@@ -718,6 +738,35 @@ DATASETS = {
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                         "rankneg_window": 125_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}}
       for M in ("4", "16")},
+    # exp-2d relational joint map (owner 2026-09-06): SigLIP2 500K joint substrate (exp2d-siglip-500k), graph =
+    # exp2d_stratified_knn (8 within + 8 cross semantic ranks), built into each ds dir. rankneg 125K = 25% of 500K.
+    # -relational = full stratified graph; -holdout = same but held-out pairs' DIRECT partner cross-edge removed.
+    **{f"monet-neomme-2d-{v}": {"load": (lambda: np.asarray(np.load(
+        "/data2/monet/exp2d-siglip-500k/substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 125_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}}
+      for v in ("relational", "holdout")},
+    # exp-2d ratio sweep (owner 2026-09-06): same 500K SigLIP2 substrate, stratification {12within+4cross, 10+6}
+    # (vs the 8+8 relational/holdout above) — maps the interleaving-vs-within-image-fidelity frontier. Graph built
+    # per cell by exp2d_stratified_knn with EXP2D_KWITHIN/KCROSS env. rankneg 125K. main + holdout per cell.
+    **{f"monet-neomme-2d-{cell}": {"load": (lambda: np.asarray(np.load(
+        "/data2/monet/exp2d-siglip-500k/substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 125_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}}
+      for cell in ("w12c4", "w10c6", "w12c4-holdout", "w10c6-holdout")},
+    # exp-2d image-only baseline (overseer 2026-09-06): champion on the 250K IMAGE rows with a WITHIN-image-only
+    # graph, scored on the same within-modality-15 truth the joint map's image FFR used. Guard = (this FFR - joint
+    # image FFR 0.5185) ≤ 0.10 = the intra-image structure cost of adding the cross-modal edges. rankneg 62500 = 25% of 250K.
+    "monet-neomme-2d-imgbaseline": {"load": (lambda: np.asarray(np.load(
+        "/data2/monet/exp2d-siglip-500k/substrate.f32.npy", mmap_mode="r")[:250000], dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 62_500, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
     # MONET diversity draws (item 3): champion CLIP-512 map per draw arm (random/sscd/annfaiss/theirfaiss),
     # substrate = pool clip512[arm.idx] assembled by monet_assemble_draw.py. Compared vs the random arm.
     **{f"monet-draw-{arm}-clip": {
