@@ -549,6 +549,14 @@ DATASETS = {
         "arms": {"champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10, "n_components": 3,
                         "rankneg_window": 502_080, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
+    # DINO-2M 3D twin (owner 2026-09-06): reuse the dino-2m graph (symlink), n_components=3. 4th encoder-space
+    # +0.054 check (dino-2m 2D = 0.826 v1). 1536-d input (heavier). Completes the DINO 2D+3D pair.
+    "monet-random-dino-2m-3d": {
+        "load": (lambda: np.asarray(np.load("/data2/monet/random-2m/dino-substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10, "n_components": 3,
+                        "rankneg_window": 502_080, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
     # 4M champion (owner 2026-09-05): nested random draw (members = random-2m; +uniform complement -> 4M),
     # SAME champion recipe as the 2M, rankneg = 25% of 4M = 1,000,000. Substrate + provenance from
     # monet_draw_4m.py. Scored vs 2M on held-out (val/test outside the 4M union) at the <=0.02 regression gate;
