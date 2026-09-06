@@ -35,11 +35,13 @@ def main():
 
     ref_hd = _norm(np.asarray(np.load(REF_HD, mmap_mode="r"), np.float32))
     ref_2d = np.asarray(np.load(REF_COORDS), np.float64)
-    index = faiss.IndexFlatIP(512); index.add(ref_hd)
+    index = faiss.IndexFlatIP(ref_hd.shape[1]); index.add(ref_hd)   # dim from ref_hd (512 CLIP / 1536 DINO), not hardcoded
     tree = cKDTree(ref_2d); disc = max(int(round(ref_hd.shape[0] * 0.001)), K)
     coords = np.load(PROJ / "coords.f32.npy", mmap_mode="r"); N = coords.shape[0]
-    pool_clip = np.load(POOL / "clip512.f32.npy", mmap_mode="r")
-    comp_clip = np.load(COMP / "clip512.f32.npy", mmap_mode="r")
+    # high-D truth columns parameterized (DINO endgame 2026-09-06): default CLIP-512, override to DINO-1536 f16 via
+    # POOL_SUB/COMP_SUB. Must MATCH the column the projected head consumed (REF_HD). All pre-normed.
+    pool_clip = np.load(os.environ.get("POOL_SUB", str(POOL / "clip512.f32.npy")), mmap_mode="r")
+    comp_clip = np.load(os.environ.get("COMP_SUB", str(COMP / "clip512.f32.npy")), mmap_mode="r")
 
     # membership within the pool
     pool_ids = np.load(POOL / "id.npy", allow_pickle=True)
