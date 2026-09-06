@@ -10,7 +10,7 @@ dino1536.f16.npy[i] pairs with clip512[i]. Resumable per shard; per-1000-shard c
 Handles the JSON-string-encoded embedding variant (same as the CLIP complement's shard 6552).
 Usage: monet_download_dino.py [WORKERS=5].
 """
-import json, sys, time
+import json, sys, time, gc
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import numpy as np
@@ -22,7 +22,11 @@ OUT = Path("/data2/monet/pool-complement-88m")
 DINO_COL = "embedding_dinov2-vitg14"
 DIM = 1536
 HF_RETRIES = 6
-CKPT_EVERY = 1000
+# OOM FIX (owner/watcher 2026-09-06): scatter-writes into the 259GB f16 memmap accumulate DIRTY PAGES faster than
+# writeback under the HF throttle → RSS climbed unboundedly to 107GB and OOM-killed. Checkpoint every 100 shards and
+# CLOSE+REOPEN the memmap there (releases dirty-page refs, forces writeback) + del per-shard tables + gc.collect().
+# Also run the unit under systemd MemoryHigh=24G/MemoryMax=40G (throttles into early writeback / fails fast).
+CKPT_EVERY = 100
 
 
 def _fetch(gi, path, lo, n_expected):
@@ -42,6 +46,7 @@ def _fetch(gi, path, lo, n_expected):
         import json as _json
         col = [_json.loads(c) for c in col]
     d = np.asarray(col, dtype=np.float16)
+    del t, col                                  # release the pyarrow table + python list promptly
     if d.ndim != 2 or d.shape[1] != DIM:
         raise RuntimeError(f"{path}: dino shape {d.shape}")
     if d.shape[0] != n_expected:
@@ -65,26 +70,50 @@ def main():
             for j in range(len(complement)) if (n_pool + j) not in done]
     print(f"[dino] {len(todo)} shards to fetch ({len(done)} done), {workers} workers", flush=True)
 
+    from concurrent.futures import wait, FIRST_COMPLETED
     t0 = time.time(); n_run = 0; errors = []
+    # REAL accumulator fix (2026-09-06): the old {submit ALL upfront} retained every COMPLETED future's ~90MB
+    # result array (fut._result) until the pool closed → RSS climbed even with the memmap close+reopen. Bounded
+    # in-flight submission keeps only ~2*workers shard results resident at once.
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(_fetch, gi, p, lo, n): gi for (gi, p, lo, n) in todo}
-        for fut in as_completed(futs):
-            gi = futs[fut]
+        it = iter(todo); inflight = {}
+        for _ in range(min(2 * workers, len(todo))):
             try:
-                gi_, lo, d = fut.result()
-            except Exception as e:
-                errors.append(f"{gi}: {e}"); print(f"[dino] FAILED shard {gi}: {e}", flush=True); continue
-            dino[lo:lo + d.shape[0]] = d
-            done.add(gi); n_run += 1
-            if n_run % CKPT_EVERY == 0 or n_run == len(todo):
-                dino.flush(); done_path.write_text(json.dumps(sorted(done)))
-                el = time.time() - t0; rate = n_run / el if el else 0
-                import shutil
-                free_gb = shutil.disk_usage("/data2").free / 1e9
-                print(f"[dino] CKPT {len(done)}/{len(complement)} shards  {rate*60:.1f} sh/min  "
-                      f"eta~{(len(todo)-n_run)/rate/3600:.1f}h  errors={len(errors)}  /data2 free {free_gb:.0f}GB", flush=True)
-                if free_gb < 300:
-                    print(f"[dino] WARNING /data2 free {free_gb:.0f}GB < 300GB flag", flush=True)
+                g, pth, lo, cnt = next(it)
+            except StopIteration:
+                break
+            inflight[ex.submit(_fetch, g, pth, lo, cnt)] = g
+        while inflight:
+            dfs, _ = wait(inflight, return_when=FIRST_COMPLETED)
+            for fut in dfs:
+                gi = inflight.pop(fut)                          # drop the tracking ref
+                try:                                            # keep the pump full (one in, one out)
+                    g, pth, lo, cnt = next(it); inflight[ex.submit(_fetch, g, pth, lo, cnt)] = g
+                except StopIteration:
+                    pass
+                try:
+                    gi_, wlo, d = fut.result()
+                except Exception as e:
+                    errors.append(f"{gi}: {e}"); print(f"[dino] FAILED shard {gi}: {e}", flush=True); del fut; continue
+                dino[wlo:wlo + d.shape[0]] = d
+                del d, fut                                      # release the shard array AND the completed future's retained result
+                done.add(gi); n_run += 1
+                if n_run % CKPT_EVERY == 0 or n_run == len(todo):
+                    # flush + CLOSE + REOPEN the memmap: forces writeback and releases dirty-page references.
+                    dino.flush(); del dino; gc.collect()
+                    dino = np.lib.format.open_memmap(dpath, mode="r+", dtype=np.float16, shape=(N, DIM))
+                    done_path.write_text(json.dumps(sorted(done)))
+                    el = time.time() - t0; rate = n_run / el if el else 0
+                    import shutil
+                    free_gb = shutil.disk_usage("/data2").free / 1e9
+                    try:    # CURRENT RSS (VmRSS) — the plateau indicator, not a monotonic peak
+                        rss_gb = int([l.split()[1] for l in open("/proc/self/status") if l.startswith("VmRSS")][0]) / 1e6
+                    except Exception:
+                        rss_gb = -1.0
+                    print(f"[dino] CKPT {len(done)}/{len(complement)} shards  {rate*60:.1f} sh/min  "
+                          f"eta~{(len(todo)-n_run)/rate/3600:.1f}h  errors={len(errors)}  /data2 free {free_gb:.0f}GB  RSS {rss_gb:.1f}GB", flush=True)
+                    if free_gb < 300:
+                        print(f"[dino] WARNING /data2 free {free_gb:.0f}GB < 300GB flag", flush=True)
     dino.flush(); done_path.write_text(json.dumps(sorted(done)))
     manifest = {"schema": "monet-complement-dino1536-f16-2026-09-06", "col": DINO_COL, "dim": DIM,
                 "dtype": "float16", "n_rows": N, "cast": "f64->f16 at download; head casts f16->f32 at projection (nil quality impact)",
