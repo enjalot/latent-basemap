@@ -30,6 +30,10 @@ SPECS = [
      'monet-random-dino-6m/champion-bs16k/coordinates.npy', 6000000, 1536),
     ('dino-6m-pca768', 'DINOv2 · 6M training images · PCA 768 dimensions',
      'monet-random-dino-6m-pca768/champion-bs16k/coordinates.npy', 6000000, 768),
+    ('dino-6m-104m', 'DINOv2 · 103.82M images · 6M-trained full 1536 head',
+     'fullcorpus-dino-6m-2d/coords.f32.npy', 6000000, 1536),
+    ('dino-6m-pca768-104m', 'DINOv2 · 103.82M images · 6M-trained PCA 768 head',
+     'fullcorpus-dino-6m-pca768-2d/coords.f32.npy', 6000000, 768),
 ]
 
 
@@ -70,7 +74,7 @@ def build(spec):
     if key.endswith('104m'):
         assert evidence['dim'] == 2 and evidence['n_rows'] == expected
     scores = {}
-    if key.startswith('dino-6m'):
+    if key.startswith('dino-6m') and not key.endswith('104m'):
         scores = {'v2 FFR (own training truth)': evidence['v2_ffr_own_truth'],
                   'Held-out reception (6M reference)': evidence['heldout_reception_recall@15']}
     elif key == 'dino-2m':
@@ -118,20 +122,26 @@ def publish_index(maps):
     cards = ''.join(f'<a href="{m["url"]}"><img src="{m["url"]}thumb.png" alt=""><b>{html.escape(m["title"])}</b></a>' for m in maps)
     rows = ''.join('<tr><td>' + html.escape(m['title']) + '</td><td>' +
                    '</td><td>'.join(f'{v:.5f}' for v in m['scores'].values()) +
-                   ('</td><td>—' if len(m['scores']) == 1 else '') + '</td></tr>' for m in maps[2:])
+                   ('</td><td>—' if len(m['scores']) == 1 else '') + '</td></tr>' for m in maps if m['scores'])
     page = '''<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Latest MONET image maps — DINO and CLIP</title>
 <style>body{font:16px/1.5 system-ui;margin:0;background:#f8fafc;color:#182333}main{max-width:1600px;margin:auto;padding:24px}h1{margin:0}p{max-width:1050px}a{color:#185c91}button,select{font:inherit;padding:8px;margin:4px 8px 4px 0}button{cursor:pointer}.panes{display:grid;grid-template-columns:1fr 1fr;gap:16px}.pane{min-width:0}iframe{width:100%;height:720px;border:1px solid #bcc8d3;background:white}select{max-width:100%}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px}.cards a{background:white;padding:12px;text-decoration:none}.cards img{width:100%}table{border-collapse:collapse}td,th{text-align:left;padding:10px;border-bottom:1px solid #cdd5df}.scroll{overflow:auto}.meta{color:#526375;font-size:14px}@media(max-width:850px){.panes{grid-template-columns:1fr}iframe{height:620px}main{padding:14px}}</style>
 <main><a href="../sandbox/">All recent experiments</a><h1>Latest MONET image maps</h1>
 <p>Compare the full 103,816,750-image corpus in DINOv2 and CLIP, or inspect the completed DINO training ladder. These are interactive <b>2D density maps</b>: every image contributes to the counts; thumbnails and individual-image browsing are not included here.</p>
-<p>The full-corpus DINO export uses the <b>2M-trained 1536-dimensional head</b>; CLIP uses the <b>4M-trained 512-dimensional head</b>. The two 6M DINO heads are complete, but their full-corpus projections are not yet available. There is no completed 12M DINO rung in this snapshot.</p>
+<p>The original full-corpus DINO export uses the <b>2M-trained 1536-dimensional head</b>; CLIP uses the <b>4M-trained 512-dimensional head</b>. FULLSTATUS There is no completed 4M or 12M DINO rung in this snapshot.</p>
 <button id="full">DINO vs CLIP · 103.8M</button><button id="ladder">DINO · 6M full vs PCA</button><button id="growth">DINO · 2M vs 6M</button>
-<p class="meta">Each pane pans and zooms independently. Frames are not aligned; the 2M and 6M views contain different populations. Compare structure, not point displacement. Density intensity is relative to each map.</p>
+EXTRABUTTONS
+<p class="meta">Each pane pans and zooms independently. Frames are not aligned. Full-corpus views contain the same 103.8M images; training-map views contain their respective training populations. Compare structure, not point displacement. Density intensity is relative to each map.</p>
 <div class="panes"><div class="pane"><label>Left map <select id="left"></select></label> <a id="left-link">Open alone</a><iframe id="left-frame" title="Left map"></iframe></div><div class="pane"><label>Right map <select id="right"></select></label> <a id="right-link">Open alone</a><iframe id="right-frame" title="Right map"></iframe></div></div>
 <h2>Completed DINO ladder</h2><div class="scroll"><table><thead><tr><th>Training map</th><th>v2 FFR · own truth</th><th>Held-out reception</th></tr></thead><tbody>ROWS</tbody></table></div>
 <p class="meta">The 6M arms use the same training draw and held-out validation population; PCA changes the high-dimensional neighborhood truth. Reception uses 6,000 held-out queries into the 6M training reference. FFR uses a 0.1% map-neighbor budget, which grows with reference size. These scores are not a fixed-budget scaling comparison.</p>
 <h2>Individual maps</h2><div class="cards">CARDS</div><p class="meta">Updated STAMP. Coordinates and score receipts are linked in each map's <a href="catalog.json">manifest / catalog</a>. Existing <a href="http://gsv.local:5300/?dataset=monet-clip-basemap-full-4m-512">CLIP 103.8M image browser</a>.</p></main>
 <script>const maps=MAPDATA;const params=new URLSearchParams(location.search);function set(side,key){const m=maps.find(m=>m.key===key)||maps[0];document.getElementById(side).value=m.key;document.getElementById(side+'-frame').src=m.url;document.getElementById(side+'-link').href=m.url;params.set(side,m.key);history.replaceState(null,'','?'+params)}for(const side of ['left','right']){const s=document.getElementById(side);for(const m of maps){s.add(new Option(m.title,m.key))}s.onchange=()=>set(side,s.value)}function pair(a,b){set('left',a);set('right',b)}document.getElementById('full').onclick=()=>pair('dino-104m','clip-104m');document.getElementById('ladder').onclick=()=>pair('dino-6m','dino-6m-pca768');document.getElementById('growth').onclick=()=>pair('dino-2m','dino-6m');const left=params.get('left')||'dino-104m',right=params.get('right')||'clip-104m';pair(left,right);</script></html>'''
+    full_ready = all(any(m['key'] == k for m in maps) for k in ('dino-6m-104m', 'dino-6m-pca768-104m'))
+    status = ('Both 6M DINO heads now project all <b>103.8M images</b>, with full 1536 dimensions or the saved PCA-768 transform.' if full_ready else
+              'The two 6M DINO full-corpus projections are queued behind the shared GPU lock; this page will be refreshed automatically when both complete.')
+    buttons = ('<button onclick="pair(\'dino-6m-104m\',\'dino-6m-pca768-104m\')">103.8M · 6M full vs PCA</button><button onclick="pair(\'dino-104m\',\'dino-6m-104m\')">103.8M · DINO 2M vs 6M heads</button><button onclick="pair(\'clip-104m\',\'dino-6m-pca768-104m\')">103.8M · CLIP 4M vs DINO 6M PCA</button>' if full_ready else '')
+    page = page.replace('FULLSTATUS', status).replace('EXTRABUTTONS', buttons)
     page = page.replace('ROWS', rows).replace('CARDS', cards).replace('STAMP', datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')).replace('MAPDATA', json.dumps(maps))
     (out / 'index.html').write_text(page)
     (out / 'catalog.json').write_text(json.dumps(maps, indent=2))
@@ -148,7 +158,14 @@ def main():
     js = js.replace('async function getSamples(cx, cy) {', 'async function getSamples(cx, cy) {\n    if (S.manifest.samples_available === false) return null;')
     js = js.replace('Hover a bin for row count and text samples.', 'Hover a bin for its image count. This density view has no thumbnail samples.')
     (assets / 'viewer.js').write_text(js)
-    publish_index([build(spec) for spec in SPECS])
+    available = []
+    for spec in SPECS:
+        path = SB / spec[2]
+        if not path.exists() or (spec[0].endswith('104m') and not (path.parent / 'manifest.json').exists()):
+            print(f'Pending: {spec[0]}', flush=True)
+            continue
+        available.append(build(spec))
+    publish_index(available)
     print('http://gsv.local:8800/basemap-maps/latest-images/', flush=True)
 
 
