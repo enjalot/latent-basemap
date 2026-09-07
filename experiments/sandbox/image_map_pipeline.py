@@ -559,6 +559,20 @@ DATASETS = {
         "arms": {"champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                         "rankneg_window": 1_500_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
+    # 3D twins of the winning 6M arm (owner 2026-09-07): reuse the arm graph (symlinked), n_components=3. Only the
+    # WINNER (decision rule in run_dino_6m_3d.sh) trains. Same prenormalized substrate as the 2D arm.
+    "monet-random-dino-6m-3d": {"load": (lambda: np.asarray(np.load(
+        "/data2/monet/random-dino-6m/dino-substrate.f16.npy", mmap_mode="r"), dtype=np.float32)),
+        "prenormalized": True, "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10, "n_components": 3,
+                        "rankneg_window": 1_500_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
+    "monet-random-dino-6m-pca768-3d": {"load": (lambda: np.asarray(np.load(
+        "/data2/monet/random-dino-6m/pca768-substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "prenormalized": True, "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10, "n_components": 3,
+                        "rankneg_window": 1_500_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
     # 3D twin of the 2M MONET-CLIP map (owner 2026-09-05, for the viewer's 3D rendering eval): SAME clip-512
     # substrate + SAME champion recipe/seed, ONLY n_components=3. REUSE the 2M knn/fuzzy graph (dimension-
     # independent) by symlinking monet-random-clip-2m/{edges-k15-fuzzy.npz,knn_indices.npy} into this dir before
