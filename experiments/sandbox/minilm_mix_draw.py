@@ -52,7 +52,8 @@ class Corpus:
                 continue
             local = global_idx[m] - lo
             if self.is_base:
-                arr = np.memmap(s, dtype=np.float32, mode="r").reshape(-1, DIM)
+                nr = os.path.getsize(s) // (4 * DIM)      # explicit shape ignores any trailing partial bytes (odd/truncated shard)
+                arr = np.memmap(s, dtype=np.float32, mode="r", shape=(nr, DIM))
             else:
                 arr = np.load(s, mmap_mode="r")
             out[m] = np.asarray(arr[local], np.float32)
