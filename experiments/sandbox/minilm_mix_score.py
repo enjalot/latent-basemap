@@ -43,7 +43,7 @@ def main():
 
     # per-register reception: gather that register's held-out val, project through the head, recall@15 into THIS map
     per_reg = {}
-    for rname in REGISTERS:
+    for rname in [r for r in REGISTERS if r in held["val_idx"]]:
         vidx = np.array(held["val_idx"][rname], np.int64)
         if vidx.size == 0:
             continue
