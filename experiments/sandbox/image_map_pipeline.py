@@ -573,6 +573,16 @@ DATASETS = {
         "arms": {"champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10, "n_components": 3,
                         "rankneg_window": 1_500_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
+    # 12M-768 overnight rung (owner via overseer 2026-09-07): nested 6M⊂12M draw, REUSED 6M PCA (no refit —
+    # transferability + matches 30M reuse), champion, rankneg 3M = 25% of 12M. Extends the 2M→6M→12M scale curve
+    # and informs the 30M extrapolation. f16 substrate (disk flag). Own knn/fuzzy (12M×768). budget 24 (X fp16
+    # 18.4GB + edges ~2GB fit resident under 24; > that would fall to host_int8).
+    "monet-random-dino-12m-pca768": {"load": (lambda: np.asarray(np.load(
+        "/data2/monet/random-dino-12m/pca768-substrate.f16.npy", mmap_mode="r"), dtype=np.float32)),
+        "prenormalized": True, "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 3_000_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 24.0}}}},
     # MiniLM 2M mix pilot (owner-queued gate 2026-09-06): mixture-pathology check. minilm-mix-2m = base+socials,
     # minilm-base-2m = pure-base baseline. Both prenormalized (draw L2-norms), MiniLM-384. rankneg 500K = 25% of 2M.
     **{f"minilm-{v}-2m": {"load": (lambda v=v: np.asarray(np.load(
