@@ -581,8 +581,10 @@ DATASETS = {
         "/data2/monet/random-dino-12m/pca768-substrate.f16.npy", mmap_mode="r"), dtype=np.float32)),
         "prenormalized": True, "subsets": None,
         "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              # x_residency=device_int8 (canary-validated): at 12M fp16-resident X is 18.4GB and OOMs with rankneg
+              # 3M + activations; int8 X is 9.2GB and fits comfortably (canary: 15M device_int8 = 30.4GB reserved).
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
-                        "rankneg_window": 3_000_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 24.0}}}},
+                        "rankneg_window": 3_000_000, "batch_size": 16384, "x_residency": "device_int8"}}}},
     # MiniLM 2M mix pilot (owner-queued gate 2026-09-06): mixture-pathology check. minilm-mix-2m = base+socials,
     # minilm-base-2m = pure-base baseline. Both prenormalized (draw L2-norms), MiniLM-384. rankneg 500K = 25% of 2M.
     **{f"minilm-{v}-2m": {"load": (lambda v=v: np.asarray(np.load(
