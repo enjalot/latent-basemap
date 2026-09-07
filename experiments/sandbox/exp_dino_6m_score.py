@@ -43,14 +43,17 @@ def main():
     rng = np.random.default_rng(0); q = np.sort(rng.choice(val_hd.shape[0], min(6000, val_hd.shape[0]), replace=False))
     with torch.no_grad():
         val_2d = pumap.model(torch.from_numpy(val_hd[q]).cuda()).cpu().numpy().astype(np.float64)
-    # faiss IP over the 6M reference (chunked add), cKDTree over 6M coords
+    # faiss IP over the 6M reference (high-D truth) + faiss L2 over the 6M 2D coords (the 0.1% disc). Both faiss —
+    # cKDTree.query(k=disc) at disc=0.1%-of-6M=6000 was pathologically slow (~30-60min); faiss batch search is ~seconds,
+    # SAME recall metric (same neighbors). (Optimization 2026-09-07; earlier arms scored on the cKDTree path — identical result.)
     t0 = time.time(); index = faiss.IndexFlatIP(dim)
     for i in range(0, n, 500_000):
         index.add(_norm(np.asarray(sub[i:i + 500_000], np.float32)))
-    tree = cKDTree(coords.astype(np.float64)); disc = max(int(round(n * 0.001)), K)
-    print(f"[6m-score {ds}] faiss+tree built {time.time()-t0:.0f}s, disc={disc}", flush=True)
+    disc = max(int(round(n * 0.001)), K)
+    idx2d = faiss.IndexFlatL2(coords.shape[1]); idx2d.add(np.ascontiguousarray(coords.astype(np.float32)))
+    print(f"[6m-score {ds}] faiss (hd+2d) built {time.time()-t0:.0f}s, disc={disc}", flush=True)
     _, hd = index.search(val_hd[q], K)
-    _, d2 = tree.query(val_2d, k=disc, workers=-1)
+    _, d2 = idx2d.search(np.ascontiguousarray(val_2d.astype(np.float32)), disc)
     rec = np.mean([len(set(int(x) for x in hd[i]) & set(int(x) for x in d2[i])) / K for i in range(len(q))])
 
     out = {"schema": "dino-6m-ladder-arm-2026-09-06", "arm": ds, "dim": dim, "n_rows": int(n),
