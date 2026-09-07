@@ -40,7 +40,26 @@ def main():
     pumap = ParametricUMAP.load(str(CKPT), device="cuda")
     ncomp = int(getattr(pumap, "n_components", 2))
     ckpt_sha = hashlib.sha256(CKPT.read_bytes()).hexdigest()[:16]
-    print(f"[full] pool {n_pool:,} + complement {n_comp:,} = {N:,} | head n_components={ncomp} | ckpt {ckpt_sha}", flush=True)
+
+    # Optional PCA preprocessing (owner 2026-09-07): a head trained on PCA-768 needs the FULL corpus to go through
+    # the SAME saved components+mean before the head. Set PCA_MODEL=<pca768-model.npz>. f32->transform->renorm.
+    PCA_MODEL = os.environ.get("PCA_MODEL"); comp_t = mean_t = None
+    if PCA_MODEL:
+        pm = np.load(PCA_MODEL); comp_t = torch.from_numpy(np.ascontiguousarray(pm["components"], np.float32)).cuda()
+        mean_t = torch.from_numpy(np.ascontiguousarray(pm["mean"], np.float32)).cuda()
+        def _pca(t):  # (b,1536)->(b,768) renormed, matching exp_dino_6m_pca.py's training-side prep
+            return torch.nn.functional.normalize((t - mean_t) @ comp_t, dim=1)
+        # ASSERT the transform matches the training-side prep: dim + a spot-check row vs the 6M substrate.
+        assert comp_t.shape[1] == 768, f"PCA out-dim {comp_t.shape[1]} != 768"
+        SPOT = os.environ.get("PCA_SPOTCHECK_SUB")  # 6M pca768 substrate + its full_pos to spot-check a shared row
+        if SPOT:
+            fp = np.load(os.environ["PCA_SPOTCHECK_FULLPOS"]); pj = int(fp[0])
+            row = np.asarray((pool if pj < n_pool else comp)[pj if pj < n_pool else pj - n_pool], np.float32)
+            got = _pca(torch.from_numpy(row[None]).cuda()).cpu().numpy()[0]
+            ref = np.asarray(np.load(SPOT, mmap_mode="r")[0], np.float32)
+            md = float(np.abs(got - ref).max()); assert md < 1e-3, f"PCA spot-check mismatch max|d|={md} (full_pos[0]={pj})"
+            print(f"[full] PCA-768 spot-check OK (full_pos[0]={pj}, max|d| {md:.2e} vs 6M substrate)", flush=True)
+    print(f"[full] pool {n_pool:,} + complement {n_comp:,} = {N:,} | head n_components={ncomp} | ckpt {ckpt_sha} | PCA={'yes' if PCA_MODEL else 'no'}", flush=True)
 
     coords = np.lib.format.open_memmap(OUT / "coords.f32.npy", mode="w+", dtype=np.float32, shape=(N, ncomp))
     t0 = time.time()
@@ -50,8 +69,10 @@ def main():
         for src, n_src, tag in ((pool, n_pool, "pool"), (comp, n_comp, "complement")):
             for i in range(0, n_src, BATCH):
                 j = min(i + BATCH, n_src)
-                chunk = np.asarray(src[i:j], dtype=np.float32)
-                coords[base + i:base + j] = pumap.model(torch.from_numpy(chunk).to("cuda")).cpu().numpy().astype(np.float32)
+                chunk = torch.from_numpy(np.asarray(src[i:j], dtype=np.float32)).to("cuda")
+                if PCA_MODEL:
+                    chunk = _pca(chunk)
+                coords[base + i:base + j] = pumap.model(chunk).cpu().numpy().astype(np.float32)
                 if ((base + i) // BATCH) % 500 == 0:
                     el = time.time() - t0; done = base + j; rate = done / el if el else 0
                     print(f"[full] {tag} {done:,}/{N:,}  {rate/1e6:.2f}M rows/s  eta~{(N-done)/rate:.0f}s", flush=True)
@@ -63,7 +84,7 @@ def main():
     manifest = {
         "schema": "monet-clip-fullcorpus-proj-2026-09-05",
         "label": f"104M full-corpus projection — head n_components={ncomp}",
-        "checkpoint": str(CKPT), "checkpoint_sha256_16": ckpt_sha, "dim": ncomp,
+        "checkpoint": str(CKPT), "checkpoint_sha256_16": ckpt_sha, "dim": ncomp, "pca_model": PCA_MODEL,
         "n_rows": int(N), "n_pool": int(n_pool), "n_complement": int(n_comp),
         "row_layout": {"pool": [0, n_pool], "complement": [n_pool, N]},
         "row_alignment": "rows [0,n_pool) -> pool-20m id/prov; rows [n_pool,N) -> pool-complement-88m id/prov; "
