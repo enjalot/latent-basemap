@@ -573,6 +573,15 @@ DATASETS = {
         "arms": {"champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10, "n_components": 3,
                         "rankneg_window": 1_500_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}},
+    # MiniLM 2M mix pilot (owner-queued gate 2026-09-06): mixture-pathology check. minilm-mix-2m = base+socials,
+    # minilm-base-2m = pure-base baseline. Both prenormalized (draw L2-norms), MiniLM-384. rankneg 500K = 25% of 2M.
+    **{f"minilm-{v}-2m": {"load": (lambda v=v: np.asarray(np.load(
+        f"/data2/monet/minilm-{v}-2m/substrate.f32.npy", mmap_mode="r"), dtype=np.float32)),
+        "prenormalized": True, "subsets": None,
+        "arms": {"champion-bs16k": {"md": "000", "dose": 4,
+              "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                        "rankneg_window": 500_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}}
+      for v in ("mix", "base")},
     # 3D twin of the 2M MONET-CLIP map (owner 2026-09-05, for the viewer's 3D rendering eval): SAME clip-512
     # substrate + SAME champion recipe/seed, ONLY n_components=3. REUSE the 2M knn/fuzzy graph (dimension-
     # independent) by symlinking monet-random-clip-2m/{edges-k15-fuzzy.npz,knn_indices.npy} into this dir before
