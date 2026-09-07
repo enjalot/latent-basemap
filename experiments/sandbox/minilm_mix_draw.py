@@ -102,7 +102,7 @@ def main():
             "note": "L2-normed MiniLM-L6-v2; register.npy labels each row's source corpus; val/test held-out per register"}, indent=1))
         print(f"[mix] {out_dir}: {sum(counts.values()):,} rows, composition {counts}", flush=True)
 
-    draw_one(plan, "/data2/monet/minilm-mix-2m")
+    draw_one(plan, "/data2/monet/minilm-mixpilot-2m")
     base_plan = {k: N // len(BASE) for k in BASE}; base_plan[list(BASE)[0]] += N - sum(base_plan.values())
     draw_one(base_plan, "/data2/monet/minilm-base-2m")
     print("[mix] DONE (mix + pure-base 2M draws)", flush=True)

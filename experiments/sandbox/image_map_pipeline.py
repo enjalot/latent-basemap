@@ -581,7 +581,7 @@ DATASETS = {
         "arms": {"champion-bs16k": {"md": "000", "dose": 4,
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                         "rankneg_window": 500_000, "batch_size": 16384, "gpu_resident_vram_budget_gb": 22.0}}}}
-      for v in ("mix", "base")},
+      for v in ("mixpilot", "base")},
     # 3D twin of the 2M MONET-CLIP map (owner 2026-09-05, for the viewer's 3D rendering eval): SAME clip-512
     # substrate + SAME champion recipe/seed, ONLY n_components=3. REUSE the 2M knn/fuzzy graph (dimension-
     # independent) by symlinking monet-random-clip-2m/{edges-k15-fuzzy.npz,knn_indices.npy} into this dir before
@@ -987,6 +987,8 @@ DATASETS = {
     # table. load = the sealed R0216 (a) substrate; teacher + edges symlinked into
     # sandbox/minilm-mix-2m/{upstream-06dev/coordinates.npy, edges-k15-fuzzy.npz} (row-aligned,
     # 0.6dev 0.4798). Probe-only via space_capacity_probe.py minilm-mix-2m (no train arms).
+    # NOTE: this minilm-mix-2m is the round-0216 p15-baseline experiment (loads a round-0216 substrate, stale p15 arms).
+    # The champion MIX PILOT is minilm-mixpilot-2m (different substrate). Do not conflate.
     "minilm-mix-2m": {
         "load": lambda: np.load(
             "/data/latent-basemap/runs/round-0216/queue-correction-3/artifacts/"
