@@ -159,7 +159,7 @@ h1{{margin:.2rem 0}}.sub{{color:#4a5568;margin-top:0}}
 .card:hover{{border-color:#d69e2e;box-shadow:0 0 0 2px #f6e05e55}}
 .card img{{width:100%;display:block;border-radius:4px;background:#f7fafc}}
 .t{{font-weight:600;font-size:.9rem;margin-top:.4rem}}.m{{color:#718096;font-size:.8rem;margin-top:.2rem}}</style>
-<h1>Recent basemaps</h1><p class="sub">This week's sandbox maps — MONET draws, their-UMAP vs our champion,
+<h1>Recent basemaps</h1><p><a href="../latest-images/">Latest image comparisons: DINO vs CLIP at 103.8M, and the DINO 2M / 6M ladder</a></p><p class="sub">This week's sandbox maps — MONET draws, their-UMAP vs our champion,
 NeoMME text + joint-modality (raw/centered), exp-2c pair-edge sweep. Click a card to pan/zoom; color layers via
 the in-viewer dropdown. Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}.</p>
 <div class="grid">{items}</div>"""
