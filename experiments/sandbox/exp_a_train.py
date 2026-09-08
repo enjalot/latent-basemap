@@ -125,7 +125,9 @@ def main():
 
     # ---- arm: alternating (proximal penalty) ----
     t0 = time.time(); pu = fresh_model(); opt = torch.optim.Adam(pu.model.parameters(), lr=1e-3); pu.model.train()
-    Z = pca2d_init().clone().requires_grad_()                               # PCA-2D init (untrained head init collapsed); rho ramps 0->2 so Z optimizes freely first; optZ = torch.optim.Adam([Z], lr=1e-2)
+    Z = pca2d_init().clone().requires_grad_()                               # PCA-2D init; rho ramps 0->2
+    optZ = torch.optim.Adam([Z], lr=1e-2)                                  # bind the NEW tensor, not the teacher's Z
+    assert optZ.param_groups[0]["params"][0] is Z
     outer = horizon // 200; rho0, rho1 = 0.0, 2.0                           # rho ramp; calibrated below to loss scale
     for o in range(outer):
         rho = rho0 + (rho1 - rho0) * (o / max(outer - 1, 1))
@@ -151,13 +153,15 @@ def main():
     # ---- promote/stop (plan rule) ----
     dc, al = results["direct"], results["alternating"]
     dr, ar = dc["recall@k15_B2000"]["micro"], al["recall@k15_B2000"]["micro"]
-    dwc = min(dc["recall@k15_B2000"]["per_source"].values()); awc = min(al["recall@k15_B2000"]["per_source"].values())
-    half_time = al["wall_s"] <= 0.5 * dc["wall_s"] and ar >= dr - 0.005 and (dwc - awc) <= 0.01
-    better = ar >= dr + 0.02
+    cohort_losses = {c: dc["recall@k15_B2000"]["per_source"][c] - al["recall@k15_B2000"]["per_source"][c]
+                     for c in dc["recall@k15_B2000"]["per_source"]}
+    worst_cohort_loss = max(cohort_losses.values())
+    half_time = al["wall_s"] <= 0.5 * dc["wall_s"] and ar >= dr - 0.005 and worst_cohort_loss <= 0.01
+    better = ar >= dr + 0.02 and al["wall_s"] <= dc["wall_s"] and worst_cohort_loss <= 0.01
     verdict = ("PROMOTE: alternating reaches control quality in ≤half time" if half_time else
                "PROMOTE: alternating +0.02 recall at matched wall" if better else
                "STOP: alternating did not beat control on the plan's rule (Δrecall %.4f, wall %.0f vs %.0f, worst-cohort Δ %.4f)"
-               % (ar - dr, al["wall_s"], dc["wall_s"], dwc - awc))
+               % (ar - dr, al["wall_s"], dc["wall_s"], worst_cohort_loss))
     out = {"schema": "exp-a-2026-09-08", "substrate": "eval-common train 500K DINO-1536", "horizon": horizon,
            "sampler": "pos from graph + UNIFORM negatives (rankneg OFF, held fixed across arms)",
            "arms": results, "verdict": verdict,
