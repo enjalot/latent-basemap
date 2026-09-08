@@ -31,16 +31,18 @@ def main():
     print(f"[12m-score] v2 FFR (own truth) = {ffr_v2:.5f}", flush=True)
 
     sub = np.load(D / "pca768-substrate.f16.npy", mmap_mode="r")           # 12M x768 (already PCA-768, renormed)
-    val = _norm(np.asarray(np.load(D / "val-pca768.f16.npy", mmap_mode="r"), np.float32))
+    val_all = np.load(D / "val-pca768.f16.npy", mmap_mode="r")             # subsample: 200K×disc12000 reception is hours; 5K is representative
+    rng = np.random.default_rng(0); vsel = np.sort(rng.choice(val_all.shape[0], min(5000, val_all.shape[0]), replace=False))
+    val = _norm(np.asarray(val_all[vsel], np.float32))
     t0 = time.time(); hdx = faiss.IndexFlatIP(sub.shape[1])
     for i in range(0, n, 1_000_000):                                       # chunked add (no whole-array f32 materialize)
         hdx.add(np.ascontiguousarray(np.asarray(sub[i:i + 1_000_000], np.float32)))
     d2x = faiss.IndexFlatL2(coords.shape[1]); d2x.add(np.ascontiguousarray(coords)); disc = max(int(round(n * 0.001)), K)
     print(f"[12m-score] faiss built {time.time()-t0:.0f}s | disc {disc}", flush=True)
 
-    pumap = ParametricUMAP.load(str(ckpt / "model.pt"), device="cuda"); pumap.model.eval()
+    pumap = ParametricUMAP.load(str(ckpt / "model.pt"), device="cpu"); pumap.model.eval()   # CPU: score is fully CPU (faiss) -> runs off-flock, doesn't hold the GPU
     with torch.no_grad():
-        v2d = pumap.model(torch.from_numpy(val).cuda()).cpu().numpy().astype(np.float32)
+        v2d = pumap.model(torch.from_numpy(val)).cpu().numpy().astype(np.float32)
     _, hd = hdx.search(val, K); _, dd = d2x.search(np.ascontiguousarray(v2d), disc)
     rec = float(np.mean([len(set(int(x) for x in hd[i]) & set(int(x) for x in dd[i])) / K for i in range(val.shape[0])]))
     out = {"schema": "monet-dino-12m-pca768-score-2026-09-07", "ds": DS, "n_rows": int(n),
