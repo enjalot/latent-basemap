@@ -5,12 +5,13 @@ champion head -> each val query's 15 high-D NN among the 12M TRAINING rows (fais
 2D 0.1%-disc in the 12M map. Writes SANDBOX/monet-random-dino-12m-pca768/ladder-score.json.
 Usage: exp_dino_12m_score.py
 """
-import json, time
+import json, sys, time
 from pathlib import Path
 import numpy as np
 
 SB = Path("/data/latent-basemap/sandbox"); D = Path("/data2/monet/random-dino-12m")
-DS = "monet-random-dino-12m-pca768"; K = 15
+DS = sys.argv[1] if len(sys.argv) > 1 else "monet-random-dino-12m-pca768"   # arm dir (2d or -3d); substrate/val shared
+K = 15
 
 
 def _norm(x):
