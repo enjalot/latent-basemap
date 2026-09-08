@@ -597,7 +597,7 @@ DATASETS = {
         "arms": {nm: {"md": "000", "dose": 0, "horizon": 20_000,
                       "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                                 "rankneg_window": 125_000, "batch_size": 16384, "x_residency": "device_int8"}}
-                 for nm in ("champion-rn-ung", "champion-rn-grp")}},
+                 for nm in ("champion-rn-ung", "champion-rn-grp", "champion-rn-reuse")}},   # C1 bench: ung/grp/grp+reuse (env-driven)
     # MiniLM 2M mix pilot (owner-queued gate 2026-09-06): mixture-pathology check. minilm-mix-2m = base+socials,
     # minilm-base-2m = pure-base baseline. Both prenormalized (draw L2-norms), MiniLM-384. rankneg 500K = 25% of 2M.
     **{f"minilm-{v}-2m": {"load": (lambda v=v: np.asarray(np.load(
