@@ -585,6 +585,12 @@ DATASETS = {
               # 3M + activations; int8 X is 9.2GB and fits comfortably (canary: 15M device_int8 = 30.4GB reserved).
               "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
                         "rankneg_window": 3_000_000, "batch_size": 16384, "x_residency": "device_int8"}}}},
+    # Experiment-A/B graph source (owner efficiency plan 2026-09-08): the sealed eval-common 500K TRAIN subset
+    # (original DINO-1536). knn+fuzzy here builds the SINGLE full-D graph all A arms (direct/teacher/alternating)
+    # share; no pipeline arms (A uses its own trainer). prenormalized (pool DINO is L2=1.0).
+    "eval-common-train": {"load": (lambda: np.asarray(np.load(
+        "/data2/monet/eval-common/train_hd.f16.npy", mmap_mode="r"), dtype=np.float32)),
+        "prenormalized": True, "subsets": None, "arms": {}},
     # MiniLM 2M mix pilot (owner-queued gate 2026-09-06): mixture-pathology check. minilm-mix-2m = base+socials,
     # minilm-base-2m = pure-base baseline. Both prenormalized (draw L2-norms), MiniLM-384. rankneg 500K = 25% of 2M.
     **{f"minilm-{v}-2m": {"load": (lambda v=v: np.asarray(np.load(
