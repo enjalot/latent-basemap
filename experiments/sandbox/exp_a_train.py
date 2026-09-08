@@ -29,8 +29,10 @@ def main():
     from basemap.pumap.parametric_umap.core import ParametricUMAP
     import eval_common, torch
     dev = "cuda"; torch.manual_seed(42)
-    feats = torch.from_numpy(np.asarray(np.load(SEAL / "train_hd.f16.npy"), np.float16)).to(dev)
-    n, dim = feats.shape
+    # fp32 forwards (no autocast) — A's pilot prioritizes stability over fp16 throughput; all arms identical so the
+    # comparison stays fair. Removes the fp16 coord-overflow -> NaN that killed the first run.
+    feats = torch.from_numpy(np.asarray(np.load(SEAL / "train_hd.f16.npy"), np.float32)).to(dev)
+    n, dim = feats.shape; CLIP = 1.0                                        # production clip_grad_norm=1.0
     g = np.load(GRAPH); src_all = torch.from_numpy(g["sources"].astype(np.int64)).to(dev)
     dst_all = torch.from_numpy(g["targets"].astype(np.int64)).to(dev); n_edges = src_all.numel()
     seal = eval_common._load_seal()
@@ -39,7 +41,8 @@ def main():
     def loss_fn(se, de, tgt):
         delta = (se - de).float(); r2 = delta.square().sum(1); tiny = torch.finfo(r2.dtype).tiny
         radial = torch.where(r2 == 0, torch.zeros_like(r2), r2.clamp_min(tiny).pow(B_))
-        qs = torch.pow(1 + A * radial, -1.0).clamp(1e-7, 1 - 1e-7)
+        qs = torch.pow(1 + A * radial, -1.0)
+        qs = torch.nan_to_num(qs, nan=1e-7, posinf=1 - 1e-7, neginf=1e-7).clamp(1e-7, 1 - 1e-7)  # nan_to_num BEFORE clamp (clamp can't fix NaN) — matches production
         per = torch.nn.functional.binary_cross_entropy(qs, tgt, reduction="none"); neg = tgt < 0.5
         per = torch.where(neg, NEG_TANH * torch.tanh(per / NEG_TANH), per); w = torch.ones_like(per)
         with torch.no_grad():
@@ -80,9 +83,12 @@ def main():
     t0 = time.time()
     for step in range(horizon):
         src, dst, tgt = sample_edges(); opt.zero_grad(set_to_none=True)
-        with torch.autocast("cuda", dtype=torch.float16):
-            se, de = pu.model(feats[src]), pu.model(feats[dst])
-        loss = loss_fn(se, de, tgt); loss.backward(); opt.step()
+        se, de = pu.model(feats[src]), pu.model(feats[dst])
+        loss = loss_fn(se, de, tgt); loss.backward()
+        torch.nn.utils.clip_grad_norm_(pu.model.parameters(), CLIP); opt.step()
+        if step % 5000 == 0:
+            with torch.no_grad(): ff = torch.isfinite(se).all(1).float().mean().item()
+            print(f"[A direct] step {step} loss {loss.item():.4f} coord-finite {ff:.4f}", flush=True)
     torch.cuda.synchronize(); wall = time.time() - t0
     results["direct"] = {"wall_s": round(wall, 1), "horizon": horizon, **score(pu, "direct")}
     print(f"[A direct] {wall:.0f}s B2000 {results['direct']['recall@k15_B2000']['micro']}", flush=True)
@@ -93,15 +99,16 @@ def main():
     optZ = torch.optim.Adam([Z], lr=1e-2)
     for step in range(horizon):                                             # optimize FREE coords on the graph loss
         src, dst, tgt = sample_edges(); optZ.zero_grad(set_to_none=True)
-        loss = loss_fn(Z[src], Z[dst], tgt); loss.backward(); optZ.step()
+        loss = loss_fn(Z[src], Z[dst], tgt); loss.backward()
+        torch.nn.utils.clip_grad_norm_([Z], CLIP); optZ.step()
     Zstar = Z.detach()
     pu = fresh_model(); opt = torch.optim.Adam(pu.model.parameters(), lr=1e-3); pu.model.train()
     reg_steps = horizon                                                     # matched budget on the regression side
     for step in range(reg_steps):
         idx = torch.randint(0, n, (BATCH,), device=dev); opt.zero_grad(set_to_none=True)
-        with torch.autocast("cuda", dtype=torch.float16):
-            pred = pu.model(feats[idx])
-        loss = ((pred.float() - Zstar[idx]) ** 2).sum(1).mean(); loss.backward(); opt.step()
+        pred = pu.model(feats[idx])
+        loss = ((pred - Zstar[idx]) ** 2).sum(1).mean(); loss.backward()
+        torch.nn.utils.clip_grad_norm_(pu.model.parameters(), CLIP); opt.step()
     torch.cuda.synchronize(); wall = time.time() - t0
     with torch.no_grad():
         disc = (head_all(pu.model) - Zstar).norm(dim=1).mean().item()
@@ -120,13 +127,13 @@ def main():
             src, dst, tgt = sample_edges(); optZ.zero_grad(set_to_none=True)
             gl = loss_fn(Z[src], Z[dst], tgt)
             prox = rho / (2 * n) * ((Z - fx) ** 2).sum()
-            (gl + prox).backward(); optZ.step()
+            (gl + prox).backward(); torch.nn.utils.clip_grad_norm_([Z], CLIP); optZ.step()
         Zc = Z.detach()
         for _ in range(100):                                                # regression phase: head -> Z
             idx = torch.randint(0, n, (BATCH,), device=dev); opt.zero_grad(set_to_none=True)
-            with torch.autocast("cuda", dtype=torch.float16):
-                pred = pu.model(feats[idx])
-            loss = ((pred.float() - Zc[idx]) ** 2).sum(1).mean(); loss.backward(); opt.step()
+            pred = pu.model(feats[idx])
+            loss = ((pred - Zc[idx]) ** 2).sum(1).mean(); loss.backward()
+            torch.nn.utils.clip_grad_norm_(pu.model.parameters(), CLIP); opt.step()
     torch.cuda.synchronize(); wall = time.time() - t0
     with torch.no_grad():
         disc = (head_all(pu.model) - Z.detach()).norm(dim=1).mean().item()
