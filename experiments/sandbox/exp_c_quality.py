@@ -70,6 +70,8 @@ def main():
             rc = pu.model(torch.from_numpy(seal["ref_hd"]).to(dev)).cpu().numpy().astype(np.float32)
             vc = pu.model(torch.from_numpy(seal["val_hd"]).to(dev)).cpu().numpy().astype(np.float32)
         s = eval_common.score(rc, vc, seal, label); s["wall_s"] = round(wall, 1)
+        (OUT / label).mkdir(parents=True, exist_ok=True)                    # PERSIST head (standing rule) so the v2
+        pu.save(str(OUT / label / "model.pt")); s["pca_k"] = None           # re-verdict is a CPU rescore, not a retrain
         print(f"[C-qual {label}] {wall:.0f}s B2000 {s['recall@k15_B2000']['micro']} worst {s['recall@k15_B2000']['worst_cohort_recall']}", flush=True)
         return s
 
