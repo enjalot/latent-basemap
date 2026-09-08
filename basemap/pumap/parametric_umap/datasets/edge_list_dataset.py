@@ -602,6 +602,13 @@ class DeviceEdgeSampler:
         # composes with rankneg (Option Y). CHANGES within-batch neg correlations -> quality gated separately.
         self._grouped_neg = int(os.environ.get("GROUPED_NEGATIVES", "0"))
         self._grouped_tails = int(os.environ.get("GROUPED_TAILS", "4"))
+        # Endpoint reuse (efficiency-tranche C1, 2026-09-08): forward each UNIQUE endpoint row once and gather back to
+        # pair order, instead of forwarding every src/dst feature. The actual neural-work reduction the microbench
+        # measured (grouping alone doesn't reduce forwards — this does). Opt-in via env; core.py has the matching
+        # reuse branch. Gradient-identical to the direct forward (deterministic pointwise layers, gather preserves
+        # pair order → loss sees identical src/dst embeddings). BN/dropout must be off (core guards it).
+        self._endpoint_reuse = int(os.environ.get("ENDPOINT_REUSE", "0"))
+        self.endpoint_reuse = bool(self._endpoint_reuse)
 
     def __len__(self):
         return int(np.ceil(self.n_pos / self.num_pos))
@@ -794,6 +801,9 @@ class DeviceEdgeSampler:
                 targets = torch.cat([
                     torch.ones(n_pos_b, dtype=torch.float32, device=self.device),
                     torch.zeros(self.num_neg, dtype=torch.float32, device=self.device)])
+            if self._endpoint_reuse:                                        # C1: unique endpoints forwarded once + gathered
+                uids, inv = torch.unique(torch.cat([all_src, all_dst]), return_inverse=True)
+                return self.dataset.index_select(uids), inv, all_src.shape[0], targets
             # M3: one combined gather instead of two index_select calls.
             src_feats, dst_feats = self.dataset.gather_pairs(all_src, all_dst)
             return src_feats, dst_feats, targets
@@ -801,6 +811,9 @@ class DeviceEdgeSampler:
         neg_labels = torch.zeros(self.num_neg, dtype=torch.float32,
                                  device=self.device)
         targets = torch.cat([p_labels, neg_labels])
+        if self._endpoint_reuse:                                            # C1 (non-fast-gather path too)
+            uids, inv = torch.unique(torch.cat([all_src, all_dst]), return_inverse=True)
+            return self.dataset.index_select(uids), inv, all_src.shape[0], targets
         src_feats = self.dataset.index_select(all_src)
         dst_feats = self.dataset.index_select(all_dst)
         return src_feats, dst_feats, targets

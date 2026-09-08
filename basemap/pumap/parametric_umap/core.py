@@ -2033,13 +2033,28 @@ class ParametricUMAP:
             while batch is not None:
                 self._train_stats["attempted_batches"] += 1
                 optimizer.zero_grad(set_to_none=True)
-                src_values, dst_values, targets = batch
+                _reuse = getattr(loader, "endpoint_reuse", False)
+                if _reuse:                          # C1: (unique_feats, inverse, n_pairs, targets)
+                    _ufeats, _inv, _n_pairs, targets = batch
+                else:
+                    src_values, dst_values, targets = batch
 
                 _fwd_ph = _ph("forward")   # S2: forward + kernel + BCE loss
                 _fwd_ph.__enter__()
                 with torch.autocast(device_type='cuda' if use_amp else 'cpu', enabled=bool(use_amp), dtype=amp_dtype):
                     # Forward pass
-                    if getattr(loader, "fused_endpoint_forward", False):
+                    if _reuse:
+                        if self.use_batchnorm or self.use_dropout:
+                            raise RuntimeError(
+                                "endpoint reuse requires batchnorm/dropout disabled")
+                        if self.correlation_weight != 0.0:
+                            raise RuntimeError(
+                                "endpoint reuse is incompatible with correlation_weight!=0 "
+                                "(the correlation term needs the per-pair feature vectors)")
+                        _z = self.model(_ufeats)   # forward each unique endpoint ONCE
+                        src_embeddings = _z[_inv[:_n_pairs]]   # gather back to pair order (preserves multiplicity)
+                        dst_embeddings = _z[_inv[_n_pairs:]]
+                    elif getattr(loader, "fused_endpoint_forward", False):
                         if self.use_batchnorm or self.use_dropout:
                             raise RuntimeError(
                                 "fused endpoint forward requires batchnorm/dropout disabled")
