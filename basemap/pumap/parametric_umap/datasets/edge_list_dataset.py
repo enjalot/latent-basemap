@@ -595,6 +595,13 @@ class DeviceEdgeSampler:
         import os
         self._per_batch = self.uniform_with_replacement or self.n_pos > int(
             os.environ.get("PER_BATCH_EDGE_THRESHOLD", 400_000_000))
+        # Grouped negatives (efficiency-tranche C, promoted 2026-09-08): draw n/tails unique negative SOURCES, each
+        # with `tails` independent tails, instead of n independent sources — fewer unique endpoints to forward (C
+        # microbench: 1.42x on uniform negs). Opt-in via env so every existing run is byte-identical when unset.
+        # Groups ONLY the neg_src draw; neg_dst still drawn per-element (uniform-offset OR rank-window), so it
+        # composes with rankneg (Option Y). CHANGES within-batch neg correlations -> quality gated separately.
+        self._grouped_neg = int(os.environ.get("GROUPED_NEGATIVES", "0"))
+        self._grouped_tails = int(os.environ.get("GROUPED_TAILS", "4"))
 
     def __len__(self):
         return int(np.ceil(self.n_pos / self.num_pos))
@@ -720,8 +727,13 @@ class DeviceEdgeSampler:
                 self.positive_source_rows_t.index_select(0, src_pos).long(),
                 self.positive_source_rows_t.index_select(0, dst_pos).long(),
             )
-        neg_src = torch.randint(0, self.n_nodes, (n,), generator=self.gen,
-                                device=self.device)
+        if getattr(self, "_grouped_neg", 0):                                # grouped: n/tails unique srcs, each x tails
+            t = self._grouped_tails
+            ns = torch.randint(0, self.n_nodes, ((n + t - 1) // t,), generator=self.gen, device=self.device)
+            neg_src = ns.repeat_interleave(t)[:n]
+        else:
+            neg_src = torch.randint(0, self.n_nodes, (n,), generator=self.gen,
+                                    device=self.device)
         if getattr(self, "_rank_window", 0) > 0 and self._rank_of_node is not None:
             neg_dst = self._rank_window_dst(neg_src, n)
             if self._rank_exclude_neighbors:
