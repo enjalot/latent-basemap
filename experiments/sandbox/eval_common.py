@@ -22,7 +22,7 @@ SEAL = Path("/data2/monet/eval-common"); K = 15; BUDGETS = (250, 2000); K_CAP = 
 
 
 def _load_seal():
-    L = lambda n: np.load(SEAL / n)
+    L = lambda n, **kw: np.load(SEAL / n, **kw)
     return dict(ref_hd=np.asarray(L("ref_hd.f16.npy"), np.float32), val_hd=np.asarray(L("val_hd.f16.npy"), np.float32),
                 truth_val=L("truth_val.npy"), val_source=L("val_source.npy", allow_pickle=True),
                 diag_idx=L("diag_idx.npy"), diag_knn_hd=L("diag_knn_hd.npy"))
@@ -64,29 +64,25 @@ def recall_at_B(ref_coords, val_coords, truth_val, val_source):
     return out
 
 
-def trust_continuity(ref_coords, diag_idx, diag_knn_hd, k=K):
-    """T&C @ k on the diagnostic sample (Venna & Kaski). High-D truth = diag_knn_hd (ranks 1..K_CAP among ref);
-    map neighbors computed among ref. Penalty ranks are capped at K_CAP (documented approximation for large data)."""
-    import faiss
-    n = ref_coords.shape[0]; d2 = faiss.IndexFlatL2(ref_coords.shape[1]); d2.add(np.ascontiguousarray(ref_coords))
-    dcoords = ref_coords[diag_idx]
-    _, mnn = d2.search(np.ascontiguousarray(dcoords), K_CAP + 1)              # +1 to drop self (diag ∈ ref)
-    # map-rank lookup: for each diag point, rank of a ref id in its map ordering (self dropped), capped
-    hd = diag_knn_hd[:, :k]                                                   # top-k high-D neighbors (ref-local)
-    nd = diag_idx.shape[0]; norm = 2.0 / (nd * k * (2 * n - 3 * k - 1))
-    t_pen = c_pen = 0.0
-    for i in range(nd):
-        mrow = mnn[i][mnn[i] != diag_idx[i]][:K_CAP]                          # map neighbors (drop self), capped
-        hrow = diag_knn_hd[i]                                                 # high-D neighbors (K_CAP), ranks 1..
-        map_topk = set(int(x) for x in mrow[:k]); hd_topk = set(int(x) for x in hd[i])
-        hd_rank = {int(v): r + 1 for r, v in enumerate(hrow)}                 # high-D rank (1..K_CAP)
-        map_rank = {int(v): r + 1 for r, v in enumerate(mrow)}
-        for j in map_topk - hd_topk:                                         # false map neighbor -> trustworthiness
-            t_pen += hd_rank.get(j, K_CAP + 1) - k
-        for j in hd_topk - map_topk:                                         # missed high-D neighbor -> continuity
-            c_pen += map_rank.get(j, K_CAP + 1) - k
+def trust_continuity(ref_coords, ref_hd, diag_idx, k=K):
+    """T&C @ k SELF-CONTAINED on the diagnostic sample (Venna & Kaski, FULL ranks among the n_diag points, proper
+    normalization). Recomputed here from the diagnostic points' original-D vectors + their map coords, so the
+    penalty ranks span the full n_diag population (not capped) and the (2n-3k-1) normalizer is exact."""
+    dh = np.ascontiguousarray(ref_hd[diag_idx]); dc = np.ascontiguousarray(ref_coords[diag_idx]); n = dh.shape[0]
+    # full neighbor orderings within the sample (self excluded): high-D cosine (desc), map L2 (asc)
+    sim = dh @ dh.T; np.fill_diagonal(sim, -np.inf); hd_order = np.argsort(-sim, axis=1)      # (n, n) neighbor ids by hd rank
+    dist = ((dc[:, None, :] - dc[None, :, :]) ** 2).sum(-1); np.fill_diagonal(dist, np.inf); map_order = np.argsort(dist, axis=1)
+    # rank lookups: hd_rank[i, j] = rank of j among i's high-D neighbors (1-based); same for map
+    hd_rank = np.empty((n, n), np.int32); map_rank = np.empty((n, n), np.int32)
+    rows = np.arange(n)[:, None]; ranks = np.arange(1, n + 1)[None, :]
+    hd_rank[rows, hd_order] = ranks; map_rank[rows, map_order] = ranks
+    norm = 2.0 / (n * k * (2 * n - 3 * k - 1)); t_pen = c_pen = 0.0
+    for i in range(n):
+        hd_topk = set(hd_order[i, :k].tolist()); map_topk = set(map_order[i, :k].tolist())
+        for j in map_topk - hd_topk: t_pen += hd_rank[i, j] - k               # false map neighbor: penalize by its hd rank
+        for j in hd_topk - map_topk: c_pen += map_rank[i, j] - k              # missed hd neighbor: penalize by its map rank
     return {"trustworthiness@15": round(1 - norm * t_pen, 4), "continuity@15": round(1 - norm * c_pen, 4),
-            "n_diag": int(nd), "rank_cap": K_CAP}
+            "n_diag": int(n), "method": "self-contained full-rank Venna-Kaski among the diagnostic sample"}
 
 
 def movement(coords_before, coords_after, radius):
@@ -100,7 +96,7 @@ def score(ref_coords, val_coords, seal=None, label="map"):
     seal = seal or _load_seal(); t0 = time.time()
     r = recall_at_B(ref_coords, val_coords, seal["truth_val"], seal["val_source"])
     for B in BUDGETS: r[f"recall@k15_B{B}"].pop("_per_q", None)               # drop the raw array from the report
-    tc = trust_continuity(ref_coords, seal["diag_idx"], seal["diag_knn_hd"])
+    tc = trust_continuity(ref_coords, seal["ref_hd"], seal["diag_idx"])
     out = {"schema": "eval-common-score-2026-09-08", "label": label, **r, **tc, "score_wall_s": round(time.time() - t0, 1),
            "note": "recall@k15 at fixed B over the sealed 250K reference (original-D truth); B=250 is also the 0.1% "
                    "budget. f_theta(x) scored, never Z. T&C on the fixed diagnostic sample."}
