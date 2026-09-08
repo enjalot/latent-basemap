@@ -81,6 +81,7 @@ def main():
             rc = pu.model(rf).cpu().numpy().astype(np.float32); vc = pu.model(vl).cpu().numpy().astype(np.float32)
         s = eval_common.score(rc, vc, seal, label); s["wall_s"] = round(wall, 1); s["in_dim"] = in_dim
         (OUT / label).mkdir(parents=True, exist_ok=True)                    # PERSIST the head + PCA k so this arm can be
+        pu.is_fitted = True                                                 # manual training loop never called fit(); save() gates on this
         pu.save(str(OUT / label / "model.pt")); s["pca_k"] = k              # rescored against a re-sealed eval set (no retrain)
         print(f"[B {label}] in_dim {in_dim} {wall:.0f}s B2000 {s['recall@k15_B2000']['micro']} worst {s['recall@k15_B2000']['worst_cohort_recall']}", flush=True)
         return s
