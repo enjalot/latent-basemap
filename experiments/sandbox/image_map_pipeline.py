@@ -590,7 +590,14 @@ DATASETS = {
     # share; no pipeline arms (A uses its own trainer). prenormalized (pool DINO is L2=1.0).
     "eval-common-train": {"load": (lambda: np.asarray(np.load(
         "/data2/monet/eval-common/train_hd.f16.npy", mmap_mode="r"), dtype=np.float32)),
-        "prenormalized": True, "subsets": None, "arms": {}},
+        "prenormalized": True, "subsets": None,
+        # grouped×rankneg 500K GATE (Option-Y, 2026-09-08): two IDENTICAL champion+rankneg arms (rankneg 125K = 25%
+        # of 500K, device_int8, explicit horizon for a matched comparison). Grouping is env-driven (GROUPED_NEGATIVES),
+        # so the driver runs -ung with GROUPED=0 and -grp with GROUPED=1; the arm names are just distinct output dirs.
+        "arms": {nm: {"md": "000", "dose": 0, "horizon": 20_000,
+                      "extra": {"fneg_weight": 1.0, "neg_tanh_gamma": 4.0, "pos_ratio": 0.10,
+                                "rankneg_window": 125_000, "batch_size": 16384, "x_residency": "device_int8"}}
+                 for nm in ("champion-rn-ung", "champion-rn-grp")}},
     # MiniLM 2M mix pilot (owner-queued gate 2026-09-06): mixture-pathology check. minilm-mix-2m = base+socials,
     # minilm-base-2m = pure-base baseline. Both prenormalized (draw L2-norms), MiniLM-384. rankneg 500K = 25% of 2M.
     **{f"minilm-{v}-2m": {"load": (lambda v=v: np.asarray(np.load(
