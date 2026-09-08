@@ -18,7 +18,8 @@ import argparse, json, time
 from pathlib import Path
 import numpy as np
 
-SEAL = Path("/data2/monet/eval-common"); K = 15; BUDGETS = (250, 2000); K_CAP = 50
+import os
+SEAL = Path(os.environ.get("EVAL_SEAL_DIR", "/data2/monet/eval-common")); K = 15; BUDGETS = (250, 2000); K_CAP = 50
 
 
 def _load_seal():
