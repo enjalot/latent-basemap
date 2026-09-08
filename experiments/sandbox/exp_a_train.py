@@ -68,6 +68,13 @@ def main():
         with torch.no_grad():
             return torch.cat([model(feats[i:i + 100_000].float()) for i in range(0, n, 100_000)]).float()
 
+    def pca2d_init():                                                        # spread structure-preserving free-Z init
+        with torch.no_grad():                                               # (UMAP-standard alternative to spectral); the
+            mu = feats.mean(0); X = feats - mu                              # tight normal(0.1) init collapsed the 1st run
+            _, _, V = torch.pca_lowrank(X, q=2, niter=4)
+            Z0 = X @ V[:, :2]; Z0 = Z0 / (Z0.std(0) + 1e-6) * 10.0          # scale to a UMAP-ish coord spread (std~10)
+        return Z0.contiguous()
+
     def score(pu, label):
         pu.model.eval()
         with torch.no_grad():
@@ -95,12 +102,13 @@ def main():
 
     # ---- arm: fixed teacher + regression ----
     t0 = time.time()
-    Z = torch.zeros(n, 2, device=dev, requires_grad=True); torch.nn.init.normal_(Z, std=0.1)
+    Z = pca2d_init().clone().requires_grad_()                               # spread PCA-2D init (was normal(0.1) -> collapse)
     optZ = torch.optim.Adam([Z], lr=1e-2)
     for step in range(horizon):                                             # optimize FREE coords on the graph loss
         src, dst, tgt = sample_edges(); optZ.zero_grad(set_to_none=True)
         loss = loss_fn(Z[src], Z[dst], tgt); loss.backward()
-        torch.nn.utils.clip_grad_norm_([Z], CLIP); optZ.step()
+        optZ.step()                                                          # no Z clip: Adam is scale-robust; clip crippled spread
+        if step % 5000 == 0: print(f'[A teacher] Zopt step {step} loss {loss.item():.4f} Z.std {Z.detach().std().item():.3f}', flush=True)
     Zstar = Z.detach()
     pu = fresh_model(); opt = torch.optim.Adam(pu.model.parameters(), lr=1e-3); pu.model.train()
     reg_steps = horizon                                                     # matched budget on the regression side
@@ -117,8 +125,7 @@ def main():
 
     # ---- arm: alternating (proximal penalty) ----
     t0 = time.time(); pu = fresh_model(); opt = torch.optim.Adam(pu.model.parameters(), lr=1e-3); pu.model.train()
-    Z = head_all(pu.model).clone()                                          # Z init from the head (fp32)
-    Z.requires_grad_(); optZ = torch.optim.Adam([Z], lr=1e-2)
+    Z = pca2d_init().clone().requires_grad_()                               # PCA-2D init (untrained head init collapsed); rho ramps 0->2 so Z optimizes freely first; optZ = torch.optim.Adam([Z], lr=1e-2)
     outer = horizon // 200; rho0, rho1 = 0.0, 2.0                           # rho ramp; calibrated below to loss scale
     for o in range(outer):
         rho = rho0 + (rho1 - rho0) * (o / max(outer - 1, 1))
@@ -127,8 +134,9 @@ def main():
             src, dst, tgt = sample_edges(); optZ.zero_grad(set_to_none=True)
             gl = loss_fn(Z[src], Z[dst], tgt)
             prox = rho / (2 * n) * ((Z - fx) ** 2).sum()
-            (gl + prox).backward(); torch.nn.utils.clip_grad_norm_([Z], CLIP); optZ.step()
+            (gl + prox).backward(); optZ.step()                              # no Z clip (Adam scale-robust)
         Zc = Z.detach()
+        if o % 20 == 0: print(f'[A alternating] outer {o} rho {rho:.2f} Z.std {Zc.std().item():.3f}', flush=True)
         for _ in range(100):                                                # regression phase: head -> Z
             idx = torch.randint(0, n, (BATCH,), device=dev); opt.zero_grad(set_to_none=True)
             pred = pu.model(feats[idx])
