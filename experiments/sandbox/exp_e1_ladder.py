@@ -11,7 +11,9 @@ from pathlib import Path
 import numpy as np
 
 SB = Path("/data/latent-basemap/sandbox"); V2 = Path("/data2/monet/eval-common-v2")
-PCA = SB / "exp-b" / "pca-basis-recovered.npz"; K = 15
+# 6M/12M heads were trained on the 6M-DRAW's PCA (pca768-model.npz), NOT eval-common-train's basis — use the
+# head's OWN saved preprocessing (the review's "correct saved preprocessing" point).
+PCA = Path("/data2/monet/random-dino-6m/pca768-model.npz"); K = 15
 HEADS = {"2M": (SB / "monet-random-dino-2m/champion-bs16k/model.pt", None),        # input DINO-1536 (no PCA)
          "6M": (SB / "monet-random-dino-6m-pca768/champion-bs16k/model.pt", 768),  # PCA-768 (recovered basis)
          "12M": (SB / "monet-random-dino-12m-pca768/champion-bs16k/model.pt", 768)}
@@ -38,7 +40,7 @@ def main():
     print(f"[E1] val {val_idx.size} | in6 {int(in6.sum())} in12 {int(in12.sum())} | both-excluded {ex.size}", flush=True)
     vex = val_hd[ex]; tex = truth[ex]; sex = src[ex]
 
-    pm = np.load(PCA); mean = pm["mean"].astype(np.float32); comp768 = pm["comp768"].astype(np.float32)
+    pm = np.load(PCA); mean = pm["mean"].astype(np.float32); comp768 = pm["components"].astype(np.float32)  # 6M-draw basis (1536x768)
 
     def preprocess(X, k):
         return _norm(X) if k is None else _norm((X - mean) @ comp768)
