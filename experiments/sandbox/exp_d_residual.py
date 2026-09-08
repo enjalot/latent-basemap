@@ -43,15 +43,24 @@ def main():
     Z0 = f0_all(train_hd)                                                   # frozen global layout of train
     global_radius = (Z0 - Z0.mean(0)).norm(dim=1).quantile(0.9).item()
 
-    # region = worst-global-recall provenance cohort (from f0 on the sealed val)
+    import os
     with torch.no_grad():
         rc0 = f0(torch.from_numpy(seal["ref_hd"]).to(dev)).cpu().numpy(); vc0 = f0(torch.from_numpy(seal["val_hd"]).to(dev)).cpu().numpy()
     base = eval_common.score(rc0, vc0, seal, "f0")
-    region = base["recall@k15_B2000"]["worst_cohort"]
-    reg_mask_train = torch.from_numpy((train_src == region).astype(np.float32)).to(dev)
-    reg_rows = torch.where(reg_mask_train > 0)[0]
-    center = Z0[reg_rows].mean(0); sigma = (Z0[reg_rows] - center).norm(dim=1).quantile(0.75).clamp_min(1e-3)
-    print(f"[D] region={region} ({reg_rows.numel()} train rows) center {center.tolist()} sigma {sigma.item():.3f} | f0 global B2000 {base['recall@k15_B2000']['micro']} region {base['recall@k15_B2000']['per_source'][region]}", flush=True)
+    mode = os.environ.get("REGION_MODE", "worst-cohort")
+    if mode == "dense":                                                     # COMPACT dense region: densest 2D cell of the f0 layout
+        region = "dense-2d-cluster"
+        lo, hi = Z0.min(0).values, Z0.max(0).values; G = 40
+        b = ((Z0 - lo) / (hi - lo).clamp_min(1e-6) * (G - 1)).long().clamp(0, G - 1)
+        flat = b[:, 0] * G + b[:, 1]; cell = torch.bincount(flat, minlength=G * G).argmax()
+        center = lo + (torch.tensor([cell // G, cell % G], device=dev).float() + 0.5) / G * (hi - lo)
+        sigma = float(global_radius * 0.08)                                 # compact (~8% of the global radius)
+        reg_rows = torch.where(((Z0 - center) ** 2).sum(1) <= (2 * sigma) ** 2)[0]
+    else:                                                                   # worst-global-recall provenance cohort
+        region = base["recall@k15_B2000"]["worst_cohort"]
+        reg_rows = torch.where(torch.from_numpy((train_src == region).astype(bool)).to(dev))[0]
+        center = Z0[reg_rows].mean(0); sigma = float((Z0[reg_rows] - center).norm(dim=1).quantile(0.75).clamp_min(1e-3))
+    print(f"[D] region={region} ({reg_rows.numel()} train rows) sigma {sigma:.3f} | f0 global B2000 {base['recall@k15_B2000']['micro']} region-cohort {base['recall@k15_B2000']['per_source'].get(region,'spatial')}", flush=True)
 
     def gate(z):                                                            # smooth compactly-supported (Gaussian, tapered 0 at 3σ)
         d2 = ((z - center) ** 2).sum(1); gg = torch.exp(-d2 / (2 * sigma ** 2))
@@ -105,7 +114,21 @@ def main():
     with torch.no_grad():
         Zf = torch.from_numpy(f_full(train_hd, Z0)).to(dev); move = (Zf - Z0).norm(dim=1) / global_radius
         outside = gate(Z0) < 1e-4; out_move = move[outside]
-    reg_before = base["recall@k15_B2000"]["per_source"][region]; reg_after = upd["recall@k15_B2000"]["per_source"][region]
+    # region-local recall (works for a provenance cohort OR a spatial dense region): recall over the val queries
+    # that belong to the region (by source, or by f0-coord inside the gate support), before vs after.
+    import faiss
+    if mode == "dense":
+        vmask = (gate(Z0val) > 1e-3).cpu().numpy()
+    else:
+        vmask = (val_src == region)
+    def region_recall(refc, valc):
+        if vmask.sum() == 0: return 0.0
+        d2 = faiss.IndexFlatL2(2); d2.add(np.ascontiguousarray(refc.astype(np.float32)))
+        _, nn = d2.search(np.ascontiguousarray(valc[vmask].astype(np.float32)), 2000)
+        tv = seal["truth_val"][vmask]
+        return round(float(np.mean([len(set(int(x) for x in tv[i]) & set(int(x) for x in nn[i])) / 15 for i in range(nn.shape[0])])), 4)
+    reg_before = region_recall(rc0, vc0); reg_after = region_recall(rcf, vcf)
+    print(f"[D] region-local recall {reg_before} -> {reg_after} ({int(vmask.sum())} region val queries)", flush=True)
     out = {"schema": "exp-d-residual-2026-09-08", "region": region, "region_train_rows": int(reg_rows.numel()), "horizon": horizon, "wall_s": round(wall, 1),
            "region_recall_before": reg_before, "region_recall_after": reg_after, "region_gain": round(reg_after - reg_before, 4),
            "global_before": base["recall@k15_B2000"]["micro"], "global_after": upd["recall@k15_B2000"]["micro"],
