@@ -1820,8 +1820,11 @@ class ParametricUMAP:
                 f"replay_X mean row-norm {_nm:.4f} not ~1 — bank not at the L2 normalized-input convention"
             self._replay_X_dev = torch.as_tensor(_rx, device=self.device).half()
             self._replay_targets_dev = torch.as_tensor(_rt, device=self.device).float()
+            # Content hash over IDs + X + targets, so a bank differing in ANY of the
+            # three (not just ids/targets) is rejected on resume (review ref 3).
             self._replay_bank_sha = _hl.sha256(
                 np.ascontiguousarray(np.sort(_rids.astype(np.int64))).tobytes()
+                + np.ascontiguousarray(_rx).tobytes()
                 + np.ascontiguousarray(_rt.astype(np.float32)).tobytes()).hexdigest()[:16]
             _rseed = (int(self.replay_seed) if self.replay_seed is not None
                       else int(random_state) + 51549)
