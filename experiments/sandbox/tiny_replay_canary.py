@@ -1,19 +1,25 @@
 """Cards 006/007 CPU canary for the off-graph preservation-replay hook (core.py).
 Validates, on a tiny real CPU fit at BOTH D=768 (Jina) and D=1536 (DINO):
-  T1 target/row identity + finite target scale: student initialised to the teacher's
-     weights reproduces each bank row's stored teacher coord (per-row residual ~0),
-     and a WRONG (rolled) mapping gives a large residual -> identity, not luck.
-  T2 gradient reaches student but NOT teacher: replay_loss.backward() gives every model
-     parameter a finite grad, while the frozen target tensor stays requires_grad=False/grad None.
-  T3 replay disabled restores the old path: a fit with replay params ABSENT and a fit with
-     replay_bank_path SET but replay_weight=0 produce BIT-IDENTICAL weights (block skipped);
-     a fit with replay_weight>0 DIFFERS (the term actually does something).
-  T4 graph/negative RNG untouched: consuming from an independent replay generator does not
-     advance a graph-proxy generator, and a replay-gen draw does not advance the torch GLOBAL rng.
+  T1/T2 target/row identity + gradient (STRENGTHENED per overseer review): an INDEPENDENT
+     FROZEN teacher supplies targets cached from the EXACT fp16->model-dtype input the hook
+     feeds (no rounding masquerade); a PERTURBED student has a nonzero initial residual; the
+     ACTUAL saved bank is loaded and paired via SHUFFLED index_select (mirroring the hook).
+     Assert: student gradients nonzero+finite; training the replay loss REDUCES the residual;
+     the frozen teacher's params/grads are UNCHANGED; a WRONG (mis-aligned) pairing does NOT
+     satisfy — so the 1:1 row->target provenance is what drives the fit, not luck.
+  T3 replay disabled restores the old path: on THIS implementation, a fit with replay params
+     ABSENT and a fit with replay_bank_path SET but replay_weight=0 give BIT-IDENTICAL weights
+     (block skipped); a fit with replay_weight>0 DIFFERS. (Scope: same-source-revision claim.)
+  T4 graph/negative RNG untouched (generator-level): consuming from an independent replay
+     generator does not advance a graph-proxy generator, and a replay-gen draw does not advance
+     the torch GLOBAL rng. The REAL positive/negative/hold sampler-stream equality on the
+     production device path is validated in the GPU preflight (device-path only), not here.
   T5 end-to-end replay-ON fit runs with finite loss/coords.
-The true checkpoint save/reload round-trip of replay_gen is DEVICE-path only (fit raises on CPU),
-so it is deferred to the short GPU preflight and reported there. Pure CPU. Usage: tiny_replay_canary.py
+The true checkpoint save/reload round-trip of replay_gen and the real-sampler RNG hash are
+DEVICE-path only (fit raises on CPU), so they are deferred to the short GPU preflight and
+reported there. Pure CPU. Usage: tiny_replay_canary.py
 """
+import copy
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 import sys, json, tempfile
@@ -58,29 +64,51 @@ def main():
     np.savez(td / "bank.npz", replay_X=bank_X.astype(np.float16), replay_targets=bank_tgt.astype(np.float32),
              replay_ids=np.arange(NB, dtype=np.int64))
 
-    # ---- T1 identity + finite scale: a student initialised to the teacher reproduces each bank
-    # row's stored target under the SAME index_select pairing the hook uses; a rolled (mis-aligned)
-    # target gives a large residual, so the 1:1 row->target pairing is what makes the residual ~0. ----
-    with torch.no_grad():
-        z = teacher.model(torch.from_numpy(bank_X)).float().numpy()
-    perrow = np.linalg.norm(z - bank_tgt, axis=1)
-    wrong = np.linalg.norm(z - np.roll(bank_tgt, 1, axis=0), axis=1)
-    out["target_row_identity_median_resid"] = round(float(np.median(perrow)), 8)
-    out["wrong_map_median_resid"] = round(float(np.median(wrong)), 6)
-    out["finite_target_scale"] = bool(np.isfinite(bank_tgt).all())
-    T1 = bool(np.median(perrow) < 1e-4 and np.median(perrow) < 0.25 * max(np.median(wrong), 1e-9)
-              and out["finite_target_scale"])
+    # ---- T1/T2 (strengthened): independent frozen teacher, perturbed student, ACTUAL loaded
+    # fp16 bank paired via SHUFFLED index_select; targets cached from the EXACT fp16->model-dtype
+    # representation the hook feeds. Validate provenance + gradient direction, not a tautology. ----
+    mdl_dtype = next(teacher.model.parameters()).dtype
+    teacher_frozen = copy.deepcopy(teacher.model).eval()
+    for p in teacher_frozen.parameters(): p.requires_grad_(False)
+    teacher_ref = [p.detach().clone() for p in teacher_frozen.parameters()]
 
-    # ---- T2 gradient reaches student but NOT teacher ----
-    bx = torch.from_numpy(bank_X); tg = torch.from_numpy(bank_tgt)   # both requires_grad=False (leaf constants)
-    for p in teacher.model.parameters(): p.grad = None
-    z_t = teacher.model(bx)
-    rloss = (z_t.float() - tg.float()).pow(2).sum(dim=1).mean()
-    rloss.backward()
-    grads_ok = all((p.grad is not None and torch.isfinite(p.grad).all()) for p in teacher.model.parameters())
-    teacher_no_grad = (tg.requires_grad is False and tg.grad is None and bx.grad is None)
-    out["replay_loss_init"] = round(float(rloss.item()), 8)   # ~0 since student==teacher
-    T2 = bool(grads_ok and teacher_no_grad)
+    loaded = np.load(td / "bank.npz")                              # the ACTUAL saved bank (fp16 X)
+    bX16 = torch.from_numpy(loaded["replay_X"])                    # fp16, as replay holds it
+    with torch.no_grad():                                          # targets from EXACT fp16->dtype input
+        tgt_exact = teacher_frozen(bX16.to(mdl_dtype)).float()
+    perm = torch.randperm(NB)                                      # shuffled 1:1 pairing (mirror index_select)
+    r_feats = bX16.index_select(0, perm).to(mdl_dtype)
+    r_tgt = tgt_exact.index_select(0, perm)                        # CORRECT pairing (same perm)
+    r_tgt_wrong = tgt_exact.index_select(0, torch.roll(perm, 1))   # MIS-ALIGNED pairing
+
+    student = copy.deepcopy(teacher.model).train()                 # perturb -> nonzero initial residual
+    with torch.no_grad():
+        for p in student.parameters(): p.add_(0.05 * torch.randn_like(p))
+
+    def resid(m, tg):
+        with torch.no_grad(): z = m(r_feats).float()
+        return float((z - tg).pow(2).sum(1).mean())
+    r0 = resid(student, r_tgt)                                     # >0 (student != teacher)
+    opt = torch.optim.Adam(student.parameters(), lr=1e-2)
+    grad_norm0, grads_finite = 0.0, True
+    for k in range(80):
+        opt.zero_grad(); z = student(r_feats).float()
+        rl = (z - r_tgt).pow(2).sum(1).mean(); rl.backward()
+        if k == 0:
+            grad_norm0 = float(sum(p.grad.norm() for p in student.parameters() if p.grad is not None))
+            grads_finite = all(torch.isfinite(p.grad).all() for p in student.parameters())
+        opt.step()
+    r1 = resid(student, r_tgt)                                     # reduced toward CORRECT targets
+    r_wrong = resid(student, r_tgt_wrong)                          # NOT reduced toward mis-aligned
+    teacher_unchanged = (all(torch.equal(p, q) for p, q in zip(teacher_frozen.parameters(), teacher_ref))
+                         and all(p.grad is None for p in teacher_frozen.parameters()))
+
+    out["finite_target_scale"] = bool(np.isfinite(tgt_exact.numpy()).all())
+    out["student_grad_norm_step0"] = round(grad_norm0, 6)
+    out["residual_before"] = round(r0, 6); out["residual_after_correct"] = round(r1, 6)
+    out["residual_after_wrong"] = round(r_wrong, 6)
+    T1 = bool(out["finite_target_scale"] and r0 > 1e-4 and r1 < 0.2 * r0 and r_wrong > 3 * max(r1, 1e-9))
+    T2 = bool(grad_norm0 > 0 and grads_finite and teacher_unchanged)
 
     # ---- T3 replay disabled restores old path (bit-identical); enabled differs ----
     mA = _fit(edges, X, {})                                                              # params absent
@@ -111,10 +139,32 @@ def main():
     out["global_rng_untouched_by_replay_gen"] = global_rng_untouched
     T4 = bool(graph_stream_identical and global_rng_untouched)
 
+    # ---- T6 fail-closed: an ENABLED replay (weight>0) with a missing/malformed bank must RAISE,
+    # never silently become an unlabelled baseline. Validation fires before the training loop. ----
+    def _raises(kw):
+        try:
+            _fit(edges, X, kw); return False
+        except (AssertionError, ValueError, FileNotFoundError, OSError):
+            return True
+    # (a) enabled + missing path; (b) enabled + wrong target width; (c) enabled + non-normalised X
+    bad_dim = td / "bank_baddim.npz"
+    np.savez(bad_dim, replay_X=bank_X.astype(np.float16),
+             replay_targets=np.zeros((NB, 3), np.float32), replay_ids=np.arange(NB, dtype=np.int64))  # width 3 != n_components 2
+    bad_norm = td / "bank_badnorm.npz"
+    np.savez(bad_norm, replay_X=(bank_X * 5.0).astype(np.float16),                                # mean norm ~5, not ~1
+             replay_targets=bank_tgt.astype(np.float32), replay_ids=np.arange(NB, dtype=np.int64))
+    miss = _raises({"replay_bank_path": str(td / "does_not_exist.npz"), "replay_weight": 0.02})
+    baddim = _raises({"replay_bank_path": str(bad_dim), "replay_weight": 0.02})
+    badnorm = _raises({"replay_bank_path": str(bad_norm), "replay_weight": 0.02})
+    out["fail_closed_missing"] = miss; out["fail_closed_bad_target_dim"] = baddim
+    out["fail_closed_unnormalised_X"] = badnorm
+    T6 = bool(miss and baddim and badnorm)
+
     out["T1_target_row_identity"] = T1; out["T2_grad_student_not_teacher"] = T2
-    out["T3_off_path_restored"] = T3; out["T4_rng_untouched"] = T4
+    out["T3_off_path_restored"] = T3; out["T4_rng_untouched"] = T4; out["T6_fail_closed"] = T6
     out["checkpoint_replay_gen_roundtrip"] = "deferred_to_gpu_preflight (device-path only)"
-    out["PASS"] = bool(T1 and T2 and T3 and T4)
+    out["real_sampler_rng_equality"] = "deferred_to_gpu_preflight (device-path only)"
+    out["PASS"] = bool(T1 and T2 and T3 and T4 and T6)
     print(json.dumps(out, indent=1))
     oc = "/data/latent-basemap/sandbox/overseer-codex"
     p = f"{oc}/card007-replay-canary.json" if D == 768 else f"{oc}/card006-replay-canary.json"

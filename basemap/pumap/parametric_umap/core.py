@@ -1436,7 +1436,9 @@ class ParametricUMAP:
             checkpoint_every_epochs=0,
             checkpoint_dir=None,
             resume_from=None,
-            warm_start_state=None):
+            warm_start_state=None,
+            snapshot_steps=(),
+            snapshot_dir=None):
         """
         Fit the model using X as training data.
 
@@ -1775,22 +1777,59 @@ class ParametricUMAP:
         # negative / hold / midnear / density RNG streams are untouched.
         self._replay_X_dev = None
         self._replay_targets_dev = None
+        self._replay_bank_sha = None
         replay_gen = None
-        if self.replay_weight and self.replay_weight > 0 and self.replay_bank_path:
+        _replay_enabled = bool(self.replay_weight is not None and self.replay_weight > 0)
+        if not _replay_enabled and self.replay_bank_path:
+            # An explicit disabled baseline (bank set, weight<=0). Logged, not loaded —
+            # never silently promote a set path into an active term.
+            logging.info("replay_bank_path set but replay_weight<=0 -> replay DISABLED (baseline).")
+        elif _replay_enabled:
+            # FAIL-CLOSED: an enabled replay MUST have a valid, finite, dimension- and
+            # count-matched bank at the normalized-input convention. A missing or
+            # malformed bank raises here, never becomes an unlabelled baseline.
+            import hashlib as _hl
+            assert np.isfinite(self.replay_weight) and self.replay_weight >= 0, \
+                f"replay_weight must be finite >=0, got {self.replay_weight}"
+            assert self.replay_bank_path and Path(self.replay_bank_path).exists(), \
+                f"replay_weight>0 requires an existing replay_bank_path (got {self.replay_bank_path!r})"
+            assert self.replay_fraction and self.replay_fraction > 0, \
+                f"replay_fraction must be >0 when replay enabled, got {self.replay_fraction}"
+            _r_m = int(self.batch_size * self.replay_fraction)
+            assert _r_m >= 1, f"replay_fraction*batch_size={_r_m} rounds to <1 replay example"
             _rb = np.load(self.replay_bank_path)
-            _rx = np.asarray(_rb["replay_X"])
-            _rt = np.asarray(_rb["replay_targets"], np.float32)
-            assert _rx.ndim == 2 and _rt.ndim == 2, "replay bank arrays must be 2-D"
-            assert _rx.shape[0] == _rt.shape[0] and _rx.shape[0] > 0, "replay X/target row mismatch"
-            assert _rt.shape[1] in (2, 3), f"replay_targets width {_rt.shape[1]} not in (2,3)"
+            for _k in ("replay_X", "replay_targets", "replay_ids"):
+                assert _k in _rb, f"replay bank missing required array '{_k}'"
+            _rx = np.asarray(_rb["replay_X"]); _rt = np.asarray(_rb["replay_targets"], np.float32)
+            _rids = np.asarray(_rb["replay_ids"])
+            assert _rx.ndim == 2 and _rt.ndim == 2, "replay bank X/targets must be 2-D"
+            assert _rx.shape[0] == _rt.shape[0] == _rids.shape[0] and _rx.shape[0] > 0, \
+                f"replay X/target/id row mismatch: {_rx.shape[0]}/{_rt.shape[0]}/{_rids.shape[0]}"
+            assert _rt.shape[1] == self.n_components, \
+                f"replay_targets width {_rt.shape[1]} != n_components {self.n_components}"
+            _in_feat = next((m.in_features for m in self.model.modules()
+                             if isinstance(m, torch.nn.Linear)), None)
+            assert _in_feat is None or _rx.shape[1] == _in_feat, \
+                f"replay_X width {_rx.shape[1]} != model input_dim {_in_feat}"
+            assert np.isfinite(_rx).all() and np.isfinite(_rt).all(), "replay bank has non-finite values"
+            # normalized-input convention: both actual bases feed L2-normalised input
+            # (prenormalized substrate; the model does not renorm). A raw-embedding
+            # bank (mean norm far from 1) would silently mismatch preprocessing.
+            _nm = float(np.linalg.norm(_rx.astype(np.float32), axis=1).mean())
+            assert 0.9 <= _nm <= 1.1, \
+                f"replay_X mean row-norm {_nm:.4f} not ~1 — bank not at the L2 normalized-input convention"
             self._replay_X_dev = torch.as_tensor(_rx, device=self.device).half()
             self._replay_targets_dev = torch.as_tensor(_rt, device=self.device).float()
+            self._replay_bank_sha = _hl.sha256(
+                np.ascontiguousarray(np.sort(_rids.astype(np.int64))).tobytes()
+                + np.ascontiguousarray(_rt.astype(np.float32)).tobytes()).hexdigest()[:16]
             _rseed = (int(self.replay_seed) if self.replay_seed is not None
                       else int(random_state) + 51549)
             replay_gen = torch.Generator(device=self.device)
             replay_gen.manual_seed(_rseed)
-            logging.info("off-graph replay ENABLED: %d rows, weight=%.4g, fraction=%.4g, seed=%d",
-                         _rx.shape[0], self.replay_weight, self.replay_fraction, _rseed)
+            logging.info("off-graph replay ENABLED: %d rows (sha %s), weight=%.4g, fraction=%.4g (%d/step), "
+                         "seed=%d, mean_norm=%.4f", _rx.shape[0], self._replay_bank_sha, self.replay_weight,
+                         self.replay_fraction, _r_m, _rseed, _nm)
         mn_total_steps = (
             self.total_steps_estimate if self.total_steps_estimate > 0
             else max(len(loader) * self.n_epochs, 1)
@@ -1964,7 +2003,14 @@ class ParametricUMAP:
                 "init_state_sha256": getattr(self, "init_state_sha256", None),
                 "config": {"n_epochs": self.n_epochs, "lr_horizon": lr_horizon,
                            "batch_size": self.batch_size, "architecture": self.architecture,
-                           "random_state": int(random_state)},
+                           "random_state": int(random_state),
+                           # Replay identity is part of the resumable config: a resume
+                           # must reuse the exact bank/weight/fraction/seed or fail closed.
+                           "replay_enabled": bool(_replay_enabled),
+                           "replay_weight": float(self.replay_weight) if _replay_enabled else 0.0,
+                           "replay_fraction": float(self.replay_fraction) if _replay_enabled else 0.0,
+                           "replay_seed": (int(self.replay_seed) if self.replay_seed is not None else None),
+                           "replay_bank_sha": self._replay_bank_sha},
                 "model": self.model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
@@ -2005,6 +2051,19 @@ class ParametricUMAP:
             if _cfg.get("random_state") != int(random_state) or _cfg.get("lr_horizon") != lr_horizon:
                 raise ValueError(f"resume config mismatch: ckpt {_cfg} vs current "
                                  f"seed={random_state} lr_horizon={lr_horizon}")
+            # Replay identity must match exactly, or fail closed before any step.
+            if bool(_cfg.get("replay_enabled", False)) != _replay_enabled:
+                raise ValueError(f"resume replay_enabled mismatch: ckpt {_cfg.get('replay_enabled')} "
+                                 f"vs current {_replay_enabled}")
+            if _replay_enabled:
+                _cur = {"replay_weight": float(self.replay_weight), "replay_fraction": float(self.replay_fraction),
+                        "replay_seed": (int(self.replay_seed) if self.replay_seed is not None else None),
+                        "replay_bank_sha": self._replay_bank_sha}
+                _saved = {k: _cfg.get(k) for k in _cur}
+                if _saved != _cur:
+                    raise ValueError(f"resume replay config/content mismatch: ckpt {_saved} vs current {_cur}")
+                if _ck.get("replay_gen") is None:
+                    raise ValueError("resume with replay enabled but checkpoint has no replay_gen RNG state")
             self.model.load_state_dict(_ck["model"])
             optimizer.load_state_dict(_ck["optimizer"])
             scheduler.load_state_dict(_ck["scheduler"])
@@ -2028,6 +2087,14 @@ class ParametricUMAP:
             start_epoch = int(_ck["epoch"])
             logging.info("RESUMED from %s at epoch %d (global_step=%d)",
                          resume_from, start_epoch, global_step)
+
+        # Inference-only step snapshots (cards 006/007 diagnostics: 35K/70K/140K).
+        # These are model-only exports written OUTSIDE the epoch-boundary checkpoint
+        # pruner; they are NOT resumable and must never be resumed from. Only steps
+        # still ahead of the current position are retained on resume.
+        _snap_remaining = set(int(s) for s in (snapshot_steps or ()) if int(s) > global_step)
+        if _snap_remaining and not snapshot_dir:
+            raise ValueError("snapshot_steps set but snapshot_dir is None")
 
         for epoch in range(start_epoch, self.n_epochs):
             if (checkpoint_every_epochs and checkpoint_dir and epoch > start_epoch
@@ -2503,6 +2570,16 @@ class ParametricUMAP:
                 global_step += 1
                 st["executed_iters"] = global_step
 
+                # Inference-only diagnostic snapshot at exact attempted-step targets.
+                # Written outside the epoch pruner; not a resume point.
+                if _snap_remaining and global_step in _snap_remaining:
+                    _snap_remaining.discard(global_step)
+                    import os as _os
+                    _os.makedirs(snapshot_dir, exist_ok=True)
+                    self.is_fitted = True
+                    self.save(_os.path.join(snapshot_dir, f"model-step{global_step}.pt"))
+                    logging.info("inference-only step snapshot written: model-step%d.pt", global_step)
+
                 # Close performance windows on the update that reaches their
                 # boundary.  This must precede the LR-horizon break: otherwise
                 # an exact-budget run exits before recording its final window
@@ -2823,6 +2900,14 @@ class ParametricUMAP:
             'kernel_anneal_frac': self.kernel_anneal_frac,
             'x_residency': self.x_residency,
             'pipeline_info': dict(getattr(self, '_pipeline_info', {}) or {}),
+            # Off-graph replay provenance (backward-compatible; loaded via .get).
+            # This is inference/provenance metadata only — the fully-validated
+            # training manifest for resume lives in the epoch checkpoint config.
+            'replay_bank_path': self.replay_bank_path,
+            'replay_weight': self.replay_weight,
+            'replay_fraction': self.replay_fraction,
+            'replay_seed': self.replay_seed,
+            'replay_bank_sha': getattr(self, '_replay_bank_sha', None),
         }
         torch.save(save_dict, path)
 
@@ -2876,6 +2961,12 @@ class ParametricUMAP:
             rankneg_exclude_neighbors=save_dict.get('rankneg_exclude_neighbors', False),
             neg_tanh_gamma=save_dict.get('neg_tanh_gamma', 0.0),
             kernel_anneal_frac=save_dict.get('kernel_anneal_frac', 0.0),
+            # Off-graph replay provenance (backward-compatible defaults for
+            # checkpoints predating cards 006/007).
+            replay_bank_path=save_dict.get('replay_bank_path', ''),
+            replay_weight=save_dict.get('replay_weight', 0.0),
+            replay_fraction=save_dict.get('replay_fraction', 0.05),
+            replay_seed=save_dict.get('replay_seed', None),
         )
 
         state_dict = save_dict['model_state_dict']
