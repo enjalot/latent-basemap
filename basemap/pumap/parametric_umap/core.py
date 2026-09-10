@@ -64,6 +64,20 @@ class ParametricUMAP:
         anchor_hold_fraction=0.05,
         anchor_ids_path="",
         anchor_holdout_fraction=0.0,
+        # ── Off-graph preservation replay (cards 006/007) — DEFAULT OFF ──
+        # An OPTIONAL external consistency term, fully isolated from the graph.
+        # replay_bank_path -> .npz with replay_X (fp16 [n, D], already at the
+        # substrate's L2-preprocessing) + replay_targets (fp32 [n, d_out], the
+        # FROZEN teacher/old-model coords for those exact rows) + replay_ids
+        # (provenance). When replay_weight>0 AND a bank is set, each step draws
+        # replay_fraction*batch rows (floor .05*16384 = 819) via an INDEPENDENT
+        # seeded RNG and adds replay_weight * mean(sum((f(x)-old_target)^2)).
+        # These inputs enter ONLY this loss — never the graph/negative sampler
+        # populations — so with replay off the training path is byte-identical.
+        replay_bank_path="",
+        replay_weight=0.0,
+        replay_fraction=0.05,
+        replay_seed=None,
         midnear_enabled=False,
         mn_pairs_per_batch=0,
         mn_weight_scale=1.0,
@@ -187,6 +201,13 @@ class ParametricUMAP:
         # Fraction of the loaded landmark set reserved as held-out: recorded (for
         # later old-point drift measurement) but NEVER drawn into the hold loss.
         self.anchor_holdout_fraction = anchor_holdout_fraction
+        # Off-graph preservation replay (default off; see __init__ signature).
+        self.replay_bank_path = replay_bank_path
+        self.replay_weight = replay_weight
+        self.replay_fraction = replay_fraction
+        self.replay_seed = replay_seed
+        self._replay_X_dev = None        # fp16 external replay inputs, resident
+        self._replay_targets_dev = None  # fp32 frozen teacher coords for those rows
         self.midnear_enabled = midnear_enabled
         self.mn_pairs_per_batch = mn_pairs_per_batch
         self.mn_weight_scale = mn_weight_scale
@@ -1747,6 +1768,29 @@ class ParametricUMAP:
         if self._fast_device_path:
             hold_gen = torch.Generator(device=self.device)
             hold_gen.manual_seed(int(random_state) + 92821)
+
+        # ── Off-graph preservation replay setup (cards 006/007) — DEFAULT OFF ──
+        # Always reset (a reused instance must not leak a stale bank), then load
+        # only when explicitly enabled. Uses its OWN generator so the graph /
+        # negative / hold / midnear / density RNG streams are untouched.
+        self._replay_X_dev = None
+        self._replay_targets_dev = None
+        replay_gen = None
+        if self.replay_weight and self.replay_weight > 0 and self.replay_bank_path:
+            _rb = np.load(self.replay_bank_path)
+            _rx = np.asarray(_rb["replay_X"])
+            _rt = np.asarray(_rb["replay_targets"], np.float32)
+            assert _rx.ndim == 2 and _rt.ndim == 2, "replay bank arrays must be 2-D"
+            assert _rx.shape[0] == _rt.shape[0] and _rx.shape[0] > 0, "replay X/target row mismatch"
+            assert _rt.shape[1] in (2, 3), f"replay_targets width {_rt.shape[1]} not in (2,3)"
+            self._replay_X_dev = torch.as_tensor(_rx, device=self.device).half()
+            self._replay_targets_dev = torch.as_tensor(_rt, device=self.device).float()
+            _rseed = (int(self.replay_seed) if self.replay_seed is not None
+                      else int(random_state) + 51549)
+            replay_gen = torch.Generator(device=self.device)
+            replay_gen.manual_seed(_rseed)
+            logging.info("off-graph replay ENABLED: %d rows, weight=%.4g, fraction=%.4g, seed=%d",
+                         _rx.shape[0], self.replay_weight, self.replay_fraction, _rseed)
         mn_total_steps = (
             self.total_steps_estimate if self.total_steps_estimate > 0
             else max(len(loader) * self.n_epochs, 1)
@@ -1931,6 +1975,7 @@ class ParametricUMAP:
                 "mn_gen": _tgst(mn_gen), "mn_rng": _npst(mn_rng),
                 "dens_gen": _tgst(dens_gen), "dens_rng": _npst(dens_rng),
                 "hold_gen": _tgst(hold_gen), "hold_rng": _npst(hold_rng),
+                "replay_gen": _tgst(replay_gen),
                 "train_stats": dict(self._train_stats),
             }
 
@@ -1974,6 +2019,7 @@ class ParametricUMAP:
             _setg(getattr(loader, "gen", None), _ck.get("loader_gen"))
             _setg(mn_gen, _ck.get("mn_gen"));  _setg(dens_gen, _ck.get("dens_gen"))
             _setg(hold_gen, _ck.get("hold_gen"))
+            _setg(replay_gen, _ck.get("replay_gen"))
             if _ck.get("mn_rng") is not None: mn_rng.set_state(_ck["mn_rng"])
             if _ck.get("dens_rng") is not None: dens_rng.set_state(_ck["dens_rng"])
             if _ck.get("hold_rng") is not None: hold_rng.set_state(_ck["hold_rng"])
@@ -2259,6 +2305,31 @@ class ParametricUMAP:
                     hold_loss = (z_h.float() - h_tgt.float()).pow(2).sum(dim=1).mean()
                     loss = loss + self.anchor_hold_weight * hold_loss
                     hold_loss_val = hold_loss.item() if use_wandb else 0.0
+
+                # ── Off-graph preservation replay term (cards 006/007) ──
+                # Independent seeded RNG draws replay_fraction*batch rows (819 at
+                # bs16384) from the FIXED external bank; the frozen teacher coords
+                # are constant tensors so the gradient reaches the student only.
+                # These rows never touch the graph/negative sampler — with replay
+                # off (bank None) this whole block is skipped and the stream above
+                # is byte-identical to the historical path.
+                replay_loss_val = 0.0
+                if self._replay_targets_dev is not None:
+                    r_m = max(1, int(self.batch_size * self.replay_fraction))
+                    r_idx = torch.randint(0, self._replay_X_dev.shape[0], (r_m,),
+                                          generator=replay_gen, device=self.device)
+                    # Bank stays fp16-resident; cast only the tiny gathered slice to the
+                    # model's parameter dtype so it matches on CPU (no autocast) and GPU
+                    # (fp32 params + cuda autocast recasts per-op) alike.
+                    r_feats = self._replay_X_dev.index_select(0, r_idx).to(
+                        dtype=next(self.model.parameters()).dtype)
+                    r_tgt = self._replay_targets_dev.index_select(0, r_idx)
+                    with torch.autocast(device_type='cuda' if use_amp else 'cpu',
+                                        enabled=bool(use_amp), dtype=amp_dtype):
+                        z_r = self.model(r_feats)
+                    replay_loss = (z_r.float() - r_tgt.float()).pow(2).sum(dim=1).mean()
+                    loss = loss + self.replay_weight * replay_loss
+                    replay_loss_val = replay_loss.item() if use_wandb else 0.0
 
                 _fwd_ph.__exit__(None, None, None)   # S2: close forward+loss phase
 
