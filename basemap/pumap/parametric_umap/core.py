@@ -2098,7 +2098,15 @@ class ParametricUMAP:
                            "replay_weight": float(self.replay_weight) if _replay_enabled else 0.0,
                            "replay_fraction": float(self.replay_fraction) if _replay_enabled else 0.0,
                            "replay_seed": (int(self.replay_seed) if self.replay_seed is not None else None),
-                           "replay_bank_sha": self._replay_bank_sha},
+                           "replay_bank_sha": self._replay_bank_sha,
+                           # Derivative-preservation identity (card009) — resume must reuse the exact
+                           # bank/weight/subbatch/radius/seed or fail closed.
+                           "deriv_enabled": bool(self._deriv_teacher_jv_dev is not None),
+                           "deriv_weight": float(self.deriv_weight) if self._deriv_teacher_jv_dev is not None else 0.0,
+                           "deriv_subbatch": int(self.deriv_subbatch) if self._deriv_teacher_jv_dev is not None else 0,
+                           "deriv_radius": float(self.deriv_radius) if self._deriv_teacher_jv_dev is not None else 0.0,
+                           "deriv_seed": (int(self.deriv_seed) if self.deriv_seed is not None else None),
+                           "deriv_bank_sha": self._deriv_bank_sha},
                 "model": self.model.state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
@@ -2110,6 +2118,7 @@ class ParametricUMAP:
                 "dens_gen": _tgst(dens_gen), "dens_rng": _npst(dens_rng),
                 "hold_gen": _tgst(hold_gen), "hold_rng": _npst(hold_rng),
                 "replay_gen": _tgst(replay_gen),
+                "deriv_gen": _tgst(deriv_gen),
                 "train_stats": dict(self._train_stats),
             }
 
@@ -2157,6 +2166,20 @@ class ParametricUMAP:
                     raise ValueError(f"resume replay config/content mismatch: ckpt {_saved} vs current {_cur}")
                 if _ck.get("replay_gen") is None:
                     raise ValueError("resume with replay enabled but checkpoint has no replay_gen RNG state")
+            # Derivative-preservation identity must match exactly, or fail closed.
+            _deriv_enabled = self._deriv_teacher_jv_dev is not None
+            if bool(_cfg.get("deriv_enabled", False)) != _deriv_enabled:
+                raise ValueError(f"resume deriv_enabled mismatch: ckpt {_cfg.get('deriv_enabled')} vs current {_deriv_enabled}")
+            if _deriv_enabled:
+                _dcur = {"deriv_weight": float(self.deriv_weight), "deriv_subbatch": int(self.deriv_subbatch),
+                         "deriv_radius": float(self.deriv_radius),
+                         "deriv_seed": (int(self.deriv_seed) if self.deriv_seed is not None else None),
+                         "deriv_bank_sha": self._deriv_bank_sha}
+                _dsaved = {k: _cfg.get(k) for k in _dcur}
+                if _dsaved != _dcur:
+                    raise ValueError(f"resume deriv config/content mismatch: ckpt {_dsaved} vs current {_dcur}")
+                if _ck.get("deriv_gen") is None:
+                    raise ValueError("resume with deriv enabled but checkpoint has no deriv_gen RNG state")
             self.model.load_state_dict(_ck["model"])
             optimizer.load_state_dict(_ck["optimizer"])
             scheduler.load_state_dict(_ck["scheduler"])
@@ -2172,6 +2195,7 @@ class ParametricUMAP:
             _setg(mn_gen, _ck.get("mn_gen"));  _setg(dens_gen, _ck.get("dens_gen"))
             _setg(hold_gen, _ck.get("hold_gen"))
             _setg(replay_gen, _ck.get("replay_gen"))
+            _setg(deriv_gen, _ck.get("deriv_gen"))
             if _ck.get("mn_rng") is not None: mn_rng.set_state(_ck["mn_rng"])
             if _ck.get("dens_rng") is not None: dens_rng.set_state(_ck["dens_rng"])
             if _ck.get("hold_rng") is not None: hold_rng.set_state(_ck["hold_rng"])
