@@ -1870,6 +1870,11 @@ class ParametricUMAP:
         # 499,999 positive-LR updates). We stop after H positive-LR updates and
         # never apply the LR=0 endpoint.
         planned_loop = int(len(loader)) * int(self.n_epochs)
+        # card008: LR-peak / floor sanity (default lr_min=0 preserves the historical sequence).
+        if not (np.isfinite(self.learning_rate) and self.learning_rate > 0):
+            raise ValueError(f"learning_rate (LR peak) must be finite >0, got {self.learning_rate}")
+        if not (0.0 <= float(self.lr_min) <= self.learning_rate):
+            raise ValueError(f"lr_min {self.lr_min} must satisfy 0 <= lr_min <= lr_peak {self.learning_rate}")
         if self.lr_schedule == "cosine":
             if int(self.total_steps_estimate) <= 0:
                 lr_horizon = planned_loop
@@ -2015,6 +2020,10 @@ class ParametricUMAP:
                 "config": {"n_epochs": self.n_epochs, "lr_horizon": lr_horizon,
                            "batch_size": self.batch_size, "architecture": self.architecture,
                            "random_state": int(random_state),
+                           # LR schedule identity (card008): LambdaLR closure semantics are not
+                           # serialized, so resume must re-validate schedule/peak/floor/horizon.
+                           "lr_schedule": self.lr_schedule, "learning_rate": float(self.learning_rate),
+                           "lr_min": float(self.lr_min),
                            # Replay identity is part of the resumable config: a resume
                            # must reuse the exact bank/weight/fraction/seed or fail closed.
                            "replay_enabled": bool(_replay_enabled),
@@ -2062,6 +2071,11 @@ class ParametricUMAP:
             if _cfg.get("random_state") != int(random_state) or _cfg.get("lr_horizon") != lr_horizon:
                 raise ValueError(f"resume config mismatch: ckpt {_cfg} vs current "
                                  f"seed={random_state} lr_horizon={lr_horizon}")
+            # LR schedule identity must match (LambdaLR closure is not serialized) — fail closed.
+            _lr_cur = {"lr_schedule": self.lr_schedule, "learning_rate": float(self.learning_rate), "lr_min": float(self.lr_min)}
+            _lr_saved = {k: _cfg.get(k) for k in _lr_cur}
+            if any(k in _cfg for k in _lr_cur) and _lr_saved != _lr_cur:
+                raise ValueError(f"resume LR-schedule mismatch: ckpt {_lr_saved} vs current {_lr_cur}")
             # Replay identity must match exactly, or fail closed before any step.
             if bool(_cfg.get("replay_enabled", False)) != _replay_enabled:
                 raise ValueError(f"resume replay_enabled mismatch: ckpt {_cfg.get('replay_enabled')} "
@@ -2976,6 +2990,7 @@ class ParametricUMAP:
             kernel_anneal_frac=save_dict.get('kernel_anneal_frac', 0.0),
             # Off-graph replay provenance (backward-compatible defaults for
             # checkpoints predating cards 006/007).
+            learning_rate=save_dict.get('learning_rate', 1e-4),
             lr_schedule=save_dict.get('lr_schedule', 'plateau'),
             lr_min=save_dict.get('lr_min', 0.0),
             replay_bank_path=save_dict.get('replay_bank_path', ''),
