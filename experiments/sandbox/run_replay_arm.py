@@ -18,20 +18,23 @@ Usage: run_replay_arm.py <w_anchor> <n_epochs>
 import os, sys, time, json, hashlib
 from pathlib import Path
 
-# ── Card008 code isolation ──────────────────────────────────────────────────
-# card008's three schedule arms must all use ONE immutable trainer (commit dd3038a)
-# even while core.py changes for card009. The live chain invokes THIS mutable file;
-# for a card008 OUTD we re-exec the FROZEN dd3038a entrypoint (its own _paths imports
-# the frozen core) BEFORE importing core/_paths or reading any other env. execv keeps
-# the PID and the held GPU-flock fd. All other cards keep the normal live path.
-_C8_FROZEN_ENTRY = "/data/latent-basemap/sandbox/overseer-codex/card008-code-dd3038a/experiments/sandbox/run_replay_arm.py"
-if ("card008" in os.environ.get("EVOLBENCH_LAMBDA_OUTD", "")
-        and os.environ.get("_CARD008_DISPATCHED") != "1"
-        and os.path.exists(_C8_FROZEN_ENTRY)
-        and os.path.realpath(__file__) != os.path.realpath(_C8_FROZEN_ENTRY)):
-    os.environ["_CARD008_DISPATCHED"] = "1"
-    sys.stderr.write(f"[card008-dispatch] routing to FROZEN dd3038a entrypoint: {_C8_FROZEN_ENTRY}\n"); sys.stderr.flush()
-    os.execv(sys.executable, [sys.executable, _C8_FROZEN_ENTRY, *sys.argv[1:]])
+# ── Per-card code isolation ─────────────────────────────────────────────────
+# A card's arms must all use ONE immutable trainer even while core.py evolves for the next
+# card. The live chain invokes THIS mutable file; for a pinned card's OUTD we re-exec that
+# card's FROZEN entrypoint (its own _paths imports its frozen core) BEFORE importing
+# core/_paths or reading other env. execv keeps the PID + held GPU-flock fd. Other cards
+# keep the normal live path. Frozen entrypoints are not in this map -> no re-exec loop.
+_FROZEN_ENTRIES = [
+    ("card008", "/data/latent-basemap/sandbox/overseer-codex/card008-code-dd3038a/experiments/sandbox/run_replay_arm.py"),
+    ("card009", "/data/latent-basemap/sandbox/overseer-codex/card009-code-e173e3b/experiments/sandbox/run_replay_arm.py"),
+]
+_outd = os.environ.get("EVOLBENCH_LAMBDA_OUTD", "")
+for _key, _entry in _FROZEN_ENTRIES:
+    if (_key in _outd and os.environ.get("_FROZEN_DISPATCHED") != "1"
+            and os.path.exists(_entry) and os.path.realpath(__file__) != os.path.realpath(_entry)):
+        os.environ["_FROZEN_DISPATCHED"] = "1"
+        sys.stderr.write(f"[frozen-dispatch] {_key} OUTD -> FROZEN entrypoint {_entry}\n"); sys.stderr.flush()
+        os.execv(sys.executable, [sys.executable, _entry, *sys.argv[1:]])
 
 import numpy as np
 
