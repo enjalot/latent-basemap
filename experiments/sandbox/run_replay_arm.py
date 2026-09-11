@@ -104,6 +104,13 @@ def main():
     # off-graph replay
     pumap.replay_bank_path = str(RBANK); pumap.replay_weight = RWEIGHT
     pumap.replay_fraction = RFRAC; pumap.replay_seed = RSEED
+    # optional derivative-preservation (card009 derivative arm; default off)
+    if os.environ.get("DERIV_BANK"):
+        pumap.deriv_bank_path = os.environ["DERIV_BANK"]
+        pumap.deriv_weight = float(os.environ.get("DERIV_WEIGHT", "0.0"))
+        pumap.deriv_subbatch = int(os.environ.get("DERIV_SUBBATCH", "128"))
+        pumap.deriv_seed = int(os.environ["DERIV_SEED"]) if os.environ.get("DERIV_SEED") else None
+        pumap.deriv_radius = float(os.environ.get("DERIV_RADIUS", "33.6717"))
     pumap.batch_size = 16384; pumap.n_epochs = max(n_epochs, 50); pumap.warmup_steps = 0
     pumap._max_train_steps = int(os.environ.get("EVOLBENCH_LAMBDA_MAXSTEPS", "140000"))
     # Optional LR-schedule control (card008 finishing comparison). Defaults leave the
@@ -135,6 +142,8 @@ def main():
                  "batch_size": 16384, "seed": SEED, "max_train_steps": pumap._max_train_steps,
                  "lr_schedule": pumap.lr_schedule, "learning_rate": pumap.learning_rate,
                  "lr_min": pumap.lr_min, "total_steps_estimate": int(getattr(pumap, "total_steps_estimate", 0)),
+                 "deriv_bank": pumap.deriv_bank_path or None, "deriv_weight": pumap.deriv_weight,
+                 "deriv_subbatch": pumap.deriv_subbatch, "deriv_radius": pumap.deriv_radius, "deriv_seed": pumap.deriv_seed,
                  "snapshot_steps": list(SNAP), "n_rows": int(n), "prenormed": os.environ.get("PRENORMED") == "1"}
     (OUTD / f"admission-{tag}.json").write_text(json.dumps(admission, indent=1))
     fit_kw = dict(precomputed_edges_path=str(EDGES), random_state=SEED, verbose=False, warm_start_state=warm_state)
@@ -167,6 +176,9 @@ def main():
            "max_train_steps": pumap._max_train_steps, "executed_steps": steps, "batch_size": 16384, "seed": SEED,
            "lr_schedule": pumap.lr_schedule, "learning_rate": pumap.learning_rate, "lr_min": pumap.lr_min,
            "total_steps_estimate": int(getattr(pumap, "total_steps_estimate", 0)),
+           "deriv_bank": pumap.deriv_bank_path or None, "deriv_weight": pumap.deriv_weight,
+           "deriv_subbatch": pumap.deriv_subbatch, "deriv_radius": pumap.deriv_radius, "deriv_seed": pumap.deriv_seed,
+           "deriv_bank_sha": getattr(pumap, "_deriv_bank_sha", None),
            "train_wall_s": round(wall, 1), "it_per_s": its, "projected_140k_gpu_h": proj_140k_h,
            "peak_vram_gb": peak_vram_gb, "warm_start_hash": warm_hash, "trained_hash": trained_hash,
            "warm_start_changed": bool(warm_hash != trained_hash), "anchored": bool(w > 0),
