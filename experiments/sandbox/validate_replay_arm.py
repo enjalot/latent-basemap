@@ -5,7 +5,8 @@ Requires: fresh manifest/coords/model (mtime >= run_start), EXACT expected attem
 + fresh + LOADABLE, replay bank content sha == admission, warm hash == admission, the produced
 active/holdout anchor IDs identical to the ORIGINAL card005/004 update (same split), and full
 train_stats persisted. Exit 0 = validated DONE; nonzero = fail-closed STOP.
-Usage: validate_replay_arm.py OUTD tag run_start_epoch expected_steps orig_active_ids orig_holdout_ids
+Usage: validate_replay_arm.py OUTD tag run_start_epoch expected_steps orig_active_ids orig_holdout_ids [snapshots_csv]
+(snapshots_csv defaults to 35000,70000,140000; card008 70K arms pass 35000,70000)
 """
 import os, sys, json
 os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
@@ -16,6 +17,7 @@ import numpy as np
 def main():
     OUTD, tag, rs, exp = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
     orig_active, orig_holdout = sys.argv[5], sys.argv[6]
+    snaps = tuple(int(s) for s in (sys.argv[7] if len(sys.argv) > 7 else "35000,70000,140000").split(",") if s.strip())
     errs = []
 
     def fresh(p):
@@ -44,8 +46,8 @@ def main():
     c = np.load(cp)
     if not np.isfinite(c).all():
         errs.append("coords non-finite")
-    # all 3 snapshots present, fresh, loadable + finite model output
-    for s in (35000, 70000, 140000):
+    # all expected snapshots present, fresh, loadable + finite model output
+    for s in snaps:
         sp = snapdir / f"model-step{s}.pt"
         if not fresh(sp):
             errs.append(f"snapshot model-step{s}.pt missing/stale"); continue
@@ -75,7 +77,7 @@ def main():
 
     ok = not errs
     print(json.dumps({"tag": tag, "PASS": ok, "executed_steps": m.get("executed_steps"),
-                      "snapshots_ok": all(f"model-step{s}" not in e for s in (35000, 70000, 140000) for e in errs),
+                      "snapshots_ok": all(f"model-step{s}" not in e for s in snaps for e in errs),
                       "errors": errs}, indent=1))
     return 0 if ok else 3
 
