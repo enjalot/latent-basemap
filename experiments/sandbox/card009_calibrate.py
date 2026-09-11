@@ -33,22 +33,31 @@ def _norm(a):
     a = np.asarray(a, np.float32); return a / np.linalg.norm(a, axis=1, keepdims=True).clip(1e-12)
 
 
+def _global_l2(model):   # global L2 over all param grads (consistent definition for both terms)
+    return float(torch.sqrt(sum((p.grad.double() ** 2).sum() for p in model.parameters() if p.grad is not None)))
+
+
 def deriv_grad_norm(model, X, V, S, JVt):
+    # matches core: fp32 JVP with autocast OFF (double-backward-safe)
     for p in model.parameters():
         p.requires_grad_(True); p.grad = None
-    _, jv = torch.autograd.functional.jvp(lambda i: model(i), X, V, create_graph=True)
+    with torch.autocast(device_type="cuda", enabled=False):
+        _, jv = torch.autograd.functional.jvp(lambda i: model(i), X, V, create_graph=True)
     loss = ((S.unsqueeze(1) * (jv.float() - JVt) / R0) ** 2).sum(1).mean()
     loss.backward()
-    return float(sum(p.grad.norm() for p in model.parameters() if p.grad is not None)), float(loss.item())
+    return _global_l2(model), float(loss.item())
 
 
-def replay_grad_norm(model, X, T):
+def replay_grad_norm(model, X16, T):
+    # matches core replay: stored fp16 -> param dtype (NO renorm), forward UNDER GPU autocast(fp16)
     for p in model.parameters():
         p.requires_grad_(True); p.grad = None
-    z = model(X).float()
-    loss = (z - T).pow(2).sum(1).mean()
+    xr = X16.to(next(model.parameters()).dtype)
+    with torch.autocast(device_type="cuda", enabled=True, dtype=torch.float16):
+        z = model(xr)
+    loss = (z.float() - T).pow(2).sum(1).mean()
     loss.backward()
-    return float(sum(p.grad.norm() for p in model.parameters() if p.grad is not None)), float(loss.item())
+    return _global_l2(model), float(loss.item())
 
 
 def main():
@@ -59,7 +68,7 @@ def main():
     dV = torch.from_numpy(np.asarray(db["deriv_dir"], np.float32)).to(DEV)
     dS = torch.from_numpy(np.asarray(db["deriv_scale"], np.float32)).to(DEV)
     dJV = torch.from_numpy(np.asarray(db["deriv_teacher_jv"], np.float32)).to(DEV)
-    rX = torch.from_numpy(_norm(np.asarray(rb["replay_X"], np.float32))).to(DEV)
+    rX = torch.from_numpy(np.asarray(rb["replay_X"], np.float16)).to(DEV)   # raw stored fp16 (as core holds it)
     rT = torch.from_numpy(np.asarray(rb["replay_targets"], np.float32)).to(DEV)
     rng = np.random.default_rng(909)
 
@@ -73,8 +82,8 @@ def main():
             dloss = ((dS[idx].unsqueeze(1) * (jv.float() - dJV[idx]) / R0) ** 2).sum(1).mean().item()
         floor[f"deriv_loss_init_sub{cs}"] = float(dloss)
     ridx = torch.from_numpy(rng.choice(rX.shape[0], 819, replace=False)).to(DEV)
-    with torch.no_grad():
-        rloss_init = (t0.model(rX[ridx]).float() - rT[ridx]).pow(2).sum(1).mean().item()
+    with torch.no_grad(), torch.autocast(device_type="cuda", enabled=True, dtype=torch.float16):
+        rloss_init = (t0.model(rX[ridx].to(next(t0.model.parameters()).dtype)).float() - rT[ridx]).pow(2).sum(1).mean().item()
     floor["replay_loss_init_819"] = float(rloss_init)
 
     # ---- added gradient norms at the MOVED state ----

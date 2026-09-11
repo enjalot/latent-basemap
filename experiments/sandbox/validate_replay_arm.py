@@ -39,6 +39,21 @@ def main():
         errs.append(f"replay bank sha {m.get('replay_bank_sha')} != admission {adm.get('replay_bank_content_sha')}")
     if m.get("warm_start_hash") != adm.get("warm_start_hash"):
         errs.append("warm hash != admission")
+    # Intervention + LR binding (frozen per-arm expected config; a deriv arm with the flag
+    # accidentally OFF must FAIL here). Env: EXPECT_LR, EXPECT_DERIV_WEIGHT, EXPECT_DERIV_SUBBATCH,
+    # EXPECT_DERIV_BANK_SHA (checked only when a derivative intervention is expected).
+    exp_lr = float(os.environ.get("EXPECT_LR", "0.0001"))
+    if abs(float(m.get("learning_rate", -1)) - exp_lr) > 1e-12:
+        errs.append(f"learning_rate {m.get('learning_rate')} != expected {exp_lr}")
+    exp_dw = float(os.environ.get("EXPECT_DERIV_WEIGHT", "0"))
+    if abs(float(m.get("deriv_weight", 0) or 0) - exp_dw) > 1e-9:
+        errs.append(f"deriv_weight {m.get('deriv_weight')} != expected {exp_dw} (deriv intervention mis-set)")
+    if exp_dw > 0:
+        exp_sha = os.environ.get("EXPECT_DERIV_BANK_SHA", "")
+        if exp_sha and m.get("deriv_bank_sha") != exp_sha:
+            errs.append(f"deriv_bank_sha {m.get('deriv_bank_sha')} != expected {exp_sha}")
+        if int(m.get("deriv_subbatch", 0) or 0) != int(os.environ.get("EXPECT_DERIV_SUBBATCH", "128")):
+            errs.append(f"deriv_subbatch {m.get('deriv_subbatch')} != expected")
     ts = m.get("train_stats") or {}
     if not ts or "executed_iters" not in ts:
         errs.append("train_stats not persisted")
