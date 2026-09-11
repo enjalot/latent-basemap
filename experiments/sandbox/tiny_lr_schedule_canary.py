@@ -43,6 +43,7 @@ def tiny_fit(schedule, lr, lr_min, Hs):
     m.fit(X.astype(np.float32), precomputed_edges_path=str(e), random_state=0, verbose=False)
     ts = dict(m._train_stats)
     return {"lr_first": ts.get("lr_used_first"), "lr_last": ts.get("lr_used_last"),
+            "lr_min": ts.get("lr_used_min"), "lr_max": ts.get("lr_used_max"),
             "executed": ts.get("executed_iters")}
 
 
@@ -52,22 +53,27 @@ def main():
     arm3_const = float(seq.mean())
     A = {"arm2_lr_first": float(seq[0]), "arm2_lr_last": float(seq[-1]), "arm2_lr_min": float(seq.min()),
          "strictly_decreasing": bool(np.all(np.diff(seq) < 0)), "no_zero_lr": bool(seq.min() > 0),
-         "arm3_registered_constant_lr": round(arm3_const, 10),
+         "arm3_registered_constant_lr": repr(arm3_const),
+         "arm3_matches_launch_value": bool(arm3_const == 0.000055000642857142866),
          "checks": {"first_is_1e-4": bool(abs(seq[0] - 1e-4) < 1e-9),
                     "last_is_~1e-5": bool(abs(seq[-1] - 1e-5) < 2e-9),
                     "arm3_in_5.4e-5..5.6e-5": bool(5.4e-5 <= arm3_const <= 5.6e-5)}}
-    A_pass = all(A["checks"].values()) and A["strictly_decreasing"] and A["no_zero_lr"]
+    A_pass = all(A["checks"].values()) and A["strictly_decreasing"] and A["no_zero_lr"] and A["arm3_matches_launch_value"]
 
     # ---- B. real tiny fits confirm core applies the floor ----
     Hs = 300
     cos_floor = tiny_fit("cosine", BASE_LR, LR_MIN, Hs)
     cos_zero = tiny_fit("cosine", BASE_LR, 0.0, Hs)
-    const = tiny_fit("plateau", arm3_const, 0.0, Hs)
-    B = {"cosine_floor": cos_floor, "cosine_zero": cos_zero, "constant_arm3": const}
+    const1 = tiny_fit("constant", BASE_LR, 0.0, Hs)          # arm1: truly-constant schedule
+    const3 = tiny_fit("constant", arm3_const, 0.0, Hs)       # arm3: truly-constant at the mean LR
+    B = {"cosine_floor": cos_floor, "cosine_zero": cos_zero, "constant_arm1": const1, "constant_arm3": const3}
+    def is_const(c, lr):
+        return (c["lr_min"] is not None and c["lr_max"] is not None
+                and abs(c["lr_min"] - c["lr_max"]) < 1e-12 and abs(c["lr_min"] - lr) < 1e-12)
     B_pass = bool(cos_floor["lr_first"] and abs(cos_floor["lr_first"] - BASE_LR) < 1e-9
                   and abs(cos_floor["lr_last"] - LR_MIN) / LR_MIN < 0.05        # floor applied (~1e-5)
                   and cos_zero["lr_last"] < cos_floor["lr_last"]                 # no-floor ends lower
-                  and abs(const["lr_last"] - arm3_const) / arm3_const < 0.01     # constant stays put
+                  and is_const(const1, BASE_LR) and is_const(const3, arm3_const) # TRUE constants (min==max==lr)
                   and cos_floor["executed"] == Hs)
 
     out = {"schema": "card008-lr-canary-2026-09-11", "horizon_H": H, "base_lr": BASE_LR, "lr_min": LR_MIN,

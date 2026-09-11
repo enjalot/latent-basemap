@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent)); from _paths import ens
 import torch
 from basemap.pumap.parametric_umap.core import ParametricUMAP
 
-N, D, K, BATCH, EPOCHS, H = 3000, 64, 10, 512, 3, 300
+N, D, K, BATCH, EPOCHS, H = 3000, 64, 10, 512, 3, 200  # H bench-caps at 200 within a 3-epoch plan; epoch1 ckpt (~118) survives keep-last-2
 OC = Path("/data/latent-basemap/sandbox/overseer-codex")
 rng = np.random.default_rng(8)
 
@@ -52,24 +52,38 @@ def main():
     td = Path(tempfile.mkdtemp(prefix="lrresume_")); e = td / "e.npz"
     X = rng.standard_normal((N, D)).astype(np.float32); _edges(X, e)
     m_un = _fit(e, X, td / "un")                      # uninterrupted cosine+lr_min
+    endpoint = int(m_un._train_stats.get("executed_iters", 0))
     ck1 = _ck1(td / "un")
+    # A real resume test REQUIRES a genuine mid-run checkpoint (not None after pruning).
+    if ck1 is None:
+        out["error"] = "epoch1 checkpoint missing (pruned) — cannot test real resume"; out["PASS"] = False
+        print(json.dumps(out, indent=1)); return 3
+    ck1_step = int(torch.load(ck1, map_location="cpu", weights_only=False).get("global_step", -1))
+    ck1_valid = bool(0 < ck1_step < endpoint)
 
-    def resume_raises(**kw):
+    def resume_raises(expect_msg, **kw):
         try:
-            _fit(e, X, td / "tmp", resume=ck1, **kw); return False
-        except (ValueError, AssertionError, RuntimeError):
-            return True
+            _fit(e, X, td / "tmp", resume=ck1, **kw)
+            return {"raised": False, "msg_ok": False}
+        except ValueError as ex:
+            return {"raised": True, "msg_ok": bool(expect_msg in str(ex))}
+        except (AssertionError, RuntimeError) as ex:
+            return {"raised": True, "msg_ok": False, "wrong_error": str(ex)[:120]}
         finally:
             shutil.rmtree(td / "tmp", ignore_errors=True)
-    diff_min = resume_raises(lr_min=5e-5)             # different floor
-    diff_sched = resume_raises(sched="plateau", lr_min=0.0)  # different schedule
-    diff_lr = resume_raises(lr=5e-5)                  # different peak
-    m_re = _fit(e, X, td / "re", resume=ck1)          # same config -> bitwise-identical endpoint
+    diff_min = resume_raises("mismatch", lr_min=5e-5)
+    diff_sched = resume_raises("mismatch", sched="plateau", lr_min=0.0)
+    diff_lr = resume_raises("mismatch", lr=5e-5)
+    m_re = _fit(e, X, td / "re", resume=ck1)          # same config -> continues to bitwise-identical endpoint
     same_ok = _sd_eq(m_un, m_re)
+    re_endpoint = int(m_re._train_stats.get("executed_iters", 0))
 
-    out["diff_lr_min_raises"] = diff_min; out["diff_schedule_raises"] = diff_sched
-    out["diff_lr_peak_raises"] = diff_lr; out["same_config_resume_bitwise_identical"] = same_ok
-    out["PASS"] = bool(diff_min and diff_sched and diff_lr and same_ok)
+    out.update(uninterrupted_endpoint_steps=endpoint, epoch1_ckpt_step=ck1_step, epoch1_step_in_range=ck1_valid,
+               resumed_endpoint_steps=re_endpoint,
+               diff_lr_min=diff_min, diff_schedule=diff_sched, diff_lr_peak=diff_lr,
+               same_config_resume_bitwise_identical=same_ok)
+    out["PASS"] = bool(ck1_valid and same_ok and re_endpoint == endpoint
+                       and all(r["raised"] and r["msg_ok"] for r in (diff_min, diff_sched, diff_lr)))
     print(json.dumps(out, indent=1)); (OC / "card008-lr-resume-canary.json").write_text(json.dumps(out, indent=1))
     shutil.rmtree(td, ignore_errors=True)
     return 0 if out["PASS"] else 3

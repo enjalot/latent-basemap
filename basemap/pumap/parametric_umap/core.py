@@ -1900,6 +1900,11 @@ class ParametricUMAP:
                 return _floor + (1.0 - _floor) * 0.5 * (1.0 + np.cos(np.pi * min(progress, 1.0)))
 
             scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+        elif self.lr_schedule == "constant":
+            # card008: TRULY constant LR (lambda ≡ 1.0) — distinct from "plateau"
+            # (ReduceLROnPlateau), which can halve the rate on a loss plateau.
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda u: 1.0)
+            lr_horizon = planned_loop
         elif self.lr_schedule == "plateau":
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer, mode='min', factor=0.5, patience=5)
@@ -1917,6 +1922,7 @@ class ParametricUMAP:
             "executed_iters": 0, "n_pos_edges": int(n_pos_edges),
             # P0-3: budget accounting — H successful positive-LR updates.
             "lr_used_first": None, "lr_used_last": None, "next_lr": None,
+            "lr_used_min": None, "lr_used_max": None, "lr_used_sum": 0.0, "lr_used_count": 0,
             "budget_satisfied": None, "use_amp": bool(use_amp),
             "amp_dtype": ("bfloat16" if amp_bf16 else
                           ("float16" if use_amp else None)),
@@ -2554,6 +2560,13 @@ class ParametricUMAP:
                         if st["lr_used_first"] is None:
                             st["lr_used_first"] = lr_used
                         st["lr_used_last"] = lr_used
+                        # card008: exact used-LR sequence summary (min/max/sum/count) so a
+                        # constant control can be PROVEN constant (min==max==base) without
+                        # storing the full 70K sequence.
+                        st["lr_used_min"] = lr_used if st["lr_used_min"] is None else min(st["lr_used_min"], lr_used)
+                        st["lr_used_max"] = lr_used if st["lr_used_max"] is None else max(st["lr_used_max"], lr_used)
+                        st["lr_used_sum"] += lr_used
+                        st["lr_used_count"] += 1
                     # Advance the schedule ONLY on a successful update, so an
                     # AMP-overflow skip does not consume the LR horizon.
                     if self.lr_schedule == "cosine":
