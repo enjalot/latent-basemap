@@ -90,6 +90,17 @@ def main():
     pumap.replay_fraction = RFRAC; pumap.replay_seed = RSEED
     pumap.batch_size = 16384; pumap.n_epochs = max(n_epochs, 50); pumap.warmup_steps = 0
     pumap._max_train_steps = int(os.environ.get("EVOLBENCH_LAMBDA_MAXSTEPS", "140000"))
+    # Optional LR-schedule control (card008 finishing comparison). Defaults leave the
+    # loaded/plateau behavior untouched. LR_SCHEDULE=cosine needs TOTAL_STEPS_EST (the
+    # cosine horizon in successful updates); LR_MIN sets the cosine floor (0=to zero).
+    if os.environ.get("LR"):
+        pumap.learning_rate = float(os.environ["LR"])
+    if os.environ.get("LR_SCHEDULE"):
+        pumap.lr_schedule = os.environ["LR_SCHEDULE"]
+    if os.environ.get("LR_MIN"):
+        pumap.lr_min = float(os.environ["LR_MIN"])
+    if os.environ.get("TOTAL_STEPS_EST"):
+        pumap.total_steps_estimate = int(os.environ["TOTAL_STEPS_EST"])
 
     _paths = [p for p in TRANCHE.split(",") if p]
     X = np.asarray(np.load(_paths[0], mmap_mode="r"), np.float32) if len(_paths) == 1 \
@@ -106,6 +117,8 @@ def main():
                  "replay_weight": RWEIGHT, "replay_fraction": RFRAC, "replay_seed": RSEED,
                  "anchor_lambda": w, "anchor_hold_fraction": 0.05, "anchor_holdout_fraction": 0.10,
                  "batch_size": 16384, "seed": SEED, "max_train_steps": pumap._max_train_steps,
+                 "lr_schedule": pumap.lr_schedule, "learning_rate": pumap.learning_rate,
+                 "lr_min": pumap.lr_min, "total_steps_estimate": int(getattr(pumap, "total_steps_estimate", 0)),
                  "snapshot_steps": list(SNAP), "n_rows": int(n), "prenormed": os.environ.get("PRENORMED") == "1"}
     (OUTD / f"admission-{tag}.json").write_text(json.dumps(admission, indent=1))
     fit_kw = dict(precomputed_edges_path=str(EDGES), random_state=SEED, verbose=False, warm_start_state=warm_state)
@@ -136,6 +149,8 @@ def main():
            "replay_bank_content_sha_admission": admission["replay_bank_content_sha"],
            "replay_weight": RWEIGHT, "replay_fraction": RFRAC, "replay_seed": RSEED,
            "max_train_steps": pumap._max_train_steps, "executed_steps": steps, "batch_size": 16384, "seed": SEED,
+           "lr_schedule": pumap.lr_schedule, "learning_rate": pumap.learning_rate, "lr_min": pumap.lr_min,
+           "total_steps_estimate": int(getattr(pumap, "total_steps_estimate", 0)),
            "train_wall_s": round(wall, 1), "it_per_s": its, "projected_140k_gpu_h": proj_140k_h,
            "peak_vram_gb": peak_vram_gb, "warm_start_hash": warm_hash, "trained_hash": trained_hash,
            "warm_start_changed": bool(warm_hash != trained_hash), "anchored": bool(w > 0),

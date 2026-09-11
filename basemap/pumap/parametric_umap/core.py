@@ -48,6 +48,7 @@ class ParametricUMAP:
         neck_fraction=0.75,   # ResidualBottleneckMLP neck = int(hidden_dim*neck_fraction); 0.75 == 3//4
         correlation_distance_transform="raw",
         lr_schedule="plateau",
+        lr_min=0.0,
         warmup_steps=0,
         total_steps_estimate=0,
         require_full_budget=True,
@@ -177,6 +178,10 @@ class ParametricUMAP:
         self.correlation_distance_transform = correlation_distance_transform
         self.lr_schedule = lr_schedule
         self.warmup_steps = warmup_steps
+        # Cosine LR floor (card008): when >0, the cosine schedule decays to this
+        # absolute LR instead of 0 (floor = lr_min/learning_rate). Default 0.0 ->
+        # identical to the historical cosine (anneal to 0).
+        self.lr_min = lr_min
         self.total_steps_estimate = total_steps_estimate
         self.require_full_budget = require_full_budget
         self.require_graph_manifest = require_graph_manifest
@@ -1877,6 +1882,9 @@ class ParametricUMAP:
                 raise ValueError(f"warmup_steps ({W}) >= LR horizon ({H}); the schedule "
                                  f"would never reach full LR (P0-3).")
 
+            # Optional cosine FLOOR (card008): decay to lr_min instead of 0.
+            _floor = (float(self.lr_min) / self.learning_rate) if (self.lr_min and self.learning_rate > 0) else 0.0
+
             def lr_lambda(u):
                 # u = successful positive-LR updates already taken (0-based).
                 if W > 0 and u < W:
@@ -1884,7 +1892,7 @@ class ParametricUMAP:
                 if u >= H:
                     return 0.0                  # never applied — we stop at H
                 progress = (u - W) / max(1, H - W)
-                return 0.5 * (1.0 + np.cos(np.pi * min(progress, 1.0)))
+                return _floor + (1.0 - _floor) * 0.5 * (1.0 + np.cos(np.pi * min(progress, 1.0)))
 
             scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
         elif self.lr_schedule == "plateau":
@@ -2885,6 +2893,8 @@ class ParametricUMAP:
             'kernel_alpha': self.kernel_alpha,
             'correlation_weight': self.correlation_weight,
             'learning_rate': self.learning_rate,
+            'lr_schedule': self.lr_schedule,
+            'lr_min': self.lr_min,
             'use_batchnorm': self.use_batchnorm,
             'use_dropout': self.use_dropout,
             'clip_grad_norm': self.clip_grad_norm,
@@ -2966,6 +2976,8 @@ class ParametricUMAP:
             kernel_anneal_frac=save_dict.get('kernel_anneal_frac', 0.0),
             # Off-graph replay provenance (backward-compatible defaults for
             # checkpoints predating cards 006/007).
+            lr_schedule=save_dict.get('lr_schedule', 'plateau'),
+            lr_min=save_dict.get('lr_min', 0.0),
             replay_bank_path=save_dict.get('replay_bank_path', ''),
             replay_weight=save_dict.get('replay_weight', 0.0),
             replay_fraction=save_dict.get('replay_fraction', 0.05),
