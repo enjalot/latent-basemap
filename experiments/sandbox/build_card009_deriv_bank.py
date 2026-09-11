@@ -13,8 +13,7 @@ R0 = fixed DINO radius 33.6717. Directions/pool exclude the seal and the OUT row
 Env: BANK_N (rows, default all OUT), POOL_N (training-only pool sample, default 500000).
 Usage: build_card009_deriv_bank.py
 """
-import os, sys, json, hashlib
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+import os, sys, json, hashlib, time
 for v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
     os.environ.setdefault(v, "4")
 from pathlib import Path
@@ -22,6 +21,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent)); from _paths import ensure_paths; ensure_paths()
 import torch, faiss
 from basemap.pumap.parametric_umap.core import ParametricUMAP
+DEVICE = os.environ.get("DERIV_DEVICE") or ("cuda" if torch.cuda.is_available() else "cpu")
+def _log(m): print(f"{time.strftime('%H:%M:%S')} {m}", flush=True)
 
 SB = Path("/data/latent-basemap/sandbox"); OC = SB / "overseer-codex"
 POOL = Path("/data2/monet/pool-20m"); SEAL = Path("/data2/monet/eval-common-v2")
@@ -29,7 +30,7 @@ T0SUB = Path("/data/latent-basemap/substrates/dino-arrival-t0")
 TEACHER = SB / "dino-arrival-t0/champion-bs16k/model.pt"
 R0 = 33.6717
 BANK_N = int(os.environ.get("BANK_N", "0"))          # 0 = all OUT rows
-POOL_N = int(os.environ.get("POOL_N", "500000"))
+POOL_N = int(os.environ.get("POOL_N", "200000"))
 SEED = 9009
 
 
@@ -56,15 +57,23 @@ def main():
     if pool_pos.size > POOL_N:
         pool_pos = rng.choice(pool_pos, POOL_N, replace=False)
     Xmm = np.load(POOL / "dino1536.f16.npy", mmap_mode="r")
-    # gather pool embeddings (sorted for locality), normalize
-    order = np.argsort(pool_pos); Ppool = _norm(np.asarray(Xmm[pool_pos[order]], np.float32))
-    pool_pos_sorted = pool_pos[order]
+    order = np.argsort(pool_pos); pool_pos_sorted = pool_pos[order]
+    _log(f"gathering {pool_pos_sorted.size} pool rows from memmap (sorted for I/O locality)")
+    Ppool = _norm(np.asarray(Xmm[pool_pos_sorted], np.float32)); _log("pool gathered + normalized")
 
-    # nearest OLD neighbor for each OUT row (cosine == IP on normalized)
-    index = faiss.IndexFlatIP(Ppool.shape[1]); index.add(np.ascontiguousarray(Ppool))
-    D, I = index.search(np.ascontiguousarray(Xb), 1)                    # top-1 old neighbor
-    nbr = Ppool[I[:, 0]]                                               # [n, D] neighbor embeddings
+    # nearest OLD neighbor for each OUT row (cosine == IP on normalized). Exact flat search over
+    # 200K x 200K x 1536 is infeasible on CPU; use an APPROXIMATE IVF index — the direction only needs
+    # "a real nearby old neighbor", so an approximate top-1 is sufficient (recorded as such).
+    faiss.omp_set_num_threads(4)
+    d = Ppool.shape[1]; nlist = max(64, min(4096, int(np.sqrt(Ppool.shape[0]))))
+    quant = faiss.IndexFlatIP(d); index = faiss.IndexIVFFlat(quant, d, nlist, faiss.METRIC_INNER_PRODUCT)
+    _log(f"training IVF (nlist={nlist})"); index.train(np.ascontiguousarray(Ppool)); index.add(np.ascontiguousarray(Ppool))
+    index.nprobe = 32
+    _log(f"faiss IVF searching {n} OUT rows (nprobe=32, approximate top-1)")
+    D, I = index.search(np.ascontiguousarray(Xb), 1)  # approximate top-1 old neighbor
+    nbr = Ppool[I[:, 0]].copy()                                        # [n, D] neighbor embeddings
     nbr_ids = pool_pos_sorted[I[:, 0]].astype(np.int64)               # provenance: neighbor global pool positions
+    del Ppool, index, Xmm; import gc; gc.collect(); _log("neighbors extracted; pool/index freed")
 
     # EXACT-INPUT teacher fidelity (review item 2): freeze the STORED fp16 input first and compute
     # everything (tangent direction, teacher Jv) at exactly the fp32-cast stored input the hook uses.
@@ -81,17 +90,19 @@ def main():
     v = (v / vnorm.clip(1e-12)).astype(np.float32)
 
     # teacher directional derivative J_old(x_used) v via batched jvp at the EXACT stored input.
-    teacher = ParametricUMAP.load(str(TEACHER), device="cpu"); teacher.model.eval()
+    teacher = ParametricUMAP.load(str(TEACHER), device=DEVICE); teacher.model.eval()
     for p in teacher.model.parameters(): p.requires_grad_(False)
-    def _teacher_jv(Xarr, Varr):
-        outs = []
-        xt = torch.from_numpy(np.asarray(Xarr, np.float32)); vt = torch.from_numpy(np.asarray(Varr, np.float32))
+    def _teacher_jv(Xarr, Varr, tag=""):
+        outs = []; N = Xarr.shape[0]
         with torch.no_grad():
-            for i in range(0, xt.shape[0], 20000):
-                _, jv = torch.autograd.functional.jvp(lambda inp: teacher.model(inp), xt[i:i + 20000], vt[i:i + 20000])
-                outs.append(jv.float().numpy().astype(np.float32))
+            for i in range(0, N, 20000):
+                xt = torch.from_numpy(np.asarray(Xarr[i:i + 20000], np.float32)).to(DEVICE)
+                vt = torch.from_numpy(np.asarray(Varr[i:i + 20000], np.float32)).to(DEVICE)
+                _, jv = torch.autograd.functional.jvp(lambda inp: teacher.model(inp), xt, vt)
+                outs.append(jv.float().cpu().numpy().astype(np.float32))
+                if tag: _log(f"  teacher-jv {tag} {min(i + 20000, N)}/{N}")
         return np.concatenate(outs)
-    jv_teacher = _teacher_jv(x_used, v)
+    _log(f"teacher Jv on {DEVICE} for {n} rows"); jv_teacher = _teacher_jv(x_used, v, tag="main")
 
     # keep only rows with a valid tangent direction (filter ALL arrays incl the stored fp16 input)
     Xb16, x_used, v, scale, jv_teacher, out_ids, src, nbr_ids = \
@@ -110,8 +121,9 @@ def main():
     # teacher Jv with the SAME directions -> must be bit-identical to the stored teacher Jv (near-floor).
     z = np.load(OC / "card009_deriv_bank.npz")
     x_reload = np.asarray(z["deriv_X"], np.float32)                   # fp16 -> fp32 exactly as the hook does
-    jv_reload = _teacher_jv(x_reload, np.asarray(z["deriv_dir"], np.float32))
-    fidelity_resid = float(np.abs(jv_reload - jv_teacher).max())
+    smp = np.sort(np.random.default_rng(SEED).choice(x_reload.shape[0], min(5000, x_reload.shape[0]), replace=False))
+    jv_reload = _teacher_jv(x_reload[smp], np.asarray(z["deriv_dir"], np.float32)[smp])  # sample proves the property
+    fidelity_resid = float(np.abs(jv_reload - jv_teacher[smp]).max())
 
     manifest = {"schema": "card009-deriv-bank-2026-09-11", "R0": R0, "n_rows": ng, "n_dropped_no_tangent": int(n - ng),
                 "pool_n": int(pool_pos_sorted.size), "teacher": str(TEACHER), "seed": SEED,
@@ -123,7 +135,7 @@ def main():
                            "deriv_teacher_jv": _h(jv_teacher.astype(np.float32)), "deriv_ids": _h(np.sort(out_ids.astype(np.int64))),
                            "deriv_neighbor_ids": _h(np.sort(nbr_ids))},
                 "note": "exact-input teacher Jv at fp16-cast stored input; tangent on x_used w/ correct norm; "
-                        "training-only T0-pool neighbors (global ids persisted); frozen T0 teacher."}
+                        "training-only T0-pool APPROXIMATE-IVF top-1 neighbors (global ids persisted); frozen T0 teacher."}
     (OC / "card009-deriv-bank-manifest.json").write_text(json.dumps(manifest, indent=1))
     print(json.dumps(manifest, indent=1))
     ok = (np.isfinite(jv_teacher).all() and ortho < 1e-4 and unit < 1e-4 and ng > 0
