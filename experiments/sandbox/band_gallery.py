@@ -56,13 +56,15 @@ def main():
             vals=v.get('budget_recall',{'250':v['B250_k15']})
             body.append('<tr><td>'+h+'</td>'+''.join('<td>'+ (f'{100*vals[str(b)]:.1f}%' if str(b) in vals else '—')+'</td>' for b in [15,50,250,2000])+'</tr>')
         body.append('</table></section>')
+    if (ROOT/'fullcorpus-crops.png').exists():
+        body.append('<section><h2>Check against the complete corpus</h2><p>These fixed windows contain every corpus point, streamed from all 103,816,750 saved coordinates. The gym corridor persists in all four heads (roughly 165–172K images per crop). Some endpoint groups spread widely in other heads, so their matched windows span much of the map. Per-panel colors use separate log-count scales; this is a geometry check, not a shared density comparison.</p><a href="band-assets/fullcorpus-crops.png"><img class="plot" src="band-assets/fullcorpus-crops.png" alt="All-corpus density crops around three fixed cases"></a></section>')
     if (ROOT/'snapshot-movement.png').exists():
         body.append('<section><h2>Actual saved fine-tuning checkpoints</h2><p>The case images were also projected through card006 IN/OUT replay snapshots. These are a different model family from the ladder. Case 4 moves substantially and non-monotonically: IN displacement from original T0 is .0718, .0088, .2230 at 35K, 70K, 140K updates; OUT is .0482, .1485, .0058. Values are fractions of the fixed original T0 radius. This is measured model movement; lines between checkpoints are only visual guides, and do not prove a semantic cluster transition.</p><img class="plot" src="band-assets/snapshot-movement.png" alt="Measured displacement at three saved checkpoints"><p>CPU re-inference matches stored map coordinates to less than .001 local k32 radius on the tested panel. Small input probes reveal sensitive locations, but perturbed feature vectors need not correspond to real images. The detector and selected examples do not establish that a larger head removes bands globally.</p></section>')
     body.append('<p>Literature: <a href="https://www.nature.com/articles/s41467-025-60434-9">Map-continuity reliability</a>; <a href="https://arxiv.org/abs/2107.07859">Steadiness and Cohesiveness</a>; <a href="https://arxiv.org/abs/1909.12902">MING neighborhood overlays</a>. This page uses a custom geometric screen, not those papers’ validated scores.</p></html>')
     (ROOT/'band-review.html').write_text(''.join(body))
     (ROOT/'thumbnail-audit.json').write_text(json.dumps({'script_sha256':sha(Path(__file__)),'count':len(fetched),'rows':fetched},indent=2)+'\n')
     target=PUBLIC/'band-assets';target.mkdir(exist_ok=True);shutil.copytree(ROOT/'thumbs',target/'thumbs',dirs_exist_ok=True)
-    for p in [ROOT/'survey-overview.png',*ROOT.glob('case-*-maps.png'),*ROOT.glob('snapshot-movement.png')]:shutil.copy2(p,target/p.name)
+    for p in [ROOT/'survey-overview.png',*ROOT.glob('case-*-maps.png'),*ROOT.glob('snapshot-movement.png'),*ROOT.glob('fullcorpus-crops.png')]:shutil.copy2(p,target/p.name)
     shutil.copy2(ROOT/'band-review.html',PUBLIC/'band-review.html')
     print('Gallery complete',len(cases),'cases',len(fetched),'images',flush=True)
 
