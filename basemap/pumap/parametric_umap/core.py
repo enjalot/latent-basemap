@@ -79,6 +79,21 @@ class ParametricUMAP:
         replay_weight=0.0,
         replay_fraction=0.05,
         replay_seed=None,
+        # ── Derivative preservation (card009, Sobolev-style) — DEFAULT OFF ──
+        # An OPTIONAL directional-derivative-matching term on a small subbatch.
+        # deriv_bank_path -> .npz with deriv_X (fp16 [n,D], L2-preprocessed inputs),
+        # deriv_dir (fp32 [n,D] unit tangent directions toward real old-content
+        # neighbors), deriv_teacher_jv (fp32 [n,d_out], the FROZEN teacher's cached
+        # directional derivative J_old(x) v), deriv_scale (fp32 [n], local neighbor
+        # scale s_i), deriv_ids. When deriv_weight>0, each step draws deriv_subbatch
+        # rows via an INDEPENDENT RNG and adds deriv_weight * mean(sum((s*(Jv_new -
+        # Jv_teacher)/R0)^2)). Student Jv is a create_graph JVP (gradient to student
+        # params); teacher Jv is a constant. Default off -> path byte-identical.
+        deriv_bank_path="",
+        deriv_weight=0.0,
+        deriv_subbatch=128,
+        deriv_seed=None,
+        deriv_radius=1.0,
         midnear_enabled=False,
         mn_pairs_per_batch=0,
         mn_weight_scale=1.0,
@@ -213,6 +228,17 @@ class ParametricUMAP:
         self.replay_seed = replay_seed
         self._replay_X_dev = None        # fp16 external replay inputs, resident
         self._replay_targets_dev = None  # fp32 frozen teacher coords for those rows
+        # Derivative preservation (card009; default off).
+        self.deriv_bank_path = deriv_bank_path
+        self.deriv_weight = deriv_weight
+        self.deriv_subbatch = deriv_subbatch
+        self.deriv_seed = deriv_seed
+        self.deriv_radius = deriv_radius
+        self._deriv_X_dev = None
+        self._deriv_dir_dev = None
+        self._deriv_teacher_jv_dev = None
+        self._deriv_scale_dev = None
+        self._deriv_bank_sha = None
         self.midnear_enabled = midnear_enabled
         self.mn_pairs_per_batch = mn_pairs_per_batch
         self.mn_weight_scale = mn_weight_scale
@@ -1838,6 +1864,42 @@ class ParametricUMAP:
             logging.info("off-graph replay ENABLED: %d rows (sha %s), weight=%.4g, fraction=%.4g (%d/step), "
                          "seed=%d, mean_norm=%.4f", _rx.shape[0], self._replay_bank_sha, self.replay_weight,
                          self.replay_fraction, _r_m, _rseed, _nm)
+
+        # ── Derivative-preservation setup (card009) — DEFAULT OFF, fail-closed ──
+        self._deriv_X_dev = None; self._deriv_dir_dev = None
+        self._deriv_teacher_jv_dev = None; self._deriv_scale_dev = None; self._deriv_bank_sha = None
+        deriv_gen = None
+        if self.deriv_weight is not None and self.deriv_weight > 0:
+            import hashlib as _hl2
+            assert np.isfinite(self.deriv_weight) and self.deriv_weight >= 0, "deriv_weight must be finite >=0"
+            assert self.deriv_bank_path and Path(self.deriv_bank_path).exists(), \
+                f"deriv_weight>0 requires an existing deriv_bank_path (got {self.deriv_bank_path!r})"
+            assert self.deriv_subbatch and int(self.deriv_subbatch) >= 1, "deriv_subbatch must be >=1"
+            assert np.isfinite(self.deriv_radius) and self.deriv_radius > 0, "deriv_radius (R0) must be finite >0"
+            _db = np.load(self.deriv_bank_path)
+            for _k in ("deriv_X", "deriv_dir", "deriv_teacher_jv", "deriv_scale", "deriv_ids"):
+                assert _k in _db, f"deriv bank missing required array '{_k}'"
+            _dx = np.asarray(_db["deriv_X"]); _dv = np.asarray(_db["deriv_dir"], np.float32)
+            _djv = np.asarray(_db["deriv_teacher_jv"], np.float32); _ds = np.asarray(_db["deriv_scale"], np.float32)
+            _dids = np.asarray(_db["deriv_ids"])
+            _in_feat2 = next((m.in_features for m in self.model.modules() if isinstance(m, torch.nn.Linear)), None)
+            assert _dx.ndim == 2 and _dv.shape == _dx.shape, "deriv_X/deriv_dir shape mismatch"
+            assert _in_feat2 is None or _dx.shape[1] == _in_feat2, f"deriv_X width != model input {_in_feat2}"
+            assert _djv.ndim == 2 and _djv.shape[1] == self.n_components and _djv.shape[0] == _dx.shape[0], \
+                "deriv_teacher_jv must be [n, n_components] matching deriv_X"
+            assert _ds.shape[0] == _dx.shape[0] and _dids.shape[0] == _dx.shape[0], "deriv row-count mismatch"
+            assert np.isfinite(_dx).all() and np.isfinite(_dv).all() and np.isfinite(_djv).all() and np.isfinite(_ds).all(), \
+                "deriv bank has non-finite values"
+            self._deriv_X_dev = torch.as_tensor(_dx, device=self.device).float()
+            self._deriv_dir_dev = torch.as_tensor(_dv, device=self.device).float()
+            self._deriv_teacher_jv_dev = torch.as_tensor(_djv, device=self.device).float()
+            self._deriv_scale_dev = torch.as_tensor(_ds, device=self.device).float()
+            self._deriv_bank_sha = _hl2.sha256(np.ascontiguousarray(np.sort(_dids.astype(np.int64))).tobytes()
+                                               + np.ascontiguousarray(_djv).tobytes()).hexdigest()[:16]
+            _dseed = int(self.deriv_seed) if self.deriv_seed is not None else int(random_state) + 74093
+            deriv_gen = torch.Generator(device=self.device); deriv_gen.manual_seed(_dseed)
+            logging.info("derivative preservation ENABLED: %d rows (sha %s), weight=%.4g, subbatch=%d, R0=%.4f, seed=%d",
+                         _dx.shape[0], self._deriv_bank_sha, self.deriv_weight, int(self.deriv_subbatch), self.deriv_radius, _dseed)
         mn_total_steps = (
             self.total_steps_estimate if self.total_steps_estimate > 0
             else max(len(loader) * self.n_epochs, 1)
@@ -2429,6 +2491,28 @@ class ParametricUMAP:
                     loss = loss + self.replay_weight * replay_loss
                     replay_loss_val = replay_loss.item() if use_wandb else 0.0
 
+                # ── Derivative-preservation term (card009, Sobolev-style) ──
+                # On a small subbatch, match the student's directional derivative to the
+                # frozen teacher's cached one: deriv_weight * mean(sum((s*(Jv_new - Jv_teacher)/R0)^2)).
+                # Jv_new is a create_graph JVP (gradient reaches student params); Jv_teacher is a
+                # constant tensor (no gradient to teacher). Computed in fp32 (autocast off) for
+                # stable double-backward. Independent RNG; inputs enter ONLY this loss.
+                deriv_loss_val = 0.0
+                if self._deriv_teacher_jv_dev is not None:
+                    d_n = self._deriv_X_dev.shape[0]; d_m = min(int(self.deriv_subbatch), d_n)
+                    d_idx = torch.randint(0, d_n, (d_m,), generator=deriv_gen, device=self.device)
+                    xd = self._deriv_X_dev.index_select(0, d_idx)
+                    vd = self._deriv_dir_dev.index_select(0, d_idx)
+                    sd = self._deriv_scale_dev.index_select(0, d_idx)
+                    jv_teacher = self._deriv_teacher_jv_dev.index_select(0, d_idx)
+                    with torch.autocast(device_type='cuda' if use_amp else 'cpu', enabled=False):
+                        _, jv_student = torch.autograd.functional.jvp(
+                            lambda inp: self.model(inp), xd, vd, create_graph=True)
+                    deriv_term = ((sd.unsqueeze(1) * (jv_student.float() - jv_teacher) / self.deriv_radius)
+                                  ).pow(2).sum(dim=1).mean()
+                    loss = loss + self.deriv_weight * deriv_term
+                    deriv_loss_val = deriv_term.item() if use_wandb else 0.0
+
                 _fwd_ph.__exit__(None, None, None)   # S2: close forward+loss phase
 
                 if not torch.isfinite(loss):
@@ -2948,6 +3032,13 @@ class ParametricUMAP:
             'replay_fraction': self.replay_fraction,
             'replay_seed': self.replay_seed,
             'replay_bank_sha': getattr(self, '_replay_bank_sha', None),
+            # Derivative-preservation provenance (card009; backward-compatible).
+            'deriv_bank_path': self.deriv_bank_path,
+            'deriv_weight': self.deriv_weight,
+            'deriv_subbatch': self.deriv_subbatch,
+            'deriv_seed': self.deriv_seed,
+            'deriv_radius': self.deriv_radius,
+            'deriv_bank_sha': getattr(self, '_deriv_bank_sha', None),
         }
         torch.save(save_dict, path)
 
@@ -3006,6 +3097,11 @@ class ParametricUMAP:
             learning_rate=save_dict.get('learning_rate', 1e-4),
             lr_schedule=save_dict.get('lr_schedule', 'plateau'),
             lr_min=save_dict.get('lr_min', 0.0),
+            deriv_bank_path=save_dict.get('deriv_bank_path', ''),
+            deriv_weight=save_dict.get('deriv_weight', 0.0),
+            deriv_subbatch=save_dict.get('deriv_subbatch', 128),
+            deriv_seed=save_dict.get('deriv_seed', None),
+            deriv_radius=save_dict.get('deriv_radius', 1.0),
             replay_bank_path=save_dict.get('replay_bank_path', ''),
             replay_weight=save_dict.get('replay_weight', 0.0),
             replay_fraction=save_dict.get('replay_fraction', 0.05),
