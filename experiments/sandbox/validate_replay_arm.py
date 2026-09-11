@@ -49,11 +49,36 @@ def main():
     if abs(float(m.get("deriv_weight", 0) or 0) - exp_dw) > 1e-9:
         errs.append(f"deriv_weight {m.get('deriv_weight')} != expected {exp_dw} (deriv intervention mis-set)")
     if exp_dw > 0:
-        exp_sha = os.environ.get("EXPECT_DERIV_BANK_SHA", "")
-        if exp_sha and m.get("deriv_bank_sha") != exp_sha:
-            errs.append(f"deriv_bank_sha {m.get('deriv_bank_sha')} != expected {exp_sha}")
-        if int(m.get("deriv_subbatch", 0) or 0) != int(os.environ.get("EXPECT_DERIV_SUBBATCH", "128")):
-            errs.append(f"deriv_subbatch {m.get('deriv_subbatch')} != expected")
+        # DERIVATIVE arm: bind the COMPLETE input contract (immutable, Codex-written). The env-passed
+        # hash proved unreliable (empty when the chain's system-python3 sha failed); read the contract
+        # authoritatively and FAIL CLOSED if it is missing/empty. External full-array SHA guard covers
+        # deriv_X/dir/scale that the legacy core digest omits.
+        import hashlib
+        cpath = os.environ.get("CARD009_CONTRACT", "/data/latent-basemap/sandbox/overseer-codex/card009-frozen-input-contract.json")
+        if not Path(cpath).exists():
+            errs.append(f"derivative arm but frozen-input contract missing: {cpath}")
+        else:
+            con = json.load(open(cpath))
+            for ckey, mkey in [("expected_deriv_weight", "deriv_weight"), ("expected_deriv_subbatch", "deriv_subbatch"),
+                               ("expected_deriv_radius", "deriv_radius"), ("expected_deriv_seed", "deriv_seed"),
+                               ("expected_learning_rate", "learning_rate"), ("expected_steps", "executed_steps")]:
+                cv, mv = con.get(ckey), m.get(mkey)
+                if cv is None or mv is None or abs(float(cv) - float(mv)) > 1e-9:
+                    errs.append(f"{mkey}={mv} != contract {ckey}={cv}")
+            oa = con.get("ordered_array_sha256") or {}
+            if not oa:
+                errs.append("contract ordered_array_sha256 empty — cannot verify full deriv bank")
+            bankp = m.get("deriv_bank")
+            if not bankp or not Path(bankp).exists():
+                errs.append(f"deriv arm bank path missing/absent from manifest: {bankp}")
+            elif oa:
+                zb = np.load(bankp)
+                for arr, exp_sha in oa.items():
+                    if arr not in zb:
+                        errs.append(f"deriv bank missing array {arr}"); continue
+                    got = hashlib.sha256(np.ascontiguousarray(zb[arr]).tobytes()).hexdigest()
+                    if got != exp_sha:
+                        errs.append(f"deriv bank {arr} full-SHA != contract")
     ts = m.get("train_stats") or {}
     if not ts or "executed_iters" not in ts:
         errs.append("train_stats not persisted")
