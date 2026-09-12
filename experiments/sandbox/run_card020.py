@@ -5,6 +5,7 @@ from pathlib import Path
 import hashlib,json,time,sys
 import numpy as np
 import torch
+import card016_model,run_card016_arm
 from card016_model import CompactProjector,loss_for
 from run_card016_arm import train_step
 ROOT=Path(__file__).resolve().parents[2]; SB=Path('/data/latent-basemap/sandbox'); OC=SB/'overseer-codex'; DATA=SB/'card016-data';POOL=SB/'card012-pool';OUT=SB/'card020-train';PARENT=SB/'card016-train/compact_l1/step-20000.pt';SNAPS=[40000,80000]
@@ -30,6 +31,7 @@ def base():return json.loads((ROOT/'card020-admission-base.json').read_text())
 def identity(canary=False):
  b=base();return {'card':'020','parent':b,'total_successful_steps':80000,'parent_steps':20000,'batch':8192,'lr':.001,'objective':'compact_l1','precision':'bf16_hidden_matmuls_FP32_output_loss_parameters','seed':16016,'canary':bool(canary),'runtime_manifest_sha':sha(ROOT/'card020-runtime-sha.json')}
 def validate_inputs():
+ assert all(Path(mod.__file__).resolve().is_relative_to(ROOT) for mod in [card016_model,run_card016_arm]),'loaded helper path mismatch'
  b=base();assert sha(PARENT)==b['parent_file_sha'],'parent file mismatch';assert sha(DATA/'manifest.json')==b['data_manifest_sha'],'data manifest mismatch';assert sha(POOL/'pool_X.f16.npy')==b['input_file_sha'],'input file mismatch'
  m=json.loads((DATA/'manifest.json').read_text());assert all(sha(DATA/k)==v for k,v in m['files'].items()),'data files mismatch'
  runtime=json.loads((ROOT/'card020-runtime-sha.json').read_text());assert all(sha(ROOT/k)==v for k,v in runtime.items()),'runtime mismatch'
@@ -64,9 +66,12 @@ def checkpoint(path,model,opt,gen,step,ident,elapsed=0):
  tmp=path.with_suffix('.tmp');torch.save(value,tmp);tmp.replace(path)
 
 def gpu_data():
- raw=np.load(POOL/'pool_X.f16.npy',mmap_mode='r');X=torch.empty(raw.shape,dtype=torch.float16,device='cuda')
+ raw=np.load(POOL/'pool_X.f16.npy',mmap_mode='r');free,total=torch.cuda.mem_get_info();required=raw.nbytes+32*(1<<20)+6*(1<<30)
+ assert free>=required,'global VRAM headroom: input bank plus6GiB required'
+ X=torch.empty(raw.shape,dtype=torch.float16,device='cuda')
  for s in range(0,len(raw),8192):X[s:s+8192].copy_(torch.from_numpy(np.array(raw[s:s+8192],copy=True)))
  target=torch.from_numpy(np.load(DATA/'targets_normalized.npy')).cuda();rows=torch.from_numpy(np.load(DATA/'fit_rows.npy')).cuda();grid=torch.from_numpy(np.load(DATA/'density_grid.npy')).cuda()
+ free,total=torch.cuda.mem_get_info();assert (total-free)/2**30<30,'global used VRAM>=30GiB after input load'
  return X,target,rows,grid
 
 def validate_endpoint():
@@ -82,7 +87,8 @@ def validate_endpoint():
   hashes.append(objsha(c['model_state_dict']))
  assert len(set(hashes))==2 and hashes[-1]==done['endpoint_state_sha'] and done['successful_steps']==80000
  e=torch.load(OUT/'model.pt',map_location='cpu',weights_only=False);assert e['identity']==ad and e['successful_steps']==80000 and objsha(e['model_state_dict'])==hashes[-1] and sha(OUT/'model.pt')==done['endpoint_file_sha']
- assert done['peak_allocated_gib']<30 and done['input_file_sha']==parent['input_file_sha']
+ manifest=json.loads((DATA/'manifest.json').read_text());assert e['center']==manifest['center'] and e['span']==manifest['span'],'endpoint native conversion mismatch'
+ assert 0<=done['peak_allocated_gib']<30 and 0<=done['global_used_gib']<30 and done['input_file_sha']==parent['input_file_sha']
  return {'PASS':True,'successful_steps':80000,'parent_file_sha':parent['parent_file_sha'],'endpoint_state_sha':hashes[-1]}
 
 def train():
@@ -103,6 +109,7 @@ def train():
     curve.append({'step':step,'dev_mae':float(res.abs().mean()),'dev_mse':float(res.square().mean()),'elapsed_s':time.monotonic()-t})
    write(OUT/f'dev-{step}.json',curve[-1]);print(json.dumps(curve[-1]),flush=True)
  torch.save({'model_state_dict':model.state_dict(),'identity':ident,'successful_steps':step,'center':m['center'],'span':m['span']},OUT/'model.pt')
- done={'status':'TRAINED','identity':ident,'successful_steps':step,'start_receipt':start,'endpoint_state_sha':objsha(model.state_dict()),'endpoint_file_sha':sha(OUT/'model.pt'),'input_file_sha':sha(POOL/'pool_X.f16.npy'),'fit_s':time.monotonic()-t,'peak_allocated_gib':torch.cuda.max_memory_allocated()/2**30};write(OUT/'complete.json',done);validate_inputs();write(OC/'card020-validation.json',validate_endpoint())
+ free,total=torch.cuda.mem_get_info();global_used=(total-free)/2**30;assert global_used<30,'global used VRAM>=30GiB after training'
+ done={'global_used_gib':global_used,'status':'TRAINED','identity':ident,'successful_steps':step,'start_receipt':start,'endpoint_state_sha':objsha(model.state_dict()),'endpoint_file_sha':sha(OUT/'model.pt'),'input_file_sha':sha(POOL/'pool_X.f16.npy'),'fit_s':time.monotonic()-t,'peak_allocated_gib':torch.cuda.max_memory_allocated()/2**30};write(OUT/'complete.json',done);validate_inputs();write(OC/'card020-validation.json',validate_endpoint())
 
 if __name__=='__main__':train()

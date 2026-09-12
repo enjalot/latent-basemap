@@ -10,23 +10,24 @@ def charge(tag,seconds,rc):
 def remaining():return min(CAP-json.loads(LEDGER.read_text())['batch_spent_s'],86400-json.loads(WINDOW.read_text())['spent_s'],END-time.time())
 def main():
  if not LEDGER.exists():write(LEDGER,{'batch_cap_s':CAP,'batch_spent_s':0,'entries':[]})
- prep=time.monotonic()
+ prep=time.monotonic();prep_rc=999
  try:
-  cpu=json.loads((OC/'card020-cpu-canary.json').read_text());assert cpu['PASS'] and cpu['identity']==identity(True);validate_inputs()
- finally:charge('chain-admission',time.monotonic()-prep,0)
+  cpu=json.loads((OC/'card020-cpu-canary.json').read_text());assert cpu['PASS'] and cpu['identity']==identity(True);validate_inputs();prep_rc=0
+ finally:charge('chain-admission',time.monotonic()-prep,prep_rc)
  for tag,script,args in [('device-canary','card020_canary.py',['cuda']),('continuation','run_card020.py',[])]:
   if tag=='continuation':
    c=json.loads((OC/'card020-cuda-canary.json').read_text());assert c['PASS'] and c['identity']==identity(True)
    assert remaining()>=c['admission_estimate_s'],'measured continuation estimate exceeds remaining occupancy'
+  available=remaining();assert available>0,'card/window/deadline exhausted'
   t=time.monotonic();rc=999
-  try:rc=subprocess.run([PY,str(ROOT/'experiments/sandbox'/script),*args],cwd=ROOT,timeout=max(1,remaining())).returncode
+  try:rc=subprocess.run([PY,str(ROOT/'experiments/sandbox'/script),*args],cwd=ROOT,timeout=available).returncode
   except subprocess.TimeoutExpired:rc=124
   finally:charge(tag,time.monotonic()-t,rc)
   assert rc==0,f'{tag} failure {rc}'
- close=time.monotonic()
+ close=time.monotonic();close_rc=999
  try:
-  v=validate_endpoint();write(OC/'card020-execution.json',{'status':'TRAINED_VALIDATED','validation':v,'quality':'NOT_YET_SCORED'})
- finally:charge('chain-closeout',time.monotonic()-close,0)
+  v=validate_endpoint();write(OC/'card020-execution.json',{'status':'TRAINED_VALIDATED','validation':v,'quality':'NOT_YET_SCORED'});close_rc=0
+ finally:charge('chain-closeout',time.monotonic()-close,close_rc)
 if __name__=='__main__':
  try:main()
  except Exception as e:write(OC/'card020-execution.json',{'status':'EXECUTION_FAILED','error':repr(e)});raise

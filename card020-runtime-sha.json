@@ -110,12 +110,12 @@
   "experiments/sandbox/run_card016_arm.py": "252f97e31ec0ceeffd90fce21641948c2258b8f015aa1d491f9ab4c9e45d9e7d",
   "experiments/sandbox/benchmark_card016.py": "b19b0a63aee4b521248d78facedbe2eb42b59ece99bbce4cf54302e700b53fb5",
   "experiments/sandbox/_paths.py": "ba79e4e33dcab51b0956bfc30f0e1cdc532ab8ce8a9e95302e01fc9a27c55359",
-  "experiments/sandbox/run_card020.py": "fe0727f51cb9e9e2b1f267e5df96b05d02d48a884338fad517f9f01f2840625d",
-  "experiments/sandbox/card020_canary.py": "a3b3cd38ede4ab16c26b1668bea3e69fbf85fe7982da9bc88c1b6003e6731346",
-  "experiments/sandbox/run_card020_chain.py": "9014b208de3de79ca28980aac0db3a83a919be140e377d103202c8ff2a2cc9da",
-  "experiments/sandbox/score_card020.py": "0565493933b52158cf4c8e87a064aa4999a90b59949a9e2822df9520dd96c979",
+  "experiments/sandbox/run_card020.py": "575467dbc61833a13ef2fe98bf3784ce8ce1f5c16c04515a942f47fc5dd85317",
+  "experiments/sandbox/card020_canary.py": "f070243dba025b6490e6714a1d97384aa890f9bdc4e6c11e953b6a4d3ec642da",
+  "experiments/sandbox/run_card020_chain.py": "c9f2772e0a14e118a67bed864df972f6b199def7a382795f5194c70773d5ca93",
+  "experiments/sandbox/score_card020.py": "d168dca1e23f88af539348855d06a390944ba24caabb3f5ccb8e5c15817fa195",
   "experiments/sandbox/card020_instrument.py": "05b3b5152369130a11f8bca059ba3ae53cbcda891fe724e41321f9cca74bb836",
   "experiments/sandbox/prepare_card020.py": "c6db020e8b2c73f9bb8431181fb9ca0f0de695a55b4a9c6e80aaec7678a74d05",
-  "experiments/sandbox/card020_validator_canary.py": "c3dfd3f1510a7b4e55eec6c311ac9d201accc04dfeef264f22b5939b8ef327de",
+  "experiments/sandbox/card020_validator_canary.py": "e47340a579470a0522383db1972ffe9291cd48a5f0279bfba03e8a74418389ad",
   "card020-admission-base.json": "ac3a9315d7afaaf597a6d1fd9153d1fddfca2008b31a11c3c8c939385583ca25"
 }

@@ -16,11 +16,13 @@ def main(device):
   return time.monotonic()-ts
  m,o,g,s,r=init_state(device,ident);checks['parent_model_hash']=r['model_sha']==base()['parent_model_sha'];checks['parent_optimizer_hash']=r['optimizer_sha']==base()['parent_optimizer_sha']
  if device=='cuda':checks['actual_parent_cuda_batch_rng']=r['batch_rng_sha']==base()['parent_batch_rng_sha']
- first_time=run(m,o,g,0,dose);target={'model':objsha(m.state_dict()),'optimizer':objsha(o.state_dict()),'rng':objsha(g.get_state())}
+ first_time=run(m,o,g,0,dose);target={'model':objsha(m.state_dict()),'optimizer':objsha(o.state_dict()),'rng':objsha(g.get_state()),'cpu_rng':objsha(torch.get_rng_state()),'cuda_rng':objsha(torch.cuda.get_rng_state()) if device=='cuda' else None}
  del m,o,g
  m,o,g,s,r=init_state(device,ident);run(m,o,g,0,mid,True);middle=torch.load(dest/'middle.pt',map_location='cpu',weights_only=False);checks['genuine_intermediate']=middle['successful_steps']==20000+mid and 0<mid<dose
  del m,o,g
  m,o,g,s,r=init_state(device,ident,dest/'middle.pt');tail_time=run(m,o,g,mid,dose);checks['resumed_model_bitwise']=objsha(m.state_dict())==target['model'];checks['resumed_optimizer_bitwise']=objsha(o.state_dict())==target['optimizer'];checks['resumed_batch_rng_bitwise']=objsha(g.get_state())==target['rng']
+ checks['resumed_global_cpu_rng_bitwise']=objsha(torch.get_rng_state())==target['cpu_rng']
+ if device=='cuda':checks['resumed_global_cuda_rng_bitwise']=objsha(torch.cuda.get_rng_state())==target['cuda_rng']
  checks['model_changed']=objsha(m.state_dict())!=base()['parent_model_sha']
  for name,mutate,resume in [('wrong_parent',lambda z:z['parent'].update(parent_file_sha='0'*64),None),('wrong_lr',lambda z:z.update(lr=.0002),None),('wrong_child_identity',lambda z:z.update(total_successful_steps=80001),dest/'middle.pt')]:
   z=copy.deepcopy(ident);mutate(z)
@@ -32,6 +34,7 @@ def main(device):
  except ValueError as exc:checks['corrupt_child_identity_reject']='child admission identity mismatch' in str(exc)
  result={'PASS':all(checks.values()),'device':device,'checks':checks,'true_parent_boundary':20000,'target_step':20000+dose,'resume_step':20000+mid,'wall_s':time.monotonic()-t,'identity':ident,'scope':'Exact original GPU model/Adam/RNG; full fixed input bank' if device=='cuda' else 'CPU model/Adam parent and algebra resume with separate CPU RNG and synthetic inputs; GPU canary validates actual CUDA RNG/input path'}
  if device=='cuda':
+  free,total=torch.cuda.mem_get_info();checks['global_used_VRAM_lt30']=(total-free)/2**30<30
   rate=(dose-mid)/tail_time;result.update({'steady_updates_per_s':rate,'measured_tail_s':tail_time,'remaining_fit_estimate_s':60000/rate,'admission_estimate_s':60000/rate*1.25+30,'peak_allocated_gib':torch.cuda.max_memory_allocated()/2**30});checks['VRAM_lt30']=result['peak_allocated_gib']<30;result['PASS']=all(checks.values())
  write(OC/f'card020-{device}-canary.json',result);assert result['PASS'],checks;print(json.dumps({k:v for k,v in result.items() if k!='identity'},indent=2))
 if __name__=='__main__':main(sys.argv[1])
