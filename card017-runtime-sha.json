@@ -109,8 +109,9 @@
   "experiments/sandbox/_paths.py": "ba79e4e33dcab51b0956bfc30f0e1cdc532ab8ce8a9e95302e01fc9a27c55359",
   "experiments/sandbox/build_card017_draws.py": "183281e47bba88773d1b65d3503befca52b9b17db0e6c63a3ab837b76d971534",
   "experiments/sandbox/build_card017_graphs.py": "ea79d518f973a5ed0f918dde77d5b99ff6ed51ebb269b038d6fea8c254edd005",
+  "experiments/sandbox/build_card017_graphs_gpu.py": "a0df8c2306ae567d49459c2bf797f934d17bb696062d631ec4aaca97180b4622",
   "experiments/sandbox/card017_sketch.py": "2bae4e9b8f09589c929adcb9348c9474cee995eec3b3fa1c4bdddc6d8260160f",
   "experiments/sandbox/gpu_card017_canary.py": "3693d9b1b87eacd1652820c8242e4475776fdd13ad4ca822e368b258dd76d88d",
   "experiments/sandbox/run_card017_arm.py": "7bbafafdc7f57eaca9ac85486b22ee36cc28794339531269ded975e67b4daf25",
-  "experiments/sandbox/run_card017_chain.py": "d642e1ee539fd1f55f6b62311f7d9337588639e80aad13806a50340285eac0ff"
+  "experiments/sandbox/run_card017_chain.py": "747b5c8f537442aaf0ce747846cc6e401e5343e16b7de8b873a3c0d3967f9400"
 }

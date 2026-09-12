@@ -46,9 +46,7 @@ def notify(msg):
 def main():
  if not CARD.exists():write(CARD,{'schema':'card017-ledger','batch_cap_s':CAP,'batch_spent_s':0,'entries':[]})
  runtime=json.loads((ROOT/'card017-runtime-sha.json').read_text());assert all(sha(ROOT/n)==h for n,h in runtime.items())
- assert json.loads((SUBD/'graph-manifest.json').read_text())['complete']
- assert json.loads((OC/'card017-independent-cpu-audit.json').read_text())['PASS']
- stages=[('gpu_canary','gpu_card017_canary.py',[],90,300)]+[(a,'run_card017_arm.py',[a],1050,1500) for a in ARMS]
+ stages=[('exact_graphs','build_card017_graphs_gpu.py',[],600,900),('cpu_graph_audit',str(OC/'audit_card017_cpu.py'),[],30,300),('gpu_canary','gpu_card017_canary.py',[],90,300)]+[(a,'run_card017_arm.py',[a],1050,1500) for a in ARMS]
  done=[]
  for tag,script,args,expected,cap in stages:
   available=min(cap,CAP-json.loads(CARD.read_text())['batch_spent_s'],86400-json.loads(WIN.read_text())['spent_s'],END-time.time())
@@ -59,7 +57,9 @@ def main():
   except subprocess.TimeoutExpired:rc=124
   finally:charge(tag,time.monotonic()-t,rc)
   assert rc==0,f'{tag} failed rc={rc}'
-  if tag=='gpu_canary':assert json.loads((OC/'card017-gpu-canary.json').read_text())['PASS']
+  if tag=='exact_graphs':assert json.loads((SUBD/'graph-manifest.json').read_text())['complete']
+  elif tag=='cpu_graph_audit':assert json.loads((OC/'card017-independent-cpu-audit.json').read_text())['PASS']
+  elif tag=='gpu_canary':assert json.loads((OC/'card017-gpu-canary.json').read_text())['PASS']
   else:
    done.append(validate(tag));write(OC/'card017-completion-validation.json',{'arms':done,'all_three_valid':len(done)==3})
  assert len({a['endpoint_named_sha'] for a in done})==3
