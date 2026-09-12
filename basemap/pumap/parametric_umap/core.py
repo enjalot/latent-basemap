@@ -2344,17 +2344,18 @@ class ParametricUMAP:
             self._card013_radii_dev = _rr
             loader._stash_ids = True
 
-        # card022 local-shape covariance-floor (opt-in): upload the fixed bank to device once. The bank is a
-        # dict with center_rows (ncent,16) int64 full-domain row indices [center + 15 graph neighbors] and
-        # tau (ncent,) float32 frozen from the ENCODER clouds. Off (attr unset / weight 0) ⇒ run unchanged.
+        # card022 local-shape covariance-floor (opt-in): upload the self-contained fixed bank to device once.
+        # The bank carries its OWN cloud input vectors X (ncent,16,dim) fp16 [row 0 = center, then the 15
+        # original nonself graph neighbors; exact stored fp16, cast fp32 without renorm] and tau (ncent,)
+        # frozen from the ENCODER clouds. Off (attr unset / weight 0) ⇒ run unchanged.
         _sbank = getattr(self, "_shape_bank", None)
         if _sbank is not None and float(getattr(self, "_shape_weight", 0.0) or 0.0) > 0.0:
             import torch as _t
-            _cr = _t.as_tensor(np.asarray(_sbank["center_rows"], np.int64), device=self.device)
+            _bx = _t.as_tensor(np.asarray(_sbank["X"], np.float16), device=self.device)
             _tau = _t.as_tensor(np.asarray(_sbank["tau"], np.float32), device=self.device)
-            assert _cr.ndim == 2 and _cr.shape[1] == 16, "shape bank center_rows must be (ncent,16)"
-            assert _tau.shape[0] == _cr.shape[0] and bool(_t.isfinite(_tau).all()) and bool((_tau > 0).all()), "shape tau invalid"
-            self._shape_bank_dev = {"center_rows": _cr, "tau": _tau}
+            assert _bx.ndim == 3 and _bx.shape[1] == 16, "shape bank X must be (ncent,16,dim)"
+            assert _tau.shape[0] == _bx.shape[0] and bool(_t.isfinite(_tau).all()) and bool((_tau > 0).all()), "shape tau invalid"
+            self._shape_bank_dev = {"X": _bx, "tau": _tau}
 
         for epoch in range(start_epoch, self.n_epochs):
             if (checkpoint_every_epochs and checkpoint_dir and epoch > start_epoch
@@ -2698,24 +2699,24 @@ class ParametricUMAP:
 
                 # ── Card022 local-shape covariance-floor term (opt-in; DEFAULT OFF) ──
                 # Weak directional-thinness regularizer on a FIXED training-only bank of 16-row clouds
-                # (center + 15 graph neighbors). Sample _shape_centers_per_step clouds via the INDEPENDENT
-                # shape_gen; forward ALL rows through the student; per cloud q = lambda_min(C)/(trace(C)+eps)
-                # in FP32; loss = mean(relu(tau - q)^2) with tau frozen from the encoder cloud. No penalty
-                # when q>=tau (relu). OFF (weight 0 / bank None) is bitwise-identical: branch not entered, no
-                # shape_gen draw, no extra forward. This smooth ratio has NO first-order escape gradient at an
-                # exactly rank-one cloud (documented; no jitter added) — the useful-gradient case is thin-but-
-                # nonzero minor variance.
+                # (row 0 center + 15 graph neighbors), whose input vectors live IN the bank. Sample
+                # _shape_centers_per_step clouds via the INDEPENDENT shape_gen; flatten to (m*16, dim) —
+                # retaining cloud groups — and forward ALL rows through the student; per cloud
+                # q = lambda_min(C)/(trace(C)+eps) in FP32; loss = mean(relu(tau - q)^2), tau frozen from the
+                # encoder cloud. No penalty when q>=tau (relu). OFF (weight 0 / bank None) is bitwise-identical:
+                # branch not entered, no shape_gen draw, no extra forward. This smooth ratio has NO first-order
+                # escape gradient at an exactly rank-one cloud (documented; no jitter) — the useful-gradient
+                # regime is thin-but-nonzero minor variance.
                 shape_loss_val = 0.0
                 if float(getattr(self, "_shape_weight", 0.0) or 0.0) > 0.0 and self._shape_bank_dev is not None:
-                    _bank = self._shape_bank_dev; _ncent = _bank["center_rows"].shape[0]
+                    _bank = self._shape_bank_dev; _ncent, _k = _bank["X"].shape[0], _bank["X"].shape[1]
                     _m = int(getattr(self, "_shape_centers_per_step", 16))
                     _sel = torch.randint(0, _ncent, (_m,), generator=shape_gen, device=self.device)
-                    _rows = _bank["center_rows"].index_select(0, _sel)              # (m,16) full-domain row ids
+                    _cl = _bank["X"].index_select(0, _sel)                          # (m,16,dim) fp16, resident bank
                     _tau = _bank["tau"].index_select(0, _sel).to(torch.float32)     # (m,)
-                    _feats = self._X_dev.index_select(_rows.reshape(-1))            # (m*16, D) fp16, resident
+                    _feats = _cl.reshape(_m * _k, _cl.shape[2])                     # flatten; cloud groups retained
                     with torch.autocast(device_type='cuda' if use_amp else 'cpu', enabled=bool(use_amp), dtype=amp_dtype):
                         _z = self.model(_feats)
-                    _k = _rows.shape[1]                                             # 16 rows/cloud
                     _z = _z.float().reshape(_m, _k, self.n_components)              # FP32 regardless of AMP
                     _shape_loss = shape_floor_loss(_z, _tau, float(self._shape_eps))
                     loss = loss + float(self._shape_weight) * _shape_loss
