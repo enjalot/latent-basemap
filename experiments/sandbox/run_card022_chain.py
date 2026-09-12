@@ -50,6 +50,13 @@ def _preflight_perstep():
     ps = float(pf["per_step_s"]); assert math.isfinite(ps) and ps > 0, "preflight per_step invalid"; return ps
 
 
+def _completed_steps(arm):
+    from run_card022_arm import _latest_ckpt
+    _, step = _latest_ckpt(V.TD_DEFAULT / arm / "ckpts")
+    assert 0 <= step <= DOSE, "resume dose bounds"
+    return step
+
+
 def run_stage(tag, script, timeout):
     ok, bad = V.runtime_manifest_check(ROOT); assert ok, f"frozen source changed before {tag}: {bad}"
     print(f"{dt.datetime.now(dt.timezone.utc).isoformat()} START {tag} timeout={timeout:.1f}s", flush=True)
@@ -79,7 +86,12 @@ def main():
 
     # 1. calibration (freeze coefficient); PASS gates the shape arm + the whole card
     to = _remaining(CALIB_CAP); assert to >= 120, f"cannot admit calibration: {to:.0f}s"
-    rc = run_stage("calibration", "calibrate_card022.py", to)
+    if V.CALIB.exists():
+        previous = json.loads(V.CALIB.read_text())
+        assert previous.get("PASS"), "prior calibration stopped; do not automatically recalibrate"
+        rc = 0
+    else:
+        rc = run_stage("calibration", "calibrate_card022.py", to)
     if rc == 124: atomic(OC / "card022-execution.json", {"status": "CALIBRATION_TIMEOUT", "at": dt.datetime.now(dt.timezone.utc).isoformat()}); notify("Card022 calibration timed out; halted."); return
     calib = json.loads((OC / "card022-calibration.json").read_text())
     if rc == 3 or not calib.get("PASS"):
@@ -110,12 +122,10 @@ def main():
 
     # 4. arms — measured admission from the preflight steady per-step; no fallback, no dose truncation
     for arm in ARMS:
-        try:
+        if (V.TD_DEFAULT / f"manifest-{arm}.json").exists():
             completed.append(V.strict_validate_arm(arm, ROOT))
             atomic(OC / "card022-completion-validation.json", {"completed": completed, "both_valid": len(completed) == 2})
             print(f"SKIP {arm} (already strict-valid)", flush=True); continue
-        except Exception:
-            pass
         remaining_steps = DOSE - _completed_steps(arm); need = per_step * remaining_steps + ARM_TAIL_RESERVE
         to = _remaining(CAP)
         assert to >= need, f"cannot admit {arm}: remaining={to:.1f}s < measured need={need:.1f}s ({remaining_steps} steps @ {per_step:.5f}s); stop, no dose truncation"

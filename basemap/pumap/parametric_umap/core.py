@@ -2354,7 +2354,7 @@ class ParametricUMAP:
         if _sbank is not None and float(getattr(self, "_shape_weight", 0.0) or 0.0) > 0.0:
             import torch as _t
             _bx = _t.as_tensor(np.asarray(_sbank["X"], np.float16), device=self.device)
-            _tau = _t.as_tensor(np.asarray(_sbank["tau"], np.float32), device=self.device)
+            _tau = _t.as_tensor(np.asarray(_sbank["tau"], np.float64), device=self.device)
             assert _bx.ndim == 3 and _bx.shape[1] == 16, "shape bank X must be (ncent,16,dim)"     # fail-closed
             assert bool(_t.isfinite(_bx).all()), "shape bank X not finite"
             assert _tau.shape[0] == _bx.shape[0] and bool(_t.isfinite(_tau).all()) and bool((_tau > 0).all()), "shape tau invalid"
@@ -2705,12 +2705,13 @@ class ParametricUMAP:
                 # (row 0 center + 15 graph neighbors), whose input vectors live IN the bank. Sample
                 # _shape_centers_per_step clouds via the INDEPENDENT shape_gen; flatten to (m*16, dim) —
                 # retaining cloud groups — and forward ALL rows through the student; per cloud
-                # q = lambda_min(C)/(trace(C)+eps) in FP32; loss = mean(relu(tau - q)^2), tau frozen from the
+                # q = lambda_min(C)/(trace(C)+eps) in FP64; loss = mean(relu(tau - q)^2), tau frozen from the
                 # encoder cloud. No penalty when q>=tau (relu). OFF (weight 0 / bank None) is bitwise-identical:
                 # branch not entered, no shape_gen draw, no extra forward. This smooth ratio has NO first-order
                 # escape gradient at an exactly rank-one cloud (documented; no jitter) — the useful-gradient
                 # regime is thin-but-nonzero minor variance.
                 shape_loss_val = 0.0
+                _shape_active_this_step = False
                 if float(getattr(self, "_shape_weight", 0.0) or 0.0) > 0.0 and self._shape_bank_dev is not None:
                     _bank = self._shape_bank_dev; _ncent, _k = _bank["X"].shape[0], _bank["X"].shape[1]
                     _m = int(getattr(self, "_shape_centers_per_step", 16))
@@ -2723,7 +2724,8 @@ class ParametricUMAP:
                     _z = _z.double().reshape(_m, _k, self.n_components)             # FP64 covariance/eig regardless of AMP
                     _shape_loss = shape_floor_loss(_z, _tau, float(self._shape_eps))
                     loss = loss + float(self._shape_weight) * _shape_loss
-                    shape_loss_val = _shape_loss.item() if use_wandb else 0.0
+                    shape_loss_val = float(_shape_loss.detach())
+                    _shape_active_this_step = True
 
                     # Card022 calibration probe (opt-in; default-off): capture the ORDINARY pairwise-loss and
                     # the (unweighted) shape-gradient global-L2 norms at the SAME FIXED starting head, on
@@ -2738,7 +2740,10 @@ class ParametricUMAP:
                         _gpn = float(torch.sqrt(sum((g.double() ** 2).sum() for g in _gp if g is not None)))
                         _gsn = float(torch.sqrt(sum((g.double() ** 2).sum() for g in _gs if g is not None)))
                         self._calib_records.append({"batch": len(self._calib_records),
-                                                    "grad_pairwise_l2": _gpn, "grad_shape_l2": _gsn})
+                                                    "grad_pairwise_l2": _gpn, "grad_shape_l2": _gsn,
+                                                    "pair_batch_sha256": __import__("hashlib").sha256(
+                                                        src_values.detach().cpu().numpy().tobytes() + dst_values.detach().cpu().numpy().tobytes() + targets.detach().cpu().numpy().tobytes()).hexdigest(),
+                                                    "shape_centers_sha256": __import__("hashlib").sha256(_sel.cpu().numpy().tobytes()).hexdigest()})
                         _fwd_ph.__exit__(None, None, None)
                         if len(self._calib_records) >= int(self._calib_probe["n"]):
                             self._train_stats["stop_reason"] = "calib_probe_done"; stop_training = True; break
@@ -2872,6 +2877,11 @@ class ParametricUMAP:
                     consecutive_nonfinite_gradients = 0   # P0-3: reset on real progress
                     if lr_used > 0:
                         st["positive_lr_optimizer_steps"] += 1
+                        if _shape_active_this_step:
+                            st["shape_successful_steps"] = st.get("shape_successful_steps", 0) + 1
+                            st["shape_clouds_successful"] = st.get("shape_clouds_successful", 0) + _m
+                            st["shape_loss_sum"] = st.get("shape_loss_sum", 0.0) + shape_loss_val
+                            st["shape_positive_loss_steps"] = st.get("shape_positive_loss_steps", 0) + int(shape_loss_val > 0)
                         if st["lr_used_first"] is None:
                             st["lr_used_first"] = lr_used
                         st["lr_used_last"] = lr_used

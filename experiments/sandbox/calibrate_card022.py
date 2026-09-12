@@ -26,7 +26,7 @@ def main():
     assert V.full_sha(PARENT) == V.TEACHER_SHA and V.full_sha(SUB) == V.SUB_SHA256 and V.full_sha(GRAPH) == V.GRAPH_SHA256
     assert V.full_sha(BANKD / "X.npy") == V.BANK_X_SHA256 and V.full_sha(BANKD / "tau.npy") == V.BANK_TAU_SHA256
     parent = torch.load(str(PARENT), map_location="cpu", weights_only=False); warm = parent["model_state_dict"]
-    bank = {"X": np.asarray(np.load(BANKD / "X.npy", mmap_mode="r"), np.float16), "tau": np.asarray(np.load(BANKD / "tau.npy"), np.float32)}
+    bank = {"X": np.asarray(np.load(BANKD / "X.npy", mmap_mode="r"), np.float16), "tau": np.asarray(np.load(BANKD / "tau.npy"), np.float64)}
 
     torch.manual_seed(CALIB_SEED); np.random.seed(CALIB_SEED); torch.cuda.manual_seed_all(CALIB_SEED)
     p = ParametricUMAP.load(str(PARENT), device="cuda"); p.model = None
@@ -34,6 +34,7 @@ def main():
     p.learning_rate = V.LR; p.lr_schedule = "constant"; p.batch_size = V.BATCH; p.warmup_steps = 0
     p.n_epochs = 100000; p._max_train_steps = N_BATCHES + 2; p.rankneg_window = V.RANKNEG
     p.x_residency = "auto"; p.required_input_pipeline = "device"
+    V.validate_parent_recipe(p)
     for a, v in (("anchor_ids_path", ""), ("anchor_hold_weight", 0.0), ("replay_bank_path", ""),
                  ("replay_weight", 0.0), ("deriv_bank_path", ""), ("deriv_weight", 0.0)):
         if hasattr(p, a): setattr(p, a, v)
@@ -53,7 +54,8 @@ def main():
     pos_steps = int(ts.get("positive_lr_optimizer_steps", -1))
     warm_hash_ok = bool(getattr(p, "warm_start_sha256", None))     # parent weights applied
     # require ALL 8 batches finite positive — a nonfinite ratio must NOT be silently dropped
-    raw = [{"batch": r["batch"], "grad_pairwise_l2": r["grad_pairwise_l2"], "grad_shape_l2": r["grad_shape_l2"]} for r in recs]
+    raw = recs
+    distinct_batches = len({r["pair_batch_sha256"] for r in recs}) == N_BATCHES
     all8 = (len(recs) == N_BATCHES and
             all(math.isfinite(r["grad_pairwise_l2"]) and math.isfinite(r["grad_shape_l2"]) and
                 r["grad_pairwise_l2"] > 0 and r["grad_shape_l2"] > 0 for r in recs))
@@ -61,10 +63,14 @@ def main():
     coeff = float(np.median(ratios)) if all8 else None
     spread = ({"min": float(min(ratios)), "max": float(max(ratios)), "mean": float(np.mean(ratios)),
                "std": float(np.std(ratios)), "ratios": ratios} if all8 else None)
-    stable = bool(all8 and head_unchanged and pos_steps == 0 and coeff is not None and math.isfinite(coeff) and coeff > 0)
+    fractions = [coeff * r["grad_shape_l2"] / r["grad_pairwise_l2"] for r in recs] if all8 else []
+    # Prospective operational bound: no calibration batch may receive an added
+    # gradient larger than the ordinary gradient (10x intended median fraction).
+    stable = bool(all8 and distinct_batches and head_unchanged and pos_steps == 0 and coeff is not None and math.isfinite(coeff) and coeff > 0 and max(fractions) <= 1.0)
     R = {"schema": "card022-calibration-2026-09-12", "at": dt.datetime.now(dt.timezone.utc).isoformat(),
          "calibration_seed": CALIB_SEED, "n_batches": N_BATCHES, "target_fraction": TARGET_FRAC,
-         "n_records": len(recs), "raw_norms": raw, "all8_finite_positive": all8,
+         "n_records": len(recs), "raw_norms": raw, "eight_distinct_batches": distinct_batches,
+         "realized_gradient_fractions": fractions, "max_allowed_gradient_fraction": 1.0, "all8_finite_positive": all8,
          "head_unchanged": head_unchanged, "init_param_sha": init_param_sha, "final_param_sha": final_param_sha,
          "positive_optimizer_steps": pos_steps, "warm_hash_recorded": warm_hash_ok,
          "coefficient": coeff, "ratio_spread": spread, "wall_s": round(time.time() - t0, 1),

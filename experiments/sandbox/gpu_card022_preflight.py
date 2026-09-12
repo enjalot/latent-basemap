@@ -29,7 +29,7 @@ def _preload():
     t = time.monotonic()
     _X = np.asarray(np.load(SUB, mmap_mode="r"), np.float32); _ = float(_X[0, 0]) + float(_X[-1, -1])
     _WARM = torch.load(str(PARENT), map_location="cpu", weights_only=False)["model_state_dict"]
-    _BANK = {"X": np.asarray(np.load(BANKD / "X.npy", mmap_mode="r"), np.float16), "tau": np.asarray(np.load(BANKD / "tau.npy"), np.float32)}
+    _BANK = {"X": np.asarray(np.load(BANKD / "X.npy", mmap_mode="r"), np.float16), "tau": np.asarray(np.load(BANKD / "tau.npy"), np.float64)}
     return time.monotonic() - t
 
 
@@ -39,10 +39,11 @@ def _measured_fit(steps, ckpt_dir):
     p.learning_rate = V.LR; p.lr_schedule = "constant"; p.batch_size = BATCH; p.warmup_steps = 0
     p.n_epochs = 100000; p.rankneg_window = RANKNEG; p._max_train_steps = steps
     p.x_residency = "auto"; p.required_input_pipeline = "device"
+    V.validate_parent_recipe(p)
     for a, v in (("anchor_ids_path", ""), ("anchor_hold_weight", 0.0), ("replay_bank_path", ""),
                  ("replay_weight", 0.0), ("deriv_bank_path", ""), ("deriv_weight", 0.0)):
         if hasattr(p, a): setattr(p, a, v)
-    p._shape_bank = {"X": _BANK["X"], "tau": _BANK["tau"]}; p._shape_weight = 1.0
+    p._shape_bank = {"X": _BANK["X"], "tau": _BANK["tau"]}; p._shape_weight = V.calibrated_weight()
     p._shape_eps = float(V.EPSILON); p._shape_centers_per_step = V.CENTERS_PER_STEP
     p._checkpoint_step_targets = {min(steps, 500)}                # exercise a real step-ckpt write in-window
     _, total = torch.cuda.mem_get_info(); torch.cuda.reset_peak_memory_stats()
@@ -68,14 +69,17 @@ def main():
         w1, pk1, gu1, total = _measured_fit(W1, Path(td) / "m1")
         w2, pk2, gu2, _ = _measured_fit(W2, Path(td) / "m2")
     assert math.isfinite(w1) and math.isfinite(w2) and w2 > w1 > 0, "non-finite/degenerate windows — stop"
-    per_step = (w2 - w1) / (W2 - W1); setup = w1 - per_step * W1
+    raw_slope = (w2 - w1) / (W2 - W1)
+    # Independent fits can have unequal cold setup. Never subtract a negative
+    # intercept or admit on a slope cheaper than the longer whole-fit average.
+    per_step = max(raw_slope, w2 / W2); setup = max(0.0, w1 - per_step * W1)
     assert math.isfinite(per_step) and per_step > 0, "non-finite/nonpositive per-step — stop"
     itps = 1.0 / per_step
     steps_per_epoch = math.ceil((V.N * 15) / (BATCH * POS_RATIO)); n_epochs = math.ceil(DOSE / steps_per_epoch)
     per_arm = setup + per_step * DOSE + n_epochs * EPOCH_CKPT_WRITE_S + len(V.STEP_CKPTS) * STEP_CKPT_WRITE_S + ENDPOINT_OVERHEAD_S + SLACK_PER_ARM_S
 
-    card_spent = _spent(CARD, "batch_spent_s") if CARD.exists() else 0.0     # calib + canary already charged
-    win_spent = _spent(WIN, "spent_s") if WIN.exists() else 0.0
+    card_spent = _spent(CARD, "batch_spent_s")     # calib + canary already charged
+    win_spent = _spent(WIN, "spent_s")
     preflight_wall = time.monotonic() - t_pf0
     cap_room = GPU_CAP - (card_spent + preflight_wall)
     win_room = WIN_CAP - (win_spent + preflight_wall); deadline_room = DEADLINE - time.time()
@@ -85,12 +89,12 @@ def main():
               "both_arms_fit_deadline": bool((two_arms + 60) <= deadline_room), "global_vram_lt_30gb": bool(peak_global < 30.0)}
     R = {"schema": "card022-preflight-2026-09-12", "at": dt.datetime.now(dt.timezone.utc).isoformat(),
          "windows": {str(W1): w1, str(W2): w2}, "preload_wall_s": prep, "per_step_s": per_step, "setup_s": setup,
-         "it_per_s": itps, "dose": DOSE, "steps_per_epoch_est": steps_per_epoch, "n_epochs_est": n_epochs,
+         "it_per_s": itps, "raw_two_fit_slope_s": raw_slope, "production_shape_weight": V.calibrated_weight(), "shape_sampler_seed": V.SHAPE_SAMPLER_SEED, "dose": DOSE, "steps_per_epoch_est": steps_per_epoch, "n_epochs_est": n_epochs,
          "per_arm_estimate_s": per_arm, "two_arms_s": two_arms, "gpu_cap_s": GPU_CAP, "card_spent_s": card_spent,
          "cap_room_s": cap_room, "window_room_s": win_room, "deadline_room_s": deadline_room,
          "proc_peak_vram_gb": round(max(pk1, pk2), 3), "global_vram_used_gb": peak_global, "gpu_total_gb": round(total, 3),
          "preflight_wall_s": preflight_wall, "checks": checks,
-         "reserves_note": "per_step (windowed, checkpointing ON, 3000-step window spans a 300K epoch) already "
+         "reserves_note": "Two independent fits; conservative per_step=max(raw slope,long whole-fit average), setup>=0. Checkpointing ON; 3000 steps span an epoch. This already "
                           "carries steady rank-rebuild + one in-window ckpt; explicit reserves add the remaining "
                           "epoch/step checkpoint writes + endpoint. No fallback throughput; missing/degenerate STOPS.",
          "decision": "Both 60K arms + charged prep must fit 4500s cap/window/deadline. On a miss admission STOPS with NO dose truncation.",

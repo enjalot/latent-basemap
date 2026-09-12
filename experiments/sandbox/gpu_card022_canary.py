@@ -28,7 +28,7 @@ def _prep():
     if _X is None: _X = np.asarray(np.load(SUB, mmap_mode="r"), np.float32)
     if _WARM is None: _WARM = torch.load(str(PARENT), map_location="cpu", weights_only=False)["model_state_dict"]
     if _BANK is None:
-        bx = np.asarray(np.load(BANKD / "X.npy", mmap_mode="r")[:512], np.float16); bt = np.asarray(np.load(BANKD / "tau.npy")[:512], np.float32)
+        bx = np.asarray(np.load(BANKD / "X.npy", mmap_mode="r")[:512], np.float16); bt = np.asarray(np.load(BANKD / "tau.npy")[:512], np.float64)
         _BANK = {"X": bx, "tau": bt, "sha": hashlib.sha256(bx.tobytes()).hexdigest()[:16]}
 
 
@@ -42,6 +42,7 @@ def _run(arm, weight, seed=SEED, resume_from=None, ckpt_targets=None, ckpt_dir=N
     p.learning_rate = V.LR; p.lr_schedule = "constant"; p.batch_size = V.BATCH; p.warmup_steps = 0
     p.n_epochs = 100000; p.rankneg_window = RANKNEG; p._max_train_steps = SHORT
     p.x_residency = "auto"; p.required_input_pipeline = "device"
+    V.validate_parent_recipe(p)
     for a, v in (("anchor_ids_path", ""), ("anchor_hold_weight", 0.0), ("replay_bank_path", ""),
                  ("replay_weight", 0.0), ("deriv_bank_path", ""), ("deriv_weight", 0.0)):
         if hasattr(p, a): setattr(p, a, v)
@@ -67,9 +68,19 @@ def _run(arm, weight, seed=SEED, resume_from=None, ckpt_targets=None, ckpt_dir=N
 def main():
     global _BANK
     _prep(); R = {"schema": "card022-canary-2026-09-12", "short_dose": SHORT, "ckpt_at": CKPT_AT, "bank_sha": _BANK["sha"]}
-    sha_unset = _run("ordinary", 0.0)                      # hook attrs unset (no bank configured)
-    sha_bankw0 = _run("ordinary", 0.0, force_bank=True)    # REAL bank configured but weight 0 (no upload/gen/forward)
+    import tempfile
+    _off_tmp = tempfile.TemporaryDirectory(dir=str(SB))
+    off_dir = Path(_off_tmp.name)
+    sha_unset = _run("ordinary", 0.0, ckpt_targets={SHORT}, ckpt_dir=off_dir / "unset")                      # hook attrs unset (no bank configured)
+    sha_bankw0 = _run("ordinary", 0.0, force_bank=True, ckpt_targets={SHORT}, ckpt_dir=off_dir / "zero")    # REAL bank configured but weight 0 (no upload/gen/forward)
     R["off_bitwise_identical"] = bool(sha_unset == sha_bankw0)   # configured-bank/weight0 == unset (real OFF parity + RNG parity)
+    def eq(a,b):
+        if torch.is_tensor(a): return torch.is_tensor(b) and torch.equal(a,b)
+        if isinstance(a,(list,tuple)): return isinstance(b,(list,tuple)) and len(a)==len(b) and all(eq(x,y) for x,y in zip(a,b))
+        return a == b
+    ca, cb = [torch.load(off_dir / tag / f"ckpt-step{SHORT}.pt", map_location="cpu", weights_only=False) for tag in ["unset","zero"]]
+    R["off_rng_byte_equal"] = all(eq(ca[k],cb[k]) for k in ["torch_rng","cuda_rng","loader_gen","mn_gen","dens_gen","hold_gen","shape_gen"])
+    _off_tmp.cleanup()
     sha_rerun = _run("ordinary", 0.0)                      # deterministic rerun — a SEPARATE check
     R["deterministic_rerun"] = bool(sha_rerun == sha_unset)
     sha_base = sha_unset
@@ -87,6 +98,9 @@ def main():
         R["ckpt_global_step"] = int(o.get("global_step", -1)); R["ckpt_step_in_range"] = bool(0 < R["ckpt_global_step"] < SHORT)
         R["ckpt_step_flag"] = bool(o.get("step_checkpoint")); R["ckpt_identity_bound"] = o.get("card012_identity") == _identity("shape_floor", 1.0, _BANK["sha"], SEED)
         R["ckpt_has_shape_gen"] = o.get("shape_gen") is not None
+        V.validate_resume_payload(o, CKPT_AT)
+        R["ckpt_full_resume_schema"] = True
+        R["ckpt_shape_exposure"] = o["train_stats"].get("shape_successful_steps") == CKPT_AT
         R["ckpt_model_finite"] = all(bool(torch.isfinite(t).all()) for t in o["model"].values())
         sha_resume = _run("shape_floor", 1.0, resume_from=ck, ckpt_dir=cdir)
         R["resume_twin_bitwise"] = bool(sha_resume == sha_full)
@@ -105,7 +119,7 @@ def main():
         good = _BANK; _BANK = {"X": good["X"][:256], "tau": good["tau"][:256], "sha": hashlib.sha256(good["X"][:256].tobytes()).hexdigest()[:16]}
         R["wrong_bank_rejected"] = _reject("shape_floor", 1.0, SEED); _BANK = good
 
-    keys = ["off_bitwise_identical", "deterministic_rerun", "on_diverges", "ckpt_step_in_range", "ckpt_step_flag", "ckpt_identity_bound",
+    keys = ["off_rng_byte_equal", "ckpt_full_resume_schema", "ckpt_shape_exposure", "off_bitwise_identical", "deterministic_rerun", "on_diverges", "ckpt_step_in_range", "ckpt_step_flag", "ckpt_identity_bound",
             "ckpt_has_shape_gen", "ckpt_model_finite", "resume_twin_bitwise", "wrong_weight_rejected",
             "wrong_seed_rejected", "wrong_arm_rejected", "wrong_bank_rejected"]
     R["PASS"] = bool(all(R[k] for k in keys))

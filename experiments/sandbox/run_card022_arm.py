@@ -66,6 +66,9 @@ def main():
     # warm-start = the parent's weights (continuation); core allocates fresh model + injects after admission
     parent = torch.load(str(PARENT), map_location="cpu", weights_only=False)
     warm_state = parent["model_state_dict"]
+    wh = hashlib.sha256()
+    for v in warm_state.values(): wh.update(np.ascontiguousarray(v.numpy()).tobytes())
+    assert wh.hexdigest()[:16] == V.WARM_PARAM_SHA, "parent parameter hash"
 
     radii = None  # (none for card022; the intervention is the shape floor)
     shape_bank = None; shape_weight = 0.0
@@ -74,7 +77,7 @@ def main():
         assert V.full_sha(BANKD / "tau.npy") == V.BANK_TAU_SHA256, "shape bank tau hash"
         bx = np.load(BANKD / "X.npy", mmap_mode="r"); btau = np.load(BANKD / "tau.npy")
         assert bx.shape == (20000, 16, V.DIM) and btau.shape == (20000,), "bank shapes"
-        shape_bank = {"X": np.asarray(bx, np.float16), "tau": np.asarray(btau, np.float32)}
+        shape_bank = {"X": np.asarray(bx, np.float16), "tau": np.asarray(btau, np.float64)}
         shape_weight = V.calibrated_weight()
 
     fok, bad = V.runtime_manifest_check(ROOT); assert fok, f"frozen-runtime hash mismatch {bad} — fail closed"
@@ -94,6 +97,7 @@ def main():
     pumap.learning_rate = LR; pumap.lr_schedule = "constant"; pumap.batch_size = BATCH; pumap.warmup_steps = 0
     pumap.n_epochs = 100000; pumap._max_train_steps = steps; pumap.rankneg_window = RANKNEG
     pumap.x_residency = "auto"; pumap.required_input_pipeline = "device"
+    V.validate_parent_recipe(pumap)
     assert abs(float(getattr(pumap, "pos_ratio", -1)) - V.POS_RATIO) < 1e-9, "parent pos_ratio must be .1"
     for a, v in (("anchor_ids_path", ""), ("anchor_hold_weight", 0.0), ("replay_bank_path", ""),
                  ("replay_weight", 0.0), ("deriv_bank_path", ""), ("deriv_weight", 0.0)):
@@ -108,7 +112,7 @@ def main():
     adm_path = OUTD / f"admission-{arm}.json"
     if resume_from is None:
         adm = {"schema": "card022-admission-2026-09-12", "arm": arm, "written_before_steps": True, "n_components": NC,
-               "teacher_sha256": V.TEACHER_SHA, "substrate_sha": V.SUB_SHA256[:16], "graph_sha": V.GRAPH_SHA256[:16],
+               "teacher_sha256": V.TEACHER_SHA, "warm_start_param_sha256": V.WARM_PARAM_SHA, "substrate_sha": V.SUB_SHA256[:16], "graph_sha": V.GRAPH_SHA256[:16],
                "lr": LR, "lr_schedule": "constant", "batch_size": BATCH, "pos_ratio": V.POS_RATIO, "seed": SEED,
                "steps": steps, "rankneg_window": RANKNEG, "shape_weight": shape_weight, "kernel": identity["kernel"],
                "epsilon": (V.EPSILON if arm == "shape_floor" else None),
@@ -138,7 +142,7 @@ def main():
     assert abs(ts.get("lr_used_min", 0) - LR) < 1e-12 and abs(ts.get("lr_used_max", 0) - LR) < 1e-12, "LR not 1e-4"
     assert pinfo.get("x_residency") == "device_fp16", f"pipeline not device_fp16: {pinfo.get('x_residency')}"
     if resume_from is None:
-        assert getattr(pumap, "warm_start_sha256", None), "warm-start param hash not recorded"
+        assert getattr(pumap, "warm_start_sha256", None) == V.WARM_PARAM_SHA, "actual applied warm parameter mismatch"
     proc_peak = round(torch.cuda.max_memory_allocated() / 2**30, 3)
     free, total = torch.cuda.mem_get_info(); global_used = round((total - free) / 2**30, 3)
     assert global_used < 30.0, f"global VRAM {global_used} GiB exceeds 30 GiB cap"
@@ -146,7 +150,7 @@ def main():
     coords = np.asarray(pumap.transform(X, batch_size=8192), np.float32); assert coords.shape == (n, NC)
     np.save(OUTD / f"coords-{arm}.npy", coords); pumap.save(str(OUTD / f"model-{arm}.pt"))
     man = {"schema": "card022-arm-2026-09-12", "arm": arm, "n": int(n), "n_components": NC, "executed_steps": exec_steps,
-           "teacher_sha256": V.TEACHER_SHA, "warm_start_param_sha256": getattr(pumap, "warm_start_sha256", None),
+           "teacher_sha256": V.TEACHER_SHA, "warm_start_param_sha256": (orig["warm_start_param_sha256"] if resume_from else pumap.warm_start_sha256),
            "trained_sha256": V.state_sha(pumap.model.state_dict()), "lr_used_min": ts.get("lr_used_min"),
            "lr_used_max": ts.get("lr_used_max"), "shape_weight": shape_weight, "kernel": identity["kernel"],
            "snapshots": list(SNAPS), "step_checkpoints": sorted(STEP_CKPTS), "pipeline_info": pinfo,

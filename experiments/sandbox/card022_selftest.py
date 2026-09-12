@@ -15,6 +15,7 @@ import card022_validate as V
 import torch
 
 ROOT = Path(__file__).resolve().parents[2]
+V.N = 64  # structurally identical tiny fixtures; production validator retains300K
 
 
 def _sd(seed):
@@ -32,15 +33,23 @@ def build(base, arm):
     torch.save({"model_state_dict": snap[60000]}, td / f"model-{arm}.pt")
     for s in V.STEP_CKPTS:
         ck = {"global_step": s, "step_checkpoint": True, "card012_identity": ident, "model": (snap[s] if s in snap else _sd(9000 + s))}
-        if arm == "shape_floor": ck["shape_gen"] = torch.zeros(8, dtype=torch.uint8)   # bank-sampler RNG present
+        m=ck["model"]; ids=list(range(len(m)))
+        ck.update(schema="pumap-ckpt-2026-08-30", epoch=0,
+                  config={"batch_size":V.BATCH,"random_state":V.SEED,"architecture":"residual_bottleneck","learning_rate":V.LR,"lr_schedule":"constant","replay_enabled":False,"deriv_enabled":False},
+                  train_stats={"executed_iters":s,"positive_lr_optimizer_steps":s,"optimizer_steps_succeeded":s,"shape_successful_steps":s if arm=="shape_floor" else 0},
+                  optimizer={"param_groups":[{"params":ids,"lr":V.LR,"betas":(.9,.999),"eps":1e-8,"weight_decay":.01,"amsgrad":False}],"state":{i:{"step":torch.tensor(float(s)),"exp_avg":torch.zeros_like(v),"exp_avg_sq":torch.zeros_like(v)} for i,v in zip(ids,m.values())}},
+                  scheduler={"base_lrs":[V.LR],"last_epoch":s,"_step_count":s+1,"_last_lr":[V.LR],"lr_lambdas":[None]},
+                  torch_rng=torch.Generator().manual_seed(0).get_state(),cuda_rng=[torch.zeros(16,dtype=torch.uint8)],loader_gen=torch.zeros(16,dtype=torch.uint8),
+                  loader_perm=torch.arange(15*V.N),loader_pos_idx=0,loader_batch_no=s,loader_rank_of_node=torch.arange(V.N),loader_node_at_rank=torch.arange(V.N),rankneg_scale=1.0)
+        if arm == "shape_floor": ck["shape_gen"] = torch.zeros(16, dtype=torch.uint8)   # bank-sampler RNG present
         torch.save(ck, td / arm / "ckpts" / f"ckpt-step{s}.pt")
     np.save(td / f"coords-{arm}.npy", np.zeros((V.N, V.NC), "f4"))
     man = {"arm": arm, "card012_identity": ident, "teacher_sha256": V.TEACHER_SHA, "executed_steps": V.DOSE,
-           "train_stats": {"positive_lr_optimizer_steps": V.DOSE}, "lr_used_min": V.LR, "lr_used_max": V.LR,
+           "warm_start_param_sha256": V.WARM_PARAM_SHA, "train_stats": {"positive_lr_optimizer_steps": V.DOSE, "shape_successful_steps":V.DOSE if arm=="shape_floor" else 0,"shape_clouds_successful":V.DOSE*V.CENTERS_PER_STEP if arm=="shape_floor" else 0,"shape_positive_loss_steps":V.DOSE if arm=="shape_floor" else 0,"shape_loss_sum":1.0 if arm=="shape_floor" else 0.0}, "lr_used_min": V.LR, "lr_used_max": V.LR,
            "pipeline_info": {"x_residency": "device_fp16"}, "trained_sha256": V.state_sha(snap[60000]),
            "shape_weight": (ident["shape_weight"] if arm == "shape_floor" else 0.0),
            "loaded_modules": {"verified_frozen_runtime": True, "all_basemap_under_root": True}}
-    (td / f"admission-{arm}.json").write_text(json.dumps({"arm": arm, "card012_identity": ident, "teacher_sha256": V.TEACHER_SHA}))
+    (td / f"admission-{arm}.json").write_text(json.dumps({"arm": arm, "card012_identity": ident, "teacher_sha256": V.TEACHER_SHA,"warm_start_param_sha256":V.WARM_PARAM_SHA}))
     os.utime(td / f"admission-{arm}.json", (0, 0))
     (td / f"manifest-{arm}.json").write_text(json.dumps(man))
     return td
@@ -89,6 +98,22 @@ def main():
         p = td / "shape_floor/ckpts/ckpt-step40000.pt"; ck = torch.load(p, map_location="cpu", weights_only=False); ck.pop("shape_gen", None); torch.save(ck, p)
     results.append(expect_fail(base, "shape_floor", _drop_gen, "step ckpt missing bank-sampler RNG"))
 
+    def ckmut(td, fn):
+        p=td/"shape_floor/ckpts/ckpt-step40000.pt";c=torch.load(p,map_location="cpu",weights_only=False);fn(c);torch.save(c,p)
+    cases=[
+       ("missing optimizer",lambda c:c.pop("optimizer")),
+       ("empty Adam state",lambda c:c["optimizer"].update(state={})),
+       ("wrong Adam moment",lambda c:c["optimizer"]["state"][0].update(exp_avg=torch.zeros(2))),
+       ("missing scheduler",lambda c:c.pop("scheduler")),
+       ("wrong scheduler LR",lambda c:c["scheduler"].update(_last_lr=[.1])),
+       ("bad CPU RNG",lambda c:c.update(torch_rng=torch.zeros(2,dtype=torch.uint8))),
+       ("bad shape RNG",lambda c:c.update(shape_gen=torch.zeros(8,dtype=torch.uint8))),
+       ("missing loader permutation",lambda c:c.pop("loader_perm")),
+       ("wrong rank inverse",lambda c:c.update(loader_node_at_rank=torch.zeros(V.N,dtype=torch.int64))),
+       ("wrong shape exposure",lambda c:c["train_stats"].update(shape_successful_steps=0))]
+    for label,fn in cases:results.append(expect_fail(base,"shape_floor",lambda td,fn=fn:ckmut(td,fn),label))
+    results.append(expect_fail(base,"shape_floor",lambda td:_man(td,"shape_floor",warm_start_param_sha256="wrong"),"actual warm mismatch"))
+    results.append(expect_fail(base,"shape_floor",lambda td:_man(td,"shape_floor",train_stats={"positive_lr_optimizer_steps":V.DOSE}),"missing actual exposure"))
     shutil.rmtree(base, ignore_errors=True)
     out = {"schema": "card022-selftest-2026-09-12", "PASS": True, "n_cases": len(results), "results": results}
     (V.OC / "card022-selftest.json").write_text(json.dumps(out, indent=1)); print(json.dumps(out, indent=1), flush=True)
