@@ -67,7 +67,7 @@ class ResidualBottleneckMLP(nn.Module):
     """Bottleneck MLP with residual blocks in the hidden bottleneck."""
 
     def __init__(self, input_dim, hidden_dim, output_dim, num_layers=3,
-                 neck_fraction=0.75):
+                 neck_fraction=0.75, final_activation="relu"):
         super().__init__()
         # neck_fraction default 0.75: int(hidden_dim*0.75) == hidden_dim*3//4 for
         # every integer hidden_dim (0.75 is exact in binary), so existing configs
@@ -79,7 +79,12 @@ class ResidualBottleneckMLP(nn.Module):
             nn.Sequential(nn.Linear(neck_dim, neck_dim), nn.ReLU())
             for _ in range(max(num_layers - 1, 0))
         ])
-        self.up = nn.Sequential(nn.Linear(neck_dim, hidden_dim), nn.ReLU())
+        if final_activation not in ("relu", "leaky_relu_slope_0p01"):
+            raise ValueError(f"Unknown final_activation: {final_activation}")
+        # Card019: only the final hidden activation changes. No parameters/RNG
+        # are added; the default preserves old checkpoints and initialization.
+        activation = nn.ReLU() if final_activation == "relu" else nn.LeakyReLU(negative_slope=0.01)
+        self.up = nn.Sequential(nn.Linear(neck_dim, hidden_dim), activation)
         self.proj_out = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, x):

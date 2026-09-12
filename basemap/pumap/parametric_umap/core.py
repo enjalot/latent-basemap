@@ -150,6 +150,7 @@ class ParametricUMAP:
         host_int8_fast_input=False,
         graph_manifest_path=None,
         graph_manifest_sha256=None,
+        final_activation="relu",
     ):
         if device is None:
             if torch.cuda.is_available():
@@ -190,6 +191,11 @@ class ParametricUMAP:
         self.pos_ratio = pos_ratio
         self.architecture = architecture
         self.neck_fraction = float(neck_fraction)
+        if final_activation not in ("relu", "leaky_relu_slope_0p01"):
+            raise ValueError(f"Unknown final_activation: {final_activation}")
+        if final_activation != "relu" and architecture != "residual_bottleneck":
+            raise ValueError("final_activation intervention requires residual_bottleneck")
+        self.final_activation = final_activation
         self.correlation_distance_transform = correlation_distance_transform
         self.lr_schedule = lr_schedule
         self.warmup_steps = warmup_steps
@@ -316,6 +322,7 @@ class ParametricUMAP:
                 output_dim=self.n_components,
                 num_layers=self.n_layers,
                 neck_fraction=self.neck_fraction,
+                final_activation=self.final_activation,
             ).to(self.device)
         else:
             raise ValueError(f"Unknown architecture: {self.architecture}")
@@ -2104,6 +2111,7 @@ class ParametricUMAP:
                 "init_state_sha256": getattr(self, "init_state_sha256", None),
                 "config": {"n_epochs": self.n_epochs, "lr_horizon": lr_horizon,
                            "batch_size": self.batch_size, "architecture": self.architecture,
+                           "final_activation": self.final_activation,
                            "random_state": int(random_state),
                            # LR schedule identity (card008): LambdaLR closure semantics are not
                            # serialized, so resume must re-validate schedule/peak/floor/horizon.
@@ -2199,6 +2207,8 @@ class ParametricUMAP:
             if _cfg.get("random_state") != int(random_state) or _cfg.get("lr_horizon") != lr_horizon:
                 raise ValueError(f"resume config mismatch: ckpt {_cfg} vs current "
                                  f"seed={random_state} lr_horizon={lr_horizon}")
+            if _cfg.get("final_activation", "relu") != self.final_activation:
+                raise ValueError("resume final_activation mismatch")
             # LR schedule identity must match (LambdaLR closure is not serialized) — fail closed.
             _lr_cur = {"lr_schedule": self.lr_schedule, "learning_rate": float(self.learning_rate), "lr_min": float(self.lr_min)}
             _lr_saved = {k: _cfg.get(k) for k in _lr_cur}
@@ -3161,6 +3171,7 @@ class ParametricUMAP:
             'model_state_dict': self.model.state_dict(),
             'architecture': self.architecture,
             'neck_fraction': self.neck_fraction,
+            'final_activation': self.final_activation,
             'init_state_sha256': getattr(self, 'init_state_sha256', None),  # P0.1 seeded-init audit
             'input_dim': self.input_dim,
             'n_components': self.n_components,
@@ -3228,6 +3239,7 @@ class ParametricUMAP:
             hidden_dim=save_dict['hidden_dim'],
             n_layers=save_dict['n_layers'],
             neck_fraction=save_dict.get('neck_fraction', 0.75),
+            final_activation=save_dict.get('final_activation', 'relu'),
             n_neighbors=save_dict.get('n_neighbors', 15),
             a=save_dict['a'],
             b=save_dict['b'],
