@@ -45,7 +45,7 @@ def main():
     assert dev == "cuda", "card034 arms are the production device path; refuse CPU fallback"
     assert V.full_sha(SUB) == V.SUB_SHA256 and V.full_sha(GRAPH) == V.GRAPH_SHA256, "data identity"
     init_obj = torch.load(str(INIT), map_location="cpu", weights_only=False); warm = init_obj["model_state"]
-    init_payload = V.state_sha(warm); assert init_payload == V.INIT_SHA, f"init payload hash {init_payload} != {V.INIT_SHA}"   # hash actual tensors
+    init_payload = V.init_payload_sha(warm); assert init_payload == V.INIT_SHA, f"init payload hash {init_payload} != {V.INIT_SHA}"   # hash actual tensors
     if arm == "grouped_infonce":
         assert V.full_sha(V.CALIB) == V.expected_identity(arm, ROOT)["infonce_calib_sha256"], "calibration content hash drift"
     fok, bad = V.runtime_manifest_check(ROOT); assert fok, f"frozen-runtime mismatch {bad}"

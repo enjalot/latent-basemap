@@ -19,7 +19,10 @@ CHAMPION = SB / "dino-arrival-t0/champion-bs16k/model.pt"
 SUBD = Path("/data/latent-basemap/substrates/card010-adaptive")
 SUB = SUBD / "substrate.f16.npy"; GRAPH = SUBD / "edges-fixed15.npz"; INIT = SUBD / "init-card010.pt"
 TD_DEFAULT = SB / "card034-train"; CALIB = OC / "card034-calibration.json"
-INIT_SHA = "589895f037d406ae"
+INIT_SHA = "589895f037d406ae"  # legacy raw-parameter-order prefix, NOT named sorted state hash
+INIT_PARAM_SHA = "589895f037d406ae8807941517058192e049f983a5a5511f55ed63ca76864a0c"
+INIT_NAMED_SHA = "fc7eeddda0e3c1ae"
+INIT_FILE_SHA = "7d313c265cb659c954951d79ec395fa4d267f0f34a0bfb6aafe0dd23d5985825"
 SUB_SHA256 = "873d76e35eb2151e966c1c4dabb05e113c53f9cbc6e8473d87b6bd25029e5f45"
 GRAPH_SHA256 = "d214a839b07113dff2c29b225da9f38008f86a0b2cb3662a39d14bc0542d4450"
 A, B = 1.9328, 0.7905
@@ -43,6 +46,14 @@ def state_sha(sd):
     import numpy as np
     h = hashlib.sha256()
     for k in sorted(sd): h.update(k.encode()); h.update(np.ascontiguousarray(sd[k].detach().cpu().numpy()).tobytes())
+    return h.hexdigest()[:16]
+
+
+def init_payload_sha(sd):
+    import numpy as np
+    h=hashlib.sha256()
+    for t in sd.values():h.update(np.ascontiguousarray(t.detach().cpu().numpy()).tobytes())
+    assert h.hexdigest()==INIT_PARAM_SHA and state_sha(sd)==INIT_NAMED_SHA, 'actual warm-init tensors changed'
     return h.hexdigest()[:16]
 
 
@@ -75,7 +86,8 @@ def calibrated_coeff():
 
 def expected_identity(arm, ROOT):
     assert arm in ARMS, arm
-    ident = {"card": "card034", "arm": arm, "mode": MODE[arm], "kernel": KERNEL[arm], "kernel_a": A, "kernel_b": B,
+    assert full_sha(INIT)==INIT_FILE_SHA, "init file changed"
+    ident = {"init_named_sorted_sha16":INIT_NAMED_SHA,"init_parameter_order_sha256":INIT_PARAM_SHA,"card": "card034", "arm": arm, "mode": MODE[arm], "kernel": KERNEL[arm], "kernel_a": A, "kernel_b": B,
              "init_sha256": INIT_SHA, "init_file_sha256": full_sha(INIT), "substrate_sha256": SUB_SHA256, "graph_sha256": GRAPH_SHA256,
              "sampler": "grouped shared-PERM positive stream; 9 uniform nonself noise/positive (with replacement)",
              "block_pos": BLOCK_POS, "n_noise": N_NOISE, "seed": SEED, "lr": LR, "lr_schedule": "constant",
@@ -154,7 +166,8 @@ def validate_ckpt_payload(ck, arm, ROOT, identity, n_nodes, expect_beta, expect_
 def expected_model_state():
     import torch
     state=torch.load(INIT,map_location='cpu',weights_only=False)['model_state']
-    assert state_sha(state)==INIT_SHA, 'warm-init actual tensors changed'
+    assert full_sha(INIT)==INIT_FILE_SHA
+    assert init_payload_sha(state)==INIT_SHA
     return state
 
 
