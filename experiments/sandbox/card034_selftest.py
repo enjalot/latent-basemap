@@ -1,8 +1,10 @@
-"""Card034 canonical-validator self-test (CPU, no GPU). Builds structurally-valid grouped_umap + grouped_nce
-+ grouped_infonce fixtures and asserts strict_validate_arm PASSES them, then applies independent single-fault
-mutations that must each FAIL closed: wrong dose, warm-init drift, precision, identity drift, endpoint != 60K
-snapshot, stale snapshot, corrupt step ckpt, missing resumable ckpt, missing epoch ckpt, 9:1 exposure
-violation, and (grouped_nce) unmoved scalar + a step ckpt missing the scalar. Usage: card034_selftest.py
+"""Card034 canonical-validator self-test (CPU, no GPU). Builds structurally-valid grouped_umap/grouped_nce/
+grouped_infonce fixtures whose checkpoints carry the FULL deep payload (Adam groups + per-parameter finite
+moments + step counter, scalar param, scaler state, CPU/CUDA RNG, valid sampler permutation/cursor/epoch,
+live stats), asserts strict_validate_arm PASSES them, then applies independent single-fault mutations that
+must each FAIL closed — including the deep-state faults (stale ckpt stats, wrong Adam step counter, nonfinite
+Adam moment, missing scaler, malformed sampler permutation, missing scalar, missing init-payload hash).
+Usage: card034_selftest.py
 """
 import os, sys, json, shutil, tempfile
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -13,7 +15,8 @@ import card034_validate as V
 import torch
 
 ROOT = Path(__file__).resolve().parents[2]
-V.N = 64  # tiny structurally-identical fixtures; production validator keeps 300K
+V.N = 64
+_GEN = np.random.default_rng(0).bit_generator.state
 
 
 def _sd(seed):
@@ -21,27 +24,46 @@ def _sd(seed):
     return {"proj_out.weight": torch.randn(2, 4, generator=g), "proj_out.bias": torch.randn(2, generator=g)}
 
 
+def _sampler_state():
+    return {"perm": np.arange(10), "cursor": 3, "epoch": 1, "perm_gen": _GEN, "noise_gen": _GEN}
+
+
+def _adam_state(model_sd, nce):
+    ids = list(range(len(model_sd))); state = {}
+    for i, v in enumerate(model_sd.values()):
+        state[i] = {"step": torch.tensor(float(GS_HOLDER[0])), "exp_avg": torch.zeros_like(v), "exp_avg_sq": torch.zeros_like(v)}
+    groups = [{"params": ids, "lr": V.LR, "weight_decay": V.WEIGHT_DECAY, "betas": (.9, .999), "eps": 1e-8, "amsgrad": False}]
+    if nce:
+        state[len(ids)] = {"step": torch.tensor(float(GS_HOLDER[0])), "exp_avg": torch.zeros(()), "exp_avg_sq": torch.zeros(())}
+        groups.append({"params": [len(ids)], "lr": V.LR, "weight_decay": 0.0, "betas": (.9, .999), "eps": 1e-8, "amsgrad": False})
+    return {"param_groups": groups, "state": state}
+
+
+GS_HOLDER = [0]
+
+
+def _ckpt(arm, s, ident, model_sd):
+    GS_HOLDER[0] = s; nce = (arm == "grouped_nce")
+    return {"schema": "card034-ckpt-2026-09-12", "arm": arm, "mode": V.MODE[arm], "global_step": s, "epoch": 1,
+            "step_checkpoint": True, "identity": ident, "coeff": ident.get("infonce_coeff") or 1.0, "model": model_sd,
+            "optimizer": _adam_state(model_sd, nce), "scaler": {"scale": 65536.0, "growth_tracker": 0},
+            "beta": (torch.tensor(0.03) if nce else None), "sampler_state": _sampler_state(),
+            "torch_rng": torch.get_rng_state(), "cuda_rng": [torch.zeros(16, dtype=torch.uint8)],
+            "train_stats": {"positive_lr_optimizer_steps": s}}
+
+
 def build(base, arm):
     td = Path(base); (td / arm / "ckpts").mkdir(parents=True, exist_ok=True)
     ident = V.expected_identity(arm, ROOT)
     snap = {s: _sd(1000 + i) for i, s in enumerate(V.SNAP_STEPS)}
-    for s in V.SNAP_STEPS:
-        torch.save({"model_state_dict": snap[s], "n_components": V.NC}, td / arm / f"model-step{s}.pt")
+    for s in V.SNAP_STEPS: torch.save({"model_state_dict": snap[s], "n_components": V.NC}, td / arm / f"model-step{s}.pt")
     torch.save({"model_state_dict": snap[60000]}, td / f"model-{arm}.pt")
-    ss = {"perm": np.arange(10), "cursor": 0, "epoch": 1}
-    for s in V.STEP_CKPTS:
-        ck = {"schema": "card034-ckpt-2026-09-12", "arm": arm, "global_step": s, "epoch": 1, "step_checkpoint": True,
-              "identity": ident, "coeff": ident.get("infonce_coeff") or 1.0, "model": (snap[s] if s in snap else _sd(9000 + s)),
-              "optimizer": {"state": {}, "param_groups": []}, "scaler": {}, "sampler_state": ss,
-              "beta": (torch.tensor(0.03) if arm == "grouped_nce" else None)}
-        torch.save(ck, td / arm / "ckpts" / f"ckpt-step{s}.pt")
-    torch.save({"global_step": 2747, "epoch": 1, "identity": ident, "model": _sd(5), "optimizer": {"state": {}, "param_groups": []},
-                "scaler": {}, "sampler_state": ss, "step_checkpoint": False, "beta": (torch.tensor(0.03) if arm == "grouped_nce" else None)},
-               td / arm / "ckpts" / "ckpt-epoch1.pt")
+    for s in V.STEP_CKPTS: torch.save(_ckpt(arm, s, ident, snap[s] if s in snap else _sd(9000 + s)), td / arm / "ckpts" / f"ckpt-step{s}.pt")
+    torch.save(_ckpt(arm, 2747, ident, _sd(5)), td / arm / "ckpts" / "ckpt-epoch1.pt")
     np.save(td / f"coords-{arm}.npy", np.zeros((V.N, V.NC), "f4"))
     fb = (0.03 if arm == "grouped_nce" else None)
-    man = {"arm": arm, "mode": V.MODE[arm], "identity": ident, "warm_init_sha256": V.INIT_SHA, "executed_steps": V.DOSE,
-           "train_stats": {"positive_lr_optimizer_steps": V.DOSE, "exposure_probes": [{"step": 1, "noise_per_pos": 9}, {"step": 30000, "noise_per_pos": 9}, {"step": 60000, "noise_per_pos": 9}]},
+    man = {"arm": arm, "mode": V.MODE[arm], "identity": ident, "warm_init_sha256": V.INIT_SHA, "init_payload_sha256": V.INIT_SHA,
+           "executed_steps": V.DOSE, "train_stats": {"positive_lr_optimizer_steps": V.DOSE, "exposure_probes": [{"step": 1, "noise_per_pos": 9}, {"step": 30000, "noise_per_pos": 9}, {"step": 60000, "noise_per_pos": 9}]},
            "lr_used_min": V.LR, "lr_used_max": V.LR, "weight_decay": V.WEIGHT_DECAY, "grad_clip": V.GRAD_CLIP,
            "final_beta": fb, "infonce_coeff": ident.get("infonce_coeff"), "pipeline": "device_fp16",
            "trained_sha256": V.state_sha(snap[60000]), "loaded_modules": {"verified_frozen_runtime": True, "all_basemap_under_root": True}}
@@ -64,6 +86,8 @@ def expect_fail(base, arm, mutate, label):
 
 def _man(td, arm, **kw):
     m = json.loads((td / f"manifest-{arm}.json").read_text()); m.update(kw); (td / f"manifest-{arm}.json").write_text(json.dumps(m))
+def _edit_ck(td, arm, name, fn):
+    p = td / arm / "ckpts" / name; ck = torch.load(p, map_location="cpu", weights_only=False); fn(ck); torch.save(ck, p)
 
 
 def main():
@@ -73,23 +97,30 @@ def main():
     A = "grouped_umap"
     results.append(expect_fail(base, A, lambda td: _man(td, A, executed_steps=59999), "wrong dose"))
     results.append(expect_fail(base, A, lambda td: _man(td, A, warm_init_sha256="0" * 16), "warm-init drift"))
+    results.append(expect_fail(base, A, lambda td: _man(td, A, init_payload_sha256="0" * 16), "init-payload hash drift"))
     results.append(expect_fail(base, A, lambda td: _man(td, A, pipeline="host_int8"), "precision"))
+    results.append(expect_fail(base, A, lambda td: _man(td, A, weight_decay=0.0), "wrong weight decay"))
     def _idmut(td):
         m = json.loads((td / f"manifest-{A}.json").read_text()); m["identity"] = dict(m["identity"]); m["identity"]["dose"] = 1; (td / f"manifest-{A}.json").write_text(json.dumps(m))
     results.append(expect_fail(base, A, _idmut, "identity drift"))
     results.append(expect_fail(base, A, lambda td: torch.save({"model_state_dict": _sd(7)}, td / f"model-{A}.pt"), "endpoint != 60K snapshot"))
     results.append(expect_fail(base, A, lambda td: os.utime(td / f"admission-{A}.json", None), "stale snapshot"))
     results.append(expect_fail(base, A, lambda td: (td / f"{A}/ckpts/ckpt-step40000.pt").write_bytes(b"garbage"), "corrupt step ckpt"))
-    results.append(expect_fail(base, A, lambda td: (td / f"{A}/ckpts/ckpt-step60000.pt").unlink(), "missing 60K resumable ckpt"))
+    results.append(expect_fail(base, A, lambda td: (td / f"{A}/ckpts/ckpt-step60000.pt").unlink(), "missing 60K ckpt"))
     results.append(expect_fail(base, A, lambda td: (td / f"{A}/ckpts/ckpt-epoch1.pt").unlink(), "missing epoch ckpt"))
     def _exp(td):
         m = json.loads((td / f"manifest-{A}.json").read_text()); m["train_stats"]["exposure_probes"][1]["noise_per_pos"] = 8; (td / f"manifest-{A}.json").write_text(json.dumps(m))
     results.append(expect_fail(base, A, _exp, "9:1 exposure violated"))
+    # DEEP-STATE faults
+    results.append(expect_fail(base, A, lambda td: _edit_ck(td, A, "ckpt-step40000.pt", lambda c: c["train_stats"].__setitem__("positive_lr_optimizer_steps", 0)), "stale ckpt stats"))
+    results.append(expect_fail(base, A, lambda td: _edit_ck(td, A, "ckpt-step40000.pt", lambda c: c["optimizer"]["state"][0].__setitem__("step", torch.tensor(123.0))), "wrong Adam step counter"))
+    results.append(expect_fail(base, A, lambda td: _edit_ck(td, A, "ckpt-step40000.pt", lambda c: c["optimizer"]["state"][0].__setitem__("exp_avg", torch.tensor([float("inf")] * 4))), "nonfinite Adam moment"))
+    results.append(expect_fail(base, A, lambda td: _edit_ck(td, A, "ckpt-step40000.pt", lambda c: c.pop("scaler")), "missing scaler"))
+    results.append(expect_fail(base, A, lambda td: _edit_ck(td, A, "ckpt-step40000.pt", lambda c: c["sampler_state"].__setitem__("perm", np.zeros(10, np.int64))), "malformed sampler perm"))
+    results.append(expect_fail(base, A, lambda td: _edit_ck(td, A, "ckpt-step40000.pt", lambda c: c["optimizer"]["param_groups"][0].__setitem__("weight_decay", 0.0)), "ckpt Adam wd drift"))
     NC = "grouped_nce"
     results.append(expect_fail(base, NC, lambda td: _man(td, NC, final_beta=0.0), "nce scalar never moved"))
-    def _drop_beta(td):
-        p = td / f"{NC}/ckpts/ckpt-step40000.pt"; ck = torch.load(p, map_location="cpu", weights_only=False); ck["beta"] = None; torch.save(ck, p)
-    results.append(expect_fail(base, NC, _drop_beta, "nce step ckpt missing scalar"))
+    results.append(expect_fail(base, NC, lambda td: _edit_ck(td, NC, "ckpt-step40000.pt", lambda c: c.__setitem__("beta", None)), "nce ckpt missing scalar"))
 
     shutil.rmtree(base, ignore_errors=True)
     out = {"schema": "card034-selftest-2026-09-12", "PASS": True, "n_cases": len(results), "results": results}

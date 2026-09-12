@@ -24,16 +24,27 @@ CLAMP_LO, CLAMP_HI = 1e-7, 1 - 1e-7      # UMAP probability clamp — grouped_um
 BLOCK_POS = 1638; N_NOISE = 9; GROUP = N_NOISE + 1
 
 
+def _up(t):
+    """Upcast AMP fp16/bf16 to FP32 (never downcast fp64) BEFORE any arithmetic (a fp16 subtraction of large
+    opposite-sign coordinates overflows to Inf before an after-the-fact upcast can help)."""
+    return t.float() if t.dtype in (torch.float16, torch.bfloat16) else t
+
+
 def radial_from_emb(head, tails):
-    """head (m,2), tails (m,GROUP,2) -> guarded radial (m,GROUP), FP32. radial = where(r2==0, 0,
-    r2.clamp_min(tiny)**b): singular-free at exact zero (forward 0, gradient 0); finite near/far gradients."""
-    delta = tails - head.unsqueeze(1)
-    if delta.dtype in (torch.float16, torch.bfloat16):    # upcast AMP fp16 to FP32 (never downcast fp64)
-        delta = delta.float()
+    """head (m,2), tails (m,GROUP,2) -> guarded radial (m,GROUP), >= FP32. Operands are cast to >=FP32 BEFORE
+    the subtraction (item 1: fp16 subtract-then-upcast overflows). radial = where(r2==0, 0, r2.clamp_min(tiny)
+    **b): singular-free at exact zero (forward 0, gradient 0); finite near/far gradients."""
+    delta = _up(tails) - _up(head).unsqueeze(1)           # cast BEFORE subtraction
     r2 = (delta * delta).sum(-1)                          # squared Euclidean, >= FP32
     tiny = torch.finfo(r2.dtype).tiny
     radial_nz = r2.clamp_min(tiny).pow(B)                 # flat below tiny -> zero grad at r2==0
     return torch.where(r2 == 0, torch.zeros_like(r2), radial_nz)
+
+
+def embeddings_finite(*embs):
+    """True iff all embeddings are finite. The engine rejects a nonfinite forward BEFORE any objective (UMAP's
+    probability clamp would otherwise mask an Inf into a finite loss)."""
+    return all(bool(torch.isfinite(e).all()) for e in embs)
 
 
 def phi_from_radial(radial): return 1.0 / (1.0 + A * radial)

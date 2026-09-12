@@ -26,7 +26,11 @@ def notify(msg):
     subprocess.run([PY, str(OC / "notify.py"), "post", "basemap-runner", str(OC / "card034-execution.json"), msg], timeout=30)
 
 
+_RUN_CHARGED = [0.0]
+
+
 def charge(tag, seconds, rc):
+    _RUN_CHARGED[0] += float(seconds)
     with (OC / "window-ledger-write.lock").open("a") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
         for path, key in [(CARD, "batch_spent_s"), (WIN, "spent_s")]:
@@ -72,11 +76,12 @@ def main():
     ok, bad = V.runtime_manifest_check(ROOT); assert ok, f"frozen isolated source changed: {bad}"
     assert time.time() < END, "past hard deadline"
     assert json.loads((OC / "card034-calibration.json").read_text()).get("PASS"), "InfoNCE calibration not frozen/PASS"
-    completed = []
+    attempt_start = time.time(); ctrl_t0 = time.monotonic(); completed = []
 
     to = _remaining(CANARY_CAP); assert to >= 120, f"cannot admit canary: {to:.0f}s"
     rc = run_stage("device_canary", "gpu_card034_canary.py", to); assert rc == 0, f"device_canary rc={rc}"
-    assert json.loads((OC / "card034-canary.json").read_text())["PASS"], "device canary FAILED"
+    cj = OC / "card034-canary.json"; assert cj.stat().st_mtime >= attempt_start, "stale canary receipt — re-run required (no admit on stale PASS)"
+    assert json.loads(cj.read_text())["PASS"], "device canary FAILED"
     print("DONE device_canary", flush=True)
 
     to = _remaining(PREFLIGHT_CAP); assert to >= 120, f"cannot admit preflight: {to:.0f}s"
@@ -89,6 +94,7 @@ def main():
                "note": "Measured cost of the three 60K arms does not fit 7200s cap/window/deadline. Admission stopped; dose NOT truncated."})
         notify("Card034 preflight STOP: three 60K arms do not fit the cap/deadline. Admission halted, no dose truncation."); return
     assert rc == 0, f"throughput_preflight rc={rc}"
+    assert (OC / "card034-preflight.json").stat().st_mtime >= attempt_start, "stale preflight receipt — re-run required"
     per_step = _preflight_perstep(); print("DONE throughput_preflight", flush=True)
 
     for arm in ARMS:
@@ -112,8 +118,11 @@ def main():
         print(f"DONE {arm}", flush=True)
 
     assert len({x["model_state_sha"] for x in completed}) == 3, "arms did not diverge"
+    # final ledger reconciliation: charge controller/validation overhead accrued while leases were held (033-style)
+    overhead = max(0.0, (time.monotonic() - ctrl_t0) - _RUN_CHARGED[0])
+    charge("controller_reconciliation", overhead, 0)
     atomic(OC / "card034-execution.json", {"status": "TRAINED_VALIDATED", "at": dt.datetime.now(dt.timezone.utc).isoformat(),
-           "arms": completed, "quality": "NOT_YET_SCORED"})
+           "arms": completed, "controller_overhead_s": round(overhead, 2), "quality": "NOT_YET_SCORED"})
     notify("Card034 all three arms (grouped_umap/grouped_nce/grouped_infonce) trained + strict-validated: fresh 2D "
            "60K, LR 1e-3, grouped 9:1 uniform nonself noise, device_fp16, resumable step+epoch ckpts, frozen "
            "InfoNCE coefficient, global VRAM<30GB. Root owns scoring (250K common, grouped_infonce primary).")

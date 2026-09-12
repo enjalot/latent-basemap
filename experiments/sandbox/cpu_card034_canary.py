@@ -61,6 +61,11 @@ def main():
     rn = G.radial_from_emb(hn, tn); rn.sum().backward(); R["radial_near_zero_finite"] = bool(torch.isfinite(hn.grad).all())
     hf = torch.zeros(1, 2, requires_grad=True); tf = torch.full((1, G.GROUP, 2), 1e5)
     rf = G.radial_from_emb(hf, tf); R["radial_far_finite"] = bool(torch.isfinite(rf).all() and (rf > 0).all())
+    # (1b) production mixed-precision edge (root evidence): fp16 +60000/-60000 -> cast-before-subtract finite,
+    # while the naive fp16 subtract-then-upcast overflows to Inf (the bug this guards against).
+    hh = torch.tensor([[60000.0, 0.0]], dtype=torch.float16); tt = torch.full((1, G.GROUP, 2), -60000.0, dtype=torch.float16)
+    R["fp16_cast_before_subtract_finite"] = bool(torch.isfinite(G.radial_from_emb(hh, tt)).all())
+    R["fp16_naive_subtract_overflows"] = not bool(torch.isfinite(tt - hh.unsqueeze(1)).all())
 
     # (3b) NaN/Inf inputs are NOT concealed (nonfinite loss)
     hbad = head.clone(); hbad[0, 0] = float("nan")

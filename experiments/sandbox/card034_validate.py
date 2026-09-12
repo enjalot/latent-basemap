@@ -76,19 +76,57 @@ def calibrated_coeff():
 def expected_identity(arm, ROOT):
     assert arm in ARMS, arm
     ident = {"card": "card034", "arm": arm, "mode": MODE[arm], "kernel": KERNEL[arm], "kernel_a": A, "kernel_b": B,
-             "init_sha256": INIT_SHA, "substrate_sha256": SUB_SHA256, "graph_sha256": GRAPH_SHA256,
+             "init_sha256": INIT_SHA, "init_file_sha256": full_sha(INIT), "substrate_sha256": SUB_SHA256, "graph_sha256": GRAPH_SHA256,
              "sampler": "grouped shared-PERM positive stream; 9 uniform nonself noise/positive (with replacement)",
              "block_pos": BLOCK_POS, "n_noise": N_NOISE, "seed": SEED, "lr": LR, "lr_schedule": "constant",
              "weight_decay": WEIGHT_DECAY, "grad_clip": GRAD_CLIP, "dose": DOSE, "n_components": NC,
              "precision": "device_fp16", "runtime_manifest_sha256": full_sha(runtime_manifest_path(ROOT))}
     if arm == "grouped_nce":
-        ident.update({"beta_init": 0.0, "scalar_learned": True, "scalar_lr": LR, "scalar_weight_decay": 0.0, "infonce_coeff": None})
+        ident.update({"beta_init": 0.0, "scalar_learned": True, "scalar_lr": LR, "scalar_weight_decay": 0.0,
+                      "infonce_coeff": None, "infonce_calib_sha256": None})
     elif arm == "grouped_infonce":
         ident.update({"beta_init": None, "scalar_learned": False, "scalar_lr": None, "scalar_weight_decay": None,
-                      "infonce_coeff": calibrated_coeff()})
+                      "infonce_coeff": calibrated_coeff(), "infonce_calib_sha256": full_sha(CALIB)})
     else:
-        ident.update({"beta_init": None, "scalar_learned": False, "scalar_lr": None, "scalar_weight_decay": None, "infonce_coeff": None})
+        ident.update({"beta_init": None, "scalar_learned": False, "scalar_lr": None, "scalar_weight_decay": None,
+                      "infonce_coeff": None, "infonce_calib_sha256": None})
     return ident
+
+
+def validate_ckpt_payload(ck, arm, ROOT, identity, n_nodes, expect_beta, expect_step=None):
+    """Deep canonical checkpoint validation (item 4). Adam groups LR/WD + per-parameter finite moments/shapes/
+    step counter, scalar param/value/moments, scaler state, CPU/CUDA RNG, full valid sampler
+    permutation/cursor/epoch/generator states, live (non-zero) stats, finite model. Reused BEFORE restore and
+    at completion. Raises AssertionError on any drift."""
+    import torch, numpy as np
+    assert ck.get("schema") == "card034-ckpt-2026-09-12", "ckpt schema"
+    assert ck.get("identity") == identity, "ckpt identity != canonical (wrong objective/coeff/seed/data/scalar)"
+    gs = int(ck["global_step"]); assert gs >= 0 and isinstance(ck.get("epoch"), int) and ck["epoch"] >= 0, "global_step/epoch"
+    if expect_step is not None: assert gs == int(expect_step), f"ckpt step {gs} != {expect_step}"
+    ts = ck.get("train_stats", {})
+    assert int(ts.get("positive_lr_optimizer_steps", -1)) == gs, "stale/zero checkpoint stats (must equal global_step)"
+    model_sd = ck["model"]; assert all(bool(torch.isfinite(t).all()) for t in model_sd.values()), "nonfinite model in ckpt"
+    opt = ck.get("optimizer", {}); groups = opt.get("param_groups", []); state = opt.get("state", {})
+    assert groups and state, "empty optimizer state/groups"
+    assert groups[0]["lr"] == LR and groups[0]["weight_decay"] == WEIGHT_DECAY, "model Adam group lr/wd"
+    if expect_beta:
+        assert len(groups) == 2 and groups[1]["lr"] == LR and groups[1]["weight_decay"] == 0.0, "scalar Adam group lr/wd"
+        assert ck.get("beta") is not None and bool(torch.isfinite(ck["beta"]).all()), "missing/nonfinite scalar"
+    else:
+        assert len(groups) == 1, "unexpected extra optimizer group"
+    pids = [i for g in groups for i in g["params"]]
+    assert len(pids) == len(set(pids)) and set(pids) == set(state), "optimizer parameter identity"
+    for pid in state:
+        st = state[pid]; assert all(k in st for k in ("step", "exp_avg", "exp_avg_sq")), "missing Adam moments"
+        assert float(st["step"]) == gs, "Adam step counter != successful dose"
+        assert st["exp_avg"].shape == st["exp_avg_sq"].shape and bool(torch.isfinite(st["exp_avg"]).all()) and bool(torch.isfinite(st["exp_avg_sq"]).all()), "Adam moment shape/nonfinite"
+    assert ck.get("scaler") and "scale" in ck["scaler"], "scaler state"
+    assert ck.get("torch_rng") is not None and ck.get("cuda_rng") is not None, "CPU/CUDA RNG state"
+    ss = ck.get("sampler_state", {}); perm = np.asarray(ss.get("perm"))
+    assert perm.ndim == 1 and perm.shape[0] > 0 and np.array_equal(np.sort(perm), np.arange(perm.shape[0])), "sampler perm not a valid permutation"
+    assert 0 <= int(ss["cursor"]) <= perm.shape[0] and int(ss["epoch"]) >= 0, "sampler cursor/epoch"
+    assert "perm_gen" in ss and "noise_gen" in ss, "sampler generator states"
+    return True
 
 
 def strict_validate_arm(arm, ROOT, base=None):
@@ -122,6 +160,7 @@ def strict_validate_arm(arm, ROOT, base=None):
     assert len(set(snap_sha.values())) == len(SNAP_STEPS), f"{arm}: snapshots did not progress"
     assert snap_sha[60000] == ep_sha, f"{arm}: endpoint != 60K snapshot"
 
+    expect_beta = (arm == "grouped_nce")
     ck_receipt = {}
     for s in STEP_CKPTS:
         p = base / arm / "ckpts" / f"ckpt-step{s}.pt"; assert p.exists(), f"missing resumable step ckpt {s}"
@@ -129,19 +168,19 @@ def strict_validate_arm(arm, ROOT, base=None):
             ck = torch.load(p, map_location="cpu", weights_only=False)
         except Exception as e:
             raise AssertionError(f"corrupt step checkpoint {s}: {e!r}")
-        assert int(ck.get("global_step", -1)) == s, f"step ckpt {s} global_step mismatch"
+        validate_ckpt_payload(ck, arm, ROOT, exp, N, expect_beta, expect_step=s)   # DEEP Adam/scaler/RNG/sampler
         assert bool(ck.get("step_checkpoint")), f"ckpt {s} not marked step_checkpoint"
-        assert ck.get("identity") == exp, f"step ckpt {s} identity != canonical"
-        assert ck.get("sampler_state") is not None and "perm" in ck["sampler_state"], f"step ckpt {s} missing sampler state"
-        assert ck.get("optimizer") is not None, f"step ckpt {s} missing optimizer state"
-        if arm == "grouped_nce":
-            assert ck.get("beta") is not None, f"grouped_nce step ckpt {s} missing learned scalar"
-        m = ck["model"]; assert all(bool(torch.isfinite(t).all()) for t in m.values()), f"step ckpt {s} non-finite"
-        msha = state_sha(m)
+        msha = state_sha(ck["model"])
         if s in snap_sha: assert msha == snap_sha[s], f"step ckpt {s} model payload != snapshot"
         ck_receipt[s] = msha
-    # at least one epoch checkpoint present (auditable epoch/step state)
-    assert any((base / arm / "ckpts").glob("ckpt-epoch*.pt")), f"{arm}: no epoch checkpoint"
+    # retained epoch checkpoint(s) deep-validated too (not just filename existence)
+    epoch_cks = sorted((base / arm / "ckpts").glob("ckpt-epoch*.pt"))
+    assert epoch_cks, f"{arm}: no epoch checkpoint"
+    for ep_p in epoch_cks:
+        eck = torch.load(ep_p, map_location="cpu", weights_only=False)
+        validate_ckpt_payload(eck, arm, ROOT, exp, N, expect_beta)     # coherent full state, not just a filename
+    # init payload hash: manifest must record the hash of the actual warm tensors == INIT_SHA (not trusted metadata)
+    assert man.get("init_payload_sha256") == INIT_SHA, f"{arm}: init payload hash not verified/recorded"
 
     # recorded 9:1 exposure at early/middle/final probes
     probes = ts.get("exposure_probes", [])
