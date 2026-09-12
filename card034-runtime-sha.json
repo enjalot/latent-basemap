@@ -112,7 +112,7 @@
   "experiments/sandbox/card034_validate.py": "c94fb8d059e767db177110ee5b423b8c91c7e1cc3133378d70972f25e709a05f",
   "experiments/sandbox/run_card034_arm.py": "d3829baae92334a67fc66641ce9d161e08e2c547118d8457e3044c82115f07d7",
   "experiments/sandbox/calibrate_card034.py": "fe25fe80f16041b4de4825dd6b7ad306d03833780a8e66f5746ac794a57e6254",
-  "experiments/sandbox/gpu_card034_canary.py": "12b63987f79821cc2cd86c1808d318dc36e5fdacaa8500f2ca5d4e4c48e74e81",
+  "experiments/sandbox/gpu_card034_canary.py": "321df00ae8f43cd50ed71b19ba259e71bfa86bfe9e0f32ca4f42ce49cffb0abe",
   "experiments/sandbox/gpu_card034_preflight.py": "3bfb7779677b6b1ac79d9eef3cc6efd541a07c3351ba17a6dda3acad76a16116",
   "experiments/sandbox/run_card034_chain.py": "3e96bde7f5ab69c80e5c76f027d926932d81096efb68b8c74186062f7d994f1a",
   "experiments/sandbox/cpu_card034_canary.py": "a4af554af119002381f7d14ca619f40ff388ef6d78e7025352d0193655556bad",
