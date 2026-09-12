@@ -34,7 +34,14 @@ def build_fixture(base, arm):
     # resumable step ckpts: those matching a snapshot step carry the SAME model payload
     for s in V.STEP_CKPTS:
         m = snap[s] if s in snap else _sd(9000 + s)
-        torch.save({"global_step": s, "step_checkpoint": True, "card012_identity": ident, "model": m,"optimizer":{"state":{}},"scheduler":{},"torch_rng":torch.ones(1,dtype=torch.uint8),"cuda_rng":[torch.ones(1,dtype=torch.uint8)],"loader_gen":torch.ones(1,dtype=torch.uint8),"config":{"learning_rate":.001,"lr_schedule":"constant"}}, td / arm / "ckpts" / f"ckpt-step{s}.pt")
+        parameters=[torch.nn.Parameter(v.clone()) for v in m.values()]
+        opt=torch.optim.AdamW(parameters,lr=V.LR);sch=torch.optim.lr_scheduler.LambdaLR(opt,lambda _:1.)
+        ost=opt.state_dict();ost['state']={i:{'step':torch.tensor(float(s)),'exp_avg':torch.zeros_like(v),'exp_avg_sq':torch.zeros_like(v)} for i,v in enumerate(m.values())}
+        torch.save({"schema":"pumap-ckpt-2026-08-30","epoch":1,"global_step":s,"step_checkpoint":True,"card012_identity":ident,"model":m,
+                    "optimizer":ost,"scheduler":sch.state_dict(),"torch_rng":torch.get_rng_state(),"cuda_rng":[torch.arange(16,dtype=torch.uint8)],"loader_gen":torch.arange(16,dtype=torch.uint8),
+                    "config":{"learning_rate":V.LR,"lr_schedule":"constant","batch_size":V.BATCH,"random_state":V.SEED,"architecture":"residual_bottleneck","replay_enabled":False,"deriv_enabled":False},
+                    "train_stats":{"executed_iters":s,"positive_lr_optimizer_steps":s,"optimizer_steps_succeeded":s},
+                    "loader_perm":torch.arange(V.N*15),"loader_pos_idx":0,"loader_batch_no":0,"loader_rank_of_node":torch.arange(V.N),"loader_node_at_rank":torch.arange(V.N),"rankneg_scale":1.},td/arm/"ckpts"/f"ckpt-step{s}.pt")
     np.save(td / f"coords-{arm}.npy", np.zeros((V.N, 3), "f4"))
     man = {"arm": arm, "card012_identity": ident, "warm_param_sha256": V.WARM_PARAM_SHA,
            "executed_steps": V.DOSE, "train_stats": {"positive_lr_optimizer_steps": V.DOSE,"executed_iters":V.DOSE,"lr_used_min":.001,"lr_used_max":.001},"kernel":ident["kernel"],"proc_peak_vram_gb":1.,"global_vram_used_gb":1.,
@@ -76,6 +83,8 @@ def _edit_man_nested(td, key, sub, val):
 
 
 def main():
+    torch.set_num_threads(2)
+    original_n=V.N;V.N=32 # Scaled schema fixture; real production validator remains N=2M.
     base = tempfile.mkdtemp(prefix="card018-selftest-", dir="/tmp")
     build_fixture(base, "actual3d")
     results = [expect_pass(base, "actual3d")]
@@ -101,7 +110,23 @@ def main():
         (td / "actual3d" / "ckpts" / "ckpt-step400000.pt").unlink()
     results.append(expect_fail(base, "actual3d", _drop_ckpt, "missing 400K resumable ckpt"))
 
+    def ck_mut(td,fn):
+        p=td/"actual3d"/"ckpts"/"ckpt-step250000.pt";z=torch.load(p,map_location="cpu",weights_only=False);fn(z);torch.save(z,p)
+    for label,fn in [
+        ("empty Adam",lambda z:z.update(optimizer={"state":{},"param_groups":[]})),
+        ("missing scheduler",lambda z:z.update(scheduler={})),
+        ("invalid CPU RNG",lambda z:z.update(torch_rng=torch.ones(1,dtype=torch.uint8))),
+        ("invalid CUDA RNG",lambda z:z.update(cuda_rng=[torch.ones(1,dtype=torch.uint8)])),
+        ("invalid loader RNG",lambda z:z.update(loader_gen=torch.ones(1,dtype=torch.uint8))),
+        ("missing permutation",lambda z:z.pop("loader_perm")),
+        ("missing cursor",lambda z:z.pop("loader_pos_idx")),
+        ("missing rank order",lambda z:z.pop("loader_rank_of_node")),
+        ("wrong Adam dose",lambda z:next(iter(z["optimizer"]["state"].values()))["step"].fill_(1)),
+        ("wrong moment shape",lambda z:next(iter(z["optimizer"]["state"].values())).update(exp_avg=torch.zeros(1))),
+    ]:results.append(expect_fail(base,"actual3d",lambda td,fn=fn:ck_mut(td,fn),label))
+
     shutil.rmtree(base, ignore_errors=True)
+    V.N=original_n
     out = {"schema": "card018-selftest-2026-09-12", "PASS": True, "n_cases": len(results), "results": results}
     (V.OC / "card018-selftest.json").write_text(json.dumps(out, indent=1)); print(json.dumps(out, indent=1), flush=True)
     return 0

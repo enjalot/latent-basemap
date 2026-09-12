@@ -55,12 +55,15 @@ def project(model, data, dim):
     xy = np.concatenate(out); assert xy.shape == (len(data), dim) and np.isfinite(xy).all(); return xy
 
 
-def recall(ref, val, truth):
+def recall(ref, val, truth, neighbor_path=None):
     idx = faiss.IndexFlatL2(ref.shape[1]); idx.add(np.ascontiguousarray(ref, "f4")); vals = {b: [] for b in BUDGETS}
+    saved = np.lib.format.open_memmap(neighbor_path, mode="w+", dtype="int32", shape=(len(val), max(BUDGETS))) if neighbor_path else None
     for s in range(0, len(val), 256):
         _, ids = idx.search(np.ascontiguousarray(val[s:s + 256], "f4"), max(BUDGETS))
+        if saved is not None: saved[s:s+len(ids)] = ids
         hits = (ids[:, :, None] == truth[s:s + 256, None, :]).any(axis=2)
         for b in BUDGETS: vals[b].append(hits[:, :b].sum(axis=1) / truth.shape[1])
+    if saved is not None: saved.flush()
     return {b: np.concatenate(v) for b, v in vals.items()}
 
 
@@ -103,7 +106,7 @@ def main():
         model = ParametricUMAP.load(str(TD / f"model-{a}.pt"), device="cpu").model.eval()
         rc = project(model, ref, DIM); vc = project(model, val, DIM); del model
         np.save(out / f"{a}-ref-xy.npy", rc); np.save(out / f"{a}-val-xy.npy", vc)
-        recs[a] = recall(rc, vc, truth)
+        recs[a] = recall(rc, vc, truth, out / f"{a}-map-neighbor-ref-local.npy")
         dd, _ = cKDTree(rc.astype("f8")).query(vc.astype("f8"), k=15, workers=4); maps[a] = np.sqrt((dd ** 2).mean(1))
         cont[a] = continuity(vc[panel], hi)
         sev = severe_false_joins(H, vc[panel].astype("f8")); severe[a] = sev["severe_frac_of_map15"]
