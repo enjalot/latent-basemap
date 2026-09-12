@@ -15,11 +15,11 @@ def same(a,b):
  return a==b
 
 def main():
- start=time.monotonic();C.source_check();C.input_check();C.graph_check();checks=[];hashes={};keys=['model','optimizer','scheduler','scaler','torch_rng','cuda_rng','loader_gen','loader_perm','loader_pos_idx','loader_batch_no','loader_rank_of_node','loader_node_at_rank','rankneg_scale','replay_gen'];stream={}
+ start=time.monotonic();C.source_check();C.input_check();C.graph_check();checks=[];hashes={};keys=['model','optimizer','scheduler','scaler','torch_rng','cuda_rng','loader_gen','loader_perm','loader_pos_idx','loader_batch_no','loader_rank_of_node','loader_node_at_rank','rankneg_scale','replay_gen'];stream={};early={}
  with tempfile.TemporaryDirectory(dir=str(C.R.parent),prefix='card052-canary-') as td:
   td=Path(td);n=512;X=np.asarray(np.load(C.D/'train.f16.npy',mmap_mode='r')[:n],dtype='f4');graph=td/'edges.npz';src=np.repeat(np.arange(n,dtype='i4'),15);dst=np.array([(i+j)%n for i in range(n) for j in range(1,16)],dtype='i4');np.savez(graph,sources=src,targets=dst,weights=np.ones(len(src),'f4'),n_nodes=n);rp=td/'radii.npy';np.save(rp,np.load(C.D/'radii.npy')[:n]);bank=td/'bank.npz';b=np.load(C.D/'pca-bank.npz');np.savez(bank,**{k:b[k][:512] for k in ['replay_X','replay_targets','replay_ids']});del b
   for arm in C.ARMS:
-   kw={'X':X,'graph':graph,'radius_path':rp,'bank_path':bank,'checkpoints':[2,4,7,9,18]};p,full,report=fit(arm,18,td/arm,**kw);hashes[arm]=report['state_sha'];stream[arm]={k:full[k] for k in ['torch_rng','cuda_rng','loader_gen','loader_perm','loader_rank_of_node','loader_node_at_rank']};del p;gc.collect();torch.cuda.empty_cache()
+   kw={'X':X,'graph':graph,'radius_path':rp,'bank_path':bank,'checkpoints':[2,4,7,9,18]};p,full,report=fit(arm,18,td/arm,**kw);hashes[arm]=report['state_sha'];stream[arm]={k:full[k] for k in ['torch_rng','cuda_rng','loader_gen','loader_perm','loader_rank_of_node','loader_node_at_rank']};early_ck=torch.load(td/arm/'ckpts/ckpt-step2.pt',map_location='cpu',weights_only=False);early[arm]={k:early_ck[k] for k in stream[arm]};assert early_ck['epoch']==0 and early_ck['global_step']==2;del p;gc.collect();torch.cuda.empty_cache()
    candidates=[]
    for path in (td/arm/'ckpts').glob('ckpt-step*.pt'):
     ck=torch.load(path,map_location='cpu',weights_only=False)
@@ -37,6 +37,13 @@ def main():
    if arm=='ordinary':
     p,off,_=fit(arm,18,td/'disabled-bank',disabled_bank_control=True,**kw);assert all(same(full[k],off[k]) for k in keys),'disabled bank changes baseline';checks.append('disabled bank bit-identical');del p,off;gc.collect();torch.cuda.empty_cache()
   assert len(set(hashes.values()))==3;checks.append('all three endpoint hashes diverge')
-  assert all(same(stream['ordinary'][k],stream[a][k]) for a in C.ARMS for k in stream[a]);checks.append('replay independent graph/global RNG')
+  # Ranking is recomputed from each trained model at epoch boundaries; it is not RNG state.
+  early_equal={a:{k:same(early['ordinary'][k],early[a][k]) for k in early[a]} for a in C.ARMS}
+  rng_equal={a:{k:same(stream['ordinary'][k],stream[a][k]) for k in ['torch_rng','cuda_rng','loader_gen','loader_perm']} for a in C.ARMS}
+  rank_equal={a:{k:same(stream['ordinary'][k],stream[a][k]) for k in ['loader_rank_of_node','loader_node_at_rank']} for a in C.ARMS}
+  C.write(C.O/'card052-sampler-diagnosis.json',{'early_step2_equal':early_equal,'endpoint_random_state_equal':rng_equal,'endpoint_model_rank_equal':rank_equal,'scope':'Step2 is before first epoch rank refresh; endpoint ranks depend on each trained model. RNG and edge permutation still required byte-identical.','runtime_sha':C.source_check()})
+  assert all(v for row in early_equal.values() for v in row.values()),'early sampler/RNG differs'
+  assert all(v for row in rng_equal.values() for v in row.values()),'actual endpoint RNG/permutation differs'
+  checks.append('early-step2 rank/sampler/global RNG identical');checks.append('endpoint genuine RNG and edge permutation identical; learned ranks reported separately')
  C.write(C.O/'card052-device-canary.json',{'PASS':True,'checks':checks,'n_checks':len(checks),'endpoints':hashes,'wall_s':time.monotonic()-start,'runtime_sha':C.source_check(),'scope':'Real1536D core fit,512rows,18successfulsteps, replay/radius active, fullstate epoch andstep resume; wrong identities reject. Not a numericalquality result.'});print('DEVICE PASS',len(checks),flush=True)
 if __name__=='__main__':main()
