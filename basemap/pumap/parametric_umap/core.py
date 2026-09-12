@@ -2495,6 +2495,11 @@ class ParametricUMAP:
                     corr_loss = torch.zeros((), device=umap_loss.device)
                     loss = umap_loss
 
+                # Card054 isolated default-off stateless landmark objective.
+                _lmc_hook = getattr(self, '_card054_lmc', None)
+                if _lmc_hook is not None:
+                    loss = loss + _lmc_hook(self.model, global_step)
+
                 # ── Mid-near attractive term (PaCMAP-style global structure) ──
                 mn_loss_val = 0.0
                 w_mn = 0.0
