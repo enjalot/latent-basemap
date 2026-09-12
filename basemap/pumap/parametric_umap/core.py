@@ -1938,6 +1938,18 @@ class ParametricUMAP:
                   if use_amp and not amp_bf16 else None)
 
         optimizer = AdamW(self.model.parameters(), lr=self.learning_rate)
+        # ── Card024 contrastive-normalization scalar (opt-in; DEFAULT OFF) ──
+        # nce_learned adds a LEARNED scalar beta (init 0) in its OWN AdamW group at LR .001, weight_decay 0
+        # (zero wd, NOT the model's) on the same successful-step clock. neg_fixed/umap_uniform use a CONSTANT
+        # beta=0 (no grad, no group). OFF (_card024_mode None) leaves the optimizer bitwise-identical.
+        _c24_mode = getattr(self, "_card024_mode", None)
+        if _c24_mode == "nce_learned":
+            self._card024_beta = nn.Parameter(torch.zeros((), device=self.device))     # matches neg_fixed at init
+            optimizer.add_param_group({"params": [self._card024_beta], "lr": self.learning_rate, "weight_decay": 0.0})
+        elif _c24_mode == "neg_fixed":
+            self._card024_beta = torch.zeros((), device=self.device)                    # fixed 0, no grad
+        else:
+            self._card024_beta = None
 
         # P0-3 (review): the LR horizon H is a budget of SUCCESSFUL, POSITIVE-LR
         # optimizer updates — derived and VALIDATED **before** the scheduler is
@@ -2150,6 +2162,10 @@ class ParametricUMAP:
                 # INITIAL bank sha (separate from the active bank). A resume with a different experiment
                 # config fails closed BEFORE any step (validated ahead of the bank auto-restore).
                 "card012_identity": getattr(self, "_card012_identity", None),
+                # card024 learned normalization scalar (nce_learned); None for other modes. Its optimizer
+                # moments ride in optimizer.state_dict() (own param group); this restores the scalar VALUE.
+                "card024_beta": (self._card024_beta.detach().cpu()
+                                 if isinstance(getattr(self, "_card024_beta", None), torch.Tensor) else None),
             }
 
         def _write_ckpt(cur_epoch, cur_global_step, name=None):
@@ -2233,6 +2249,13 @@ class ParametricUMAP:
                     raise ValueError("resume with deriv enabled but checkpoint has no deriv_gen RNG state")
             self.model.load_state_dict(_ck["model"])
             optimizer.load_state_dict(_ck["optimizer"])
+            # card024: recover the learned normalization scalar VALUE (its optimizer moments are restored by
+            # optimizer.load_state_dict above via its own param group). A wrong family/scalar config already
+            # failed closed on the card012_identity guard before this point.
+            _cb = _ck.get("card024_beta")
+            if _cb is not None and isinstance(getattr(self, "_card024_beta", None), torch.Tensor):
+                with torch.no_grad():
+                    self._card024_beta.copy_(_cb.to(self.device))
             scheduler.load_state_dict(_ck["scheduler"])
             if scaler is not None and _ck.get("scaler") is not None:
                 scaler.load_state_dict(_ck["scaler"])
@@ -2477,6 +2500,17 @@ class ParametricUMAP:
                             fneg_batches += 1
                 else:
                     umap_loss = self.loss_fn(qs.float(), targets_for_loss)
+                # ── Card024 contrastive-normalization: binary-LOGIT loss (opt-in; DEFAULT OFF) ──
+                # logit = log(qhat) - beta; loss = BCE-with-logits (stable). beta fixed 0 (neg_fixed) or the
+                # learned scalar (nce_learned). qs is already clamped to [1e-7, 1-1e-7] (the SHARED finite-
+                # distance / zero-gradient guard). OFF ⇒ not entered; umap_uniform keeps the plain-BCE path
+                # above, bitwise-identical to the baseline. beta0 makes nce_learned's initial loss+gradient
+                # EXACTLY equal neg_fixed's (both logit=log(qhat)).
+                _c24 = getattr(self, "_card024_mode", None)
+                if _c24 in ("neg_fixed", "nce_learned"):
+                    _logit = torch.log(qs.float()) - self._card024_beta
+                    umap_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                        _logit, targets_for_loss, reduction="mean")
                 # P0.3: skip the correlation branch entirely when its weight is 0
                 # (the frozen recipe). It computed two 384-D distance vectors +
                 # a sync-forcing Pearson every batch, and `0 * NaN = NaN` could
@@ -2836,6 +2870,11 @@ class ParametricUMAP:
                     self.is_fitted = True
                     self.save(_os.path.join(snapshot_dir, f"model-step{global_step}.pt"))
                     logging.info("inference-only step snapshot written: model-step%d.pt", global_step)
+                    # card024: record the learned-scalar trajectory at snapshots (exposure evidence — a
+                    # silently inactive scalar yields no scientific result). Cheap (already syncing to save).
+                    if isinstance(getattr(self, "_card024_beta", None), torch.Tensor):
+                        self._train_stats.setdefault("card024_beta_traj", []).append(
+                            {"step": int(global_step), "beta": float(self._card024_beta.detach())})
 
                 # Card011 injection-pool REFRESH at exact step targets (e.g. 20K/40K):
                 # re-mine from the CURRENT map via the caller's refresh fn and swap the
