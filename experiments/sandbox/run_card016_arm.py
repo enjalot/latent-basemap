@@ -45,7 +45,9 @@ def save_checkpoint(p, model, optimizer, generator, step, identity, accumulators
 
 
 def restore_checkpoint(p, model, optimizer, generator, identity, device):
-    ck = torch.load(p, map_location=device, weights_only=False)
+    # Deserialize on CPU; optimizer.load_state_dict moves moments to each parameter's device
+    # while preserving Adam's non-capturable CPU step scalar.
+    ck = torch.load(p, map_location='cpu', weights_only=False)
     if ck['identity'] != identity:
         raise ValueError('admission identity mismatch')
     model.load_state_dict(ck['model_state_dict'], strict=True)
