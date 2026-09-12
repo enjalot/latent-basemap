@@ -350,8 +350,13 @@ class ParametricUMAP:
         self.warm_start_sha256 = _h.hexdigest()[:16]
         logging.info("WARM-START applied: weights loaded, state sha256=%s", self.warm_start_sha256)
 
-    def _low_dim_qs(self, src, dst):
+    def _low_dim_qs(self, src, dst, pair_scale=None):
         """Low-D similarity q_ij for an edge batch, per ``self.low_dim_kernel``.
+
+        card013 local-scale kernel (opt-in): ``pair_scale`` is a DETACHED length-batch tensor = r_i·r_j
+        (per-row high-D RMS radii). When given, the umap kernel uses ``d²/(r_i·r_j)`` instead of ``d²``,
+        applied to BOTH positive and negative pairs. radii detached ⇒ autograd flows through the map delta
+        only; ``pair_scale`` all-ones reproduces the baseline loss+gradient BITWISE (default None = off).
 
         - ``legacy_lp`` (shipped historically): ``1 / (1 + a·‖Δ‖_{2b})`` where
           ``‖Δ‖_{2b}`` is the p=2b vector norm — an Lp/quasi-norm radial curve,
@@ -372,14 +377,18 @@ class ParametricUMAP:
         b_eff = self.b if e == 1.0 else self.b ** e
         if self.low_dim_kernel in ("umap", "gcauchy"):
             r2 = delta.square().sum(dim=1)
+            # card013: divide the squared map distance by the DETACHED per-pair scale r_i·r_j (local-scale
+            # kernel). pair_scale>0 ⇒ r2s==0 iff r2==0, so the r2==0 singular-derivative guard below stays
+            # correct; radii detached ⇒ gradient flows only through delta; all-ones ⇒ r2s==r2 (bitwise base).
+            r2s = r2 / pair_scale if pair_scale is not None else r2
             # P0-A: r2.pow(b) has a singular derivative b·r2^(b-1) at r2=0 for
             # b<1 → autograd yields 0·inf = NaN, silently corrupting the model on
             # self/duplicate edges (forward stays q=1, so the loss guard misses
             # it). Clamp the power's input away from 0 and select an exact 0
             # radial where r2==0, so both value (q=1) and gradient (0) are finite
             # while small nonzero radii keep the true r^(2b) curve.
-            tiny = torch.finfo(r2.dtype).tiny
-            radial_nz = r2.clamp_min(tiny).pow(b_eff)
+            tiny = torch.finfo(r2s.dtype).tiny
+            radial_nz = r2s.clamp_min(tiny).pow(b_eff)
             radial = torch.where(r2 == 0, torch.zeros_like(radial_nz), radial_nz)
         else:  # legacy_lp — unchanged shipped behaviour
             radial = torch.norm(delta, dim=1, p=2 * b_eff)
@@ -1828,35 +1837,42 @@ class ParametricUMAP:
                 f"replay_fraction must be >0 when replay enabled, got {self.replay_fraction}"
             _r_m = int(self.batch_size * self.replay_fraction)
             assert _r_m >= 1, f"replay_fraction*batch_size={_r_m} rounds to <1 replay example"
-            _rb = np.load(self.replay_bank_path)
-            for _k in ("replay_X", "replay_targets", "replay_ids"):
-                assert _k in _rb, f"replay bank missing required array '{_k}'"
-            _rx = np.asarray(_rb["replay_X"]); _rt = np.asarray(_rb["replay_targets"], np.float32)
-            _rids = np.asarray(_rb["replay_ids"])
-            assert _rx.ndim == 2 and _rt.ndim == 2, "replay bank X/targets must be 2-D"
-            assert _rx.shape[0] == _rt.shape[0] == _rids.shape[0] and _rx.shape[0] > 0, \
-                f"replay X/target/id row mismatch: {_rx.shape[0]}/{_rt.shape[0]}/{_rids.shape[0]}"
-            assert _rt.shape[1] == self.n_components, \
-                f"replay_targets width {_rt.shape[1]} != n_components {self.n_components}"
-            _in_feat = next((m.in_features for m in self.model.modules()
-                             if isinstance(m, torch.nn.Linear)), None)
-            assert _in_feat is None or _rx.shape[1] == _in_feat, \
-                f"replay_X width {_rx.shape[1]} != model input_dim {_in_feat}"
-            assert np.isfinite(_rx).all() and np.isfinite(_rt).all(), "replay bank has non-finite values"
-            # normalized-input convention: both actual bases feed L2-normalised input
-            # (prenormalized substrate; the model does not renorm). A raw-embedding
-            # bank (mean norm far from 1) would silently mismatch preprocessing.
-            _nm = float(np.linalg.norm(_rx.astype(np.float32), axis=1).mean())
-            assert 0.9 <= _nm <= 1.1, \
-                f"replay_X mean row-norm {_nm:.4f} not ~1 — bank not at the L2 normalized-input convention"
-            self._replay_X_dev = torch.as_tensor(_rx, device=self.device).half()
-            self._replay_targets_dev = torch.as_tensor(_rt, device=self.device).float()
-            # Content hash over IDs + X + targets, so a bank differing in ANY of the
-            # three (not just ids/targets) is rejected on resume (review ref 3).
-            self._replay_bank_sha = _hl.sha256(
-                np.ascontiguousarray(np.sort(_rids.astype(np.int64))).tobytes()
-                + np.ascontiguousarray(_rx).tobytes()
-                + np.ascontiguousarray(_rt.astype(np.float32)).tobytes()).hexdigest()[:16]
+
+            def _load_replay_bank(_path):
+                """Validate + load a replay bank into _replay_X_dev/_replay_targets_dev; return its content
+                sha (sorted ids + X + targets). Reused by the initial load, mid-run refresh (card012) and
+                resume. Keeps replay_gen untouched (continuity)."""
+                import hashlib as _hlb
+                _rb = np.load(_path)
+                for _k in ("replay_X", "replay_targets", "replay_ids"):
+                    assert _k in _rb, f"replay bank missing required array '{_k}'"
+                _rx = np.asarray(_rb["replay_X"]); _rt = np.asarray(_rb["replay_targets"], np.float32)
+                _rids = np.asarray(_rb["replay_ids"])
+                assert _rx.ndim == 2 and _rt.ndim == 2, "replay bank X/targets must be 2-D"
+                assert _rx.shape[0] == _rt.shape[0] == _rids.shape[0] and _rx.shape[0] > 0, \
+                    f"replay X/target/id row mismatch: {_rx.shape[0]}/{_rt.shape[0]}/{_rids.shape[0]}"
+                assert _rt.shape[1] == self.n_components, \
+                    f"replay_targets width {_rt.shape[1]} != n_components {self.n_components}"
+                _in_feat = next((m.in_features for m in self.model.modules()
+                                 if isinstance(m, torch.nn.Linear)), None)
+                assert _in_feat is None or _rx.shape[1] == _in_feat, \
+                    f"replay_X width {_rx.shape[1]} != model input_dim {_in_feat}"
+                assert np.isfinite(_rx).all() and np.isfinite(_rt).all(), "replay bank has non-finite values"
+                _nm = float(np.linalg.norm(_rx.astype(np.float32), axis=1).mean())
+                assert 0.9 <= _nm <= 1.1, \
+                    f"replay_X mean row-norm {_nm:.4f} not ~1 — bank not at the L2 normalized-input convention"
+                self._replay_mean_norm = _nm
+                self._replay_X_dev = torch.as_tensor(_rx, device=self.device).half()
+                self._replay_targets_dev = torch.as_tensor(_rt, device=self.device).float()
+                return _hlb.sha256(
+                    np.ascontiguousarray(np.sort(_rids.astype(np.int64))).tobytes()
+                    + np.ascontiguousarray(_rx).tobytes()
+                    + np.ascontiguousarray(_rt.astype(np.float32)).tobytes()).hexdigest()[:16]
+
+            self._replay_bank_sha = _load_replay_bank(self.replay_bank_path)
+            self._current_replay_bank_path = self.replay_bank_path
+            _rx = self._replay_X_dev  # for the log line below
+            _nm = float(getattr(self, "_replay_mean_norm", float("nan")))   # set inside _load_replay_bank
             _rseed = (int(self.replay_seed) if self.replay_seed is not None
                       else int(random_state) + 51549)
             replay_gen = torch.Generator(device=self.device)
@@ -2071,7 +2087,8 @@ class ParametricUMAP:
         # Epoch-boundary state: every RNG stream the loop reads (torch global cpu+cuda, the sampler
         # gen, the 3 aux gens np+torch) + model/optimizer/scheduler/scaler + loop counters. Acceptance
         # bar: resume is bitwise-invisible to trained_state_sha256. See CHECKPOINTING_DESIGN.md.
-        _ckpt_on = int(checkpoint_every_epochs or 0) > 0 or bool(resume_from)
+        _ckpt_on = (int(checkpoint_every_epochs or 0) > 0 or bool(resume_from)
+                    or bool(getattr(self, "_checkpoint_step_targets", None)))   # card012 step ckpts too
         if _ckpt_on and not self._fast_device_path:
             raise NotImplementedError(
                 "checkpointing is implemented for the DEVICE path only (the production >6h path); "
@@ -2120,14 +2137,31 @@ class ParametricUMAP:
                 "replay_gen": _tgst(replay_gen),
                 "deriv_gen": _tgst(deriv_gen),
                 "train_stats": dict(self._train_stats),
+                # card012 mid-epoch (step) resume: within-epoch loader position + rank order + active bank.
+                # Off-card runs never read these; present only for step checkpoints.
+                "loader_perm": (loader.perm.detach().cpu() if getattr(loader, "perm", None) is not None else None),
+                "loader_pos_idx": int(getattr(loader, "pos_idx", 0)),
+                "loader_batch_no": int(getattr(loader, "batch_no", 0)),
+                "loader_rank_of_node": (loader._rank_of_node.detach().cpu() if getattr(loader, "_rank_of_node", None) is not None else None),
+                "loader_node_at_rank": (loader._node_at_rank.detach().cpu() if getattr(loader, "_node_at_rank", None) is not None else None),
+                "rankneg_scale": (float(self._rankneg_scale) if getattr(self, "_rankneg_scale", None) is not None else None),
+                "current_replay_bank_path": getattr(self, "_current_replay_bank_path", None) or self.replay_bank_path,
+                # card012 admission identity: arm / refresh on-off / cadence / pool+teacher+selection-seed /
+                # INITIAL bank sha (separate from the active bank). A resume with a different experiment
+                # config fails closed BEFORE any step (validated ahead of the bank auto-restore).
+                "card012_identity": getattr(self, "_card012_identity", None),
             }
 
-        def _write_ckpt(cur_epoch, cur_global_step):
+        def _write_ckpt(cur_epoch, cur_global_step, name=None):
             import os as _os, re as _re
             _os.makedirs(checkpoint_dir, exist_ok=True)
-            _path = _os.path.join(checkpoint_dir, f"ckpt-epoch{cur_epoch}.pt")
+            _path = _os.path.join(checkpoint_dir, f"ckpt-{name or ('epoch' + str(cur_epoch))}.pt")
             _tmp = f"{_path}.tmp.{_os.getpid()}"
-            torch.save(_ckpt_state(cur_epoch, cur_global_step), _tmp)
+            _st = _ckpt_state(cur_epoch, cur_global_step)
+            # STEP checkpoints (card012 mid-epoch) carry the within-epoch continue contract; EPOCH
+            # checkpoints (legacy cards 006-009) do NOT — resume must rebuild perm + refresh rank.
+            _st["step_checkpoint"] = bool(name and str(name).startswith("step"))
+            torch.save(_st, _tmp)
             _os.replace(_tmp, _path)   # atomic
             # keep last 2 — sort by the INTEGER epoch, NOT the string (else "epoch8" sorts after
             # "epoch10" and the newest checkpoints get pruned while stale single-digit ones survive).
@@ -2142,9 +2176,26 @@ class ParametricUMAP:
             logging.info("checkpoint written: %s (global_step=%d)", _path, cur_global_step)
 
         start_epoch = 0
+        if resume_from and float(getattr(self, "_inject_frac_cfg", 0.0) or 0.0) > 0.0:
+            raise RuntimeError("card011 injection prohibits resume (injection-generator + pool-stage resume "
+                               "state is not implemented) — clean per-arm restart only; fail closed.")
         if resume_from:
             _ck = torch.load(resume_from, map_location=self.device, weights_only=False)
             _cfg = _ck.get("config", {})
+            # card012: validate the full experiment/admission identity (arm / refresh on-off / cadence /
+            # candidate-pool + teacher + selection-seed / INITIAL bank sha) BEFORE any bank restore, so a
+            # wrong caller config fails closed pre-step (not a generic downstream error).
+            _saved_id = _ck.get("card012_identity"); _cur_id = getattr(self, "_card012_identity", None)
+            if (_saved_id is not None or _cur_id is not None) and _saved_id != _cur_id:
+                raise ValueError(f"card012 resume admission-identity mismatch (arm/refresh/cadence/pool/"
+                                 f"teacher/selection_seed/initial_bank): ckpt {_saved_id} vs current {_cur_id}")
+            # a checkpoint taken AFTER a mid-run bank refresh records the REFRESHED bank sha; reload that
+            # bank BEFORE the replay-sha match below so a post-refresh resume passes (not a mismatch).
+            _bankpath = _ck.get("current_replay_bank_path")
+            if _replay_enabled and _bankpath and _bankpath != self.replay_bank_path:
+                self.replay_bank_path = _bankpath
+                self._replay_bank_sha = _load_replay_bank(_bankpath)
+                self._current_replay_bank_path = _bankpath
             if _cfg.get("random_state") != int(random_state) or _cfg.get("lr_horizon") != lr_horizon:
                 raise ValueError(f"resume config mismatch: ckpt {_cfg} vs current "
                                  f"seed={random_state} lr_horizon={lr_horizon}")
@@ -2199,6 +2250,23 @@ class ParametricUMAP:
             if _ck.get("mn_rng") is not None: mn_rng.set_state(_ck["mn_rng"])
             if _ck.get("dens_rng") is not None: dens_rng.set_state(_ck["dens_rng"])
             if _ck.get("hold_rng") is not None: hold_rng.set_state(_ck["hold_rng"])
+            # card012 mid-epoch (STEP) resume ONLY: restore within-epoch loader position + rank order + scale
+            # so the first resumed epoch CONTINUES bitwise. EPOCH checkpoints (legacy) do NOT continue — the
+            # first resumed epoch rebuilds perm + refreshes rank as normal (regression fix).
+            if bool(_ck.get("step_checkpoint", False)):
+                if _ck.get("loader_perm") is not None:
+                    loader.perm = _ck["loader_perm"].to(self.device)
+                if hasattr(loader, "pos_idx"): loader.pos_idx = int(_ck.get("loader_pos_idx", 0))
+                if hasattr(loader, "batch_no"): loader.batch_no = int(_ck.get("loader_batch_no", 0))
+                if _ck.get("loader_rank_of_node") is not None:
+                    loader._rank_of_node = _ck["loader_rank_of_node"].to(self.device)
+                if _ck.get("loader_node_at_rank") is not None:
+                    loader._node_at_rank = _ck["loader_node_at_rank"].to(self.device)
+                if _ck.get("rankneg_scale") is not None:
+                    self._rankneg_scale = float(_ck["rankneg_scale"])
+                self._resume_continue = True   # first resumed epoch continues (cleared after it)
+            else:
+                self._resume_continue = False  # legacy epoch-boundary resume: rebuild perm + refresh rank
             global_step = int(_ck["global_step"])
             self._train_stats.update(_ck["train_stats"])
             start_epoch = int(_ck["epoch"])
@@ -2213,16 +2281,46 @@ class ParametricUMAP:
         if _snap_remaining and not snapshot_dir:
             raise ValueError("snapshot_steps set but snapshot_dir is None")
 
+        # Card011 verified/collision negative injection (opt-in via instance attrs;
+        # default-off). _inject_frac_cfg>0 turns on the sampler's front-slot overwrite;
+        # _inject_pool = (src_np, dst_np) is the INITIAL (step-0) pool; _inject_refresh_fn
+        # (self, step)->(src_np, dst_np) re-mines from the CURRENT map at _inject_refresh_steps
+        # (e.g. 20K/40K). No effect on any run that does not set these.
+        _inject_frac_cfg = float(getattr(self, "_inject_frac_cfg", 0.0) or 0.0)
+        _inject_refresh_steps = set(int(s) for s in (getattr(self, "_inject_refresh_steps", ()) or ()))
+        if _inject_frac_cfg > 0.0 and hasattr(loader, "_inject_frac"):
+            import torch as _t
+            loader._inject_frac = _inject_frac_cfg
+            _pool = getattr(self, "_inject_pool", None)
+            if _pool is not None:
+                _ps, _pd = _pool
+                loader._inject_src = _t.as_tensor(_ps, dtype=_t.long, device=self.device)
+                loader._inject_dst = _t.as_tensor(_pd, dtype=_t.long, device=self.device)
+            self._train_stats.setdefault("inject_refreshes", [])
+
+        # card013 local-scale kernel (opt-in): upload the per-row radii to device + enable the sampler's
+        # pair-id stash so the loop can gather r_i·r_j. Off (attr unset) ⇒ every existing run is unchanged.
+        _c13_radii = getattr(self, "_card013_radii", None)
+        if _c13_radii is not None:
+            import torch as _t
+            _rr = _t.as_tensor(np.asarray(_c13_radii, np.float32), device=self.device)
+            assert bool(_t.isfinite(_rr).all()) and bool((_rr > 0).all()), "card013 radii must be finite+positive"
+            self._card013_radii_dev = _rr
+            loader._stash_ids = True
+
         for epoch in range(start_epoch, self.n_epochs):
             if (checkpoint_every_epochs and checkpoint_dir and epoch > start_epoch
                     and epoch % int(checkpoint_every_epochs) == 0):
                 _write_ckpt(epoch, global_step)
-            if self.rankneg_window > 0 and hasattr(loader, "set_rank_order"):
+            if self.rankneg_window > 0 and hasattr(loader, "set_rank_order") \
+                    and not (getattr(self, "_resume_continue", False) and epoch == start_epoch):
                 # 0.6dev sandbox: re-project the CURRENT embedding on a fresh
                 # random direction and re-rank, EVERY epoch including the first
                 # (upstream semantics — the random-init projection is an
                 # arbitrary but valid order, and the 2M harness only runs 2
                 # epochs, so skipping epoch 0 would halve the treatment dose).
+                # card012: on the FIRST resumed epoch the rank order was restored from the
+                # checkpoint, so skip the re-refresh (which would advance loader.gen + re-rank).
                 self._refresh_rank_negatives(loader)
             epoch_loss_t = torch.zeros((), device=self.device)
             epoch_umap_t = torch.zeros((), device=self.device)
@@ -2248,7 +2346,13 @@ class ParametricUMAP:
 
             if self._fast_device_path:
                 # DeviceEdgeSampler yields (src, dst, targets) already on-device.
-                _batch_iter = iter(loader)
+                # card012: on the FIRST resumed epoch, use the loader AS-IS (do NOT iter()->rebuild perm/
+                # reset pos_idx) so __next__ continues from the restored perm+pos_idx; clear the flag after.
+                if getattr(self, "_resume_continue", False) and epoch == start_epoch:
+                    _batch_iter = loader
+                    self._resume_continue = False
+                else:
+                    _batch_iter = iter(loader)
 
                 def _get_next(_it=_batch_iter):
                     try:
@@ -2301,7 +2405,14 @@ class ParametricUMAP:
                     # Low-D similarity kernel (P0.1 switch). `dists` is the
                     # kernel's radial term (‖Δ‖_{2b} legacy / ‖Δ‖²^b umap), used
                     # only for optional per-batch stats below.
-                    qs, dists = self._low_dim_qs(src_embeddings, dst_embeddings)
+                    # card013 (opt-in): gather DETACHED per-pair local-scale r_i·r_j from the stashed
+                    # pair-order node ids; None ⇒ baseline. Guarded ⇒ no effect on any run without radii.
+                    _pair_scale = None
+                    _radii = getattr(self, "_card013_radii_dev", None)
+                    if _radii is not None:
+                        _as = loader._last_all_src; _ad = loader._last_all_dst
+                        _pair_scale = (_radii.index_select(0, _as) * _radii.index_select(0, _ad)).detach()
+                    qs, dists = self._low_dim_qs(src_embeddings, dst_embeddings, pair_scale=_pair_scale)
 
                     # Keep BCE inputs in its valid probability domain. Larger
                     # scale pilots can occasionally produce non-finite low-dim
@@ -2726,6 +2837,36 @@ class ParametricUMAP:
                     self.save(_os.path.join(snapshot_dir, f"model-step{global_step}.pt"))
                     logging.info("inference-only step snapshot written: model-step%d.pt", global_step)
 
+                # Card011 injection-pool REFRESH at exact step targets (e.g. 20K/40K):
+                # re-mine from the CURRENT map via the caller's refresh fn and swap the
+                # sampler's live pool tensors. Guarded -> no effect unless configured.
+                if (_inject_frac_cfg > 0.0 and global_step in _inject_refresh_steps
+                        and getattr(self, "_inject_refresh_fn", None) is not None):
+                    import torch as _t
+                    _rs, _rd = self._inject_refresh_fn(self, global_step)
+                    loader._inject_src = _t.as_tensor(_rs, dtype=_t.long, device=self.device)
+                    loader._inject_dst = _t.as_tensor(_rd, dtype=_t.long, device=self.device)
+                    self._train_stats["inject_refreshes"].append(
+                        {"step": int(global_step), "n_pairs": int(len(_rs))})
+                    logging.info("card011 inject-pool refreshed at step %d: %d pairs", global_step, len(_rs))
+
+                # card012 replay-bank REFRESH at exact steps (opt-in). refresh_fn selects+writes a bank npz
+                # and returns its path; reload into _replay_X_dev/_targets_dev, rebind sha, keep replay_gen.
+                if (getattr(self, "_replay_refresh_fn", None) is not None
+                        and global_step in getattr(self, "_replay_refresh_steps", set())):
+                    _old_sha = self._replay_bank_sha
+                    _newpath = self._replay_refresh_fn(self, global_step)
+                    self.replay_bank_path = _newpath
+                    self._replay_bank_sha = _load_replay_bank(_newpath)
+                    self._current_replay_bank_path = _newpath
+                    self._train_stats.setdefault("replay_refreshes", []).append(
+                        {"step": int(global_step), "old_sha": _old_sha, "new_sha": self._replay_bank_sha, "path": str(_newpath)})
+                    logging.info("card012 replay bank refreshed @%d: %s -> %s", global_step, _old_sha, self._replay_bank_sha)
+                # card012 step-boundary checkpoint (opt-in genuine resumable state)
+                if (getattr(self, "_checkpoint_step_targets", None) and checkpoint_dir
+                        and global_step in self._checkpoint_step_targets):
+                    _write_ckpt(epoch, global_step, name=f"step{global_step}")
+
                 # Close performance windows on the update that reaches their
                 # boundary.  This must precede the LR-horizon break: otherwise
                 # an exact-budget run exits before recording its final window
@@ -2900,6 +3041,10 @@ class ParametricUMAP:
         # exact registered kernel.
         self._kernel_exp = 1.0
         self.is_fitted = True
+        # Card011: record ACTUAL injected exposure (zero => the configured intervention never applied;
+        # the arm validator fails closed on this).
+        self._train_stats["inject_slots_applied"] = int(getattr(loader, "_inject_slot_count", 0))
+        self._train_stats["inject_batches_applied"] = int(getattr(loader, "_inject_batch_count", 0))
         # P1: expose fneg telemetry for the summary (opt-in; None when off).
         if self.fneg_weight > 0 and fneg_epoch_telemetry:
             last = fneg_epoch_telemetry[-1]

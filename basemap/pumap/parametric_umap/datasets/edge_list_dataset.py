@@ -609,6 +609,25 @@ class DeviceEdgeSampler:
         # pair order → loss sees identical src/dst embeddings). BN/dropout must be off (core guards it).
         self._endpoint_reuse = int(os.environ.get("ENDPOINT_REUSE", "0"))
         self.endpoint_reuse = bool(self._endpoint_reuse)
+        # Card011 verified/collision negative injection (opt-in, default-off). When
+        # `_inject_frac`>0 and a pool is set, the front k=round(frac*num_neg) NEGATIVE
+        # slots are overwritten with pool pairs drawn via self.gen (seed-deterministic),
+        # BEFORE the p/neg concat -> they become ordinary target-0 negatives flowing
+        # through the identical BCE/tanh-cap/fneg path (no second loss term; total pair
+        # count + weighting preserved). Trainer swaps the pool tensors at refresh steps.
+        # Off (_inject_frac==0) => every existing run is byte-identical.
+        self._inject_src = None
+        self._inject_dst = None
+        self._inject_frac = 0.0
+        # DISTINCT generator for the injection slot-index draw so it NEVER consumes the
+        # background negative/positive stream (self.gen). With injection off OR on, self.gen
+        # advances identically -> every background draw (positives + the [k:] negative slots)
+        # is byte-identical; only the front-k slot VALUES are overwritten (the intervention).
+        # Seeded deterministically off random_state for reproducibility + arm matching.
+        self._inject_gen = torch.Generator(device=device)
+        self._inject_gen.manual_seed(int(random_state) + 918273)
+        self._inject_slot_count = 0        # actual injected exposure (zero => intervention never applied)
+        self._inject_batch_count = 0
 
     def __len__(self):
         return int(np.ceil(self.n_pos / self.num_pos))
@@ -720,8 +739,31 @@ class DeviceEdgeSampler:
                 + mag * sign) % self.n_nodes
         return self._node_at_rank.index_select(0, rank)
 
+    def _inject_active(self):
+        return getattr(self, "_inject_frac", 0.0) > 0.0 and self._inject_src is not None
+
+    def _apply_injection(self, neg_src, neg_dst, n):
+        """Card011: overwrite the front k negative slots with pool pairs, on the SHARED exit path (after
+        WHICHEVER background branch — rank-window or uniform — drew neg_src/neg_dst). Uses a SEPARATE
+        _inject_gen so the background stream is untouched. Counts actual injected exposure. Off by default."""
+        if not self._inject_active():
+            return neg_src, neg_dst
+        k = int(round(self._inject_frac * n))
+        if k > 0 and self._inject_src.shape[0] > 0:
+            pos = torch.randint(0, self._inject_src.shape[0], (k,),
+                                generator=self._inject_gen, device=self.device)
+            neg_src = neg_src.clone(); neg_dst = neg_dst.clone()
+            neg_src[:k] = self._inject_src.index_select(0, pos)
+            neg_dst[:k] = self._inject_dst.index_select(0, pos)
+            self._inject_slot_count += int(k)
+            self._inject_batch_count += 1
+        return neg_src, neg_dst
+
     def _sample_negatives(self, n):
         if self.positive_source_rows_t is not None:
+            if self._inject_active():                                        # fail-closed: unsupported path
+                raise RuntimeError("card011 injection is not supported on the positive_source_rows negative "
+                                   "path — refuse rather than silently skip the intervention.")
             universe = len(self.positive_source_rows_t)
             src_pos = torch.randint(
                 0, universe, (n,), generator=self.gen, device=self.device
@@ -735,6 +777,8 @@ class DeviceEdgeSampler:
                 self.positive_source_rows_t.index_select(0, dst_pos).long(),
             )
         if getattr(self, "_grouped_neg", 0):                                # grouped: n/tails unique srcs, each x tails
+            if self._inject_active():
+                raise RuntimeError("card011 injection is not supported with GROUPED_NEGATIVES (fail-closed).")
             t = self._grouped_tails
             ns = torch.randint(0, self.n_nodes, ((n + t - 1) // t,), generator=self.gen, device=self.device)
             neg_src = ns.repeat_interleave(t)[:n]
@@ -753,12 +797,13 @@ class DeviceEdgeSampler:
                 if n_hit:
                     neg_dst = neg_dst.clone()
                     neg_dst[hit] = self._rank_window_dst(neg_src[hit], n_hit)
-            return neg_src, neg_dst
-        # offset in [1, n_nodes-1] -> dst != src, uniform over non-self nodes.
-        offset = torch.randint(1, self.n_nodes, (n,), generator=self.gen,
-                               device=self.device)
-        neg_dst = (neg_src + offset) % self.n_nodes
-        return neg_src, neg_dst
+        else:
+            # offset in [1, n_nodes-1] -> dst != src, uniform over non-self nodes.
+            offset = torch.randint(1, self.n_nodes, (n,), generator=self.gen,
+                                   device=self.device)
+            neg_dst = (neg_src + offset) % self.n_nodes
+        # SHARED injection exit (applies to rank-window AND uniform background draws).
+        return self._apply_injection(neg_src, neg_dst, n)
 
     def __next__(self):
         if self._per_batch:
@@ -786,6 +831,11 @@ class DeviceEdgeSampler:
         neg_src, neg_dst = self._sample_negatives(self.num_neg)
         all_src = torch.cat([p_src, neg_src])
         all_dst = torch.cat([p_dst, neg_dst])
+        # card013 (opt-in, default-off): stash the pair-order node ids so the loop can gather per-pair
+        # local-scale radii. Computed BEFORE any gather/endpoint-reuse, so they map 1:1 to the yielded pairs.
+        if getattr(self, "_stash_ids", False):
+            self._last_all_src = all_src
+            self._last_all_dst = all_dst
 
         if self._fast_gather:
             # M5: cache the constant [ones(num_pos)|zeros(num_neg)] label vector;
