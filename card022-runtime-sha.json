@@ -115,5 +115,6 @@
   "experiments/sandbox/cpu_card022_canary.py": "ea163bba7c348254666fad39562fcd0e97720270921071a0a012a9a7b127bc8b",
   "experiments/sandbox/score_card009.py": "d34cc1a852961547180cec6e99e825d62985489a0c9cb086023b49a9a8ca07c7",
   "experiments/sandbox/score_card011.py": "2a2b8ac0a77d31a29b024aa68c9f8c53b376ffa18ce27fca98d5e8aad63fcadf",
-  "experiments/sandbox/score_card022.py": "1ab345a756ae076708a0a89f067f2c1f4bfa1d4533e98076366709b60801b724"
+  "experiments/sandbox/score_card022.py": "1ab345a756ae076708a0a89f067f2c1f4bfa1d4533e98076366709b60801b724",
+  "experiments/sandbox/card022_selftest.py": "4234a984e236d765d615bc902b54c77d3a3cd4ee6181ac52704e5f4ab7855d56"
 }
