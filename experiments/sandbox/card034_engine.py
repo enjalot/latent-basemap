@@ -104,7 +104,7 @@ class GroupedEngine:
                 "optimizer": self.opt.state_dict(), "scaler": self.scaler.state_dict(),
                 "beta": (self.beta.detach().cpu() if self.beta is not None else None),
                 "sampler_state": sampler.state(), "torch_rng": torch.get_rng_state(),
-                "cuda_rng": torch.cuda.get_rng_state_all(), "train_stats": dict(self.stats)}
+                "cuda_rng": torch.cuda.get_rng_state_all(), "train_stats": dict(self.stats), "consecutive_bad":self._consec_bad}
 
     def restore(self, ck, sampler, ROOT, n_nodes):
         """Deep-validate BEFORE restore (identity + Adam groups/moments/counter + scalar + scaler + RNG +
@@ -118,4 +118,4 @@ class GroupedEngine:
         sampler.load_state(ck["sampler_state"])
         torch.set_rng_state(ck["torch_rng"].to("cpu", torch.uint8))
         torch.cuda.set_rng_state_all([s.to("cpu", torch.uint8) for s in ck["cuda_rng"]])
-        self.success = int(ck["global_step"]); self.stats = dict(ck["train_stats"])
+        self.success = int(ck["global_step"]); self.stats = dict(ck["train_stats"]);self._consec_bad=int(ck.get("consecutive_bad",0))

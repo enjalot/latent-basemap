@@ -47,7 +47,8 @@ def _arm_cumulative(arm):
     v = json.loads(CARD.read_text())
     return float(sum(e.get("wall_s", 0.0) for e in v.get("entries", []) if e.get("tag") == arm))
 def _remaining(stage_cap, arm=None):
-    r = [stage_cap, CAP - _spent(CARD, "batch_spent_s"), WIN_CAP - _spent(WIN, "spent_s"), END - time.time()]
+    pending=max(0.,time.monotonic()-_CTRL_T0[0]-_RUN_CHARGED[0]) if _CTRL_T0[0] else 0.
+    r = [stage_cap, CAP - _spent(CARD, "batch_spent_s")-pending, WIN_CAP - _spent(WIN, "spent_s")-pending, END - time.time()]
     if arm is not None: r.append(PER_ARM_CAP - _arm_cumulative(arm))
     return min(r)
 def _completed_steps(arm):
@@ -81,7 +82,8 @@ def main():
     to = _remaining(CANARY_CAP); assert to >= 120, f"cannot admit canary: {to:.0f}s"
     rc = run_stage("device_canary", "gpu_card034_canary.py", to); assert rc == 0, f"device_canary rc={rc}"
     cj = OC / "card034-canary.json"; assert cj.stat().st_mtime >= attempt_start, "stale canary receipt — re-run required (no admit on stale PASS)"
-    assert json.loads(cj.read_text())["PASS"], "device canary FAILED"
+    assert json.loads(cj.read_text())["PASS"] is True, "device canary FAILED"
+    assert json.loads(cj.read_text())["runtime_manifest_sha256"]==V.full_sha(V.runtime_manifest_path(ROOT)), "canary runtime mismatch"
     print("DONE device_canary", flush=True)
 
     to = _remaining(PREFLIGHT_CAP); assert to >= 120, f"cannot admit preflight: {to:.0f}s"
@@ -95,6 +97,7 @@ def main():
         notify("Card034 preflight STOP: three 60K arms do not fit the cap/deadline. Admission halted, no dose truncation."); return
     assert rc == 0, f"throughput_preflight rc={rc}"
     assert (OC / "card034-preflight.json").stat().st_mtime >= attempt_start, "stale preflight receipt — re-run required"
+    assert json.loads((OC/"card034-preflight.json").read_text())["runtime_manifest_sha256"]==V.full_sha(V.runtime_manifest_path(ROOT)), "preflight runtime mismatch"
     per_step = _preflight_perstep(); print("DONE throughput_preflight", flush=True)
 
     for arm in ARMS:
@@ -118,6 +121,9 @@ def main():
         print(f"DONE {arm}", flush=True)
 
     assert len({x["model_state_sha"] for x in completed}) == 3, "arms did not diverge"
+    probes=[json.loads((OC.parent/'card034-train'/f'manifest-{a}.json').read_text())['train_stats']['attempted_probes'] for a in ARMS]
+    assert all(x==probes[0] for x in probes[1:]), 'attempted group streams differ across arms'
+
     atomic(OC / "card034-execution.json", {"status": "TRAINED_VALIDATED", "at": dt.datetime.now(dt.timezone.utc).isoformat(),
            "arms": completed, "quality": "NOT_YET_SCORED"})
     notify("Card034 all three arms (grouped_umap/grouped_nce/grouped_infonce) trained + strict-validated: fresh 2D "

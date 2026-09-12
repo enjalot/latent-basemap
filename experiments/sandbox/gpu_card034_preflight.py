@@ -33,14 +33,15 @@ def _preload():
     ez = np.load(GRAPH); _E = (ez["sources"], ez["targets"]); return time.monotonic() - t
 
 
-def _measured_fit(steps, ckpt_dir):
-    coeff = V.calibrated_coeff()
+def _measured_fit(arm, steps, ckpt_dir):
+    start_all=time.monotonic()
+    coeff = V.calibrated_coeff() if arm=="grouped_infonce" else 1.0
     torch.manual_seed(V.SEED); np.random.seed(V.SEED); torch.cuda.manual_seed_all(V.SEED)
-    ident = V.expected_identity("grouped_infonce", ROOT)     # most expensive arm
-    engine = E.GroupedEngine("grouped_infonce", ident, coeff, "cuda", CHAMPION, _WARM)
+    ident = V.expected_identity(arm, ROOT)
+    engine = E.GroupedEngine(arm, ident, coeff, "cuda", CHAMPION, _WARM)
     sampler = G.GroupedSampler(V.N, _E[0], _E[1], seed=V.SEED); prev_epoch = sampler.epoch; pending = False
     _, total = torch.cuda.mem_get_info(); torch.cuda.reset_peak_memory_stats()
-    torch.cuda.synchronize(); t0 = time.monotonic()
+    torch.cuda.synchronize(); setup=time.monotonic()-start_all; t0 = time.monotonic()
     while engine.success < steps:
         heads, tails = sampler.next_block()
         if sampler.epoch > prev_epoch: pending = True; prev_epoch = sampler.epoch
@@ -50,7 +51,7 @@ def _measured_fit(steps, ckpt_dir):
             if s == min(steps, 500): torch.save(engine.ckpt_dict(sampler, True), Path(ckpt_dir) / "ckpt-step.pt")                          # FULL payload
         assert engine.stats["nonfinite_skips"] < 300, "preflight: bounded overflow/nonfinite failure — stop"
     torch.cuda.synchronize(); wall = time.monotonic() - t0
-    free1, _ = torch.cuda.mem_get_info(); return wall, torch.cuda.max_memory_allocated() / 2**30, (total - free1) / 2**30, total / 2**30
+    free1, _ = torch.cuda.mem_get_info(); return wall, torch.cuda.max_memory_allocated() / 2**30, (total - free1) / 2**30, total / 2**30, setup
 
 
 def _spent(path, key):
@@ -63,12 +64,19 @@ def _spent(path, key):
 def main():
     import tempfile
     t_pf0 = time.monotonic(); prep = _preload()
+    fits={}
     with tempfile.TemporaryDirectory(dir=str(SB)) as td:
-        d1 = Path(td) / "m1"; d2 = Path(td) / "m2"; d1.mkdir(); d2.mkdir()
-        w1, pk1, gu1, total = _measured_fit(W1, d1)
-        w2, pk2, gu2, _ = _measured_fit(W2, d2)
+        for arm in V.ARMS:
+            d1=Path(td)/(arm+'-m1');d2=Path(td)/(arm+'-m2');d1.mkdir();d2.mkdir()
+            w1,pk1,gu1,total,s1=_measured_fit(arm,W1,d1)
+            w2,pk2,gu2,_,s2=_measured_fit(arm,W2,d2)
+            assert math.isfinite(w1) and math.isfinite(w2) and w2>w1>0, 'invalid measured windows'
+            fits[arm]={'short_s':w1,'long_s':w2,'setup_s':max(s1,s2)+prep,'per_step_s':max((w2-w1)/(W2-W1),w2/W2),'proc_peak_gib':max(pk1,pk2),'global_peak_gib':max(gu1,gu2)}
+    # Conservatively admit every arm using the slowest observed rate and largest measured setup.
+    slow=max(fits.values(),key=lambda r:r['per_step_s']);w1=slow['short_s'];w2=slow['long_s']
+    pk1=pk2=max(r['proc_peak_gib'] for r in fits.values());gu1=gu2=max(r['global_peak_gib'] for r in fits.values())
     assert math.isfinite(w1) and math.isfinite(w2) and w2 > w1 > 0, "non-finite/degenerate windows — stop"
-    per_step = max((w2 - w1) / (W2 - W1), w2 / W2); setup = max(0.0, w1 - per_step * W1) + prep    # include real setup/PERM/load
+    per_step = max((w2 - w1) / (W2 - W1), w2 / W2); setup = max(r["setup_s"] for r in fits.values()) + max(0.0, w1 - per_step * W1)    # include real setup/PERM/load
     assert math.isfinite(per_step) and per_step > 0, "non-finite/nonpositive per-step — stop"
     itps = 1.0 / per_step
     spe = math.ceil((V.N * 15) / V.BLOCK_POS); n_epochs = math.ceil(V.DOSE / spe)
@@ -82,7 +90,7 @@ def main():
               "three_arms_fit_window": bool(all_arms <= win_room), "three_arms_fit_deadline": bool((all_arms + 60) <= deadline_room),
               "global_vram_lt_30gb": bool(peak_global < 30.0)}
     R = {"schema": "card034-preflight-2026-09-12", "at": dt.datetime.now(dt.timezone.utc).isoformat(),
-         "engine": "card034_engine.GroupedEngine (production)", "windows": {str(W1): w1, str(W2): w2}, "preload_wall_s": prep,
+         "engine": "card034_engine.GroupedEngine (production)", "per_arm_measured_fits":fits, "windows": {str(W1): w1, str(W2): w2}, "preload_wall_s": prep,
          "per_step_s": per_step, "setup_s": setup, "it_per_s": itps, "dose": V.DOSE, "n_arms": N_ARMS,
          "steps_per_epoch_est": spe, "n_epochs_est": n_epochs, "per_arm_estimate_s": per_arm, "per_arm_cap_s": PER_ARM_CAP,
          "three_arms_s": all_arms, "gpu_cap_s": GPU_CAP, "card_spent_s": card_spent, "cap_room_s": cap_room,
@@ -91,6 +99,7 @@ def main():
          "note": "Real production engine + FULL checkpoint payload; conservative per_step=max(slope, long whole-fit "
                  "avg); setup includes graph/PERM/substrate load. No fallback; degenerate/overflow STOPS; no truncation.",
          "PASS": bool(all(checks.values())), "checks": checks}
+    R["runtime_manifest_sha256"]=V.full_sha(V.runtime_manifest_path(ROOT))
     (OC / "card034-preflight.json").write_text(json.dumps(R, indent=2))
     print(json.dumps({k: R[k] for k in ("per_step_s", "per_arm_estimate_s", "three_arms_s", "cap_room_s", "PASS")}, indent=1), flush=True)
     return 0 if R["PASS"] else 3

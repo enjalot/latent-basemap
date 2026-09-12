@@ -49,7 +49,7 @@ def _run(arm, short, seed=SEED, coeff=None, resume_from=None, ckpt_targets=(), c
             s = engine.success
             if pending and ckpt_dir: torch.save(engine.ckpt_dict(sampler, True), Path(ckpt_dir) / f"ckpt-epoch{sampler.epoch}.pt"); pending = False
             if s in ckpt_targets and ckpt_dir: torch.save(engine.ckpt_dict(sampler, True), Path(ckpt_dir) / f"ckpt-step{s}.pt")
-    return V.state_sha(engine.model.state_dict()), engine.final_beta()
+    return V.state_sha(engine.model.state_dict()), engine.final_beta(), engine.ckpt_dict(sampler,True)
 
 
 def main():
@@ -57,18 +57,27 @@ def main():
     import tempfile
     for arm in V.ARMS:
         with tempfile.TemporaryDirectory(dir=str(SB)) as td:
-            sha_full, beta_full = _run(arm, SHORT, ckpt_targets={STEP_AT, EPOCH_STEP}, ckpt_dir=td)
+            sha_full, beta_full, full = _run(arm, SHORT, ckpt_targets={STEP_AT, EPOCH_STEP}, ckpt_dir=td)
             step_ck = Path(td) / f"ckpt-step{STEP_AT}.pt"; epoch_ck = sorted(Path(td).glob("ckpt-epoch*.pt"))
             assert step_ck.exists() and epoch_ck, f"{arm} checkpoints not written"
             # (a) MID-EPOCH resume bitwise
-            sha_mid, beta_mid = _run(arm, SHORT, resume_from=step_ck, ckpt_dir=td)
+            sha_mid, beta_mid, mid = _run(arm, SHORT, resume_from=step_ck, ckpt_dir=td)
             R[f"{arm}_midepoch_resume_bitwise"] = bool(sha_mid == sha_full)
             R[f"{arm}_midepoch_scalar_recovered"] = bool((beta_full is None and beta_mid is None) or abs(beta_mid - beta_full) < 1e-12)
             # (b) EPOCH-BOUNDARY resume crossing a LATER boundary, bitwise
-            sha_ep, beta_ep = _run(arm, SHORT, resume_from=epoch_ck[0], ckpt_dir=td)
+            sha_ep, beta_ep, ep = _run(arm, SHORT, resume_from=epoch_ck[0], ckpt_dir=td)
             R[f"{arm}_epoch_resume_crosses_bitwise"] = bool(sha_ep == sha_full)
+            # Compare full state, not only output weights. Probe stats include identical skipped attempts.
+            def same(a,b):
+                if torch.is_tensor(a):return torch.equal(a.cpu(),b.cpu())
+                if isinstance(a,np.ndarray):return np.array_equal(a,b)
+                if isinstance(a,dict):return a.keys()==b.keys() and all(same(a[k],b[k]) for k in a)
+                if isinstance(a,(list,tuple)):return len(a)==len(b) and all(same(x,y) for x,y in zip(a,b))
+                return a==b
+            R[f"{arm}_midepoch_full_state_bitwise"]=same(full,mid)
+            R[f"{arm}_epoch_full_state_bitwise"]=same(full,ep)
             # (c) deep payload validation succeeds on a real ckpt
-            V.validate_ckpt_payload(torch.load(step_ck, map_location="cpu", weights_only=False), arm, ROOT, _ident(arm, SEED, (V.calibrated_coeff() if arm == "grouped_infonce" else 1.0)), V.N, expect_beta=(arm == "grouped_nce"), expect_step=STEP_AT)
+            V.validate_ckpt_payload(torch.load(step_ck, map_location="cpu", weights_only=False), arm, ROOT, _ident(arm, SEED, (V.calibrated_coeff() if arm == "grouped_infonce" else 1.0)), V.N, expect_beta=(arm == "grouped_nce"), expect_step=STEP_AT, model_sd=_WARM, expect_perm_len=SUBSET)
             R[f"{arm}_deep_payload_valid"] = True
             if arm == "grouped_nce": R["nce_scalar_moved"] = bool(beta_full is not None and abs(beta_full) > 0)
 
@@ -77,10 +86,14 @@ def main():
                     _run(arm, SHORT, resume_from=step_ck, ckpt_dir=td, **ov); return False
                 except AssertionError: return True
                 except Exception: return False
+            ck=torch.load(step_ck,map_location='cpu',weights_only=False)
+            assert 0<ck['global_step']<SHORT
+            R[f"{arm}_genuine_midrun"]=True
             R[f"{arm}_wrong_seed_rejected"] = _reject(seed=SEED + 1)
             R[f"{arm}_wrong_coeff_rejected"] = _reject(coeff=(1.0 if arm == "grouped_infonce" else 2.0))
             R[f"{arm}_wrong_objective_rejected"] = _reject(ident_override={"arm": "grouped_umap" if arm != "grouped_umap" else "grouped_nce"})
 
+    R["runtime_manifest_sha256"]=V.full_sha(V.runtime_manifest_path(ROOT))
     keys = [k for k in R if isinstance(R[k], bool)]
     R["PASS"] = bool(all(R[k] for k in keys) and len(keys) >= 6 * len(V.ARMS))
     (OC / "card034-canary.json").write_text(json.dumps(R, indent=1)); print(json.dumps(R, indent=1), flush=True)

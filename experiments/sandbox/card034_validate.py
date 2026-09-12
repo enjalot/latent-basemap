@@ -96,7 +96,7 @@ def expected_identity(arm, ROOT):
 def validate_ckpt_payload(ck, arm, ROOT, identity, n_nodes, expect_beta, expect_step=None, model_sd=None, expect_perm_len=None):
     """Deep canonical checkpoint validation (items 4/5). Adam groups LR/WD + per-parameter finite moments whose
     SHAPES match the actual parameters (incl. the scalar), correct step counter; scalar param/value; scaler
-    STRUCTURE (finite positive scale + growth_tracker); CPU/CUDA RNG STRUCTURE (uint8 tensor / list of uint8
+    STRUCTURE (finite positive scale + _growth_tracker); CPU/CUDA RNG STRUCTURE (uint8 tensor / list of uint8
     tensors); full valid sampler permutation of the EXPECTED length + cursor/epoch + numpy generator-state
     STRUCTURE; live (== global_step) stats; finite model. Reused BEFORE restore and at completion. Raises on
     any drift."""
@@ -109,7 +109,8 @@ def validate_ckpt_payload(ck, arm, ROOT, identity, n_nodes, expect_beta, expect_
     assert int(ts.get("positive_lr_optimizer_steps", -1)) == gs, "stale/zero checkpoint stats (must equal global_step)"
     ck_model = ck["model"]; assert all(bool(torch.isfinite(t).all()) for t in ck_model.values()), "nonfinite model in ckpt"
     # actual ordered parameter shapes (model params in state_dict order, then the scalar) for moment mapping
-    ref = model_sd if model_sd is not None else ck_model
+    ref = model_sd if model_sd is not None else expected_model_state()
+    assert set(ck_model)==set(ref) and all(ck_model[k].shape==ref[k].shape for k in ref), "model parameter keys/shapes mismatch"
     param_shapes = [tuple(v.shape) for v in ref.values()]
     if expect_beta: param_shapes.append(())                       # scalar beta has shape ()
     opt = ck.get("optimizer", {}); groups = opt.get("param_groups", []); state = opt.get("state", {})
@@ -122,26 +123,39 @@ def validate_ckpt_payload(ck, arm, ROOT, identity, n_nodes, expect_beta, expect_
         assert len(groups) == 1, "unexpected extra optimizer group"
     pids = [i for g in groups for i in g["params"]]
     assert len(pids) == len(set(pids)) == len(param_shapes) and set(pids) == set(state), "optimizer parameter identity/count"
-    for j, pid in enumerate(sorted(state)):
+    for j, pid in enumerate(pids):
         st = state[pid]; assert all(k in st for k in ("step", "exp_avg", "exp_avg_sq")), "missing Adam moments"
         assert float(st["step"]) == gs, "Adam step counter != successful dose"
         want = torch.Size(param_shapes[j])                        # moment shape == actual parameter shape
         assert tuple(st["exp_avg"].shape) == tuple(want) and tuple(st["exp_avg_sq"].shape) == tuple(want), "Adam moment shape != parameter shape"
         assert bool(torch.isfinite(st["exp_avg"]).all()) and bool(torch.isfinite(st["exp_avg_sq"]).all()), "nonfinite Adam moment"
     # scaler structure
-    sc = ck.get("scaler", {}); assert isinstance(sc, dict) and "scale" in sc and "growth_tracker" in sc, "scaler structure"
+    sc = ck.get("scaler", {}); assert isinstance(sc, dict) and "scale" in sc and "_growth_tracker" in sc, "scaler structure"
     _scale = float(sc["scale"]); assert np.isfinite(_scale) and _scale > 0, "scaler scale not finite positive"
+    assert int(sc["_growth_tracker"]) >= 0 and float(sc["growth_factor"]) > 1 and 0 < float(sc["backoff_factor"]) < 1 and int(sc["growth_interval"]) > 0, "invalid scaler settings"
     # RNG structure
-    tr = ck.get("torch_rng"); assert torch.is_tensor(tr) and tr.dtype == torch.uint8, "torch RNG structure"
-    cr = ck.get("cuda_rng"); assert isinstance(cr, (list, tuple)) and len(cr) >= 1 and all(torch.is_tensor(x) and x.dtype == torch.uint8 for x in cr), "cuda RNG structure"
+    tr = ck.get("torch_rng"); assert torch.is_tensor(tr) and tr.dtype == torch.uint8 and tr.ndim==1 and tr.numel()==torch.get_rng_state().numel(), "torch RNG structure"
+    cr = ck.get("cuda_rng"); assert isinstance(cr, (list, tuple)) and len(cr) >= 1 and all(torch.is_tensor(x) and x.dtype == torch.uint8 and x.ndim==1 and x.numel()>=16 for x in cr), "cuda RNG structure"
     # sampler permutation + cursor/epoch + generator-state structure
     ss = ck.get("sampler_state", {}); perm = np.asarray(ss.get("perm"))
     assert perm.ndim == 1 and perm.shape[0] > 0 and np.array_equal(np.sort(perm), np.arange(perm.shape[0])), "sampler perm not a valid permutation"
-    if expect_perm_len is not None: assert perm.shape[0] == int(expect_perm_len), f"perm length {perm.shape[0]} != {expect_perm_len}"
+    if expect_perm_len is None: expect_perm_len=n_nodes*15
+    assert perm.shape[0] == int(expect_perm_len), f"perm length {perm.shape[0]} != {expect_perm_len}"
     assert 0 <= int(ss["cursor"]) <= perm.shape[0] and int(ss["epoch"]) >= 0, "sampler cursor/epoch"
     for gk in ("perm_gen", "noise_gen"):
-        assert isinstance(ss.get(gk), dict) and "bit_generator" in ss[gk], f"sampler {gk} generator-state structure"
+        assert isinstance(ss.get(gk), dict) and ss[gk].get("bit_generator")=="PCG64", f"sampler {gk} generator-state structure"
+        gen=np.random.default_rng();gen.bit_generator.state=ss[gk]  # real deserialization before restore
+    assert int(ss["epoch"])==ck["epoch"], "epoch/sampler mismatch"
+    expected_coeff=identity.get("infonce_coeff") or identity.get("coeff") or 1.0
+    assert float(ck["coeff"])==float(expected_coeff), "payload coefficient mismatch"
     return True
+
+
+def expected_model_state():
+    import torch
+    state=torch.load(INIT,map_location='cpu',weights_only=False)['model_state']
+    assert state_sha(state)==INIT_SHA, 'warm-init actual tensors changed'
+    return state
 
 
 def strict_validate_arm(arm, ROOT, base=None):
@@ -186,8 +200,9 @@ def strict_validate_arm(arm, ROOT, base=None):
             ck = torch.load(p, map_location="cpu", weights_only=False)
         except Exception as e:
             raise AssertionError(f"corrupt step checkpoint {s}: {e!r}")
-        validate_ckpt_payload(ck, arm, ROOT, exp, N, expect_beta, expect_step=s, model_sd=ck["model"], expect_perm_len=N * 15)   # DEEP
+        validate_ckpt_payload(ck, arm, ROOT, exp, N, expect_beta, expect_step=s, model_sd=expected_model_state(), expect_perm_len=N * 15)   # DEEP
         assert bool(ck.get("step_checkpoint")), f"ckpt {s} not marked step_checkpoint"
+        assert p.stat().st_mtime>=ad_mtime, "stale step checkpoint"
         msha = state_sha(ck["model"])
         if s in snap_sha: assert msha == snap_sha[s], f"step ckpt {s} model payload != snapshot"
         ck_receipt[s] = msha
@@ -196,12 +211,20 @@ def strict_validate_arm(arm, ROOT, base=None):
     assert epoch_cks, f"{arm}: no epoch checkpoint"
     for ep_p in epoch_cks:
         eck = torch.load(ep_p, map_location="cpu", weights_only=False)
-        validate_ckpt_payload(eck, arm, ROOT, exp, N, expect_beta, model_sd=eck["model"], expect_perm_len=N * 15)   # coherent full state
+        assert ep_p.stat().st_mtime>=ad_mtime, "stale epoch checkpoint"
+        validate_ckpt_payload(eck, arm, ROOT, exp, N, expect_beta, model_sd=expected_model_state(), expect_perm_len=N * 15)   # coherent full state
+    assert ck["train_stats"]==ts, "final checkpoint stats != manifest"
     # init payload hash: manifest must record the hash of the actual warm tensors == INIT_SHA (not trusted metadata)
-    assert man.get("init_payload_sha256") == INIT_SHA, f"{arm}: init payload hash not verified/recorded"
+    assert adm.get("init_payload_sha256")==INIT_SHA and man.get("init_payload_sha256") == INIT_SHA, f"{arm}: init payload hash not verified/recorded"
 
     # recorded 9:1 exposure at BOTH attempted-step and successful-step probes (AMP differences kept honest)
     succ_probes = ts.get("exposure_probes", []); att_probes = ts.get("attempted_probes", [])
+    assert [q.get('step') for q in succ_probes]==[1,30000,60000], 'wrong/missing successful probes'
+    assert [q.get('attempted_step') for q in att_probes]==[1,30000,60000], 'wrong/missing attempted probes'
+    assert ts['attempted_steps']==DOSE+ts['amp_skips']+ts['nonfinite_skips'], 'attempt/skip count mismatch'
+    assert ts['successful_noise']==9*ts['successful_positive'] and ts['attempted_noise']==9*ts['attempted_positive'], 'actual exposure not9:1'
+    assert 0<ts['successful_positive']<=ts['attempted_positive']<=ts['attempted_steps']*BLOCK_POS, 'invalid actual exposure'
+
     assert succ_probes and all(abs(float(q.get("noise_per_pos", -1)) - N_NOISE) < 1e-9 and q.get("id_digest") for q in succ_probes), f"{arm}: successful-step 9:1 exposure not recorded/violated"
     assert att_probes and all(abs(float(q.get("noise_per_pos", -1)) - N_NOISE) < 1e-9 and q.get("id_digest") for q in att_probes), f"{arm}: attempted-step 9:1 exposure not recorded/violated"
     # scalar exposure (nce): beta must have moved

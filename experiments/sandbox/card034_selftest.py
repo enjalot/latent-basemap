@@ -16,6 +16,8 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[2]
 V.N = 64
+# Explicit reduced-shape fixture; production uses real bound init tensors.
+V.expected_model_state=lambda:_sd(0)
 _GEN = np.random.default_rng(0).bit_generator.state
 
 
@@ -46,7 +48,7 @@ def _ckpt(arm, s, ident, model_sd):
     GS_HOLDER[0] = s; nce = (arm == "grouped_nce")
     return {"schema": "card034-ckpt-2026-09-12", "arm": arm, "mode": V.MODE[arm], "global_step": s, "epoch": 1,
             "step_checkpoint": True, "identity": ident, "coeff": ident.get("infonce_coeff") or 1.0, "model": model_sd,
-            "optimizer": _adam_state(model_sd, nce), "scaler": {"scale": 65536.0, "growth_tracker": 0},
+            "optimizer": _adam_state(model_sd, nce), "scaler": torch.amp.GradScaler("cpu",enabled=True).state_dict(),
             "beta": (torch.tensor(0.03) if nce else None), "sampler_state": _sampler_state(),
             "torch_rng": torch.get_rng_state(), "cuda_rng": [torch.zeros(16, dtype=torch.uint8)],
             "train_stats": {"positive_lr_optimizer_steps": s}}
@@ -69,7 +71,9 @@ def build(base, arm):
            "final_beta": fb, "infonce_coeff": ident.get("infonce_coeff"),
            "pipeline_receipt": {"x_residency": "device_fp16", "device": "cuda:0", "dtype": "torch.float16", "shape": [V.N, 1536], "verified": True},
            "trained_sha256": V.state_sha(snap[60000]), "loaded_modules": {"verified_frozen_runtime": True, "all_basemap_under_root": True}}
-    (td / f"admission-{arm}.json").write_text(json.dumps({"arm": arm, "identity": ident, "warm_init_sha256": V.INIT_SHA}))
+    ts=man['train_stats'];ts.update(attempted_steps=V.DOSE,amp_skips=0,nonfinite_skips=0,successful_positive=V.DOSE*100,successful_noise=V.DOSE*900,attempted_positive=V.DOSE*100,attempted_noise=V.DOSE*900)
+    final_path=td/arm/'ckpts/ckpt-step60000.pt';final=torch.load(final_path,weights_only=False);final['train_stats']=dict(ts);torch.save(final,final_path)
+    (td / f"admission-{arm}.json").write_text(json.dumps({"arm": arm, "identity": ident, "warm_init_sha256": V.INIT_SHA, "init_payload_sha256": V.INIT_SHA}))
     os.utime(td / f"admission-{arm}.json", (0, 0)); (td / f"manifest-{arm}.json").write_text(json.dumps(man))
     return td
 
@@ -127,6 +131,15 @@ def main():
     results.append(expect_fail(base, NC, lambda td: _man(td, NC, final_beta=0.0), "nce scalar never moved"))
     results.append(expect_fail(base, NC, lambda td: _edit_ck(td, NC, "ckpt-step40000.pt", lambda c: c.__setitem__("beta", None)), "nce ckpt missing scalar"))
 
+    for label,mut in [
+        ('wrong moment shape',lambda c:c['optimizer']['state'][0].__setitem__('exp_avg',torch.zeros(1))),
+        ('malformed CPU RNG',lambda c:c.__setitem__('torch_rng',torch.zeros(16,dtype=torch.uint8))),
+        ('wrong permutation length',lambda c:c['sampler_state'].__setitem__('perm',np.arange(63))),
+        ('invalid generator content',lambda c:c['sampler_state']['noise_gen'].__setitem__('state',{})),
+        ('old invented scaler key',lambda c:c['scaler'].__setitem__('growth_tracker',c['scaler'].pop('_growth_tracker'))),
+        ('payload coefficient drift',lambda c:c.__setitem__('coeff',3.0)),
+    ]:
+        results.append(expect_fail(base,A,lambda td,m=mut:_edit_ck(td,A,'ckpt-step40000.pt',m),label))
     shutil.rmtree(base, ignore_errors=True)
     out = {"schema": "card034-selftest-2026-09-12", "PASS": True, "n_cases": len(results), "results": results}
     (V.OC / "card034-selftest.json").write_text(json.dumps(out, indent=1)); print(json.dumps(out, indent=1), flush=True)
