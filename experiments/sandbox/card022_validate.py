@@ -26,7 +26,7 @@ BANK_X_SHA256 = "62014603c2120df04fd799079172c6107e0a3d23b0a758909e48404d391e353
 BANK_TAU_SHA256 = "47c551c77d415acba554a2737f4aa381f9c5d7b3a3429089d8a69dd3e9664f4b"
 EPSILON = 2.0141069984559376e-10
 N = 300000; DIM = 1536; NC = 2; DOSE = 60000; LR = 1e-4; BATCH = 16384; POS_RATIO = 0.1
-RANKNEG = 75000; SEED = 42; CENTERS_PER_STEP = 16
+RANKNEG = 75000; SEED = 42; CENTERS_PER_STEP = 16; SHAPE_SAMPLER_SEED = SEED + 20220512  # core: random_state + 20220512
 SNAP_STEPS = [20000, 40000, 60000]; STEP_CKPTS = [20000, 40000, 60000]
 ARMS = ["ordinary", "shape_floor"]
 KERNEL = {"ordinary": "baseline continuation 2D", "shape_floor": "covariance-floor relu(tau-q)^2 2D"}
@@ -86,11 +86,12 @@ def expected_identity(arm, ROOT):
     if arm == "shape_floor":
         common.update({"shape_bank_X_sha256": BANK_X_SHA256, "shape_bank_tau_sha256": BANK_TAU_SHA256,
                        "shape_bank_manifest_sha256": full_sha(BANK_MANIFEST), "epsilon": EPSILON,
-                       "shape_centers_per_step": CENTERS_PER_STEP, "shape_weight": calibrated_weight()})
+                       "shape_centers_per_step": CENTERS_PER_STEP, "shape_sampler_seed": SHAPE_SAMPLER_SEED,
+                       "shape_weight": calibrated_weight()})
     else:
         common.update({"shape_bank_X_sha256": None, "shape_bank_tau_sha256": None,
                        "shape_bank_manifest_sha256": None, "epsilon": None,
-                       "shape_centers_per_step": None, "shape_weight": 0.0})
+                       "shape_centers_per_step": None, "shape_sampler_seed": None, "shape_weight": 0.0})
     return common
 
 

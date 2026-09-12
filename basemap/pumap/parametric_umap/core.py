@@ -29,13 +29,14 @@ def shape_floor_q(z_clouds, eps):
 
     z_clouds: (m, k, d) mapped coordinates (per-cloud k rows). Centering makes q translation-invariant;
     eigenvalues make it rotation-invariant; lambda_min/trace is exactly scale-invariant except for the +eps
-    floor (scale invariance is therefore APPROXIMATE near the floor, as documented). Computed in the dtype of
-    z_clouds — callers pass FP32 (or FP64) even when forward matmuls are mixed precision. Returns q: (m,).
+    floor (scale invariance is therefore APPROXIMATE near the floor, as documented). Covariance is normalized
+    by k (÷16), matching the Card022 bank/instrument tau convention ("eig covariance /16"). Callers pass FP64
+    for the covariance/eigenvalue computation even when forward matmuls are mixed precision. Returns q: (m,).
     NOTE: this smooth ratio has ZERO first-order escape gradient at an EXACTLY rank-one (or constant) cloud;
     the useful-gradient regime is thin-but-nonzero minor variance. No jitter is added here."""
     k = z_clouds.shape[1]
     zc = z_clouds - z_clouds.mean(dim=1, keepdim=True)
-    C = torch.matmul(zc.transpose(1, 2), zc) / (k - 1)
+    C = torch.matmul(zc.transpose(1, 2), zc) / k                    # /16 convention (matches frozen tau)
     ev = torch.linalg.eigvalsh(C)                                   # ascending
     return ev[:, 0] / (C.diagonal(dim1=1, dim2=2).sum(dim=1) + eps)
 
@@ -2348,12 +2349,14 @@ class ParametricUMAP:
         # The bank carries its OWN cloud input vectors X (ncent,16,dim) fp16 [row 0 = center, then the 15
         # original nonself graph neighbors; exact stored fp16, cast fp32 without renorm] and tau (ncent,)
         # frozen from the ENCODER clouds. Off (attr unset / weight 0) ⇒ run unchanged.
+        self._shape_bank_dev = None     # RESET first: a reused instance must not leak a stale bank
         _sbank = getattr(self, "_shape_bank", None)
         if _sbank is not None and float(getattr(self, "_shape_weight", 0.0) or 0.0) > 0.0:
             import torch as _t
             _bx = _t.as_tensor(np.asarray(_sbank["X"], np.float16), device=self.device)
             _tau = _t.as_tensor(np.asarray(_sbank["tau"], np.float32), device=self.device)
-            assert _bx.ndim == 3 and _bx.shape[1] == 16, "shape bank X must be (ncent,16,dim)"
+            assert _bx.ndim == 3 and _bx.shape[1] == 16, "shape bank X must be (ncent,16,dim)"     # fail-closed
+            assert bool(_t.isfinite(_bx).all()), "shape bank X not finite"
             assert _tau.shape[0] == _bx.shape[0] and bool(_t.isfinite(_tau).all()) and bool((_tau > 0).all()), "shape tau invalid"
             self._shape_bank_dev = {"X": _bx, "tau": _tau}
 
@@ -2713,33 +2716,35 @@ class ParametricUMAP:
                     _m = int(getattr(self, "_shape_centers_per_step", 16))
                     _sel = torch.randint(0, _ncent, (_m,), generator=shape_gen, device=self.device)
                     _cl = _bank["X"].index_select(0, _sel)                          # (m,16,dim) fp16, resident bank
-                    _tau = _bank["tau"].index_select(0, _sel).to(torch.float32)     # (m,)
+                    _tau = _bank["tau"].index_select(0, _sel).to(torch.float64)     # (m,) FP64
                     _feats = _cl.reshape(_m * _k, _cl.shape[2])                     # flatten; cloud groups retained
                     with torch.autocast(device_type='cuda' if use_amp else 'cpu', enabled=bool(use_amp), dtype=amp_dtype):
                         _z = self.model(_feats)
-                    _z = _z.float().reshape(_m, _k, self.n_components)              # FP32 regardless of AMP
+                    _z = _z.double().reshape(_m, _k, self.n_components)             # FP64 covariance/eig regardless of AMP
                     _shape_loss = shape_floor_loss(_z, _tau, float(self._shape_eps))
                     loss = loss + float(self._shape_weight) * _shape_loss
                     shape_loss_val = _shape_loss.item() if use_wandb else 0.0
 
-                    # Card022 calibration probe (opt-in; default-off): capture the ORDINARY pairwise-loss
-                    # gradient global-L2 and the (unweighted) shape-gradient global-L2 at the SAME starting
-                    # head on the same actual-recipe batch, for _calib_probe["n"] steps. No optimizer step is
-                    # taken for the recorded steps (we stop after n). Uses this run's random_state as the
-                    # disjoint, recorded calibration RNG.
-                    if getattr(self, "_calib_probe", None) is not None and len(self._calib_records) < int(self._calib_probe["n"]):
+                    # Card022 calibration probe (opt-in; default-off): capture the ORDINARY pairwise-loss and
+                    # the (unweighted) shape-gradient global-L2 norms at the SAME FIXED starting head, on
+                    # _calib_probe["n"] distinct actual-recipe batches. NO optimizer step is taken for ANY
+                    # recorded batch — the loader is advanced but the head NEVER updates — so all n ratios are
+                    # measured at the pristine parent head. Uses this run's random_state as the disjoint,
+                    # recorded calibration RNG.
+                    if getattr(self, "_calib_probe", None) is not None:
                         _cp = [p for p in self.model.parameters() if p.requires_grad]
                         _gp = torch.autograd.grad(umap_loss, _cp, retain_graph=True, allow_unused=True)
                         _gs = torch.autograd.grad(_shape_loss, _cp, retain_graph=True, allow_unused=True)
-                        _gpn = float(torch.sqrt(sum((g.float() ** 2).sum() for g in _gp if g is not None)))
-                        _gsn = float(torch.sqrt(sum((g.float() ** 2).sum() for g in _gs if g is not None)))
-                        self._calib_records.append({"step": int(global_step), "grad_pairwise_l2": _gpn, "grad_shape_l2": _gsn})
+                        _gpn = float(torch.sqrt(sum((g.double() ** 2).sum() for g in _gp if g is not None)))
+                        _gsn = float(torch.sqrt(sum((g.double() ** 2).sum() for g in _gs if g is not None)))
+                        self._calib_records.append({"batch": len(self._calib_records),
+                                                    "grad_pairwise_l2": _gpn, "grad_shape_l2": _gsn})
+                        _fwd_ph.__exit__(None, None, None)
                         if len(self._calib_records) >= int(self._calib_probe["n"]):
-                            self._train_stats["stop_reason"] = "calib_probe_done"; stop_training = True
+                            self._train_stats["stop_reason"] = "calib_probe_done"; stop_training = True; break
+                        batch = _get_next(); pbar.update(1); continue    # advance loader; NO optimizer update (fixed head)
 
                 _fwd_ph.__exit__(None, None, None)   # S2: close forward+loss phase
-                if getattr(self, "_calib_probe", None) is not None and stop_training:
-                    break   # calibration probe complete: stop before any optimizer step corrupts the head
 
                 if not torch.isfinite(loss):
                     consecutive_nonfinite_losses += 1

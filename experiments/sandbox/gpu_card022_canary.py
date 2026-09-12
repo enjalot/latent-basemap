@@ -36,7 +36,7 @@ def _identity(arm, weight, bank_sha, seed):
     return {"card": "card022-canary", "arm": arm, "weight": float(weight), "bank_sha": bank_sha, "seed": int(seed)}
 
 
-def _run(arm, weight, seed=SEED, resume_from=None, ckpt_targets=None, ckpt_dir=None):
+def _run(arm, weight, seed=SEED, resume_from=None, ckpt_targets=None, ckpt_dir=None, force_bank=False):
     torch.manual_seed(seed); np.random.seed(seed); torch.cuda.manual_seed_all(seed)
     p = ParametricUMAP.load(str(PARENT), device="cuda"); p.model = None
     p.learning_rate = V.LR; p.lr_schedule = "constant"; p.batch_size = V.BATCH; p.warmup_steps = 0
@@ -46,9 +46,11 @@ def _run(arm, weight, seed=SEED, resume_from=None, ckpt_targets=None, ckpt_dir=N
                  ("replay_weight", 0.0), ("deriv_bank_path", ""), ("deriv_weight", 0.0)):
         if hasattr(p, a): setattr(p, a, v)
     bank_sha = None
-    if weight > 0:
-        p._shape_bank = {"X": _BANK["X"], "tau": _BANK["tau"]}; p._shape_weight = float(weight)
-        p._shape_eps = float(V.EPSILON); p._shape_centers_per_step = V.CENTERS_PER_STEP; bank_sha = _BANK["sha"]
+    if weight > 0 or force_bank:      # force_bank configures the bank even at weight 0 (real OFF-parity test)
+        p._shape_bank = {"X": _BANK["X"], "tau": _BANK["tau"]}
+        p._shape_eps = float(V.EPSILON); p._shape_centers_per_step = V.CENTERS_PER_STEP
+        if weight > 0: bank_sha = _BANK["sha"]
+    p._shape_weight = float(weight)
     p._card012_identity = _identity(arm, weight, bank_sha, seed)
     if ckpt_targets: p._checkpoint_step_targets = set(ckpt_targets)
     kw = {}
@@ -65,9 +67,12 @@ def _run(arm, weight, seed=SEED, resume_from=None, ckpt_targets=None, ckpt_dir=N
 def main():
     global _BANK
     _prep(); R = {"schema": "card022-canary-2026-09-12", "short_dose": SHORT, "ckpt_at": CKPT_AT, "bank_sha": _BANK["sha"]}
-    sha_base = _run("ordinary", 0.0)                       # hook attrs unset (weight 0 ⇒ no bank/gen/forward)
-    sha_w0 = _run("ordinary", 0.0)                         # identical config; OFF is deterministic
-    R["off_bitwise_identical"] = bool(sha_base == sha_w0)
+    sha_unset = _run("ordinary", 0.0)                      # hook attrs unset (no bank configured)
+    sha_bankw0 = _run("ordinary", 0.0, force_bank=True)    # REAL bank configured but weight 0 (no upload/gen/forward)
+    R["off_bitwise_identical"] = bool(sha_unset == sha_bankw0)   # configured-bank/weight0 == unset (real OFF parity + RNG parity)
+    sha_rerun = _run("ordinary", 0.0)                      # deterministic rerun — a SEPARATE check
+    R["deterministic_rerun"] = bool(sha_rerun == sha_unset)
+    sha_base = sha_unset
     sha_on = _run("shape_floor", 1.0)
     R["on_diverges"] = bool(sha_on != sha_base)
 
@@ -100,7 +105,7 @@ def main():
         good = _BANK; _BANK = {"X": good["X"][:256], "tau": good["tau"][:256], "sha": hashlib.sha256(good["X"][:256].tobytes()).hexdigest()[:16]}
         R["wrong_bank_rejected"] = _reject("shape_floor", 1.0, SEED); _BANK = good
 
-    keys = ["off_bitwise_identical", "on_diverges", "ckpt_step_in_range", "ckpt_step_flag", "ckpt_identity_bound",
+    keys = ["off_bitwise_identical", "deterministic_rerun", "on_diverges", "ckpt_step_in_range", "ckpt_step_flag", "ckpt_identity_bound",
             "ckpt_has_shape_gen", "ckpt_model_finite", "resume_twin_bitwise", "wrong_weight_rejected",
             "wrong_seed_rejected", "wrong_arm_rejected", "wrong_bank_rejected"]
     R["PASS"] = bool(all(R[k] for k in keys))

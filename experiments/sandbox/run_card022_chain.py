@@ -19,7 +19,7 @@ OC = V.OC; PY = "/home/enjalot/code/latent-basemap/.venv/bin/python"
 CARD = OC / "card022-ledger.json"; WIN = OC / "cards-24h-window-ledger.json"
 END = dt.datetime.fromisoformat("2026-09-13T01:52:44+00:00").timestamp()
 CAP = 4500; WIN_CAP = 86400; DOSE = V.DOSE
-CALIB_CAP = 900; CANARY_CAP = 1200; ARM_TAIL_RESERVE = 200.0; DEFAULT_ITPS = 40.0
+CALIB_CAP = 900; CANARY_CAP = 1200; PREFLIGHT_CAP = 700; ARM_TAIL_RESERVE = 200.0
 ARMS = ["ordinary", "shape_floor"]
 
 
@@ -44,12 +44,10 @@ def _spent(path, key):
     v = json.loads(Path(path).read_text()); x = float(v[key]); assert math.isfinite(x) and x >= 0, f"bad ledger {path}"; return x
 def _remaining(stage_cap):
     return min(stage_cap, CAP - _spent(CARD, "batch_spent_s"), WIN_CAP - _spent(WIN, "spent_s"), END - time.time())
-def _canary_itps():
-    try:
-        v = json.loads((OC / "card022-canary.json").read_text()).get("it_per_s")
-        return float(v) if v and math.isfinite(float(v)) and float(v) > 0 else DEFAULT_ITPS
-    except Exception:
-        return DEFAULT_ITPS
+def _preflight_perstep():
+    """Full-precision steady per-step from the throughput preflight. No fallback — fail closed if missing."""
+    pf = json.loads((OC / "card022-preflight.json").read_text())
+    ps = float(pf["per_step_s"]); assert math.isfinite(ps) and ps > 0, "preflight per_step invalid"; return ps
 
 
 def run_stage(tag, script, timeout):
@@ -97,8 +95,20 @@ def main():
     assert json.loads((OC / "card022-canary.json").read_text())["PASS"], "device canary FAILED"
     print("DONE device_canary", flush=True)
 
-    # 3. arms — measured admission from the canary it/s; no dose truncation
-    itps = _canary_itps(); need = DOSE / itps + ARM_TAIL_RESERVE
+    # 3. throughput preflight — full-bank 2-window steady measurement; GATES that BOTH 60K arms fit 4500s
+    to = _remaining(PREFLIGHT_CAP); assert to >= 120, f"cannot admit preflight: {to:.0f}s"
+    rc = run_stage("throughput_preflight", "gpu_card022_preflight.py", to)
+    if rc == 124:
+        atomic(OC / "card022-execution.json", {"status": "PREFLIGHT_TIMEOUT", "at": dt.datetime.now(dt.timezone.utc).isoformat()}); notify("Card022 preflight timed out; halted."); return
+    pf = json.loads((OC / "card022-preflight.json").read_text())
+    if rc == 3 or not pf.get("PASS"):
+        atomic(OC / "card022-execution.json", {"status": "PREFLIGHT_STOP", "preflight": pf, "at": dt.datetime.now(dt.timezone.utc).isoformat(),
+               "note": "Measured cost of both 60K arms does not fit the 4500s cap/window/deadline. Admission stopped; dose NOT truncated."})
+        notify("Card022 preflight STOP: both 60K arms do not fit the cap/deadline. Admission halted, no dose truncation."); return
+    assert rc == 0, f"throughput_preflight rc={rc}"
+    per_step = _preflight_perstep(); print("DONE throughput_preflight", flush=True)
+
+    # 4. arms — measured admission from the preflight steady per-step; no fallback, no dose truncation
     for arm in ARMS:
         try:
             completed.append(V.strict_validate_arm(arm, ROOT))
@@ -106,9 +116,10 @@ def main():
             print(f"SKIP {arm} (already strict-valid)", flush=True); continue
         except Exception:
             pass
+        remaining_steps = DOSE - _completed_steps(arm); need = per_step * remaining_steps + ARM_TAIL_RESERVE
         to = _remaining(CAP)
-        assert to >= need, f"cannot admit {arm}: remaining={to:.1f}s < measured need={need:.1f}s (itps={itps}); stop, no dose truncation"
-        rc = run_arm(arm, min(to, need + ARM_TAIL_RESERVE + 300))
+        assert to >= need, f"cannot admit {arm}: remaining={to:.1f}s < measured need={need:.1f}s ({remaining_steps} steps @ {per_step:.5f}s); stop, no dose truncation"
+        rc = run_arm(arm, min(to, need + 300))
         if rc == 124:
             atomic(OC / "card022-execution.json", {"status": "ARM_TIMEOUT_CHECKPOINTED", "arm": arm, "at": dt.datetime.now(dt.timezone.utc).isoformat(),
                    "note": "checkpoint preserved; re-queue resumes from latest ckpt; no dose truncation."})
