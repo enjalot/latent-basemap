@@ -79,7 +79,7 @@ def main():
     SNAPDIR = OUTD / arm; SNAPDIR.mkdir(exist_ok=True); CKPTDIR = SNAPDIR / "ckpts"; CKPTDIR.mkdir(exist_ok=True)
 
     stats = {"positive_lr_optimizer_steps": 0, "amp_skips": 0, "exposure_probes": [], "lr_used_min": LR, "lr_used_max": LR}
-    success = 0; last_epoch = 0
+    success = 0; last_epoch = 0; consec_bad = 0
 
     def _ck_state(name):
         st = {"schema": "card034-ckpt-2026-09-12", "arm": arm, "mode": V.MODE[arm], "global_step": int(success),
@@ -127,25 +127,25 @@ def main():
         with torch.autocast(device_type="cuda", dtype=torch.float16):
             head_emb = model(Xt.index_select(0, h))                                  # head forwarded ONCE
             tail_emb = model(Xt.index_select(0, tl.reshape(-1))).reshape(h.shape[0], G.GROUP, NC)
-        phi = G.phi_from_emb(head_emb.float(), tail_emb.float())                      # shared head across 10
-        if arm == "grouped_umap": loss = G.grouped_umap_loss(phi)
-        elif arm == "grouped_nce": loss = G.grouped_nce_loss(phi, beta)
-        else: loss = coeff * G.grouped_infonce_loss(phi)
-        finite = bool(torch.isfinite(loss))
-        if finite:
+        radial = G.radial_from_emb(head_emb, tail_emb)                                 # guarded FP32; shared head across 10
+        if arm == "grouped_umap": loss = G.grouped_umap_loss(radial)
+        elif arm == "grouped_nce": loss = G.grouped_nce_loss(radial, beta)
+        else: loss = coeff * G.grouped_infonce_loss(radial)
+        stepped = False
+        if bool(torch.isfinite(loss)):
             scaler.scale(loss).backward(); scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
             prev = scaler.get_scale(); scaler.step(opt); scaler.update()
-            if scaler.get_scale() >= prev:                    # not an AMP-overflow skip -> a successful positive-LR update
-                success += 1
-                if success in PROBE_STEPS:
-                    stats["exposure_probes"].append({"step": int(success), "n_pos": int(h.shape[0]), "noise_per_pos": int(tl.shape[1] - 1)})
-                if success in SNAPS: _export(SNAPDIR / f"model-step{success}.pt")
-                if success in STEP_CKPTS: _ck_state(f"step{success}")
-            else:
-                stats["amp_skips"] += 1
+            stepped = scaler.get_scale() >= prev              # not an AMP-overflow skip -> successful positive-LR update
+        if stepped:
+            consec_bad = 0; success += 1
+            if success in PROBE_STEPS:
+                stats["exposure_probes"].append({"step": int(success), "n_pos": int(h.shape[0]), "noise_per_pos": int(tl.shape[1] - 1)})
+            if success in SNAPS: _export(SNAPDIR / f"model-step{success}.pt")
+            if success in STEP_CKPTS: _ck_state(f"step{success}")
         else:
-            stats["amp_skips"] += 1
+            stats["amp_skips"] += 1; consec_bad += 1
+            assert consec_bad < 300, f"aborting: {consec_bad} consecutive non-finite/AMP-skipped steps (nonfinite not concealed)"
     wall = time.time() - t0
 
     stats["positive_lr_optimizer_steps"] = success

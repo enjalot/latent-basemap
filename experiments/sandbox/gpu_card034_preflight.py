@@ -51,7 +51,7 @@ def _measured_fit(steps, ckpt_dir):
         opt.zero_grad(set_to_none=True)
         with torch.autocast(device_type="cuda", dtype=torch.float16):
             he = model(_X.index_select(0, h)); te = model(_X.index_select(0, tl.reshape(-1))).reshape(h.shape[0], G.GROUP, V.NC)
-        loss = coeff * G.grouped_infonce_loss(G.phi_from_emb(he.float(), te.float()))
+        loss = coeff * G.grouped_infonce_loss(G.radial_from_emb(he, te))
         scaler.scale(loss).backward(); scaler.unscale_(opt); torch.nn.utils.clip_grad_norm_(model.parameters(), V.CLIP)
         prev = scaler.get_scale(); scaler.step(opt); scaler.update()
         if scaler.get_scale() >= prev:

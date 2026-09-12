@@ -48,11 +48,10 @@ def main():
         h = torch.tensor(np.asarray(X[heads], np.float16).astype(np.float32))          # stored fp16 -> fp32
         tl = torch.tensor(np.asarray(X[tails.reshape(-1)], np.float16).astype(np.float32))
         head_emb = model(h); tail_emb = model(tl).reshape(h.shape[0], G.GROUP, V.NC)
-        phi = G.phi_from_emb(head_emb, tail_emb)
-        umap_n = _grad_l2(G.grouped_umap_loss(phi), params)
+        umap_n = _grad_l2(G.grouped_umap_loss(G.radial_from_emb(head_emb, tail_emb)), params)
         # recompute phi (graph freed after grad) for the InfoNCE norm on the SAME batch
         head_emb2 = model(h); tail_emb2 = model(tl).reshape(h.shape[0], G.GROUP, V.NC)
-        info_n = _grad_l2(G.grouped_infonce_loss(G.phi_from_emb(head_emb2, tail_emb2)), params)
+        info_n = _grad_l2(G.grouped_infonce_loss(G.radial_from_emb(head_emb2, tail_emb2)), params)
         rows.append({"batch": bi, "umap_grad_l2": umap_n, "infonce_grad_l2": info_n})
 
     all_finite = all(math.isfinite(r["umap_grad_l2"]) and math.isfinite(r["infonce_grad_l2"]) and

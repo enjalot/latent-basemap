@@ -68,9 +68,9 @@ def _run(arm, short, seed=SEED, coeff=None, resume_from=None, ckpt_at=None, ckpt
         opt.zero_grad(set_to_none=True)
         with torch.autocast(device_type="cuda", dtype=torch.float16):
             he = model(_X.index_select(0, h)); te = model(_X.index_select(0, tl.reshape(-1))).reshape(h.shape[0], G.GROUP, V.NC)
-        phi = G.phi_from_emb(he.float(), te.float())
-        loss = (G.grouped_umap_loss(phi) if arm == "grouped_umap" else
-                G.grouped_nce_loss(phi, beta) if arm == "grouped_nce" else coeff * G.grouped_infonce_loss(phi))
+        radial = G.radial_from_emb(he, te)
+        loss = (G.grouped_umap_loss(radial) if arm == "grouped_umap" else
+                G.grouped_nce_loss(radial, beta) if arm == "grouped_nce" else coeff * G.grouped_infonce_loss(radial))
         scaler.scale(loss).backward(); scaler.unscale_(opt); torch.nn.utils.clip_grad_norm_(model.parameters(), V.CLIP)
         prev = scaler.get_scale(); scaler.step(opt); scaler.update()
         if scaler.get_scale() >= prev:
