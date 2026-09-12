@@ -39,6 +39,7 @@ def run(radii):
     torch.manual_seed(SEED); np.random.seed(SEED); torch.cuda.manual_seed_all(SEED)
     X = np.asarray(np.load(SUB, mmap_mode="r"), np.float32)
     p.fit(X, precomputed_edges_path=str(EDGES), random_state=SEED, verbose=False, warm_start_state=init)
+    assert p.warm_start_sha256 == "b261492f84aa24bd", "warm parameter hash mismatch"
     assert p._train_stats["positive_lr_optimizer_steps"] == SHORT
     assert p.model.proj_out.out_features == 3
     assert all(torch.isfinite(t).all() for t in p.model.state_dict().values())

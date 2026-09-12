@@ -82,7 +82,7 @@ def main():
     X = np.asarray(np.load(SUB, mmap_mode="r"), np.float32); n = X.shape[0]
     SNAPDIR = OUTD / arm; SNAPDIR.mkdir(exist_ok=True)
     admission = {"schema": "card015-admission-2026-09-12", "arm": arm, "written_before_steps": True,
-                 "n_components": 3, "shared_init_sha256": init_sha, "derived_from_2d": "589895f037d406ae",
+                 "n_components": 3, "shared_init_sha256": init_sha, "derived_from_2d": "589895f037d406ae", "init_hash_format": "sorted named state", "expected_parameter_order_warm_sha": "b261492f84aa24bd",
                  "edges_sha": _sha(EDGES), "substrate_sha": _sha(SUB), "lr": LR, "lr_schedule": "constant",
                  "batch_size": 16384, "seed": SEED, "steps": steps, "rankneg_window": 75000,
                  "radii_file": (str(R13 / RMAP[arm]) if radii is not None else None), "radii_sha": radii_sha,
@@ -98,14 +98,14 @@ def main():
     exec_steps = int(ts.get("executed_iters", 0)); assert exec_steps == steps, f"{exec_steps} != {steps}"
     assert ts.get("positive_lr_optimizer_steps") == steps, "successful dose mismatch"
     assert abs(ts.get("lr_used_min", 0) - LR) < 1e-12 and abs(ts.get("lr_used_max", 0) - LR) < 1e-12, "LR not .001"
-    assert getattr(pumap, "warm_start_sha256", None) == init_sha, "warm-start != 3D init"
+    assert getattr(pumap, "warm_start_sha256", None) == "b261492f84aa24bd", "parameter-order warm digest mismatch"
     coords = np.asarray(pumap.transform(X, batch_size=8192), np.float32)
     assert np.isfinite(coords).all(), "non-finite endpoint coordinates"
     assert coords.shape == (n, 3), f"expected 3D coords, got {coords.shape}"
     peak = round(torch.cuda.max_memory_allocated() / 2**30, 2) if dev == "cuda" else None
     np.save(OUTD / f"coords-{arm}.npy", coords); pumap.save(str(OUTD / f"model-{arm}.pt"))
     man = {"schema": "card015-arm-2026-09-12", "arm": arm, "n": int(n), "n_components": 3, "executed_steps": exec_steps,
-           "shared_init_sha256": init_sha, "trained_sha256": _state_sha(pumap.model),
+           "shared_init_sha256": init_sha, "warm_parameter_order_sha": pumap.warm_start_sha256, "trained_sha256": _state_sha(pumap.model),
            "lr_used_min": ts.get("lr_used_min"), "lr_used_max": ts.get("lr_used_max"), "radii_sha": radii_sha,
            "kernel": admission["kernel"], "snapshots": list(SNAPS), "loaded_modules": loaded,
            "train_wall_s": round(wall, 1), "it_per_s": round(exec_steps / wall, 2) if wall > 0 else None,

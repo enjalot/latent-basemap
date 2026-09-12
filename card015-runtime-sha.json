@@ -107,8 +107,8 @@
   "basemap/run_controller.py": "2d33eb8ca22d92c938e7ce1b95c888c2e3b7c555bd98ae6306eb1ecbe82a09f9",
   "basemap/source_closure.py": "787b3188ae01a532d4f1bc2e810768d94b0abc2f6960ea237ac5f7f12d360f94",
   "experiments/sandbox/_paths.py": "ba79e4e33dcab51b0956bfc30f0e1cdc532ab8ce8a9e95302e01fc9a27c55359",
-  "experiments/sandbox/run_card015_arm.py": "029ad69871edc3f3c398e0db46643aaa180137d04320e12a67a6b5e211438f0f",
-  "experiments/sandbox/gpu_card015_canary.py": "0ff92fbf4124cb4c80f22cc040637d3e3b371b5e2230927d51273eea473ae104",
+  "experiments/sandbox/run_card015_arm.py": "c362c7c2bd3b80cec441c374a778cae5ede0e77ec7df5f5f803e0d208e3c1cad",
+  "experiments/sandbox/gpu_card015_canary.py": "882fc602cca7b0cb221e01995dcc988bb2a9fa891d73069a456c1bb685ee30d6",
   "experiments/sandbox/build_card015_init.py": "059687e88d3ba0188cc4a34c64b47350ea6692bf8ed7fd4a6faeaf00be7d945f",
   "experiments/sandbox/run_card015_chain.py": "8b861b9ce566f9229bf1b5744eb49092bea23de6f765bec3dda89708d9d216da",
   "experiments/sandbox/audit_card015_cpu.py": "641514be24a2111eb4179ed57a01bac871463c680d126afbdb42368fa7a529db"
