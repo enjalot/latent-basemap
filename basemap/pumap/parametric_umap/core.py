@@ -2373,6 +2373,11 @@ class ParametricUMAP:
                 else:
                     src_values, dst_values, targets = batch
 
+                # Card038 read-only accounting. No RNG, loss, sampler or model mutation.
+                if getattr(self, "_card038_observe", False):
+                    from .card038_observer import attempt as _c38_attempt
+                    _c38_counts = _c38_attempt(self._train_stats, targets, loader)
+
                 _fwd_ph = _ph("forward")   # S2: forward + kernel + BCE loss
                 _fwd_ph.__enter__()
                 with torch.autocast(device_type='cuda' if use_amp else 'cpu', enabled=bool(use_amp), dtype=amp_dtype):
@@ -2776,6 +2781,9 @@ class ParametricUMAP:
                     consecutive_nonfinite_gradients = 0   # P0-3: reset on real progress
                     if lr_used > 0:
                         st["positive_lr_optimizer_steps"] += 1
+                        if getattr(self, "_card038_observe", False):
+                            from .card038_observer import succeeded as _c38_succeeded
+                            _c38_succeeded(st, _c38_counts)
                         if st["lr_used_first"] is None:
                             st["lr_used_first"] = lr_used
                         st["lr_used_last"] = lr_used
