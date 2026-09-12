@@ -23,6 +23,28 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 
+
+def shape_floor_q(z_clouds, eps):
+    """Card022 covariance-floor roundness ratio q = lambda_min(C)/(trace(C)+eps) per mapped cloud.
+
+    z_clouds: (m, k, d) mapped coordinates (per-cloud k rows). Centering makes q translation-invariant;
+    eigenvalues make it rotation-invariant; lambda_min/trace is exactly scale-invariant except for the +eps
+    floor (scale invariance is therefore APPROXIMATE near the floor, as documented). Computed in the dtype of
+    z_clouds — callers pass FP32 (or FP64) even when forward matmuls are mixed precision. Returns q: (m,).
+    NOTE: this smooth ratio has ZERO first-order escape gradient at an EXACTLY rank-one (or constant) cloud;
+    the useful-gradient regime is thin-but-nonzero minor variance. No jitter is added here."""
+    k = z_clouds.shape[1]
+    zc = z_clouds - z_clouds.mean(dim=1, keepdim=True)
+    C = torch.matmul(zc.transpose(1, 2), zc) / (k - 1)
+    ev = torch.linalg.eigvalsh(C)                                   # ascending
+    return ev[:, 0] / (C.diagonal(dim1=1, dim2=2).sum(dim=1) + eps)
+
+
+def shape_floor_loss(z_clouds, tau, eps):
+    """mean(relu(tau - q)^2): weak one-sided roundness floor. No penalty when q>=tau."""
+    return torch.relu(tau - shape_floor_q(z_clouds, eps)).pow(2).mean()
+
+
 class ParametricUMAP:
     def __init__(
         self,
@@ -275,6 +297,7 @@ class ParametricUMAP:
         self.host_int8_fast_input = bool(host_int8_fast_input)
         self._fast_device_path = False   # set True by _prepare_edge_list_training
         self._X_dev = None               # DeviceArrayDataset when fast path active
+        self._shape_bank_dev = None      # card022 covariance-floor bank, resident (default-off)
         self._max_train_steps = None     # benchmark hook: stop after N global steps
         self._bench_warmup = 0           # benchmark hook: steps to exclude from timing
         self._bench_t0 = 0.0
@@ -1811,6 +1834,15 @@ class ParametricUMAP:
             hold_gen = torch.Generator(device=self.device)
             hold_gen.manual_seed(int(random_state) + 92821)
 
+        # ── Card022 local-shape covariance-floor sampler (DEFAULT OFF) ──
+        # INDEPENDENT generator (graph/negative/hold/midnear/density/replay/deriv streams untouched).
+        # Created only when a bank is configured AND a positive weight is set, so OFF is bitwise-identical.
+        shape_gen = None
+        if self._fast_device_path and getattr(self, "_shape_bank", None) is not None \
+                and float(getattr(self, "_shape_weight", 0.0) or 0.0) > 0.0:
+            shape_gen = torch.Generator(device=self.device)
+            shape_gen.manual_seed(int(random_state) + 20220512)
+
         # ── Off-graph preservation replay setup (cards 006/007) — DEFAULT OFF ──
         # Always reset (a reused instance must not leak a stale bank), then load
         # only when explicitly enabled. Uses its OWN generator so the graph /
@@ -2136,6 +2168,7 @@ class ParametricUMAP:
                 "hold_gen": _tgst(hold_gen), "hold_rng": _npst(hold_rng),
                 "replay_gen": _tgst(replay_gen),
                 "deriv_gen": _tgst(deriv_gen),
+                "shape_gen": _tgst(shape_gen),
                 "train_stats": dict(self._train_stats),
                 # card012 mid-epoch (step) resume: within-epoch loader position + rank order + active bank.
                 # Off-card runs never read these; present only for step checkpoints.
@@ -2247,6 +2280,9 @@ class ParametricUMAP:
             _setg(hold_gen, _ck.get("hold_gen"))
             _setg(replay_gen, _ck.get("replay_gen"))
             _setg(deriv_gen, _ck.get("deriv_gen"))
+            if shape_gen is not None and _ck.get("shape_gen") is None:
+                raise ValueError("resume with card022 shape floor enabled but checkpoint has no shape_gen RNG state")
+            _setg(shape_gen, _ck.get("shape_gen"))
             if _ck.get("mn_rng") is not None: mn_rng.set_state(_ck["mn_rng"])
             if _ck.get("dens_rng") is not None: dens_rng.set_state(_ck["dens_rng"])
             if _ck.get("hold_rng") is not None: hold_rng.set_state(_ck["hold_rng"])
@@ -2307,6 +2343,18 @@ class ParametricUMAP:
             assert bool(_t.isfinite(_rr).all()) and bool((_rr > 0).all()), "card013 radii must be finite+positive"
             self._card013_radii_dev = _rr
             loader._stash_ids = True
+
+        # card022 local-shape covariance-floor (opt-in): upload the fixed bank to device once. The bank is a
+        # dict with center_rows (ncent,16) int64 full-domain row indices [center + 15 graph neighbors] and
+        # tau (ncent,) float32 frozen from the ENCODER clouds. Off (attr unset / weight 0) ⇒ run unchanged.
+        _sbank = getattr(self, "_shape_bank", None)
+        if _sbank is not None and float(getattr(self, "_shape_weight", 0.0) or 0.0) > 0.0:
+            import torch as _t
+            _cr = _t.as_tensor(np.asarray(_sbank["center_rows"], np.int64), device=self.device)
+            _tau = _t.as_tensor(np.asarray(_sbank["tau"], np.float32), device=self.device)
+            assert _cr.ndim == 2 and _cr.shape[1] == 16, "shape bank center_rows must be (ncent,16)"
+            assert _tau.shape[0] == _cr.shape[0] and bool(_t.isfinite(_tau).all()) and bool((_tau > 0).all()), "shape tau invalid"
+            self._shape_bank_dev = {"center_rows": _cr, "tau": _tau}
 
         for epoch in range(start_epoch, self.n_epochs):
             if (checkpoint_every_epochs and checkpoint_dir and epoch > start_epoch
@@ -2647,6 +2695,31 @@ class ParametricUMAP:
                                   ).pow(2).sum(dim=1).mean()
                     loss = loss + self.deriv_weight * deriv_term
                     deriv_loss_val = deriv_term.item() if use_wandb else 0.0
+
+                # ── Card022 local-shape covariance-floor term (opt-in; DEFAULT OFF) ──
+                # Weak directional-thinness regularizer on a FIXED training-only bank of 16-row clouds
+                # (center + 15 graph neighbors). Sample _shape_centers_per_step clouds via the INDEPENDENT
+                # shape_gen; forward ALL rows through the student; per cloud q = lambda_min(C)/(trace(C)+eps)
+                # in FP32; loss = mean(relu(tau - q)^2) with tau frozen from the encoder cloud. No penalty
+                # when q>=tau (relu). OFF (weight 0 / bank None) is bitwise-identical: branch not entered, no
+                # shape_gen draw, no extra forward. This smooth ratio has NO first-order escape gradient at an
+                # exactly rank-one cloud (documented; no jitter added) — the useful-gradient case is thin-but-
+                # nonzero minor variance.
+                shape_loss_val = 0.0
+                if float(getattr(self, "_shape_weight", 0.0) or 0.0) > 0.0 and self._shape_bank_dev is not None:
+                    _bank = self._shape_bank_dev; _ncent = _bank["center_rows"].shape[0]
+                    _m = int(getattr(self, "_shape_centers_per_step", 16))
+                    _sel = torch.randint(0, _ncent, (_m,), generator=shape_gen, device=self.device)
+                    _rows = _bank["center_rows"].index_select(0, _sel)              # (m,16) full-domain row ids
+                    _tau = _bank["tau"].index_select(0, _sel).to(torch.float32)     # (m,)
+                    _feats = self._X_dev.index_select(_rows.reshape(-1))            # (m*16, D) fp16, resident
+                    with torch.autocast(device_type='cuda' if use_amp else 'cpu', enabled=bool(use_amp), dtype=amp_dtype):
+                        _z = self.model(_feats)
+                    _k = _rows.shape[1]                                             # 16 rows/cloud
+                    _z = _z.float().reshape(_m, _k, self.n_components)              # FP32 regardless of AMP
+                    _shape_loss = shape_floor_loss(_z, _tau, float(self._shape_eps))
+                    loss = loss + float(self._shape_weight) * _shape_loss
+                    shape_loss_val = _shape_loss.item() if use_wandb else 0.0
 
                 _fwd_ph.__exit__(None, None, None)   # S2: close forward+loss phase
 
