@@ -93,11 +93,13 @@ def expected_identity(arm, ROOT):
     return ident
 
 
-def validate_ckpt_payload(ck, arm, ROOT, identity, n_nodes, expect_beta, expect_step=None):
-    """Deep canonical checkpoint validation (item 4). Adam groups LR/WD + per-parameter finite moments/shapes/
-    step counter, scalar param/value/moments, scaler state, CPU/CUDA RNG, full valid sampler
-    permutation/cursor/epoch/generator states, live (non-zero) stats, finite model. Reused BEFORE restore and
-    at completion. Raises AssertionError on any drift."""
+def validate_ckpt_payload(ck, arm, ROOT, identity, n_nodes, expect_beta, expect_step=None, model_sd=None, expect_perm_len=None):
+    """Deep canonical checkpoint validation (items 4/5). Adam groups LR/WD + per-parameter finite moments whose
+    SHAPES match the actual parameters (incl. the scalar), correct step counter; scalar param/value; scaler
+    STRUCTURE (finite positive scale + growth_tracker); CPU/CUDA RNG STRUCTURE (uint8 tensor / list of uint8
+    tensors); full valid sampler permutation of the EXPECTED length + cursor/epoch + numpy generator-state
+    STRUCTURE; live (== global_step) stats; finite model. Reused BEFORE restore and at completion. Raises on
+    any drift."""
     import torch, numpy as np
     assert ck.get("schema") == "card034-ckpt-2026-09-12", "ckpt schema"
     assert ck.get("identity") == identity, "ckpt identity != canonical (wrong objective/coeff/seed/data/scalar)"
@@ -105,27 +107,40 @@ def validate_ckpt_payload(ck, arm, ROOT, identity, n_nodes, expect_beta, expect_
     if expect_step is not None: assert gs == int(expect_step), f"ckpt step {gs} != {expect_step}"
     ts = ck.get("train_stats", {})
     assert int(ts.get("positive_lr_optimizer_steps", -1)) == gs, "stale/zero checkpoint stats (must equal global_step)"
-    model_sd = ck["model"]; assert all(bool(torch.isfinite(t).all()) for t in model_sd.values()), "nonfinite model in ckpt"
+    ck_model = ck["model"]; assert all(bool(torch.isfinite(t).all()) for t in ck_model.values()), "nonfinite model in ckpt"
+    # actual ordered parameter shapes (model params in state_dict order, then the scalar) for moment mapping
+    ref = model_sd if model_sd is not None else ck_model
+    param_shapes = [tuple(v.shape) for v in ref.values()]
+    if expect_beta: param_shapes.append(())                       # scalar beta has shape ()
     opt = ck.get("optimizer", {}); groups = opt.get("param_groups", []); state = opt.get("state", {})
     assert groups and state, "empty optimizer state/groups"
     assert groups[0]["lr"] == LR and groups[0]["weight_decay"] == WEIGHT_DECAY, "model Adam group lr/wd"
     if expect_beta:
         assert len(groups) == 2 and groups[1]["lr"] == LR and groups[1]["weight_decay"] == 0.0, "scalar Adam group lr/wd"
-        assert ck.get("beta") is not None and bool(torch.isfinite(ck["beta"]).all()), "missing/nonfinite scalar"
+        assert ck.get("beta") is not None and bool(torch.isfinite(ck["beta"]).all()) and tuple(ck["beta"].shape) == (), "missing/nonfinite/nonscalar beta"
     else:
         assert len(groups) == 1, "unexpected extra optimizer group"
     pids = [i for g in groups for i in g["params"]]
-    assert len(pids) == len(set(pids)) and set(pids) == set(state), "optimizer parameter identity"
-    for pid in state:
+    assert len(pids) == len(set(pids)) == len(param_shapes) and set(pids) == set(state), "optimizer parameter identity/count"
+    for j, pid in enumerate(sorted(state)):
         st = state[pid]; assert all(k in st for k in ("step", "exp_avg", "exp_avg_sq")), "missing Adam moments"
         assert float(st["step"]) == gs, "Adam step counter != successful dose"
-        assert st["exp_avg"].shape == st["exp_avg_sq"].shape and bool(torch.isfinite(st["exp_avg"]).all()) and bool(torch.isfinite(st["exp_avg_sq"]).all()), "Adam moment shape/nonfinite"
-    assert ck.get("scaler") and "scale" in ck["scaler"], "scaler state"
-    assert ck.get("torch_rng") is not None and ck.get("cuda_rng") is not None, "CPU/CUDA RNG state"
+        want = torch.Size(param_shapes[j])                        # moment shape == actual parameter shape
+        assert tuple(st["exp_avg"].shape) == tuple(want) and tuple(st["exp_avg_sq"].shape) == tuple(want), "Adam moment shape != parameter shape"
+        assert bool(torch.isfinite(st["exp_avg"]).all()) and bool(torch.isfinite(st["exp_avg_sq"]).all()), "nonfinite Adam moment"
+    # scaler structure
+    sc = ck.get("scaler", {}); assert isinstance(sc, dict) and "scale" in sc and "growth_tracker" in sc, "scaler structure"
+    _scale = float(sc["scale"]); assert np.isfinite(_scale) and _scale > 0, "scaler scale not finite positive"
+    # RNG structure
+    tr = ck.get("torch_rng"); assert torch.is_tensor(tr) and tr.dtype == torch.uint8, "torch RNG structure"
+    cr = ck.get("cuda_rng"); assert isinstance(cr, (list, tuple)) and len(cr) >= 1 and all(torch.is_tensor(x) and x.dtype == torch.uint8 for x in cr), "cuda RNG structure"
+    # sampler permutation + cursor/epoch + generator-state structure
     ss = ck.get("sampler_state", {}); perm = np.asarray(ss.get("perm"))
     assert perm.ndim == 1 and perm.shape[0] > 0 and np.array_equal(np.sort(perm), np.arange(perm.shape[0])), "sampler perm not a valid permutation"
+    if expect_perm_len is not None: assert perm.shape[0] == int(expect_perm_len), f"perm length {perm.shape[0]} != {expect_perm_len}"
     assert 0 <= int(ss["cursor"]) <= perm.shape[0] and int(ss["epoch"]) >= 0, "sampler cursor/epoch"
-    assert "perm_gen" in ss and "noise_gen" in ss, "sampler generator states"
+    for gk in ("perm_gen", "noise_gen"):
+        assert isinstance(ss.get(gk), dict) and "bit_generator" in ss[gk], f"sampler {gk} generator-state structure"
     return True
 
 
@@ -140,7 +155,10 @@ def strict_validate_arm(arm, ROOT, base=None):
     assert man.get("warm_init_sha256") == INIT_SHA, f"{arm}: warm init != fresh 2D 589895f0"
     ts = man.get("train_stats", {})
     assert man.get("executed_steps") == ts.get("positive_lr_optimizer_steps") == DOSE, f"{arm}: dose != {DOSE}"
-    assert man.get("pipeline") == "device_fp16", f"{arm}: pipeline not device_fp16"
+    # explicit experimental pipeline receipt bound to actual Xt observations (not a borrowed core fit receipt)
+    pr = man.get("pipeline_receipt", {})
+    assert pr.get("x_residency") == "device_fp16" and pr.get("verified") and "cuda" in str(pr.get("device", "")) \
+        and "float16" in str(pr.get("dtype", "")) and tuple(pr.get("shape", ())) == (N, 1536), f"{arm}: pipeline receipt invalid"
     assert abs(float(man.get("lr_used_min", 0)) - LR) < 1e-12 and abs(float(man.get("lr_used_max", 0)) - LR) < 1e-12, "LR not 1e-3"
     assert float(man.get("weight_decay", -1)) == WEIGHT_DECAY and float(man.get("grad_clip", -1)) == GRAD_CLIP, "wd/clip mismatch"
     lm = man.get("loaded_modules", {})
@@ -168,7 +186,7 @@ def strict_validate_arm(arm, ROOT, base=None):
             ck = torch.load(p, map_location="cpu", weights_only=False)
         except Exception as e:
             raise AssertionError(f"corrupt step checkpoint {s}: {e!r}")
-        validate_ckpt_payload(ck, arm, ROOT, exp, N, expect_beta, expect_step=s)   # DEEP Adam/scaler/RNG/sampler
+        validate_ckpt_payload(ck, arm, ROOT, exp, N, expect_beta, expect_step=s, model_sd=ck["model"], expect_perm_len=N * 15)   # DEEP
         assert bool(ck.get("step_checkpoint")), f"ckpt {s} not marked step_checkpoint"
         msha = state_sha(ck["model"])
         if s in snap_sha: assert msha == snap_sha[s], f"step ckpt {s} model payload != snapshot"
@@ -178,13 +196,14 @@ def strict_validate_arm(arm, ROOT, base=None):
     assert epoch_cks, f"{arm}: no epoch checkpoint"
     for ep_p in epoch_cks:
         eck = torch.load(ep_p, map_location="cpu", weights_only=False)
-        validate_ckpt_payload(eck, arm, ROOT, exp, N, expect_beta)     # coherent full state, not just a filename
+        validate_ckpt_payload(eck, arm, ROOT, exp, N, expect_beta, model_sd=eck["model"], expect_perm_len=N * 15)   # coherent full state
     # init payload hash: manifest must record the hash of the actual warm tensors == INIT_SHA (not trusted metadata)
     assert man.get("init_payload_sha256") == INIT_SHA, f"{arm}: init payload hash not verified/recorded"
 
-    # recorded 9:1 exposure at early/middle/final probes
-    probes = ts.get("exposure_probes", [])
-    assert probes and all(abs(float(pr.get("noise_per_pos", -1)) - N_NOISE) < 1e-9 for pr in probes), f"{arm}: 9:1 exposure not recorded/violated"
+    # recorded 9:1 exposure at BOTH attempted-step and successful-step probes (AMP differences kept honest)
+    succ_probes = ts.get("exposure_probes", []); att_probes = ts.get("attempted_probes", [])
+    assert succ_probes and all(abs(float(q.get("noise_per_pos", -1)) - N_NOISE) < 1e-9 and q.get("id_digest") for q in succ_probes), f"{arm}: successful-step 9:1 exposure not recorded/violated"
+    assert att_probes and all(abs(float(q.get("noise_per_pos", -1)) - N_NOISE) < 1e-9 and q.get("id_digest") for q in att_probes), f"{arm}: attempted-step 9:1 exposure not recorded/violated"
     # scalar exposure (nce): beta must have moved
     if arm == "grouped_nce":
         fb = man.get("final_beta"); assert fb is not None and abs(float(fb)) > 0, "grouped_nce scalar never moved"

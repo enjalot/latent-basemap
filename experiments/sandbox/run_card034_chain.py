@@ -26,7 +26,7 @@ def notify(msg):
     subprocess.run([PY, str(OC / "notify.py"), "post", "basemap-runner", str(OC / "card034-execution.json"), msg], timeout=30)
 
 
-_RUN_CHARGED = [0.0]
+_RUN_CHARGED = [0.0]; _CTRL_T0 = [None]
 
 
 def charge(tag, seconds, rc):
@@ -76,7 +76,7 @@ def main():
     ok, bad = V.runtime_manifest_check(ROOT); assert ok, f"frozen isolated source changed: {bad}"
     assert time.time() < END, "past hard deadline"
     assert json.loads((OC / "card034-calibration.json").read_text()).get("PASS"), "InfoNCE calibration not frozen/PASS"
-    attempt_start = time.time(); ctrl_t0 = time.monotonic(); completed = []
+    attempt_start = time.time(); _CTRL_T0[0] = time.monotonic(); completed = []
 
     to = _remaining(CANARY_CAP); assert to >= 120, f"cannot admit canary: {to:.0f}s"
     rc = run_stage("device_canary", "gpu_card034_canary.py", to); assert rc == 0, f"device_canary rc={rc}"
@@ -118,14 +118,18 @@ def main():
         print(f"DONE {arm}", flush=True)
 
     assert len({x["model_state_sha"] for x in completed}) == 3, "arms did not diverge"
-    # final ledger reconciliation: charge controller/validation overhead accrued while leases were held (033-style)
-    overhead = max(0.0, (time.monotonic() - ctrl_t0) - _RUN_CHARGED[0])
-    charge("controller_reconciliation", overhead, 0)
     atomic(OC / "card034-execution.json", {"status": "TRAINED_VALIDATED", "at": dt.datetime.now(dt.timezone.utc).isoformat(),
-           "arms": completed, "controller_overhead_s": round(overhead, 2), "quality": "NOT_YET_SCORED"})
+           "arms": completed, "quality": "NOT_YET_SCORED"})
     notify("Card034 all three arms (grouped_umap/grouped_nce/grouped_infonce) trained + strict-validated: fresh 2D "
            "60K, LR 1e-3, grouped 9:1 uniform nonself noise, device_fp16, resumable step+epoch ckpts, frozen "
            "InfoNCE coefficient, global VRAM<30GB. Root owns scoring (250K common, grouped_infonce primary).")
+
+
+def _reconcile():
+    """Charge controller/validation overhead accrued while leases were held, on EVERY exit (success, early
+    return, or failure) — not success-only (033-style final reconciliation)."""
+    if _CTRL_T0[0] is not None:
+        charge("controller_reconciliation", max(0.0, (time.monotonic() - _CTRL_T0[0]) - _RUN_CHARGED[0]), 0)
 
 
 if __name__ == "__main__":
@@ -135,3 +139,5 @@ if __name__ == "__main__":
         atomic(OC / "card034-execution.json", {"status": "EXECUTION_FAILED", "error": repr(e), "at": dt.datetime.now(dt.timezone.utc).isoformat()})
         notify(f"Card034 chain stopped fail-closed: {e}. Preserve artifacts + reconcile ledger before repair.")
         raise
+    finally:
+        _reconcile()

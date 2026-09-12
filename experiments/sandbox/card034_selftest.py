@@ -25,7 +25,7 @@ def _sd(seed):
 
 
 def _sampler_state():
-    return {"perm": np.arange(10), "cursor": 3, "epoch": 1, "perm_gen": _GEN, "noise_gen": _GEN}
+    return {"perm": np.arange(V.N * 15), "cursor": 3, "epoch": 1, "perm_gen": _GEN, "noise_gen": _GEN}
 
 
 def _adam_state(model_sd, nce):
@@ -62,10 +62,12 @@ def build(base, arm):
     torch.save(_ckpt(arm, 2747, ident, _sd(5)), td / arm / "ckpts" / "ckpt-epoch1.pt")
     np.save(td / f"coords-{arm}.npy", np.zeros((V.N, V.NC), "f4"))
     fb = (0.03 if arm == "grouped_nce" else None)
+    _prb = lambda key: [{key: s, "noise_per_pos": 9, "id_digest": f"d{s}"} for s in (1, 30000, 60000)]
     man = {"arm": arm, "mode": V.MODE[arm], "identity": ident, "warm_init_sha256": V.INIT_SHA, "init_payload_sha256": V.INIT_SHA,
-           "executed_steps": V.DOSE, "train_stats": {"positive_lr_optimizer_steps": V.DOSE, "exposure_probes": [{"step": 1, "noise_per_pos": 9}, {"step": 30000, "noise_per_pos": 9}, {"step": 60000, "noise_per_pos": 9}]},
+           "executed_steps": V.DOSE, "train_stats": {"positive_lr_optimizer_steps": V.DOSE, "exposure_probes": _prb("step"), "attempted_probes": _prb("attempted_step")},
            "lr_used_min": V.LR, "lr_used_max": V.LR, "weight_decay": V.WEIGHT_DECAY, "grad_clip": V.GRAD_CLIP,
-           "final_beta": fb, "infonce_coeff": ident.get("infonce_coeff"), "pipeline": "device_fp16",
+           "final_beta": fb, "infonce_coeff": ident.get("infonce_coeff"),
+           "pipeline_receipt": {"x_residency": "device_fp16", "device": "cuda:0", "dtype": "torch.float16", "shape": [V.N, 1536], "verified": True},
            "trained_sha256": V.state_sha(snap[60000]), "loaded_modules": {"verified_frozen_runtime": True, "all_basemap_under_root": True}}
     (td / f"admission-{arm}.json").write_text(json.dumps({"arm": arm, "identity": ident, "warm_init_sha256": V.INIT_SHA}))
     os.utime(td / f"admission-{arm}.json", (0, 0)); (td / f"manifest-{arm}.json").write_text(json.dumps(man))
@@ -98,7 +100,6 @@ def main():
     results.append(expect_fail(base, A, lambda td: _man(td, A, executed_steps=59999), "wrong dose"))
     results.append(expect_fail(base, A, lambda td: _man(td, A, warm_init_sha256="0" * 16), "warm-init drift"))
     results.append(expect_fail(base, A, lambda td: _man(td, A, init_payload_sha256="0" * 16), "init-payload hash drift"))
-    results.append(expect_fail(base, A, lambda td: _man(td, A, pipeline="host_int8"), "precision"))
     results.append(expect_fail(base, A, lambda td: _man(td, A, weight_decay=0.0), "wrong weight decay"))
     def _idmut(td):
         m = json.loads((td / f"manifest-{A}.json").read_text()); m["identity"] = dict(m["identity"]); m["identity"]["dose"] = 1; (td / f"manifest-{A}.json").write_text(json.dumps(m))
@@ -110,7 +111,11 @@ def main():
     results.append(expect_fail(base, A, lambda td: (td / f"{A}/ckpts/ckpt-epoch1.pt").unlink(), "missing epoch ckpt"))
     def _exp(td):
         m = json.loads((td / f"manifest-{A}.json").read_text()); m["train_stats"]["exposure_probes"][1]["noise_per_pos"] = 8; (td / f"manifest-{A}.json").write_text(json.dumps(m))
-    results.append(expect_fail(base, A, _exp, "9:1 exposure violated"))
+    results.append(expect_fail(base, A, _exp, "successful-probe 9:1 violated"))
+    def _att(td):
+        m = json.loads((td / f"manifest-{A}.json").read_text()); m["train_stats"]["attempted_probes"][1]["noise_per_pos"] = 8; (td / f"manifest-{A}.json").write_text(json.dumps(m))
+    results.append(expect_fail(base, A, _att, "attempted-probe 9:1 violated"))
+    results.append(expect_fail(base, A, lambda td: _man(td, A, pipeline_receipt={"x_residency": "host_int8", "device": "cpu", "dtype": "torch.float32", "shape": [V.N, 1536], "verified": True}), "wrong pipeline receipt"))
     # DEEP-STATE faults
     results.append(expect_fail(base, A, lambda td: _edit_ck(td, A, "ckpt-step40000.pt", lambda c: c["train_stats"].__setitem__("positive_lr_optimizer_steps", 0)), "stale ckpt stats"))
     results.append(expect_fail(base, A, lambda td: _edit_ck(td, A, "ckpt-step40000.pt", lambda c: c["optimizer"]["state"][0].__setitem__("step", torch.tensor(123.0))), "wrong Adam step counter"))

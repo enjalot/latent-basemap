@@ -108,13 +108,13 @@
   "basemap/source_closure.py": "787b3188ae01a532d4f1bc2e810768d94b0abc2f6960ea237ac5f7f12d360f94",
   "experiments/sandbox/_paths.py": "ba79e4e33dcab51b0956bfc30f0e1cdc532ab8ce8a9e95302e01fc9a27c55359",
   "experiments/sandbox/card034_grouped.py": "8ab0419febe35897a497932e248a25c8451e5da5ccd797048192c0a18d6b183c",
-  "experiments/sandbox/card034_engine.py": "b5525f0f290617028bab1780b4ee4e288cedc41bfcb678d75b67fe4f3cde1f01",
-  "experiments/sandbox/card034_validate.py": "3ac650bb3b81a60f039a84aaa059e3e2728f9689ea3006811c6bd1145ddf1f52",
-  "experiments/sandbox/run_card034_arm.py": "520edac9a22ee1c5b5a67235beaaa921b13c30c981f15be161cd31071dd25599",
+  "experiments/sandbox/card034_engine.py": "44a5a60e9ece083e50d04174c17af17aad0652db99236927936dc4e758f10b91",
+  "experiments/sandbox/card034_validate.py": "a5c5625ea53403cc46272a57f309e1df4dccfec80fbab4503b88fafbcf18d00a",
+  "experiments/sandbox/run_card034_arm.py": "102364623d31f20755388eb909e0a2a7841a507d3e6b697ae3bd95c9a0eb20d1",
   "experiments/sandbox/calibrate_card034.py": "fe25fe80f16041b4de4825dd6b7ad306d03833780a8e66f5746ac794a57e6254",
   "experiments/sandbox/gpu_card034_canary.py": "a6de74c6be7d1a9dfa1672a3cd5e01eed51ac1d354a1d4959e305c2bf30ef83d",
   "experiments/sandbox/gpu_card034_preflight.py": "cb8d1a4ec7489e4eb96df74846bdd47aeb93229c1860f685710781ae47d27dda",
-  "experiments/sandbox/run_card034_chain.py": "7548a237f76bba5d607d7cbb7e913034056a9d113d672570c7db0e47d1e4993c",
+  "experiments/sandbox/run_card034_chain.py": "4afcaa6ead2cc49211eb8222b31a7c4c4aa4137e4d7750ea274279ebc9898296",
   "experiments/sandbox/cpu_card034_canary.py": "a4af554af119002381f7d14ca619f40ff388ef6d78e7025352d0193655556bad",
-  "experiments/sandbox/card034_selftest.py": "7684e61275d06d4915b14934f50459d7118742a2e9c3b2f98b5e53f82c8b9781"
+  "experiments/sandbox/card034_selftest.py": "273524524547b4b349f34b112468371c4657f4c44fccca14dde777b6e114c9c0"
 }

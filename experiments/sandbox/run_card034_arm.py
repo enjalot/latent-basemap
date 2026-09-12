@@ -105,8 +105,7 @@ def main():
     wall = time.time() - t0
 
     st = engine.stats; assert st["positive_lr_optimizer_steps"] == DOSE, "dose"
-    pinfo = dict(getattr(engine.p, "_pipeline_info", {}) or {})
-    assert pinfo.get("x_residency") == "device_fp16", f"pipeline not device_fp16: {pinfo.get('x_residency')}"
+    receipt = E.pipeline_receipt(Xt)     # explicit device-bank observation (CUDA/fp16/(N,1536)); not a borrowed core fit receipt
     proc_peak = round(torch.cuda.max_memory_allocated() / 2**30, 3)
     free, total = torch.cuda.mem_get_info(); global_used = round((total - free) / 2**30, 3)
     assert global_used < 30.0, f"global VRAM {global_used} GiB exceeds 30 GiB cap"
@@ -118,7 +117,7 @@ def main():
            "executed_steps": engine.success, "warm_init_sha256": V.INIT_SHA, "init_payload_sha256": init_payload,
            "trained_sha256": V.state_sha(engine.model.state_dict()), "lr_used_min": V.LR, "lr_used_max": V.LR,
            "weight_decay": V.WEIGHT_DECAY, "grad_clip": V.GRAD_CLIP, "final_beta": final_beta,
-           "infonce_coeff": (coeff if arm == "grouped_infonce" else None), "pipeline": "device_fp16",
+           "infonce_coeff": (coeff if arm == "grouped_infonce" else None), "pipeline_receipt": receipt,
            "snapshots": sorted(SNAPS), "step_checkpoints": sorted(STEP_CKPTS), "loaded_modules": loaded, "identity": identity,
            "resumed_from": (str(resume_from) if resume_from else None), "train_wall_s": round(wall, 1),
            "it_per_s": round(engine.success / wall, 2) if wall > 0 else None, "proc_peak_vram_gb": proc_peak,
