@@ -23,6 +23,14 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 
+def contrastive_logit_loss(radial, targets, beta, a):
+    """Stable fixed-kernel NEG/NCE classifier. The caller supplies guarded r²**b.
+    No probability clamp: distant positive pairs retain their finite gradient.
+    """
+    logit = -torch.log1p(a * radial) - beta
+    return torch.nn.functional.binary_cross_entropy_with_logits(logit, targets, reduction="mean")
+
+
 class ParametricUMAP:
     def __init__(
         self,
@@ -1943,6 +1951,14 @@ class ParametricUMAP:
         # (zero wd, NOT the model's) on the same successful-step clock. neg_fixed/umap_uniform use a CONSTANT
         # beta=0 (no grad, no group). OFF (_card024_mode None) leaves the optimizer bitwise-identical.
         _c24_mode = getattr(self, "_card024_mode", None)
+        if _c24_mode not in (None, "umap_uniform", "neg_fixed", "nce_learned"):
+            raise ValueError("invalid card024 objective family")
+        if _c24_mode is not None:
+            assert self.low_dim_kernel == "umap" and self.kernel_anneal_frac == 0 and self.a == 1.9328 and self.b == .7905
+            assert self.rankneg_window == 0 and self.fneg_weight == 0 and self.neg_tanh_gamma == 0
+            assert not self.midnear_enabled and self.density_weight == self.correlation_weight == 0
+            assert not loader.endpoint_reuse and not loader._grouped_neg and not loader._per_batch
+            if getattr(self, "_card024_trace_ids", False): loader._stash_ids = True
         if _c24_mode == "nce_learned":
             self._card024_beta = nn.Parameter(torch.zeros((), device=self.device))     # matches neg_fixed at init
             optimizer.add_param_group({"params": [self._card024_beta], "lr": self.learning_rate, "weight_decay": 0.0})
@@ -2247,6 +2263,9 @@ class ParametricUMAP:
                     raise ValueError(f"resume deriv config/content mismatch: ckpt {_dsaved} vs current {_dcur}")
                 if _ck.get("deriv_gen") is None:
                     raise ValueError("resume with deriv enabled but checkpoint has no deriv_gen RNG state")
+            if _c24_mode == "nce_learned":
+                if not torch.is_tensor(_ck.get("card024_beta")) or not bool(torch.isfinite(_ck["card024_beta"]).all()):
+                    raise ValueError("card024 checkpoint missing/nonfinite scalar")
             self.model.load_state_dict(_ck["model"])
             optimizer.load_state_dict(_ck["optimizer"])
             # card024: recover the learned normalization scalar VALUE (its optimizer moments are restored by
@@ -2502,15 +2521,13 @@ class ParametricUMAP:
                     umap_loss = self.loss_fn(qs.float(), targets_for_loss)
                 # ── Card024 contrastive-normalization: binary-LOGIT loss (opt-in; DEFAULT OFF) ──
                 # logit = log(qhat) - beta; loss = BCE-with-logits (stable). beta fixed 0 (neg_fixed) or the
-                # learned scalar (nce_learned). qs is already clamped to [1e-7, 1-1e-7] (the SHARED finite-
-                # distance / zero-gradient guard). OFF ⇒ not entered; umap_uniform keeps the plain-BCE path
+                # learned scalar (nce_learned). Uses the UNCLIPPED guarded radial via log1p; the ordinary
+                # probability clamp is reserved for UMAP. OFF ⇒ not entered; umap_uniform keeps plain BCE
                 # above, bitwise-identical to the baseline. beta0 makes nce_learned's initial loss+gradient
                 # EXACTLY equal neg_fixed's (both logit=log(qhat)).
                 _c24 = getattr(self, "_card024_mode", None)
                 if _c24 in ("neg_fixed", "nce_learned"):
-                    _logit = torch.log(qs.float()) - self._card024_beta
-                    umap_loss = torch.nn.functional.binary_cross_entropy_with_logits(
-                        _logit, targets_for_loss, reduction="mean")
+                    umap_loss = contrastive_logit_loss(dists.float(), targets_for_loss, self._card024_beta, self.a)
                 # P0.3: skip the correlation branch entirely when its weight is 0
                 # (the frozen recipe). It computed two 384-D distance vectors +
                 # a sync-forcing Pearson every batch, and `0 * NaN = NaN` could
@@ -2733,6 +2750,13 @@ class ParametricUMAP:
                     total_norm = torch.norm(torch.stack([
                         p.grad.detach().norm() for p in self.model.parameters()
                         if p.grad is not None]))
+                _c24_bg = None
+                if _c24_mode == "nce_learned":
+                    _c24_bg = self._card024_beta.grad
+                    if _c24_bg is None or not bool(torch.isfinite(_c24_bg).all()):
+                        raise RuntimeError("card024 nonfinite/missing unscaled scalar gradient")
+                    if not bool(torch.isfinite(self._card024_beta).all()):
+                        raise RuntimeError("card024 nonfinite scalar")
                 if not bool(torch.isfinite(total_norm)):
                     optimizer.zero_grad(set_to_none=True)
                     if scaler is not None:
@@ -2810,6 +2834,24 @@ class ParametricUMAP:
                     consecutive_nonfinite_gradients = 0   # P0-3: reset on real progress
                     if lr_used > 0:
                         st["positive_lr_optimizer_steps"] += 1
+                        if _c24_mode is not None:
+                            st["card024_objective_steps"] = st.get("card024_objective_steps", 0) + 1
+                            _nnoise = int(loader.num_neg); _npositive = int(targets.numel()) - _nnoise
+                            assert _npositive > 0
+                            st["card024_positive_slots"] = st.get("card024_positive_slots", 0) + _npositive
+                            st["card024_noise_slots"] = st.get("card024_noise_slots", 0) + _nnoise
+                            _ratio = _nnoise / _npositive
+                            st["card024_ratio_min"] = min(st.get("card024_ratio_min", _ratio), _ratio)
+                            st["card024_ratio_max"] = max(st.get("card024_ratio_max", _ratio), _ratio)
+                            if _c24_bg is not None:
+                                _bg = abs(float(_c24_bg.detach()))
+                                st["card024_scalar_steps"] = st.get("card024_scalar_steps", 0) + 1
+                                st["card024_scalar_absgrad_sum"] = st.get("card024_scalar_absgrad_sum", 0.0) + _bg
+                                st["card024_scalar_absgrad_max"] = max(st.get("card024_scalar_absgrad_max", 0.0), _bg)
+                            if getattr(self,"_card024_trace_ids",False) and len(st.get("card024_pair_traces",[])) < 3:
+                                _ss=loader._last_all_src.detach().cpu().numpy(); _dd=loader._last_all_dst.detach().cpu().numpy()
+                                assert not np.any(_ss[-_nnoise:]==_dd[-_nnoise:]), "self noise"
+                                st.setdefault("card024_pair_traces",[]).append({"step":st["positive_lr_optimizer_steps"],"npositive":_npositive,"nnoise":_nnoise,"sha256":__import__("hashlib").sha256(_ss.tobytes()+_dd.tobytes()).hexdigest(),"nonself":True})
                         if st["lr_used_first"] is None:
                             st["lr_used_first"] = lr_used
                         st["lr_used_last"] = lr_used
@@ -3248,6 +3290,9 @@ class ParametricUMAP:
             'deriv_radius': self.deriv_radius,
             'deriv_bank_sha': getattr(self, '_deriv_bank_sha', None),
         }
+        if getattr(self, "_card024_mode", None) is not None:
+            save_dict["card024_mode"] = self._card024_mode
+            save_dict["card024_beta"] = (float(self._card024_beta.detach()) if isinstance(self._card024_beta, torch.Tensor) else None)
         torch.save(save_dict, path)
 
     @classmethod
@@ -3329,5 +3374,9 @@ class ParametricUMAP:
         instance._init_model(input_dim=int(input_dim))
         instance.model.load_state_dict(state_dict)
         instance.is_fitted = True
+        if "card024_mode" in save_dict:
+            instance._card024_mode = save_dict["card024_mode"]
+            value = save_dict.get("card024_beta")
+            instance._card024_beta = (torch.tensor(value, device=device) if value is not None else None)
 
         return instance

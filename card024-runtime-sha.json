@@ -19,7 +19,7 @@
   "basemap/output_safety.py": "4730abd234cbf5215cf3b760f6a0f1ac41af5fcb5d8eb5ccb30924c423439bdf",
   "basemap/panel_v2.py": "fa138b333a48c40cf3ea4d892266b89bfddaafde7e569953dac311ee89989dab",
   "basemap/pumap/parametric_umap/__init__.py": "9412298e8fb9527911a42f9320f97ff20f53f75f7340cfbf395ea2a70df70b6b",
-  "basemap/pumap/parametric_umap/core.py": "b0b47d318b92df04e9d2b629968d70e6b784351f4303540f9fafa825acf6d159",
+  "basemap/pumap/parametric_umap/core.py": "a981dd84f7989fab7cce07b6d6d71d8a14fc398cd2607656d897bc0dda5e1cb0",
   "basemap/pumap/parametric_umap/datasets/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "basemap/pumap/parametric_umap/datasets/covariates_datasets.py": "8c28e85710b2b0cfd3994a8457fd75ee3857466d1d65c3e5e7848da4c6f2310c",
   "basemap/pumap/parametric_umap/datasets/edge_dataset.py": "8451c562cb141cb3f2a1a738214b9a2cf3f11534f8eb4b7423502146c1c69b71",
@@ -107,11 +107,11 @@
   "basemap/run_controller.py": "2d33eb8ca22d92c938e7ce1b95c888c2e3b7c555bd98ae6306eb1ecbe82a09f9",
   "basemap/source_closure.py": "787b3188ae01a532d4f1bc2e810768d94b0abc2f6960ea237ac5f7f12d360f94",
   "experiments/sandbox/_paths.py": "ba79e4e33dcab51b0956bfc30f0e1cdc532ab8ce8a9e95302e01fc9a27c55359",
-  "experiments/sandbox/card024_validate.py": "aa94d2591bced00c7376367c395218546665cee747d4aefe3ae88f382b8bab42",
-  "experiments/sandbox/run_card024_arm.py": "a4018d6739e7f2f259a949952f495ab95749cd3655bc6484adafb35765809fad",
-  "experiments/sandbox/gpu_card024_canary.py": "5cbc1c5e15266fd71fa3faccb2fc1b0b3a36eb08411a3708a0885f8fffbd433a",
-  "experiments/sandbox/gpu_card024_preflight.py": "8bbe9ed1de94b63140a313a3af366c9298a08ff601524a5e82733e3cce976b9b",
-  "experiments/sandbox/run_card024_chain.py": "6d276ea0493d784c67b99b2fae7f262561920b884c149d672bc106038a4fd947",
-  "experiments/sandbox/cpu_card024_canary.py": "ccc91d05109d2c370ee47960fe2ed61af933dc62cede8fb8b3b4dda282283d6c",
-  "experiments/sandbox/card024_selftest.py": "01b8177eaca0cf454881e78ad77b7563d0df6297896731fef842353114ad20b5"
+  "experiments/sandbox/card024_validate.py": "dca374e2611d5ec00246318472afbd1a01c4281d9e4952a2697a15848d898ce3",
+  "experiments/sandbox/run_card024_arm.py": "31ed720ed78b8897bcb1414f7c79caa56373203060fd38a67fd4cda136447390",
+  "experiments/sandbox/gpu_card024_canary.py": "9b8e90306f4ef985d65cda64e023d2ec480e1e3641288b73c20eda9e764232fc",
+  "experiments/sandbox/gpu_card024_preflight.py": "1c0fb31731bd1f993ea3e3c48969d6575d3dd6c5e353ac9a6622f6c430f937df",
+  "experiments/sandbox/run_card024_chain.py": "fc38d66adba3715286f597749d967ce75f84ae88f3ad83208ed6203327a63044",
+  "experiments/sandbox/cpu_card024_canary.py": "3a8a4ef7a9113bb980b4d01931c29391aadfbdbf5213a13391abeba71414ed2d",
+  "experiments/sandbox/card024_selftest.py": "1cf6e692381a499afad63f45e6dba3cf233c3814874d91d4ecae9ebf5b708250"
 }

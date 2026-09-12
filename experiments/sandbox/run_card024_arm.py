@@ -60,7 +60,9 @@ def main():
     ez = np.load(GRAPH); n_edges = ez["sources"].shape[0]
     assert n_edges == N_EXPECT * 15, f"expected 15 outgoing/row: {n_edges} != {N_EXPECT*15}"
     init_obj = torch.load(str(INIT), map_location="cpu", weights_only=False)
-    warm_state = init_obj["model_state"]; assert init_obj["init_state_sha256"] == V.INIT_SHA, "fresh 2D init identity"
+    warm_state = V.check_init()
+    assert np.array_equal(np.bincount(ez["sources"],minlength=N_EXPECT),np.full(N_EXPECT,15)), "not every row has15 positives"
+    assert not np.any(ez["sources"]==ez["targets"]), "positive graph contains self edges"
 
     fok, bad = V.runtime_manifest_check(ROOT); assert fok, f"frozen-runtime hash mismatch {bad} — fail closed"
     basemap_mods = V.loaded_basemap_under_root(ROOT)
@@ -93,7 +95,7 @@ def main():
     adm_path = OUTD / f"admission-{arm}.json"
     if resume_from is None:
         adm = {"schema": "card024-admission-2026-09-12", "arm": arm, "mode": MODE[arm], "written_before_steps": True,
-               "n_components": NC, "warm_init_sha256": V.INIT_SHA, "substrate_sha": V.SUB_SHA256[:16], "graph_sha": V.GRAPH_SHA256[:16],
+               "n_components": NC, "warm_init_sha256": V.INIT_SHA, "warm_start_param_sha256":V.INIT_SHA, "substrate_sha": V.SUB_SHA256[:16], "graph_sha": V.GRAPH_SHA256[:16],
                "lr": LR, "lr_schedule": "constant", "batch_size": BATCH, "pos_ratio": V.POS_RATIO, "seed": SEED,
                "steps": steps, "rankneg_window": 0, "noise": "uniform nonself", "kernel_a": V.A, "kernel_b": V.B,
                "snapshots": list(SNAPS), "step_checkpoints": sorted(STEP_CKPTS), "checkpoint_every_epochs": 1,
@@ -118,6 +120,7 @@ def main():
     assert int(ts.get("positive_lr_optimizer_steps", -1)) == steps, "positive-LR count != dose"
     assert abs(ts.get("lr_used_min", 0) - LR) < 1e-12 and abs(ts.get("lr_used_max", 0) - LR) < 1e-12, "LR not 1e-3"
     assert pinfo.get("x_residency") == "device_fp16", f"pipeline not device_fp16: {pinfo.get('x_residency')}"
+    if resume_from is None: assert pumap.warm_start_sha256==V.INIT_SHA, "applied warm weights"
     _beta = getattr(pumap, "_card024_beta", None)
     final_beta = (float(_beta.detach()) if isinstance(_beta, torch.Tensor) else None)
     if arm == "nce_learned":
@@ -129,7 +132,7 @@ def main():
     coords = np.asarray(pumap.transform(X, batch_size=8192), np.float32); assert coords.shape == (n, NC)
     np.save(OUTD / f"coords-{arm}.npy", coords); pumap.save(str(OUTD / f"model-{arm}.pt"))
     man = {"schema": "card024-arm-2026-09-12", "arm": arm, "mode": MODE[arm], "n": int(n), "n_components": NC,
-           "executed_steps": exec_steps, "warm_init_sha256": V.INIT_SHA, "warm_start_param_sha256": getattr(pumap, "warm_start_sha256", None),
+           "executed_steps": exec_steps, "warm_init_sha256": V.INIT_SHA, "warm_start_param_sha256": (orig["warm_start_param_sha256"] if resume_from else pumap.warm_start_sha256),
            "trained_sha256": V.state_sha(pumap.model.state_dict()), "lr_used_min": ts.get("lr_used_min"), "lr_used_max": ts.get("lr_used_max"),
            "final_beta": final_beta, "kernel_a": V.A, "kernel_b": V.B, "snapshots": list(SNAPS), "step_checkpoints": sorted(STEP_CKPTS),
            "pipeline_info": pinfo, "loaded_modules": loaded, "card012_identity": identity,

@@ -28,7 +28,7 @@ def _preload():
     global _X, _WARM
     t = time.monotonic()
     _X = np.asarray(np.load(SUB, mmap_mode="r"), np.float32); _ = float(_X[0, 0]) + float(_X[-1, -1])
-    _WARM = torch.load(str(INIT), map_location="cpu", weights_only=False)["model_state"]
+    _WARM = V.check_init()
     return time.monotonic() - t
 
 
@@ -55,7 +55,6 @@ def _measured_fit(steps, ckpt_dir):
 
 
 def _spent(path, key):
-    if not Path(path).exists(): return 0.0
     try: v = float(json.loads(Path(path).read_text())[key])
     except Exception as e: raise RuntimeError(f"malformed ledger {path}: {e!r} — fail closed")
     assert math.isfinite(v) and v >= 0; return v

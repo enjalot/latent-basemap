@@ -40,8 +40,7 @@ def charge(tag, seconds, rc):
 def _spent(path, key):
     v = json.loads(Path(path).read_text()); x = float(v[key]); assert math.isfinite(x) and x >= 0, f"bad ledger {path}"; return x
 def _arm_cumulative(arm):
-    try: v = json.loads(CARD.read_text())
-    except Exception: return 0.0
+    v = json.loads(CARD.read_text())
     return float(sum(e.get("wall_s", 0.0) for e in v.get("entries", []) if e.get("tag") == arm))
 def _remaining(stage_cap, arm=None):
     r = [stage_cap, CAP - _spent(CARD, "batch_spent_s"), WIN_CAP - _spent(WIN, "spent_s"), END - time.time()]
@@ -95,12 +94,10 @@ def main():
 
     # 3. arms — measured admission from the preflight steady per-step; cumulative per-arm cap; no truncation
     for arm in ARMS:
-        try:
+        if (V.TD_DEFAULT/f"manifest-{arm}.json").exists():
             completed.append(V.strict_validate_arm(arm, ROOT))
             atomic(OC / "card024-completion-validation.json", {"completed": completed, "all_valid": len(completed) == 3})
             print(f"SKIP {arm} (already strict-valid)", flush=True); continue
-        except Exception:
-            pass
         remaining_steps = DOSE - _completed_steps(arm); need = per_step * remaining_steps + ARM_TAIL_RESERVE
         to = _remaining(PER_ARM_CAP, arm=arm)
         assert to >= need, f"cannot admit {arm}: remaining={to:.1f}s < measured need={need:.1f}s ({remaining_steps} steps @ {per_step:.5f}s); stop, no truncation"

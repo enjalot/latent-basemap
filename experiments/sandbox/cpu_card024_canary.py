@@ -1,101 +1,28 @@
-"""Card024 CPU scalar/logit validation (per card024 "Validation before GPU production"). No GPU. Exercises
-the exact contrastive-normalization loss math the core uses (qhat kernel, the shared finite-distance clamp,
-the binary-logit loss logit=log(qhat)-beta, and the learned scalar) as device-agnostic checks:
-  - qhat(d)=1/(1+a*(d^2)^b) finite in (0,1) at near/mid/far d; shared clamp keeps log(qhat) finite at far d;
-  - neg_fixed(beta=0) equals the equivalent probability qhat/(qhat+1) BCE (logit form == probability form);
-  - beta0 reproduces NEG EXACTLY: nce_learned at beta=0 has identical loss AND identical MODEL (qhat) gradient
-    to neg_fixed;
-  - NCE beta-gradient matches a central finite-difference; the scalar receives a real gradient;
-  - neg_fixed's frozen scalar (const, requires_grad False) receives NO gradient;
-  - loss + qhat-gradient finite at near/mid/far distances (zero-gradient guard).
-Exit 0 = PASS. Usage: cpu_card024_canary.py
-"""
-import os, sys, json, math
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
+"""Actual production NEG/NCE helper and zero-distance radial tested against independent scalar math."""
+import os,sys,json,math
+os.environ['CUDA_VISIBLE_DEVICES']=''
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent)); from _paths import ensure_paths; ensure_paths()
-import torch
-import torch.nn.functional as Fn
-
-OC = Path("/data/latent-basemap/sandbox/overseer-codex"); A, B = 1.9328, 0.7905
-CLAMP_LO, CLAMP_HI = 1e-7, 1 - 1e-7
-
-
-def qhat(d):
-    return 1.0 / (1.0 + A * (d * d) ** B)
-
-
-def _clamp(q):
-    return torch.clamp(torch.nan_to_num(q, nan=1e-7, posinf=1 - 1e-7, neginf=1e-7), CLAMP_LO, CLAMP_HI)
-
-
-def logit_loss(q, t, beta):
-    return Fn.binary_cross_entropy_with_logits(torch.log(_clamp(q)) - beta, t, reduction="mean")
-
-
-def prob_loss_neg(q, t):     # neg_fixed equivalent probability qhat/(qhat+1) at beta=0
-    p = _clamp(q); p = p / (p + 1.0)
-    return Fn.binary_cross_entropy(p, t, reduction="mean")
-
+sys.path.insert(0,str(Path(__file__).resolve().parent));from _paths import ensure_paths;ensure_paths()
+import torch,numpy as np
+from basemap.pumap.parametric_umap.core import ParametricUMAP,contrastive_logit_loss
+from basemap.pumap.parametric_umap.datasets.edge_list_dataset import DeviceEdgeSampler
+import card024_validate as V
 
 def main():
-    torch.set_default_dtype(torch.float64)
-    R = {"schema": "card024-cpu-canary-2026-09-12", "a": A, "b": B}
-    d = torch.tensor([0.05, 0.5, 1.0, 3.0, 20.0])              # near..far
-    q = qhat(d)
-    R["qhat_in_unit_interval"] = bool(torch.all(q > 0) and torch.all(q < 1))
-    R["qhat_finite"] = bool(torch.isfinite(q).all())
-    R["log_qhat_finite_far"] = bool(torch.isfinite(torch.log(_clamp(qhat(torch.tensor([1e3]))))).all())
-
-    # matched batch: half positives, half noise
-    n = 64; g = torch.Generator().manual_seed(24)
-    dd = torch.rand(n, generator=g) * 5.0; qb = qhat(dd)
-    t = torch.zeros(n); t[: n // 2] = 1.0
-
-    # (1) neg_fixed(beta=0) logit form == probability form qhat/(qhat+1)
-    l_logit = logit_loss(qb, t, torch.tensor(0.0))
-    l_prob = prob_loss_neg(qb, t)
-    R["neg_logit_equals_prob"] = bool(torch.allclose(l_logit, l_prob, atol=1e-10))
-
-    # (2) beta0 reproduces NEG exactly in loss AND model(qhat) gradient
-    qn = qb.clone().requires_grad_(True); ln = logit_loss(qn, t, torch.tensor(0.0)); ln.backward()
-    qc = qb.clone().requires_grad_(True)
-    beta_param = torch.zeros((), requires_grad=True)           # nce scalar at init 0
-    lc = logit_loss(qc, t, beta_param); lc.backward()
-    R["beta0_loss_equals_neg"] = bool(torch.allclose(ln.detach(), lc.detach(), atol=1e-12))
-    R["beta0_model_grad_equals_neg"] = bool(torch.allclose(qn.grad, qc.grad, atol=1e-12))
-
-    # (3) NCE beta gradient matches central finite-difference; scalar gets a real gradient
-    R["nce_beta_receives_gradient"] = bool(beta_param.grad is not None and abs(float(beta_param.grad)) > 0)
-    h = 1e-6
-    lp = float(logit_loss(qb, t, torch.tensor(0.0 + h))); lm = float(logit_loss(qb, t, torch.tensor(0.0 - h)))
-    fd = (lp - lm) / (2 * h)
-    R["nce_beta_grad_finite_difference"] = bool(abs(float(beta_param.grad) - fd) < 1e-5)
-
-    # (4) neg_fixed's frozen scalar (const, requires_grad False) receives NO gradient
-    qf = qb.clone().requires_grad_(True); beta_const = torch.zeros((), requires_grad=False)
-    lf = logit_loss(qf, t, beta_const); lf.backward()
-    R["neg_fixed_scalar_frozen"] = bool(getattr(beta_const, "grad", None) is None)
-
-    # (5) loss + qhat gradient finite at near/mid/far
-    finite = True
-    for dv in (0.02, 0.5, 5.0, 100.0):
-        qx = qhat(torch.tensor([dv])).clone().requires_grad_(True)
-        lx = logit_loss(qx, torch.tensor([1.0]), torch.tensor(0.3)); lx.backward()
-        finite = finite and bool(torch.isfinite(lx).all() and torch.isfinite(qx.grad).all())
-    R["loss_grad_finite_near_mid_far"] = finite
-
-    keys = ["qhat_in_unit_interval", "qhat_finite", "log_qhat_finite_far", "neg_logit_equals_prob",
-            "beta0_loss_equals_neg", "beta0_model_grad_equals_neg", "nce_beta_receives_gradient",
-            "nce_beta_grad_finite_difference", "neg_fixed_scalar_frozen", "loss_grad_finite_near_mid_far"]
-    R["PASS"] = bool(all(R[k] for k in keys))
-    R["note"] = ("Validates the loss math only (device-agnostic). Default-off bitwise identity, real sampler/RNG "
-                 "parity, zero weight decay on the scalar group, and mid-epoch resume of model+scalar+moments "
-                 "are proven on the device canary. This is an explicitly simplified NEG/NCE family (no rank "
-                 "window / fneg / anchors / replay / shape / radius / mid-near / density).")
-    (OC / "card024-cpu-canary.json").write_text(json.dumps(R, indent=1)); print(json.dumps(R, indent=1), flush=True)
-    return 0 if R["PASS"] else 3
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+ torch.set_num_threads(2);checks={};p=ParametricUMAP(device='cpu',a=V.A,b=V.B,low_dim_kernel='umap')
+ def radial_loss(distance,beta):
+  x=torch.tensor([[distance,0.]],dtype=torch.float32,requires_grad=True);_,rad=p._low_dim_qs(x,torch.zeros_like(x));loss=contrastive_logit_loss(rad,torch.ones(1),beta,V.A);g=torch.autograd.grad(loss,x)[0];return float(loss.detach()),g
+ for d in [0.,1e-5,.05,1.,100.,1e5]:
+  val,g=radial_loss(d,torch.tensor(.3));expected=math.log1p(math.exp(.3)*(1+V.A*(d*d)**V.B));checks[f'scalar_reference_d{d}']=abs(val-expected)<3e-6;checks[f'finite_grad_d{d}']=bool(torch.isfinite(g).all());checks[f'nonzero_or_zero_grad_d{d}']=bool(g.abs().sum()>0) if d else bool((g==0).all())
+ checks['far_tail_not_probability_clamped']=radial_loss(1e5,torch.tensor(0.))[0]>-math.log(1e-7)+1
+ radial=torch.linspace(.01,10,64,dtype=torch.float64,requires_grad=True);target=torch.zeros(64,dtype=torch.float64);target[:7]=1
+ fixed=contrastive_logit_loss(radial,target,torch.tensor(0.,dtype=torch.float64),V.A);gfix=torch.autograd.grad(fixed,radial)[0];beta=torch.zeros((),dtype=torch.float64,requires_grad=True);learned=contrastive_logit_loss(radial,target,beta,V.A);gl,gb=torch.autograd.grad(learned,[radial,beta]);checks['beta0_exact_loss_model_gradient']=torch.equal(fixed,learned) and torch.equal(gfix,gl)
+ h=1e-6;fd=(contrastive_logit_loss(radial,target,torch.tensor(h,dtype=torch.float64),V.A)-contrastive_logit_loss(radial,target,torch.tensor(-h,dtype=torch.float64),V.A))/(2*h);checks['beta_finite_difference']=abs(float((gb-fd).detach()))<1e-9
+ q=1/(1+V.A*radial);prob=q/(q+1);direct=-(target*prob.log()+(1-target)*torch.log1p(-prob)).mean();checks['NEG_probability_equivalent']=abs(float((direct-fixed).detach()))<1e-12
+ # Actual sampler versus independent draws using its cloned initial generator.
+ sampler=DeviceEdgeSampler(None,np.arange(7),np.roll(np.arange(7),-1),None,7,batch_size=10,pos_ratio=.1,random_state=24,device='cpu')
+ gen=torch.Generator().set_state(sampler.gen.get_state());ss=torch.randint(0,7,(4200,),generator=gen);off=torch.randint(1,7,(4200,),generator=gen);dd=(ss+off)%7;a,b=sampler._sample_negatives(4200);checks['actual_uniform_nonself_draw_formula']=torch.equal(ss,a) and torch.equal(dd,b);checks['nonself_observed']=bool((a!=b).all());checks['all42_ordered_pairs_covered']=len(torch.unique(a*7+b))==42
+ allpairs={(i,(i+j)%7) for i in range(7) for j in range(1,7)};checks['toy_exact_uniform_support']=allpairs=={(i,j) for i in range(7) for j in range(7) if i!=j}
+ z=np.load(V.GRAPH);checks['each_graph_row15']=np.array_equal(np.bincount(z['sources'],minlength=V.N),np.full(V.N,15));checks['graph_nonself']=not np.any(z['sources']==z['targets']);V.check_init();checks['full_actual_init_identity']=True
+ r={'PASS':bool(all(checks.values())),'n_checks':len(checks),'checks':{k:bool(v) for k,v in checks.items()},'noise_recipe':V.noise_recipe(),'scope':'Actual production helper/radial, independent scalar/gradient references incl zero/far tail, actual sampler draw law, full graph degree/self and actual full init hashes. GPU path/resume validation still mandatory.'};(V.OC/'card024-cpu-canary.json').write_text(json.dumps(r,indent=2)+'\n');print(json.dumps(r,indent=2));assert r['PASS']
+if __name__=='__main__':main()
