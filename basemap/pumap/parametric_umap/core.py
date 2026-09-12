@@ -2722,7 +2722,24 @@ class ParametricUMAP:
                     loss = loss + float(self._shape_weight) * _shape_loss
                     shape_loss_val = _shape_loss.item() if use_wandb else 0.0
 
+                    # Card022 calibration probe (opt-in; default-off): capture the ORDINARY pairwise-loss
+                    # gradient global-L2 and the (unweighted) shape-gradient global-L2 at the SAME starting
+                    # head on the same actual-recipe batch, for _calib_probe["n"] steps. No optimizer step is
+                    # taken for the recorded steps (we stop after n). Uses this run's random_state as the
+                    # disjoint, recorded calibration RNG.
+                    if getattr(self, "_calib_probe", None) is not None and len(self._calib_records) < int(self._calib_probe["n"]):
+                        _cp = [p for p in self.model.parameters() if p.requires_grad]
+                        _gp = torch.autograd.grad(umap_loss, _cp, retain_graph=True, allow_unused=True)
+                        _gs = torch.autograd.grad(_shape_loss, _cp, retain_graph=True, allow_unused=True)
+                        _gpn = float(torch.sqrt(sum((g.float() ** 2).sum() for g in _gp if g is not None)))
+                        _gsn = float(torch.sqrt(sum((g.float() ** 2).sum() for g in _gs if g is not None)))
+                        self._calib_records.append({"step": int(global_step), "grad_pairwise_l2": _gpn, "grad_shape_l2": _gsn})
+                        if len(self._calib_records) >= int(self._calib_probe["n"]):
+                            self._train_stats["stop_reason"] = "calib_probe_done"; stop_training = True
+
                 _fwd_ph.__exit__(None, None, None)   # S2: close forward+loss phase
+                if getattr(self, "_calib_probe", None) is not None and stop_training:
+                    break   # calibration probe complete: stop before any optimizer step corrupts the head
 
                 if not torch.isfinite(loss):
                     consecutive_nonfinite_losses += 1
