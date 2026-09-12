@@ -14,6 +14,8 @@ def validate(arm):
  assert a==m['identity'] and m['successful_steps']==m['train_stats']['positive_lr_optimizer_steps']==m['train_stats']['executed_iters']==a['steps']==60000
  assert a['arm']==arm and a['activation']==ACT[arm] and a['negative_slope']==(.01 if arm=='leaky' else 0.)
  assert a['lr']==m['train_stats']['lr_used_min']==m['train_stats']['lr_used_max']==.0001 and a['lr_schedule']=='constant'
+ assert m['warm_parameter_sha']==a['expected_warm_parameter_sha']
+ assert m['peak_allocated_gib']<30
  assert a['head_sha']==sha(HEAD) and a['data_manifest_sha']==sha(DATA/'manifest.json') and m['pipeline']['x_residency']=='device_fp16'
  assert all(sha(ROOT/n)==h for n,h in a['runtime'].items())
  states=[]
@@ -23,6 +25,9 @@ def validate(arm):
   assert all(torch.isfinite(v).all() for v in o['model_state_dict'].values()) and p.stat().st_mtime>=(folder/'admission.json').stat().st_mtime
   states.append(state_sha(o['model_state_dict']))
   c=torch.load(folder/f'ckpt/ckpt-step{step}.pt',map_location='cpu',weights_only=False)
+  assert all(torch.isfinite(v).all() for v in c['model'].values())
+  assert state_sha(c['model'])==states[-1]
+  assert (folder/f'ckpt/ckpt-step{step}.pt').stat().st_mtime>=(folder/'admission.json').stat().st_mtime
   assert c['global_step']==step and c['step_checkpoint'] and c['card012_identity']==a and c['config']['final_activation']==ACT[arm]
  assert len(set(states))==3 and states[-1]==m['endpoint_named_sha']
  endpoint=torch.load(folder/'model.pt',map_location='cpu',weights_only=False)
@@ -31,6 +36,7 @@ def validate(arm):
 def notify(msg):subprocess.run([PY,str(OC/'notify.py'),'post','codex-overseer',str(OC/'card019-execution.json'),msg],timeout=30)
 def main():
  if not CARD.exists():write(CARD,{'schema':'card019-ledger','batch_cap_s':CAP,'batch_spent_s':0,'entries':[]})
+ free,total=torch.cuda.mem_get_info();assert (total-free)/2**30<20,'insufficient shared VRAM headroom for10GiB pilot'
  rt=json.loads((ROOT/'card019-runtime-sha.json').read_text());assert all(sha(ROOT/n)==h for n,h in rt.items())
  cpu=json.loads((OC/'card019-cpu-canary.json').read_text());assert cpu['PASS'] and cpu['core_sha']==sha(ROOT/'basemap/pumap/parametric_umap/core.py') and cpu['module_sha']==sha(ROOT/'basemap/pumap/parametric_umap/models/mlp.py')
  stages=[('gpu_canary','gpu_card019_canary.py',[],120,300)]+[(a,'run_card019_arm.py',[a],1050,1500) for a in ARMS]
@@ -44,6 +50,7 @@ def main():
   assert rc==0,f'{tag} failed rc={rc}'
   if tag=='gpu_canary':assert json.loads((OC/'card019-gpu-canary.json').read_text())['PASS']
   else:done.append(validate(tag));write(OC/'card019-completion-validation.json',{'arms':done,'both_valid':len(done)==2})
+ assert len({a['warm_parameter_sha'] for a in done})==1
  assert len({a['warm_named_sha'] for a in done})==1 and len({a['endpoint_named_sha'] for a in done})==2
  write(OC/'card019-execution.json',{'status':'TRAINED_VALIDATED','arms':done,'quality':'NOT_YET_SCORED'});notify('Card019 matched final-activation continuation heads trained and validated. Tie-aware pile and common quality scoring next; no promotion yet.')
 if __name__=='__main__':

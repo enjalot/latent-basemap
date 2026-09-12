@@ -28,7 +28,8 @@ def fit(arm,steps=60000,canary=False,resume_from=None,ckpt_steps=None,identity_o
  for name,mod in list(sys.modules.items()):
   if name.startswith('basemap.') and getattr(mod,'__file__',None):assert Path(mod.__file__).resolve().is_relative_to(ROOT)
  init=torch.load(HEAD,map_location='cpu',weights_only=False)['model_state_dict']
- identity={'card':'019','arm':arm,'activation':ACT[arm],'negative_slope':.01 if arm=='leaky' else 0.,'steps':steps,'lr':.0001,'lr_schedule':'constant','batch_size':16384,'rankneg_window':75000,'seed':42,'head_sha':sha(HEAD),'warm_named_sha':state_sha(init),'data_manifest_sha':sha(DATA/'manifest.json'),'runtime':rt,'canary':canary}
+ expected_warm=hashlib.sha256(b''.join(v.contiguous().numpy().tobytes() for v in init.values())).hexdigest()[:16]
+ identity={'card':'019','arm':arm,'activation':ACT[arm],'negative_slope':.01 if arm=='leaky' else 0.,'steps':steps,'lr':.0001,'lr_schedule':'constant','batch_size':16384,'rankneg_window':75000,'seed':42,'head_sha':sha(HEAD),'warm_named_sha':state_sha(init),'expected_warm_parameter_sha':expected_warm,'data_manifest_sha':sha(DATA/'manifest.json'),'runtime':rt,'canary':canary}
  dest=OUT/(arm if not canary else 'canary-'+arm);dest.mkdir(parents=True,exist_ok=True)
  if not canary:
   assert steps==60000 and not (dest/'complete.json').exists()
@@ -48,6 +49,9 @@ def fit(arm,steps=60000,canary=False,resume_from=None,ckpt_steps=None,identity_o
        **({} if canary else {'snapshot_steps':SNAPS,'snapshot_dir':str(dest)}))
  st=dict(p._train_stats);assert st['positive_lr_optimizer_steps']==st['executed_iters']==steps
  assert st['lr_used_min']==st['lr_used_max']==.0001 and p._pipeline_info['x_residency']=='device_fp16'
+ assert p.warm_start_sha256==expected_warm
+ assert torch.cuda.max_memory_allocated()/2**30<30
+ free,total=torch.cuda.mem_get_info();assert (total-free)/2**30<30
  assert all(torch.isfinite(v).all() for v in p.model.state_dict().values())
  result={'status':'TRAINED','identity':identity,'successful_steps':steps,'endpoint_named_sha':state_sha(p.model.state_dict()),'warm_parameter_sha':p.warm_start_sha256,'train_stats':st,'stage_wall_s':time.monotonic()-t,'peak_allocated_gib':torch.cuda.max_memory_allocated()/2**30,'pipeline':p._pipeline_info}
  if canary:return result

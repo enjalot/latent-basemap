@@ -110,6 +110,6 @@
   "experiments/sandbox/build_card019_data.py": "dc70071cfbc8fe0987ac502aa97b9eaea75e88ee8e2e7436cc0c1faeb9f6ce70",
   "experiments/sandbox/card019_cpu_canary.py": "79a881f7ed66ed92505f02ec65d6e4f725ccaecdb7e9c54ca5aaedf8b2dff547",
   "experiments/sandbox/gpu_card019_canary.py": "1a9372fd4cd20b063583a0cdf0bce9b335fe121839ac5f1675df225361c3d1ac",
-  "experiments/sandbox/run_card019_arm.py": "abf28335dd9b94097cba0892f1e54646aa8a6772ad6589425589d994d86ee633",
-  "experiments/sandbox/run_card019_chain.py": "af3f95ee8c87f050ebd88cf242c0d30b78f6e54c23a20044a554cc5376548b0f"
+  "experiments/sandbox/run_card019_arm.py": "f46eaa5647989404be30956adc89f9da1bc83f999df6fceb71ccbbaf037bfcb6",
+  "experiments/sandbox/run_card019_chain.py": "519c6d24bd16782a6f39f474a817a872b105cb6a8a62d8a5ad93eb2e96813440"
 }
