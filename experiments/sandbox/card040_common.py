@@ -38,7 +38,14 @@ class Readout(nn.Module):
 def load_body(which='teacher',device='cpu'):
  from basemap.pumap.parametric_umap.core import ParametricUMAP
  p=BODY if which=='teacher' else LEAKY;assert sha(p)==(BODY_SHA if which=='teacher' else LEAKY_SHA);u=ParametricUMAP.load(str(p),device=device);m=u.model.float().eval().requires_grad_(False);assert m.proj_in.in_features==768 and m.proj_out.in_features==2048 and m.proj_out.out_features==2
- assert isinstance(m.up[1],nn.ReLU) if which=='teacher' else isinstance(m.up[1],nn.LeakyReLU) and m.up[1].negative_slope==.01
+ saved=torch.load(p,map_location='cpu',weights_only=False)
+ if which=='teacher':assert saved.get('final_activation','relu')=='relu' and isinstance(m.up[1],nn.ReLU)
+ else:
+  assert saved['final_activation']=='leaky_relu_slope_0p01','unexpected continuation activation'
+  # This isolated legacy loader omits the saved final_activation field. Restore its declared module, without altering any weights.
+  m.up[1]=nn.LeakyReLU(negative_slope=.01)
+  assert isinstance(m.up[1],nn.LeakyReLU) and m.up[1].negative_slope==.01
+ assert all(torch.equal(v.detach().cpu(),saved['model_state_dict'][k]) for k,v in m.state_dict().items()),'body weights changed during activation restoration'
  loaded_check();return m
 @torch.inference_mode()
 def frozen_views(m,x):
