@@ -30,7 +30,8 @@ def fit(arm,dose,dest,*,X=None,graph=None,radii=None,radius_path=None,checkpoint
  assert p._card079_base_negative_weight==ident['base_negative_weight'];assert p.rankneg_window==0 and p._rankneg_scale is None, 'actual negative policy differs'
  free,total=torch.cuda.mem_get_info();assert (total-free)/2**30<30
  assert ck['card081_noise_pairs']==(ts['attempted_batches']*(C.BATCH-int(C.BATCH*.1)) if ident['noise_q_path'] else 0);assert p._card081_actual_q_sha==ident['noise_q_sha']
- assert p.fneg_weight==ident['fneg_weight'] and p.neg_tanh_gamma==ident['neg_tanh_gamma'];assert (p.fneg_telemetry is None)==(ident['fneg_weight']==0)
+ assert p.fneg_weight==ident['fneg_weight'] and p.neg_tanh_gamma==ident['neg_tanh_gamma'];assert ident['fneg_weight']>0 or p.fneg_telemetry is None
+ if dose > int(np.ceil(len(X)*15/int(C.BATCH*.1))) and resume is None:assert (p.fneg_telemetry is None)==(ident['fneg_weight']==0)
  report={'actual_fneg_weight':p.fneg_weight,'actual_neg_tanh_gamma':p.neg_tanh_gamma,'fneg_telemetry':p.fneg_telemetry,'noise_pairs':ck['card081_noise_pairs'],'actual_noise_q_sha':p._card081_actual_q_sha,'actual_base_negative_weight':p._card079_base_negative_weight,'arm':arm,'dose':dose,'wall_s':time.monotonic()-start,'train_stats':ts,'pipeline_info':pi,'identity':ident,'state_sha':C.state_sha(ck['model']),'global_vram_GiB':(total-free)/2**30,'endpoint_checkpoint':str(end),'loaded_modules':C.loaded_modules(),'actual_warm_sha':getattr(p,'warm_start_sha256',None),'resumed_from':str(resume) if resume else None,'expected_fresh_warm_sha':expected_warm,'lmc_stats':None,'resume_start_step':int(torch.load(resume,map_location='cpu',weights_only=False)['global_step']) if resume else 0}
  return p,ck,report
 

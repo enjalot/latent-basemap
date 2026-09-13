@@ -128,7 +128,7 @@
   "experiments/sandbox/prepare_card082.py": "cedfda96ecc58b8e01efee8a684b38cf54eb7d1fa14e1a5aae9f2f355328247c",
   "experiments/sandbox/run_card082_arm.py": "b89960fe5d3679ab8b373b1d73c5a46c8be79b38fc902aba6eed688c0b8aa945",
   "experiments/sandbox/gpu_card082_graph_canary.py": "7023f6e97dc833b3bacd0fe5e75be2083971ff1cabca5336538d9f56736fac4e",
-  "experiments/sandbox/card082_fit.py": "1258ce5e8378aa5aff9c1567a361fa92e8293296912ebd0bfb02d4e33a9d9a4e",
+  "experiments/sandbox/card082_fit.py": "34b1753b9cccc7f769bf7ea23f8bbe5f284631144aebf0a2831478198cff8237",
   "experiments/sandbox/gpu_card082_preflight.py": "a81da3bad5b87b683e4b250c7dea9b7f82403166c87b636908282f397edf39c7",
   "experiments/sandbox/card082_common.py": "83ce80beeef5a8755c3cdecf5678c36a608a0f88eca9ff866264643bfb2b4348"
 }
