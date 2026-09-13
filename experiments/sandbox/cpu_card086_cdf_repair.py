@@ -49,5 +49,5 @@ def main():
   except AssertionError as e:assert str(e)==expected;checks[name+'_fault_rejected']=True
   else:raise AssertionError('fault accepted')
  assert DeviceEdgeSampler.__init__ is method;checks['exception_restoration']=True
- p=O/'card086-cdf-repair/cpu-contracts.json';p.write_text(json.dumps({'PASS':True,'checks':checks,'n_checks':len(checks),'scope':'Actual512-node CPU production sampler,output IDs/labels,AdamW/GradScaler overflow,RNG,MID/EPOCH serialization andoffpath;CUDA/full2M model parity notclaimed.'},indent=2)+'\n');print('CDF REPAIR CPU PASS',len(checks))
+ p=O/'card086-cdf-repair-v2/cpu-contracts.json';p.write_text(json.dumps({'PASS':True,'checks':checks,'n_checks':len(checks),'scope':'Actual512-node CPU production sampler,output IDs/labels,AdamW/GradScaler overflow,RNG,MID/EPOCH serialization andoffpath;CUDA/full2M model parity notclaimed.'},indent=2)+'\n');print('CDF REPAIR CPU PASS',len(checks))
 if __name__=='__main__':main()

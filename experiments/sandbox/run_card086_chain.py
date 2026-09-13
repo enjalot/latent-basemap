@@ -100,12 +100,25 @@ def stage(tag,script,cap,args=(),arm=None,receipt_path=None):
     verify()
     return elapsed
 
+def settled_admission_checks(ledger,window,estimates,remaining_s):
+    import math
+    assert set(estimates)==set(C.ARMS) and all(math.isfinite(v) and v>0 for v in estimates.values()), 'invalid full-dose estimate'
+    checks={'card_cap':ledger['batch_spent_s']+sum(estimates.values())<=B.LIMITS['card_gpu_s'],
+            'window_cap':window['spent_s']+sum(estimates.values())<=165491,
+            'deadline':sum(estimates.values())+120<=remaining_s}
+    checks.update({a:ledger['arm_spent_s'][a]+estimates[a]<=B.LIMITS['stage_gpu_s'][a] for a in C.ARMS})
+    return checks
+
 def main():
     verify() # no lease or GPU activity without root's immutable release
     verify_external_leases() # inspect real ancestor-owned locks; never reacquire
-    start=time.monotonic();stage_time=0.;reserved=False
+    start=time.monotonic();stage_time=0.;reserved=False;controller_charged=0.
+    def settle_controller():
+        nonlocal controller_charged
+        actual=max(0.,time.monotonic()-start-STAGE_TIME)
+        B.transact('controller',actual-controller_charged,kind='settlement');controller_charged=actual
     try:
-        B.transact('controller',120.,check=True);reserved=True
+        B.transact('controller',120.,check=True);controller_charged=120.;reserved=True
         C.input_check()
         stage_time+=stage('prepare_repair','prepare_card086.py',120)
         assert all(C.read(C.TD/a/'preparation.json')['READY'] for a in C.ARMS)
@@ -121,17 +134,16 @@ def main():
             right=STAGE_RECEIPTS['preflight-membership']['receipt']['fits'][count]['sampler']['actual_first_batch']
             for key in ['negative_source_sha','negative_target_sha','sampler_rng_sha','positive_slots','negative_slots']:
                 assert left[key]==right[key], 'full-data matched-attempt parity STOP: '+key
+        settle_controller() # all completed stages and controller-to-now are actual, not active reservations
         ledger=C.read(B.L);window=C.read(B.W)
-        checks={'card_cap':ledger['batch_spent_s']+sum(estimates.values())<=3600,
-                'window_cap':window['spent_s']+sum(estimates.values())<=165491,
-                'deadline':sum(estimates.values())+120<=B.END-time.time()}
-        checks.update({a:ledger['arm_spent_s'][a]+estimates[a]<=B.LIMITS['stage_gpu_s'][a] for a in C.ARMS})
+        checks=settled_admission_checks(ledger,window,estimates,B.END-time.time())
         C.write(C.O/'card086-preflight.json',{'PASS':all(checks.values()),'checks':checks,'estimates':estimates,
             'ledger_at_admission':ledger,'runtime_sha':C.source_check(),'data_manifest_sha':C.sha((C.GD/'manifest.json'))})
         if not all(checks.values()):
             C.write(C.O/'card086-execution.json',{'status':'ADMISSION_STOP','reason':'Fulltwo60K measured dose does not fit cumulative limits; no truncation'})
             return
         for a in C.ARMS:
+            settle_controller()
             assert B.available(a)>=estimates[a],'remaining full dose no longer fits'
             stage_time+=stage(a,'run_card086_arm.py',B.LIMITS['stage_gpu_s'][a],(a,),a,receipt_path=C.TD/a/'validation.json')
         C.write(C.O/'card086-execution.json',{'status':'TRAINED_VALIDATED','quality':'NOT_SCORED',
@@ -140,5 +152,5 @@ def main():
         C.write(C.O/'card086-execution.json',{'status':'EXECUTION_STOP','error':repr(e)})
         raise
     finally:
-        if reserved:B.transact('controller',max(0.,time.monotonic()-start-STAGE_TIME)-120.,kind='settlement')
+        if reserved:settle_controller()
 if __name__=='__main__':main()

@@ -27,5 +27,5 @@ def main():
  from card086_resume import validate_resume_payload
  ck=torch.load(C.R.parent/'card075-train/uniform/ckpts/ckpt-step60000.pt',map_location='cpu',weights_only=False);ck['card012_identity']=dict(ck['card012_identity'],arm='all_one',weighted_edge_sampling=True,uniform_with_replacement=False)
  checks['legacy_unweighted_state_rejected']=reject(lambda:validate_resume_payload(ck,60000),'actual weighted pipeline mismatch')
- assert all(checks.values());C.write(C.O/'card086-cdf-repair/runtime-contracts.json',{'PASS':True,'checks':checks,'n_checks':len(checks),'scope':'CPU contracts only; actual weighted device resume and numerical mass acceptance pending root release.'});print('CPU CONTRACTS PASS',len(checks))
+ assert all(checks.values());C.write(C.O/'card086-cdf-repair-v2/runtime-contracts.json',{'PASS':True,'checks':checks,'n_checks':len(checks),'scope':'CPU contracts only; actual weighted device resume and numerical mass acceptance pending root release.'});print('CPU CONTRACTS PASS',len(checks))
 if __name__=='__main__':main()
