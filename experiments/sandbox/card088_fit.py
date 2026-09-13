@@ -27,7 +27,7 @@ def fit(arm,dose,dest,*,X=None,graph=None,radii=None,radius_path=None,checkpoint
  else:C.write(adm,ident)
  from contextlib import nullcontext
  from card088_sampler_probe import probe
- with matched_sampler(), (probe(probe_record,C.weight_sha(graph)) if probe_record is not None else nullcontext()), observe(p):
+ with matched_sampler(arm,stats=lambda:p._train_stats), (probe(probe_record,C.weight_sha(graph)) if probe_record is not None else nullcontext()), observe(p):
   p.fit(X,precomputed_edges_path=str(graph),random_state=C.SEED,verbose=False,warm_start_state=None if resume else warm,snapshot_steps=tuple(checkpoints or [dose]),snapshot_dir=str(dest),checkpoint_every_epochs=1,checkpoint_dir=str(dest/'ckpts'),resume_from=str(resume) if resume else None)
  if resume is None:assert p.warm_start_sha256==expected_warm,'actual warm-start differs'
  ts=dict(p._train_stats);exposure=validate_exposure(ts);pi=dict(p._pipeline_info);assert ts['executed_iters']==ts['positive_lr_optimizer_steps']==dose;assert ts['lr_used_min']==ts['lr_used_max']==ident['lr'] and pi['x_residency']=='device_fp16'

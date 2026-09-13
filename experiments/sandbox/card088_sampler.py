@@ -1,7 +1,7 @@
 """Isolated common CDF law:120M endpoints,30M logical draws,strict zero exclusion.
 
 Base sampler/core bytes unchanged. Both arms reconstruct this adapter on resume.
-One uniformF64 draw per positive, shared sampler RNG, exactly15N epoch slots.
+One uniformF64 draw per positive, independent epoch-seeded positive RNG,15N epoch slots.
 """
 from contextlib import contextmanager
 import numpy as np,torch
@@ -15,7 +15,7 @@ def inverse(cdf,u):
  return idx
 
 @contextmanager
-def matched_sampler():
+def matched_sampler(expected_arm=None, stats=None):
  init=DeviceEdgeSampler.__init__;iterate=DeviceEdgeSampler.__iter__;draw=DeviceEdgeSampler._draw_idx;advance=DeviceEdgeSampler.__next__
  def initialize(s,*a,**kw):
   init(s,*a,**kw)
@@ -23,16 +23,27 @@ def matched_sampler():
   assert s.source_n_pos==s.n_nodes*60,'card088 common60 endpoint shape'
   w=np.asarray(a[3] if len(a)>3 else kw['weights']).reshape(s.n_nodes,60)
   s._card088_control=bool(w[0,15]==0)
+  if expected_arm is not None:
+   assert expected_arm in ('original15','mixture'),'unknown sampler arm'
+   assert s._card088_control==(expected_arm=='original15'),'card088 sampler arm law mismatch'
   for lo in range(0,s.n_nodes,32768):
    part=w[lo:lo+32768];assert np.all(part[:,:15]==(6 if s._card088_control else 3)) and np.all(part[:,15:]==(0 if s._card088_control else 1)), 'card088 exact weight law mismatch'
   s.n_pos=s.n_nodes*15
   s._card088_support_edges=s.source_n_pos
+  s._card088_epoch_counter=0;s._card088_positive_gen=None
   # Exact total mass with integer weights; force no terminal fallthrough.
   assert float(s.sample_cdf[-1])==1.,'card088 CDF terminal must be exact1'
  def sample(s,m):
-  return inverse(s.sample_cdf,torch.rand(m,generator=s.gen,device=s.device,dtype=torch.float64))
+  assert s._card088_positive_gen is not None,'positive epoch generator missing'
+  return inverse(s.sample_cdf,torch.rand(m,generator=s._card088_positive_gen,device=s.device,dtype=torch.float64))
  def iteration(s):
-  s.pos_idx=0;s.batch_no=0;s.perm=sample(s,s.n_pos);return s
+  s.pos_idx=0;s.batch_no=0
+  if stats is None:epoch=s._card088_epoch_counter
+  else:
+   state=stats();attempts=state['attempted_batches'];assert attempts%len(s)==0,'positive epoch attempted-clock mismatch';epoch=attempts//len(s);state['card088_positive_epoch']=epoch
+  s._card088_epoch_counter=epoch+1
+  s._card088_positive_gen=torch.Generator(device=s.device);s._card088_positive_gen.manual_seed(88130+epoch)
+  s.perm=sample(s,s.n_pos);return s
  def next_batch(s):
   if s.perm is None:iter(s)
   if s.pos_idx>=s.n_pos:raise StopIteration

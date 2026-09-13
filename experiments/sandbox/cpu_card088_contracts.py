@@ -13,7 +13,7 @@ def reject(f,msg):
  raise AssertionError('negative control accepted: '+msg)
 def main():
  checks={}
- for key in ['arm','dose','lr','graph_sha','weight_values_sha','endpoints_sha','weighted_edge_sampling','uniform_with_replacement','parent_sha','warm_sha','reference_sha','data_manifest_sha','runtime_manifest_sha','positive_target_mode','negative_policy','positive_support_law','logical_epoch_draws','cdf_side','endpoint_columns']:
+ for key in ['arm','dose','lr','graph_sha','weight_values_sha','endpoints_sha','weighted_edge_sampling','uniform_with_replacement','parent_sha','warm_sha','reference_sha','data_manifest_sha','runtime_manifest_sha','positive_target_mode','negative_policy','positive_support_law','logical_epoch_draws','cdf_side','endpoint_columns','positive_rng_policy','negative_rng_policy']:
   checks['wrong_'+key]=reject(lambda:C.assert_identity({key:'old'},{key:'new'}),'card088 identity mismatch: '+key)
  with tempfile.TemporaryDirectory() as td:
   p=Path(td)/'receipt.json';t=time.time_ns();checks['missing']=reject(lambda:validate_stage_receipt(p,t,'r','d'),'missing stage receipt');good={'PASS':True,'runtime_sha':'r','data_manifest_sha':'d'};p.write_text(json.dumps(good));os.utime(p,ns=(t,t));assert validate_stage_receipt(p,t,'r','d')==good;checks['fresh']=True

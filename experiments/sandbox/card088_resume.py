@@ -49,6 +49,11 @@ def validate_resume_payload(ck, step, n_nodes=None):
     for k in ["loader_perm", "loader_pos_idx", "loader_batch_no"]:
         assert k in ck and ck[k] is not None, "missing PERM/rank continuation field: " + k
     perm = ck["loader_perm"]; n_edges = 15 * n_nodes
+    if 'positive_rng_policy' in ident:
+        logical_batches=int(np.ceil(n_edges/int(BATCH*POS_RATIO)))
+        assert isinstance(ts.get('card088_positive_epoch'),int),'missing positive epoch state'
+        # The checkpoint is within or immediately at the end of its last sampled epoch.
+        assert ts['card088_positive_epoch']==max(0,(ts['attempted_batches']-1)//logical_batches),'positive epoch state mismatch' 
     assert torch.is_tensor(perm) and perm.dtype == torch.int64 and perm.shape == (n_edges,), "PERM shape/dtype"
     assert int(perm.min()) >= 0 and int(perm.max()) < n_nodes*60, "PERM bounds"
     if ident['arm']=='original15':assert bool((perm%60<15).all()), "zero control weight in resume PERM"

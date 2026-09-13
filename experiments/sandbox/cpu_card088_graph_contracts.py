@@ -42,6 +42,28 @@ def main():
   s=samplers[1];draw=s._draw_idx(100000).numpy();near=float((draw%60<15).mean());assert abs(near-.5)<.008;checks['actual_mixture_draw_mass']=True
   # A new sampler restores the actual logical epoch state including indices>30N.
   a=make(v);iter(a);next(a);saved=(a.perm.clone(),a.pos_idx,a.gen.get_state());expect=next(a);b=make(v);b.perm,b.pos_idx=saved[:2];b.gen.set_state(saved[2]);actual=next(b);assert all(torch.equal(x,y) for x,y in zip(expect,actual));checks['actual_sampler_mid_resume']=True
+ def replay(split=None):
+  state={'attempted_batches':0};seen=[]
+  with matched_sampler('mixture',stats=lambda:state):
+   s=make(v)
+   while state['attempted_batches']<6:
+    if s.perm is None or s.pos_idx>=s.n_pos:iter(s)
+    next(s);state['attempted_batches']+=1
+    seen.append((s._last_all_src.clone(),s._last_all_dst.clone(),s.gen.get_state().clone()))
+    if state['attempted_batches']==split:
+     with tempfile.TemporaryDirectory() as path:
+      f=Path(path)/'sampler.pt';torch.save({'state':state,'perm':s.perm,'pos':s.pos_idx,'rng':s.gen.get_state()},f);saved=torch.load(f,weights_only=False)
+     state=saved['state'];s=make(v);s.perm=saved['perm'];s.pos_idx=saved['pos'];s.gen.set_state(saved['rng'])
+  return seen,state
+ full,state=replay()
+ for split in [1,2]:
+  continued,end=replay(split);assert state==end and all(torch.equal(a,b) for left,right in zip(full,continued) for a,b in zip(left,right));checks['independent_positive_epoch_reconstruction_'+str(split)]=True
+ with matched_sampler():
+  a=make(v);b=make(v);iter(a);iter(b);a._draw_idx(17);next(a);next(b);np_=a.num_pos;assert torch.equal(a._last_all_src[np_:],b._last_all_src[np_:]) and torch.equal(a._last_all_dst[np_:],b._last_all_dst[np_:]);checks['positive_draws_do_not_advance_noise_rng']=True
+ try:
+  with matched_sampler('mixture'):make(w)
+ except AssertionError as e:assert str(e)=='card088 sampler arm law mismatch';checks['wrong_arm_actual_weight_law_rejected']=True
+ else:raise AssertionError('wrong arm weights accepted')
  try:G.validate_rows(np.zeros((n,15),dtype='i4'),np.zeros((n,45),dtype='i4'),n)
  except AssertionError as e:assert str(e)=='support self';checks['self_rejected_specific']=True
  else:raise AssertionError('self accepted')
