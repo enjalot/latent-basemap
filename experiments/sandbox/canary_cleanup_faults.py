@@ -1,6 +1,8 @@
 """Default-off hooks for actual fit-path faults; restricted by caller to512-node18-step canary."""
 from contextlib import contextmanager
 import torch
+import inspect
+from pathlib import Path
 from basemap.pumap.parametric_umap.datasets.edge_list_dataset import DeviceEdgeSampler
 PLAN={5:'gradient',7:'loss'}
 def guard(nodes,dose,dest,training_dir,graph,full_graph,off,resume):
@@ -11,6 +13,8 @@ def guard(nodes,dose,dest,training_dir,graph,full_graph,off,resume):
 @contextmanager
 def force(p,record,card):
  old_next=DeviceEdgeSampler.__next__;old_zero=torch.optim.AdamW.zero_grad;old_step=torch.optim.AdamW.step
+ old_bce=torch.nn.functional.binary_cross_entropy
+ core_file=str(Path(__file__).resolve().parents[2]/'basemap/pumap/parametric_umap/core.py')
  pending=None;last=None;handles=[];row=None
  record.update(plan=PLAN,rows=[],gradient_cleanup_proved=False,loss_output_injected=False)
  def ours(opt):return opt.param_groups[0]['params'][0] is next(p.model.parameters())
@@ -42,27 +46,34 @@ def force(p,record,card):
     handles.clear();assert pending is not None,'fault recorder missing selected batch';last=attempt;row=dict(pending,attempt=attempt,successful=False,zero_calls=0,finite_loss_before=p._train_stats.get('finite_loss_batches',0));record['rows'].append(row)
     if PLAN.get(attempt)=='gradient':
      handles.append(next(p.model.parameters()).register_hook(lambda g:torch.full_like(g,float('inf'))))
-    if PLAN.get(attempt)=='loss':
-     def corrupt(module,args,out):
-      assert isinstance(module,torch.nn.BCELoss) and out.ndim==0 and torch.isfinite(out),'fault requires finite scalar BCE output'
-      assert all(torch.isfinite(x).all() for x in args),'fault requires finite BCE inputs'
-      record['loss_output_injected']=True;record['loss_pre_fault_finite']=True
-      return out*float('nan')
-     handles.append(p.loss_fn.register_forward_hook(corrupt))
    row['zero_calls']+=1
    if PLAN.get(attempt)=='gradient' and row['zero_calls']>1:
     assert p._train_stats['finite_loss_batches']==row['finite_loss_before']+1,'forced gradient did not follow finite loss'
     record['gradient_cleanup_proved']=True
   return old_zero(opt,*args,**kwargs)
+ def bce(input,target,*args,**kwargs):
+  out=old_bce(input,target,*args,**kwargs)
+  frame=inspect.currentframe().f_back
+  try:own=frame.f_locals.get('self') is p and frame.f_code.co_filename==core_file
+  finally:del frame
+  if own and last==7 and p._train_stats['attempted_batches']==7:
+   assert row is not None and row['attempt']==7 and row['zero_calls']==1,'functional fault outside owning active attempt'
+   assert kwargs.get('reduction')=='none' and out.shape==input.shape and torch.isfinite(out).all(),'fault requires finite unreduced BCE tensor'
+   assert torch.isfinite(input).all() and torch.isfinite(target).all(),'fault requires finite BCE inputs'
+   assert not record['loss_output_injected'],'duplicate owning functional BCE injection'
+   record['loss_output_injected']=True;record['loss_pre_fault_finite']=True
+   record['loss_injection_route']='owning_core_functional_BCE_none';record['loss_tensor_elements']=out.numel()
+   return out*float('nan')
+  return out
  def step(opt,*args,**kwargs):
   result=old_step(opt,*args,**kwargs)
   if ours(opt):assert row is not None;row['successful']=True
   return result
- DeviceEdgeSampler.__next__=next_batch;torch.optim.AdamW.zero_grad=zero;torch.optim.AdamW.step=step
+ DeviceEdgeSampler.__next__=next_batch;torch.optim.AdamW.zero_grad=zero;torch.optim.AdamW.step=step;torch.nn.functional.binary_cross_entropy=bce
  try:yield
  finally:
   for h in handles:h.remove()
-  DeviceEdgeSampler.__next__=old_next;torch.optim.AdamW.zero_grad=old_zero;torch.optim.AdamW.step=old_step
+  DeviceEdgeSampler.__next__=old_next;torch.optim.AdamW.zero_grad=old_zero;torch.optim.AdamW.step=old_step;torch.nn.functional.binary_cross_entropy=old_bce
 
 def validate(record,stats,exposure=None):
  assert stats['attempted_batches']==20 and stats['positive_lr_optimizer_steps']==stats['optimizer_steps_succeeded']==18,'forced fault exact dose/attempts'
