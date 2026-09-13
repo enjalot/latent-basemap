@@ -8,7 +8,9 @@ sys.path.insert(0,str(O))
 from card057_confined_repair import repair,shuffled_direction_control
 
 D=O/'card057-projection'
-START=time.monotonic();CHARGED=0.;STAGES=[]
+START=time.monotonic()
+prior=json.loads((O/'card057-ledger.json').read_text()) if (O/'card057-ledger.json').exists() else {}
+BASE=float(prior.get('batch_spent_s',0.));CHARGED=BASE;STAGES=list(prior.get('entries',[]))
 def verify():
     release=json.loads((O/'card057-release.json').read_text())
     assert release['PASS'] and all(sha(p)==h for p,h in release['files'].items()),'release/source identity'
@@ -97,7 +99,7 @@ def preflight():
         rows[name]={'t2048_s':t1,'t8192_s':t2,'seconds_per_row':slope,'conservative_remaining_s':estimate}
         del m;torch.cuda.empty_cache()
     required=sum(x['conservative_remaining_s'] for x in rows.values())+60
-    assert time.monotonic()-START+required<900,'complete workload does not fit cap'
+    assert BASE+time.monotonic()-START+required<900,'complete workload does not fit cap'
     return {'PASS':True,'heads':rows,'required_remaining_s':required}
 
 def production():
@@ -148,8 +150,9 @@ def main():
         deadline=dt.datetime.fromisoformat(window['deadline_utc'].replace('Z','+00:00'))
         room=(deadline-dt.datetime.now(dt.timezone.utc)).total_seconds()
         ledger=json.loads((O/'cards-24h-window-ledger.json').read_text())
-        assert room>=900 and ledger['spent_s']+900<=window['gpu_window_cap_s'],'owner window admission'
-        signal.signal(signal.SIGTERM,expired);signal.signal(signal.SIGALRM,expired);signal.alarm(890)
+        remaining=900-BASE
+        assert remaining>30 and room>=remaining and ledger['spent_s']+remaining<=window['gpu_window_cap_s'],'owner window admission'
+        signal.signal(signal.SIGTERM,expired);signal.signal(signal.SIGALRM,expired);signal.alarm(int(remaining-10))
         D.mkdir(exist_ok=False);device_setup()
         c=stage('device_canary',canary);atomic(D/'device-canary.json',c)
         p=stage('throughput_preflight',preflight);atomic(D/'preflight.json',p)
@@ -159,7 +162,7 @@ def main():
     except BaseException as exc:
         error=repr(exc);raise
     finally:
-        charge('controller_reconciliation',max(0.,time.monotonic()-START-CHARGED),0 if error is None else 1)
+        charge('controller_reconciliation',max(0.,time.monotonic()-START-(CHARGED-BASE)),0 if error is None else 1)
         atomic(O/'card057-execution.json',{'status':status,'error':error,'stages':STAGES,'batch_spent_s':CHARGED,'at':dt.datetime.now(dt.timezone.utc).isoformat()})
 
 if __name__=='__main__':main()
