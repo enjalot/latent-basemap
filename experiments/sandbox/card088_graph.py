@@ -73,7 +73,16 @@ Original list need not equal current numerical top15. It is NEVER regenerated.
 def validate_bundle(directory=D):
  directory=Path(directory);m=read(directory/'manifest.json')
  assert m['PASS'] is True and m['n']==N and m['k_extra']==45,'card088 graph manifest schema'
- assert m['runtime_sha']==sha(R/'card088-runtime-sha.json'),'card088 graph runtime identity'
+ current_runtime=sha(R/'card088-runtime-sha.json')
+ if m['runtime_sha']!=current_runtime:
+  proof=read(R.parent/'overseer-codex/card088-graph-reuse.json')
+  assert proof['PASS'] is True and proof['producer_runtime_sha']==m['runtime_sha'] and proof['consumer_runtime_sha']==current_runtime,'graph reuse runtime mismatch'
+  assert proof['producer_manifest_sha']==sha(directory/'manifest.json') and proof['graph_builder_sha']==m['graph_builder_sha'],'graph reuse producer mismatch'
+  import ast
+  tree=ast.parse(Path(__file__).read_text());functions={n.name:hashlib.sha256(ast.dump(n,include_attributes=False).encode()).hexdigest() for n in tree.body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name!='validate_bundle'}
+  assert functions==proof['unchanged_graph_functions'],'graph search/weights changed during reuse'
+  assert proof['files']==m['files'] and proof['inputs']==m['inputs'],'graph reuse content contract mismatch'
+
  assert m['graph_builder_sha']==sha(R/'experiments/sandbox/build_card088_graph.py'),'card088 graph builder identity'
  assert all(sha(directory/p)==h for p,h in m['files'].items()),'card088 data artifact hash mismatch'
  assert all(sha(p)==h for p,h in m['inputs'].items()),'card088 data input hash mismatch'

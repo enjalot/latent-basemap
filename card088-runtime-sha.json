@@ -221,7 +221,7 @@
   "experiments/sandbox/card088_common.py": "b43e89a54b0cc53b54eded7fc8e82f7170ae8843b03e8779306ac9b5d6513670",
   "experiments/sandbox/card088_exposure.py": "d35a42c40f379a6aa3eb90df96feaf47c82caa635c00376c590a0d443bc32a58",
   "experiments/sandbox/card088_fit.py": "3d850f160e73036e738f67fff3cb58d61b3f3201138cd3a51fbf022d6c0fa077",
-  "experiments/sandbox/card088_graph.py": "bda80008e9b80357e667b60e021b56d8b3aeb5974412de02e094993ec6422796",
+  "experiments/sandbox/card088_graph.py": "b775633f95be057cc974eabd1e46e11ace084b7cf50131bf476ee0fb75370572",
   "experiments/sandbox/card088_offpath.py": "8c3a2201fe69fdc7f42103349de1dad4ba4479572a42ecc980e6fc57c0d2a235",
   "experiments/sandbox/card088_resume.py": "1bc138ca29971eed0a1ac31b38f04416b04ea10f6a6156a7942a5621c544d3a3",
   "experiments/sandbox/card088_sampler.py": "952d0e85fdac643792657ce15e196e0c9c34b7f81293f24fcd5a2904e5ad89d7",
@@ -322,7 +322,7 @@
   "experiments/sandbox/gpu_card075_preflight.py": "2b85a5c6ac786d704215f69479d6fee9406c0eb4eebf55d32c8d327da8167157",
   "experiments/sandbox/gpu_card086_graph_canary.py": "2692fc4c4fb64f3a44b55fcd0d1430dad7d9669ee0da4ad37a1733eb1fb44ce3",
   "experiments/sandbox/gpu_card086_preflight.py": "28ea640d01baccf78df4c8d5921c96f028e74b51926e92a7e4a1ad97e71dd801",
-  "experiments/sandbox/gpu_card088_graph_canary.py": "1168618071433ae8457f35a7b1926f30d172734bf799a6e995087e794e84cd64",
+  "experiments/sandbox/gpu_card088_graph_canary.py": "cfa11de1617672ae922ccd1ebdca76cfbf6671e29e8689e54ea5cbf2d6ee68e1",
   "experiments/sandbox/gpu_card088_preflight.py": "3dd401dbf2d56de831d2d2814536c4bec1123ebe1dff8a7dc440a8e45637676f",
   "experiments/sandbox/gpu_deriv_canary.py": "e2e0c439c8a3b5f16ed7aec4ac7ff45c0fdb8d0de603851d5e57bbdcc5e92ad7",
   "experiments/sandbox/gpu_lr_resume_canary.py": "a046ac28de01f9dca3fea489f5effc0be684d5855619397fa150d13d3207ab99",
@@ -503,5 +503,8 @@
   "experiments/sandbox/validate_replay_arm.py": "7083b8faf78bd4f505e80f893e7a9f72f7b36a96b749421ef6ecd9d96e9fd5fe",
   "experiments/sandbox/vendi.py": "fb55135f065d5f093dfd28e72b5468ad47e5594d4dea6a589c8fe513deae9e74",
   "experiments/sandbox/verdict_stability_ffr_v2.py": "13be8912d2d852f4504d45c9a829b18afc0aaf9da26c95a2a853af16ae2a9767",
-  "experiments/sandbox/verify_repro.py": "8c7cfa4f1f60e8e1b8e90996d8a7cead06d8e05b6460389b1890dd6f1bad4f2a"
+  "experiments/sandbox/verify_repro.py": "8c7cfa4f1f60e8e1b8e90996d8a7cead06d8e05b6460389b1890dd6f1bad4f2a",
+  "experiments/sandbox/card088_admission_cache.py": "1ef3af9558f7a3b8e2aeebff31330bea13b28c32afb89ce8e5db39b8ce8b0316",
+  "experiments/sandbox/cpu_card088_admission_cache.py": "cc7d697013dd3aa0fad8cd34649e4f52494cceb4b952c6ef1ad437c648f7216a",
+  "experiments/sandbox/cpu_card088_graph_reuse.py": "6a3c77f7316eb4d186b9f9058e8b1881627ab577e5298310114e26e30b106913"
 }
