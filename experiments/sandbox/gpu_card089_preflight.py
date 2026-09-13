@@ -13,7 +13,7 @@ def main():
  C.require_release();arm=sys.argv[1];assert arm in C.ARMS;start=time.monotonic();C.input_check();fits={}
  with tempfile.TemporaryDirectory(dir=C.R.parent,prefix='card089-preflight-') as td:
   for dose in [500,3500]:
-   record={};before=time.monotonic()
+   record={'cdf_diagnostic_path':str(C.O/f'card089-cdf-{arm}-{dose}-{time.time_ns()}.json')};before=time.monotonic()
    with probe(record,C.weight_sha(C.GD/f'{arm}-edges.npz')):p,ck,r=fit(arm,dose,Path(td)/str(dose),checkpoints=[dose])
    stamp=time.monotonic();torch.save(ck,Path(td)/'serialize.pt');serial=time.monotonic()-stamp
    fits[str(dose)]={'seconds':time.monotonic()-before,'serialization_s':serial,'positive_updates':r['train_stats']['positive_lr_optimizer_steps'],'global_vram_GiB':r['global_vram_GiB'],'sampler':record,'actual_support_fractions':r['support_fractions'],'actual_exposure':r['exposure']}

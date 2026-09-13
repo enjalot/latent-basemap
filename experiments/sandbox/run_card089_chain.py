@@ -107,6 +107,7 @@ def main():
     try:
         B.transact('controller',120.,check=True);reserved=True
         C.input_check()
+        stage_time+=stage('baseline_deep_validation','validate_card089_baseline.py',120,receipt_path=C.O/'card089-baseline-deep-validation.json')
         stage_time+=stage('history_replay','gpu_card089_history_replay.py',300,receipt_path=C.O/'card089-history-device.json')
         stage_time+=stage('prepare','prepare_card089.py',120)
         assert all(C.read(C.TD/a/'preparation.json')['READY'] for a in C.ARMS)

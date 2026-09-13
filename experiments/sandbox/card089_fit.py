@@ -27,7 +27,8 @@ def fit(arm,dose,dest,*,X=None,graph=None,radii=None,radius_path=None,checkpoint
  else:C.write(adm,ident)
  if mutual_mask is None:mutual_mask=np.load(C.O/'reciprocity-readiness-20260913/mutual-mask.npy',mmap_mode='r')
  assert mutual_mask.shape==(len(X),15)
- with observe(p,arm,mutual_mask):
+ with np.load(graph) as graph_data:ordered_targets=graph_data['targets'].reshape(-1,15)
+ with observe(p,arm,mutual_mask,ordered_targets):
   p.fit(X,precomputed_edges_path=str(graph),random_state=C.SEED,verbose=False,warm_start_state=None if resume else warm,snapshot_steps=tuple(checkpoints or [dose]),snapshot_dir=str(dest),checkpoint_every_epochs=1,checkpoint_dir=str(dest/'ckpts'),resume_from=str(resume) if resume else None)
  if resume is None:assert p.warm_start_sha256==expected_warm,'actual warm-start differs'
  ts=dict(p._train_stats);exposure=validate_exposure(ts);pi=dict(p._pipeline_info);assert ts['executed_iters']==ts['positive_lr_optimizer_steps']==dose;assert ts['lr_used_min']==ts['lr_used_max']==ident['lr'] and pi['x_residency']=='device_fp16'

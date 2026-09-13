@@ -13,12 +13,13 @@ from card089_exposure import observe,validate,fractions as support_fractions
 from card089_weights import weights
 from gpu_card060_canary import same
 
-def _run(instrument=True,split=None):
- torch.manual_seed(42);n=512;src=np.repeat(np.arange(n,dtype='i4'),15);dst=np.array([(i+j)%n for i in range(n) for j in range(1,16)],dtype='i4');mask=np.random.default_rng(89).random((n,15))<.3;w=weights(mask,'reciprocal')[0].ravel()
+def _run(instrument=True,split=None,fault=None):
+ torch.manual_seed(42);n=512;src=np.repeat(np.arange(n,dtype='i4'),15);rng=np.random.default_rng(89);neighbors=np.array([rng.choice(np.delete(np.arange(n),i),15,False) for i in range(n)],dtype='i4');dst=neighbors.ravel();mask=(neighbors[neighbors]==np.arange(n)[:,None,None]).any(2);w=weights(mask,'reciprocal')[0].ravel()
  s=DeviceEdgeSampler(DeviceArrayDataset(np.arange(n,dtype='f4')[:,None],device='cpu'),src,dst,w,n,pos_ratio=.1,batch_size=16384,random_state=42,positive_target_mode='binary',weighted_edge_sampling=True,device='cpu')
  p=SimpleNamespace(model=torch.nn.Linear(1,1),_train_stats={k:0 for k in ['attempted_batches','optimizer_steps_succeeded','positive_lr_optimizer_steps','amp_overflow_skips','nonfinite_loss_skips','nonfinite_gradient_skips']});opt=torch.optim.AdamW(p.model.parameters(),lr=.0001);scaler=torch.amp.GradScaler('cpu',init_scale=16);seen=[]
  from contextlib import nullcontext
- with observe(p,'reciprocal',mask) if instrument else nullcontext():
+ supplied_mask=~mask if fault=='mask' else mask;supplied_targets=(neighbors+1)%n if fault=='endpoints' else neighbors
+ with observe(p,'reciprocal',supplied_mask,supplied_targets) if instrument else nullcontext():
   for epoch in range(2):
    iter(s)
    for batch in range(len(s)):
@@ -34,8 +35,8 @@ def _run(instrument=True,split=None):
       path=Path(td)/'state.pt';torch.save({'stats':p._train_stats,'model':p.model.state_dict(),'optimizer':opt.state_dict(),'scaler':scaler.state_dict(),'sampler_rng':s.gen.get_state(),'perm':s.perm,'pos':s.pos_idx},path);ck=torch.load(path,weights_only=False);p._train_stats=ck['stats'];p.model.load_state_dict(ck['model']);opt.load_state_dict(ck['optimizer']);scaler.load_state_dict(ck['scaler']);s.gen.set_state(ck['sampler_rng']);s.perm=ck['perm'];s.pos_idx=ck['pos']
  return p,opt,scaler,s,seen
 
-def run(instrument=True,split=None):
- return _run(instrument,split)
+def run(instrument=True,split=None,fault=None):
+ return _run(instrument,split,fault)
 
 def main():
  torch.set_num_threads(2);full=run();plain=run(False);checks={};e=validate(full[0]._train_stats)
@@ -44,6 +45,10 @@ def main():
  for k in [2,5]:
   resumed=run(split=k);assert resumed[0]._train_stats==full[0]._train_stats and same(resumed[1].state_dict(),full[1].state_dict()) and torch.equal(resumed[3].gen.get_state(),full[3].gen.get_state());checks['serialized_'+('mid' if k==2 else 'epoch')+'_exposure']=True
  assert same(full[0].model.state_dict(),plain[0].model.state_dict()) and same(full[1].state_dict(),plain[1].state_dict()) and full[2].state_dict()==plain[2].state_dict() and torch.equal(full[3].gen.get_state(),plain[3].gen.get_state());checks['instrumentation_numerical_rng_parity']=True
+ for fault,message in [('mask','actual reciprocal mask consumption mismatch'),('endpoints','actual endpoint consumption mismatch')]:
+  try:run(fault=fault)
+  except AssertionError as error:assert str(error)==message;checks['actual_'+fault+'_fault_rejected']=True
+  else:raise AssertionError('consumption fault accepted')
  bad=copy.deepcopy(full[0]._train_stats);bad['card089_exposure']['attempted_positive_slots']=-1
  try:validate(bad)
  except AssertionError as error:assert str(error)=='invalid exposure counters';checks['corrupt_exposure_rejected']=True
