@@ -2445,6 +2445,9 @@ class ParametricUMAP:
                         # (upstream's correction) once rank sampling is live.
                         w = torch.where(
                             neg_mask, w * self._rankneg_scale, w)
+                    if getattr(self, '_card079_base_negative_weight', None) is not None:
+                        from .negative_base_weight import override_negative_base
+                        w = override_negative_base(w, neg_mask, self._card079_base_negative_weight)
                     if self.fneg_weight > 0:
                         # Track 4C: up-weight the BCE of mid-range negatives
                         # (extra repulsion where fog lives). "Mid-range" = 2D
