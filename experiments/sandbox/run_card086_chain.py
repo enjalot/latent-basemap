@@ -110,9 +110,10 @@ def settled_admission_checks(ledger,window,estimates,remaining_s):
     return checks
 
 def main():
+    start=time.monotonic() # occupancy includes initial full release hashing and lease inspection
     verify() # no lease or GPU activity without root's immutable release
     verify_external_leases() # inspect real ancestor-owned locks; never reacquire
-    start=time.monotonic();stage_time=0.;reserved=False;controller_charged=0.
+    stage_time=0.;reserved=False;controller_charged=0.
     def settle_controller():
         nonlocal controller_charged
         actual=max(0.,time.monotonic()-start-STAGE_TIME)

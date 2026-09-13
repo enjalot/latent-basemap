@@ -25,8 +25,10 @@ def run(fail=False):
    M.STAGE_RECEIPTS[tag]={'receipt':{'PASS':True,'runtime_sha':'runtime','data_manifest_sha':'data','estimate':{'complete_arm_s':1451.33},'fits':{n:{'sampler':{'actual_first_batch':batch}} for n in ['500','3500']}}}
   return elapsed
  def available(arm=None):return min(3600-ledger['batch_spent_s'],1600-ledger['arm_spent_s'][arm] if arm else 3600)
+ def initial_verify():clock[0]+=7.
+ def initial_leases():clock[0]+=3.
  M.STAGE_TIME=0.;M.STAGE_RECEIPTS={}
- with patch.multiple(C,read=read,write=lambda p,r:outputs.update({str(p):copy.deepcopy(r)}),source_check=lambda:'runtime',input_check=lambda:None,validate_preparations=lambda:None,sha=lambda p:'data'),patch.multiple(B,transact=transact,available=available,END=1e20),patch.multiple(M,verify=lambda:None,verify_external_leases=lambda:None,stage=stage),patch.object(M.time,'monotonic',lambda:clock[0]):
+ with patch.multiple(C,read=read,write=lambda p,r:outputs.update({str(p):copy.deepcopy(r)}),source_check=lambda:'runtime',input_check=lambda:None,validate_preparations=lambda:None,sha=lambda p:'data'),patch.multiple(B,transact=transact,available=available,END=1e20),patch.multiple(M,verify=initial_verify,verify_external_leases=initial_leases,stage=stage),patch.object(M.time,'monotonic',lambda:clock[0]):
   if fail:
    try:M.main()
    except RuntimeError as e:assert str(e)=='stage fault'
@@ -35,8 +37,8 @@ def run(fail=False):
  assert abs(ledger['batch_spent_s']-(clock[0]-1000))<1e-8,'controller or stage accounting differs from actual elapsed'
  if not fail:
   admission=outputs[str(C.O/'card086-preflight.json')];assert admission['PASS'];assert admission['ledger_at_admission']['arm_spent_s']==dict.fromkeys(C.ARMS,139.5)
-  assert admission['ledger_at_admission']['batch_spent_s']==319.,admission['ledger_at_admission']
+  assert admission['ledger_at_admission']['batch_spent_s']==329.,admission['ledger_at_admission']
   assert outputs[str(C.O/'card086-execution.json')]['status']=='TRAINED_VALIDATED'
  return {'actual_total_s':ledger['batch_spent_s'],'events':events}
-r={'PASS':True,'n_checks':2,'success':run(),'stage_failure':run(True),'scope':'Real chain main, simulated clock/stages, in-memory ledger; verifies settled admission139.5 not240 and exact controller+stage settlement including exception. No GPU, files or live ledger mutation inside simulation.'}
-C.write(C.O/'card086-cdf-final-delivery/preparation-revision/chain-accounting-contracts.json',r);print('CHAIN ACCOUNTING PASS2')
+r={'PASS':True,'n_checks':2,'success':run(),'stage_failure':run(True),'scope':'Real chain main, simulated clock/stages, in-memory ledger; verifies settled admission139.5 not240 and exact controller+stage settlement including initial7s hash+3s lease overhead and exception. No GPU, files or live ledger mutation inside simulation.'}
+C.write(C.O/'card086-cdf-final-delivery/occupancy-revision/chain-accounting-contracts.json',r);print('CHAIN ACCOUNTING PASS2')
