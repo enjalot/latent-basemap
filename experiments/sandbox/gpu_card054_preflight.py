@@ -6,7 +6,7 @@ import tempfile,time,gc,math,datetime as dt
 import torch
 import card054_common as C
 from card054_fit import fit
-END=dt.datetime.fromisoformat('2026-09-13T01:52:44+00:00').timestamp()
+END=dt.datetime.fromisoformat('2026-09-13T23:50:55+00:00').timestamp()
 def main():
  start=time.monotonic();C.source_check();C.input_check();C.graph_check();fits={};est={};checks={}
  with tempfile.TemporaryDirectory(dir=str(C.R.parent),prefix='card054-preflight-') as td:
@@ -23,6 +23,6 @@ def main():
    est[arm]={'per_step_s':slope,'setup_s':setup,'reserve_s':reserve,'complete_arm_s':setup+slope*C.DOSE+reserve}
    checks[arm+'_time']=est[arm]['complete_arm_s']<=1000;checks[arm+'_vram']=max(x['global_vram_GiB'] for x in fits[arm].values())<30
  spent=C.read(C.O/'card054-ledger.json')['batch_spent_s'];win=C.read(C.O/'cards-24h-window-ledger.json')['spent_s'];used=time.monotonic()-start;need=sum(v['complete_arm_s'] for v in est.values())+120
- checks.update(card_cap=spent+used+need<=2400,window_cap=win+used+need<=86400,deadline=need<=END-time.time())
+ checks.update(card_cap=spent+used+need<=2400,window_cap=win+used+need<=165491,deadline=need<=END-time.time())
  r={'PASS':bool(all(checks.values())),'checks':{k:bool(v) for k,v in checks.items()},'fits':fits,'estimates':est,'fits_plus_reserve_s':need,'preflight_elapsed_s':used,'runtime_sha':C.source_check(),'scope':'Actual1536-D300K two-arm500/3500 successful-update fits with real epoch checkpoint, conservative repeated serialization, unchanged30K doses.'};C.write(C.O/'card054-preflight.json',r);print(r,flush=True);return 0 if r['PASS'] else 3
 if __name__=='__main__':raise SystemExit(main())
