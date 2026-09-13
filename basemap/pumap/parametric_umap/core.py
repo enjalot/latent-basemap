@@ -2376,6 +2376,9 @@ class ParametricUMAP:
 
                 def _get_next(_it=_batch_iter):
                     try:
+                        _cal = getattr(self, '_card084_calibration', None)
+                        if _cal is not None:
+                            _cal.before_batch(_it)
                         return next(_it)
                     except StopIteration:
                         return None
@@ -2517,6 +2520,15 @@ class ParametricUMAP:
                 else:
                     corr_loss = torch.zeros((), device=umap_loss.device)
                     loss = umap_loss
+
+                _cal = getattr(self, '_card084_calibration', None)
+                if _cal is not None:
+                    # Fixed-head calibration consumes actual batches, never optimizer updates.
+                    _fwd_ph.__exit__(None, None, None)
+                    _cal(self, loss, src_embeddings, dst_embeddings,
+                         targets_for_loss, _pair_scale, loader)
+                    batch = _get_next()
+                    continue
 
                 # Card084: reuse production positive pairs; no extra sampler or forward.
                 _attraction = getattr(self, '_card084_attraction', None)
@@ -2687,6 +2699,8 @@ class ParametricUMAP:
                 _fwd_ph.__exit__(None, None, None)   # S2: close forward+loss phase
 
                 if not torch.isfinite(loss):
+                    if getattr(self, '_card084_attraction', {}).get('coefficient', 0.) != 0.:
+                        raise FloatingPointError('Card084 nonfinite combined loss; STOP')
                     consecutive_nonfinite_losses += 1
                     self._train_stats["nonfinite_loss_skips"] += 1
                     if getattr(self, "_abort_on_first_nonfinite", False):
@@ -2736,6 +2750,8 @@ class ParametricUMAP:
                         p.grad.detach().norm() for p in self.model.parameters()
                         if p.grad is not None]))
                 if not bool(torch.isfinite(total_norm)):
+                    if getattr(self, '_card084_attraction', {}).get('coefficient', 0.) != 0.:
+                        raise FloatingPointError('Card084 nonfinite parameter gradient (including AMP); STOP')
                     optimizer.zero_grad(set_to_none=True)
                     if scaler is not None:
                         # Historical receipts call this ``amp_overflow`` because

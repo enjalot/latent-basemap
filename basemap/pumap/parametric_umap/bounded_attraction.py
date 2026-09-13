@@ -25,10 +25,23 @@ def add_attraction(base, src, dst, positive, pair_scale, *, coefficient=0.,
     if not bool(torch.isfinite(scale).all() and (scale > 0).all()):
         raise ValueError('invalid radius products')
     diff = src[mask].to(dtype) - dst[mask].to(dtype)
+    if diff.requires_grad:
+        diff.register_hook(require_finite_gradient)
     u = diff.square().sum(-1) / scale
     if family == 'quadratic':
         values = u / 2
     else:
         # Rationalized pseudo-Huber: no sqrt(u), no cancellation near zero.
         values = u / (torch.sqrt(1 + u / (delta * delta)) + 1)
-    return base + coefficient * values.mean()
+    extra = coefficient * values.mean()
+    if not bool(torch.isfinite(values).all() and torch.isfinite(extra)):
+        raise FloatingPointError('Card084 nonfinite extra attraction value; STOP')
+    return base + extra
+
+
+def require_finite_gradient(gradient):
+    if gradient is None:  # PyTorch undefined gradient represents zero.
+        return None
+    if not bool(torch.isfinite(gradient).all()):
+        raise FloatingPointError('Card084 nonfinite extra attraction gradient; STOP')
+    return gradient
