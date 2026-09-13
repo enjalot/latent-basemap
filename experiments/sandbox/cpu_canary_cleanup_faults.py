@@ -23,7 +23,10 @@ def run(on):
  else:outer=nullcontext()
  with outer:
   p=SimpleNamespace(model=torch.nn.Linear(1,2),_train_stats={key:0 for key in ['attempted_batches','finite_loss_batches','positive_lr_optimizer_steps','optimizer_steps_succeeded','amp_overflow_skips','nonfinite_gradient_skips','nonfinite_loss_skips']});opt=torch.optim.AdamW(p.model.parameters(),lr=.0001);scaler=torch.amp.GradScaler('cpu',init_scale=16)
-  s=DeviceEdgeSampler(DeviceArrayDataset(np.arange(n,dtype='f4')[:,None]/n,device='cpu'),src,dst,w,n,pos_ratio=.1,batch_size=16384,random_state=42,positive_target_mode='binary',weighted_edge_sampling=True,device='cpu');s._stash_ids=True;r={}
+  s=DeviceEdgeSampler(DeviceArrayDataset(np.arange(n,dtype='f4')[:,None]/n,device='cpu'),src,dst,w,n,pos_ratio=.1,batch_size=16384,random_state=42,positive_target_mode='binary',weighted_edge_sampling=True,device='cpu');r={}
+  for key in ['_stash_ids','_last_all_src','_last_all_dst']:
+   if hasattr(s,key):delattr(s,key)
+  assert all(not hasattr(s,key) for key in ['_stash_ids','_last_all_src','_last_all_dst'])
   methods=(DeviceEdgeSampler.__next__,torch.optim.AdamW.zero_grad,torch.optim.AdamW.step)
   with (E.observe(p) if on else nullcontext()),force(p,r,CARD):
    for ep in range(4):
@@ -36,11 +39,12 @@ def run(on):
       p._train_stats['finite_loss_batches']+=1;scaler.scale(loss).backward();scaler.unscale_(opt);norm=torch.nn.utils.clip_grad_norm_(p.model.parameters(),1.);env['total_norm']=norm
       if not torch.isfinite(norm):exec(codes['gradient'],env)
       else:scaler.step(opt);scaler.update();p._train_stats['optimizer_steps_succeeded']+=1;p._train_stats['positive_lr_optimizer_steps']+=1
+  assert all(not hasattr(s,key) for key in ['_stash_ids','_last_all_src','_last_all_dst']),'temporary sampler ID instrumentation leaked'
   assert methods==(DeviceEdgeSampler.__next__,torch.optim.AdamW.zero_grad,torch.optim.AdamW.step)
   validate(r,p._train_stats,E.validate(p._train_stats) if on else None)
   return {'model':p.model.state_dict(),'optimizer':opt.state_dict(),'scaler':scaler.state_dict(),'rng':s.gen.get_state(),'torch_rng':torch.get_rng_state(),'stats':p._train_stats,'record':r}
 a=run(True);b=run(False);a['stats'].pop('card'+CARD+'_exposure');assert same(a,b)
-checks={'actual_hook_core_cleanup_loss20attempt18success':True,'observer_off_exact_parity':True,'all_hook_methods_restored':True}
+checks={'actual_hook_core_cleanup_loss20attempt18success':True,'observer_off_exact_parity':True,'all_hook_methods_restored':True,'absent_stash_flag_and_ID_attributes_supported_and_restored':True}
 for tag,n,d,dest,graph,off,resume in [('full',2000000,18,'/tmp/canary','/tmp/fixture',False,None),('dose',512,60000,'/tmp/canary','/tmp/fixture',False,None),('dest',512,18,str(C.TD/'a'),'/tmp/fixture',False,None),('graph',512,18,'/tmp/canary','/tmp/full',False,None),('offresume',512,18,'/tmp/canary','/tmp/fixture',True,'checkpoint')]:
  try:guard(n,d,dest,C.TD,graph,'/tmp/full',off,resume)
  except AssertionError as ex:assert str(ex) in ['fault injection restricted to canary fixture','observer-off control cannot resume'];checks[tag+'_rejected']=True

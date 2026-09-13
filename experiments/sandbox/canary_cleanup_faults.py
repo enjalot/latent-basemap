@@ -16,10 +16,23 @@ def force(p,record,card):
  def ours(opt):return opt.param_groups[0]['params'][0] is next(p.model.parameters())
  def next_batch(s):
   nonlocal pending
-  out=old_next(s);npos=len(out[-1])-s.num_neg
-  # Actual emitted endpoint IDs independently determine support on ring fixture.
-  a=s._last_all_src[:npos];b=s._last_all_dst[:npos];near=int((((b-a)%512)-1<15).sum()) if card=='088' else npos
-  pending={'positive':npos,'negative':s.num_neg,'tail':int(npos<s.num_pos),'original15':near,'extra45':npos-near};return out
+  had_flag=hasattr(s,'_stash_ids');old_flag=getattr(s,'_stash_ids',False)
+  old_ids={key:getattr(s,key) for key in ['_last_all_src','_last_all_dst'] if hasattr(s,key)}
+  s._stash_ids=True
+  try:
+   out=old_next(s);npos=len(out[-1])-s.num_neg
+   # Capture actual emitted IDs before restoring temporary sampler instrumentation.
+   a=s._last_all_src[:npos];b=s._last_all_dst[:npos];near=int((((b-a)%512)-1<15).sum()) if card=='088' else npos
+   pending={'positive':npos,'negative':s.num_neg,'tail':int(npos<s.num_pos),'original15':near,'extra45':npos-near}
+   return out
+  finally:
+   if had_flag:s._stash_ids=old_flag
+   else:delattr(s,'_stash_ids')
+   if not old_flag:
+    for key in ['_last_all_src','_last_all_dst']:
+     if key in old_ids:setattr(s,key,old_ids[key])
+     elif hasattr(s,key):delattr(s,key)
+
  def zero(opt,*args,**kwargs):
   nonlocal last,row
   if ours(opt):
