@@ -10,7 +10,7 @@ from gpu_card060_canary import same
 KEYS=['model','optimizer','scheduler','scaler','torch_rng','cuda_rng','loader_gen','loader_perm','loader_pos_idx','loader_batch_no','loader_rank_of_node','loader_node_at_rank','rankneg_scale','replay_gen','mn_gen','mn_rng','dens_gen','dens_rng','hold_gen','hold_rng','deriv_gen','global_step','epoch','train_stats']
 def main():
  own_release=C.require_release();bound_base,bound_epoch,bound_files=bound_baseline(own_release);deep=C.read(C.O/'card089-baseline-deep-validation.json');assert deep['PASS'] and deep['baseline_files']==bound_files and deep['runtime_sha']==C.source_check(),'baseline deep validation mismatch'
- start=time.monotonic();base=C.R.parent/'card086-train/all_one';assert (base/'validation.json').exists(),'baseline incomplete STOP';v=C.read(base/'validation.json');assert v['PASS'] and v['model_sha']==C.sha(base/'model.pt'),'baseline validation STOP'
+ start=time.monotonic();base=C.R.parent/'card086-observer-train/all_one';assert (base/'validation.json').exists(),'baseline incomplete STOP';v=C.read(base/'validation.json');assert v['PASS'] and v['model_sha']==C.sha(base/'model.pt'),'baseline validation STOP'
  release=C.read(C.O/'card086-release.json');assert all(C.sha(p)==h for p,h in release['files'].items()),'baseline release changed';checks={};evidence={}
  with tempfile.TemporaryDirectory(dir=C.R.parent,prefix='card089-history-') as td:
   for mode in ['fresh','epoch']:

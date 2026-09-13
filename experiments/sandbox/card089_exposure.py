@@ -25,13 +25,13 @@ def validate(stats):
  return dict(e,skipped_batches=e['attempted_batches']-e['successful_batches'],skipped_positive_slots=e['attempted_positive_slots']-e['successful_positive_slots'],skipped_negative_slots=e['attempted_negative_slots']-e['successful_negative_slots'],skipped_short_tail_batches=e['attempted_short_tail_batches']-e['successful_short_tail_batches'])
 @contextmanager
 def observe(p,arm,mutual_mask,ordered_targets):
- advance=DeviceEdgeSampler.__next__;zero=torch.optim.AdamW.zero_grad;step=torch.optim.AdamW.step;pending=None;mask=None;degree=None;targets=None
+ advance=DeviceEdgeSampler.__next__;zero=torch.optim.AdamW.zero_grad;step=torch.optim.AdamW.step;pending=None;mask=None;degree=None;targets=None;counted=False
  def ours(opt):
   return opt.param_groups[0]['params'][0] is next(p.model.parameters())
  def next_batch(s):
-  nonlocal pending,mask,degree,targets
+  nonlocal pending,mask,degree,targets,counted
   had_stash=hasattr(s,'_stash_ids');old_stash=getattr(s,'_stash_ids',False);s._stash_ids=True
-  try:out=advance(s)
+  try:out=advance(s);counted=False
   finally:
    if had_stash:s._stash_ids=old_stash
    else:delattr(s,'_stash_ids')
@@ -45,8 +45,13 @@ def observe(p,arm,mutual_mask,ordered_targets):
   nr=int(actual_mutual.sum());nf=nr if arm=='reciprocal' else int((idx%15<degree[idx//15]).sum())
   npos=len(out[-1])-s.num_neg;assert len(idx)==npos;pending=(npos,s.num_neg,int(npos<s.num_pos),s.num_pos,s.n_pos%s.num_pos or s.num_pos,nr,nf);return out
  def clear(opt,*args,**kwargs):
+  nonlocal counted
   if ours(opt):
    assert pending is not None,'exposure missing selected batch'
+   if counted:
+    assert p._train_stats['card089_exposure']['attempted_batches']==p._train_stats['attempted_batches'],'exposure loop-entry mismatch'
+    return zero(opt,*args,**kwargs)
+   counted=True
    e=p._train_stats.setdefault('card089_exposure',dict(schema=SCHEMA,normal_positive_slots=pending[3],negative_slots_per_batch=pending[1],short_tail_positive_slots=pending[4],**{k:0 for k in FIELDS}))
    npos,nneg,tail=pending[:3];e['attempted_batches']+=1;e['attempted_positive_slots']+=npos;e['attempted_negative_slots']+=nneg;e['attempted_short_tail_batches']+=tail
    for k,v in [('reciprocal',pending[5]),('nonreciprocal',npos-pending[5]),('favored',pending[6]),('unfavored',npos-pending[6]),('verified_positive',npos)]:e['attempted_'+k+'_slots']+=v

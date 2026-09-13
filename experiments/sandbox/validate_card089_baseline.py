@@ -7,8 +7,8 @@ import card089_common as C
 from card089_baseline import bound_baseline
 
 def main():
- release=C.require_release();start=time.monotonic();base,epoch,bindings=bound_baseline(release);root=C.R.parent/'card086-code';sys.path[:0]=[str(root/'experiments/sandbox'),str(root)]
- assert C.sha(root/'card086-runtime-sha.json')==C.read(C.O/'card089-cpu-contracts.json')['baseline_runtime_sha'],'baseline runtime changed since CPU review'
+ release=C.require_release();start=time.monotonic();base,epoch,bindings=bound_baseline(release);root=C.R.parent/'card086-functional-loss-code';sys.path[:0]=[str(root/'experiments/sandbox'),str(root)]
+ assert C.sha(root/'card086-runtime-sha.json')==C.read(C.O/'card089-observer-readiness/runtime-contracts.json')['baseline_runtime_sha'],'baseline runtime changed since CPU review'
  import card086_common as H
  from card086_fit import validate_arm
  import basemap.pumap.parametric_umap.core as core

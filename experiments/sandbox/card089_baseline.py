@@ -3,7 +3,7 @@ from pathlib import Path
 import card089_common as C
 
 def bound_baseline(release):
- base=C.R.parent/'card086-train/all_one';bindings=release.get('baseline_files');assert isinstance(bindings,dict),'missing baseline file bindings'
+ base=C.R.parent/'card086-observer-train/all_one';bindings=release.get('baseline_files');assert isinstance(bindings,dict),'missing baseline file bindings'
  epoch=Path(release.get('baseline_epoch_checkpoint','')).resolve();assert epoch.is_relative_to((base/'ckpts').resolve()) and epoch.name.startswith('ckpt-epoch') and epoch.suffix=='.pt','invalid bound baseline epoch'
  required=[base/'validation.json',base/'admission.json',base/'model.pt',base/'prepared.pt',epoch]
  for path in required:

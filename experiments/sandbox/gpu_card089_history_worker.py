@@ -9,13 +9,16 @@ from card089_baseline import bound_baseline
 
 def main():
  release=C.require_release();bound_base,bound_epoch,bound_files=bound_baseline(release);ap=argparse.ArgumentParser();ap.add_argument('runtime',choices=['original','proposed']);ap.add_argument('mode',choices=['fresh','epoch']);ap.add_argument('dest');a=ap.parse_args();dest=Path(a.dest);dest.mkdir(parents=True)
- root=C.R.parent/'card086-code' if a.runtime=='original' else C.R;sys.path[:0]=[str(root/'experiments/sandbox'),str(root)]
+ root=C.R.parent/'card086-functional-loss-code' if a.runtime=='original' else C.R;sys.path[:0]=[str(root/'experiments/sandbox'),str(root)]
  from basemap.pumap.parametric_umap.core import ParametricUMAP
  import basemap.pumap.parametric_umap.core as core
+ canonical=C.R.parent/'card086-functional-loss-code'
+ sys.path.insert(0,str(canonical/'experiments/sandbox'))
  import card086_common as H
+ assert Path(H.__file__).is_relative_to(canonical),'baseline helper import escaped'
  from card086_exposure import observe as old_observe
  assert Path(core.__file__).is_relative_to(root)
- hist=C.R.parent/'card086-train/all_one';ident=C.read(hist/'admission.json');radii=np.load(C.D/'radii.npy').astype('f4');resume=None;step=0
+ hist=C.R.parent/'card086-observer-train/all_one';ident=C.read(hist/'admission.json');radii=np.load(C.D/'radii.npy').astype('f4');resume=None;step=0
  if a.mode=='epoch':
   resume=bound_epoch;ck=torch.load(resume,map_location='cpu',weights_only=False);assert not ck['step_checkpoint'];step=ck['global_step'];del ck
  dose=step+8;torch.set_num_threads(2);torch.backends.cuda.matmul.allow_tf32=False;torch.backends.cudnn.allow_tf32=False;torch.set_float32_matmul_precision('highest');torch.manual_seed(42);torch.cuda.manual_seed_all(42);np.random.seed(42)
@@ -34,7 +37,11 @@ def main():
    with np.load('/data/latent-basemap/substrates/card086-directed-membership/all_one-edges.npz') as z:ordered_targets=z['targets'].reshape(-1,15)
    extra=observe(p,'reciprocal',mask,ordered_targets)
  else:extra=nullcontext()
- with old_observe(p),extra:
+ from card086_cdf_adapter import fixed_cdf
+ cdf_record={};info=H.read(H.CD/'manifest.json')['arms']['all_one'];cdf=np.load(H.CD/info['cdf_file'],mmap_mode='r')
+ assert H.sha(H.CD/info['cdf_file'])==info['cdf_file_sha'],'baseline CDF changed'
+ baseline_cdf=fixed_cdf(cdf,info['cdf_values_sha'],info['weight_values_sha'],require_old_exact=True,record=cdf_record,proof_path=dest/'cdf-proof.json') if a.runtime=='original' else nullcontext()
+ with old_observe(p),extra,baseline_cdf:
   p.fit(X,precomputed_edges_path='/data/latent-basemap/substrates/card086-directed-membership/all_one-edges.npz',random_state=42,verbose=False,warm_start_state=warm if resume is None else None,checkpoint_every_epochs=1,checkpoint_dir=str(dest/'ckpts'),resume_from=str(resume) if resume else None)
- end=dest/'ckpts'/f'ckpt-step{dose}.pt';C.write(dest/'receipt.json',{'PASS':True,'runtime':a.runtime,'mode':a.mode,'core_path':str(core.__file__),'core_sha':C.sha(core.__file__),'endpoint':str(end),'epoch_source':str(resume) if resume else None,'epoch_source_sha':C.sha(resume) if resume else None,'end_step':dose,'baseline_files':bound_files,'telemetry_scope':'New telemetry enabled for fresh8; historical retained-epoch replay checks unchanged numerical trainer/configuration.089 telemetry resume proven separately on089 states.'})
+ end=dest/'ckpts'/f'ckpt-step{dose}.pt';C.write(dest/'receipt.json',{'PASS':True,'canonical_runtime_sha':H.source_check(),'baseline_CDF_manifest_sha':H.sha(H.CD/'manifest.json'),'cdf_proof':cdf_record,'runtime':a.runtime,'mode':a.mode,'core_path':str(core.__file__),'core_sha':C.sha(core.__file__),'endpoint':str(end),'epoch_source':str(resume) if resume else None,'epoch_source_sha':C.sha(resume) if resume else None,'end_step':dose,'baseline_files':bound_files,'telemetry_scope':'New telemetry enabled for fresh8; historical retained-epoch replay checks unchanged numerical trainer/configuration.089 telemetry resume proven separately on089 states.'})
 if __name__=='__main__':main()
