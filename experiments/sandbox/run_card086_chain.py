@@ -120,8 +120,8 @@ def main():
     try:
         B.transact('controller',120.,check=True);controller_charged=120.;reserved=True
         C.input_check()
-        stage_time+=stage('prepare_repair','prepare_card086.py',120)
-        assert all(C.read(C.TD/a/'preparation.json')['READY'] for a in C.ARMS)
+        stage_time+=stage('prepare_repair','prepare_card086.py',120,receipt_path=C.O/'card086-cdf-repair-initialization.json')
+        C.validate_preparations()
         stage_time+=stage('graph_canary','gpu_card086_graph_canary.py',300,receipt_path=C.O/'card086-graph-canary.json')
         for a in C.ARMS:stage_time+=stage('preflight-'+a,'gpu_card086_preflight.py',240,(a,),a,receipt_path=C.O/f'card086-preflight-{a}.json')
         estimates={}
@@ -143,6 +143,7 @@ def main():
             C.write(C.O/'card086-execution.json',{'status':'ADMISSION_STOP','reason':'Fulltwo60K measured dose does not fit cumulative limits; no truncation'})
             return
         for a in C.ARMS:
+            C.validate_preparations()
             settle_controller()
             assert B.available(a)>=estimates[a],'remaining full dose no longer fits'
             stage_time+=stage(a,'run_card086_arm.py',B.LIMITS['stage_gpu_s'][a],(a,),a,receipt_path=C.TD/a/'validation.json')

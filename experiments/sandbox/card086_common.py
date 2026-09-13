@@ -68,3 +68,19 @@ def require_release():
  assert os.environ.get('CARD086_RELEASE_SHA')==sha(p), 'missing root controller release binding'
  assert all(sha(p)==h for p,h in r['files'].items()), 'release input mismatch'
  return r
+
+
+def validate_preparations():
+ import torch
+ runtime=source_check();parent_sha=sha(CHAMP);base=torch.load(CHAMP,map_location='cpu',weights_only=False)['model_state_dict'];out={}
+ for arm in ARMS:
+  r=read(TD/arm/'preparation.json');p=TD/arm/'prepared.pt'
+  assert r['READY'] is True and r['arm']==arm and r['runtime_sha']==runtime,'preparation runtime/arm mismatch'
+  assert r['parent_sha']==parent_sha and r['parent_path']==str(CHAMP),'preparation parent mismatch'
+  assert r['prepared_sha']==sha(p),'preparation file mismatch'
+  saved=torch.load(p,map_location='cpu',weights_only=False);sd=saved['model_state']
+  assert saved['READY'] is True and saved['arm']==arm,'prepared payload mismatch'
+  assert set(sd)==set(base) and all(torch.equal(sd[k],base[k]) for k in base),'preparation parent tensors mismatch'
+  assert r['full_parent_tensors_bit_identical'] is True and state_sha(sd)==r['prepared_state_sha']==saved['prepared_state_sha'],'preparation state mismatch'
+  out[arm]=r
+ return out
