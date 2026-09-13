@@ -12,7 +12,7 @@ def guard(nodes,dose,dest,training_dir,graph,full_graph,off,resume):
 def force(p,record,card):
  old_next=DeviceEdgeSampler.__next__;old_zero=torch.optim.AdamW.zero_grad;old_step=torch.optim.AdamW.step
  pending=None;last=None;handles=[];row=None
- record.update(plan=PLAN,rows=[],gradient_cleanup_proved=False,loss_forward_injected=False)
+ record.update(plan=PLAN,rows=[],gradient_cleanup_proved=False,loss_output_injected=False)
  def ours(opt):return opt.param_groups[0]['params'][0] is next(p.model.parameters())
  def next_batch(s):
   nonlocal pending
@@ -43,8 +43,12 @@ def force(p,record,card):
     if PLAN.get(attempt)=='gradient':
      handles.append(next(p.model.parameters()).register_hook(lambda g:torch.full_like(g,float('inf'))))
     if PLAN.get(attempt)=='loss':
-     def corrupt(module,args,out):record['loss_forward_injected']=True;return out*float('nan')
-     handles.append(p.model.register_forward_hook(corrupt))
+     def corrupt(module,args,out):
+      assert isinstance(module,torch.nn.BCELoss) and out.ndim==0 and torch.isfinite(out),'fault requires finite scalar BCE output'
+      assert all(torch.isfinite(x).all() for x in args),'fault requires finite BCE inputs'
+      record['loss_output_injected']=True;record['loss_pre_fault_finite']=True
+      return out*float('nan')
+     handles.append(p.loss_fn.register_forward_hook(corrupt))
    row['zero_calls']+=1
    if PLAN.get(attempt)=='gradient' and row['zero_calls']>1:
     assert p._train_stats['finite_loss_batches']==row['finite_loss_before']+1,'forced gradient did not follow finite loss'
@@ -63,8 +67,9 @@ def force(p,record,card):
 def validate(record,stats,exposure=None):
  assert stats['attempted_batches']==20 and stats['positive_lr_optimizer_steps']==stats['optimizer_steps_succeeded']==18,'forced fault exact dose/attempts'
  assert stats['amp_overflow_skips']==1 and stats['nonfinite_loss_skips']==1 and stats['nonfinite_gradient_skips']==0,'forced fault exact skip counts'
- rows=record['rows'];assert len(rows)==20 and record['gradient_cleanup_proved'] and record['loss_forward_injected'],'actual fit fault path missing'
+ rows=record['rows'];assert len(rows)==20 and record['gradient_cleanup_proved'] and record['loss_output_injected'],'actual fit fault path missing'
  assert [r['attempt'] for r in rows if not r['successful']]==[5,7],'unexpected forced fault attempts'
+ assert record.get('loss_pre_fault_finite') and rows[7]['finite_loss_before']==rows[6]['finite_loss_before'],'actual nonfinite loss branch not proved'
  assert rows[4]['zero_calls']==2 and all(r['zero_calls']==1 for i,r in enumerate(rows) if i!=4),'unexpected zero_grad calls'
  if exposure is not None:
   for prefix in ['attempted','successful']:

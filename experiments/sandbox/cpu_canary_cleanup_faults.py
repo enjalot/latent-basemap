@@ -22,7 +22,7 @@ def run(on):
   outer=matched_sampler()
  else:outer=nullcontext()
  with outer:
-  p=SimpleNamespace(model=torch.nn.Linear(1,2),_train_stats={key:0 for key in ['attempted_batches','finite_loss_batches','positive_lr_optimizer_steps','optimizer_steps_succeeded','amp_overflow_skips','nonfinite_gradient_skips','nonfinite_loss_skips']});opt=torch.optim.AdamW(p.model.parameters(),lr=.0001);scaler=torch.amp.GradScaler('cpu',init_scale=16)
+  p=SimpleNamespace(model=torch.nn.Linear(1,2),loss_fn=torch.nn.BCELoss(),_train_stats={key:0 for key in ['attempted_batches','finite_loss_batches','positive_lr_optimizer_steps','optimizer_steps_succeeded','amp_overflow_skips','nonfinite_gradient_skips','nonfinite_loss_skips']});opt=torch.optim.AdamW(p.model.parameters(),lr=.0001);scaler=torch.amp.GradScaler('cpu',init_scale=16)
   s=DeviceEdgeSampler(DeviceArrayDataset(np.arange(n,dtype='f4')[:,None]/n,device='cpu'),src,dst,w,n,pos_ratio=.1,batch_size=16384,random_state=42,positive_target_mode='binary',weighted_edge_sampling=True,device='cpu');r={}
   for key in ['_stash_ids','_last_all_src','_last_all_dst']:
    if hasattr(s,key):delattr(s,key)
@@ -32,7 +32,7 @@ def run(on):
    for ep in range(4):
     iter(s)
     for _ in range(len(s)):
-     x,y,labels=next(s);p._train_stats['attempted_batches']+=1;opt.zero_grad();loss=p.model(x[:8]).square().mean()
+     x,y,labels=next(s);p._train_stats['attempted_batches']+=1;opt.zero_grad();q=p.model(x[:8]).sigmoid();q=torch.nan_to_num(q,nan=1e-7,posinf=1-1e-7,neginf=1e-7).clamp(1e-7,1-1e-7);loss=p.loss_fn(q,torch.zeros_like(q))
      env={'self':p,'optimizer':opt,'scaler':scaler,'torch':torch,'logging':logging,'global_step':p._train_stats['positive_lr_optimizer_steps'],'consecutive_nonfinite_losses':0,'consecutive_nonfinite_gradients':0,'_get_next':lambda:None,'pbar':SimpleNamespace(update=lambda n:None),'loss':loss}
      if not torch.isfinite(loss):exec(codes['loss'],env)
      else:
@@ -40,13 +40,18 @@ def run(on):
       if not torch.isfinite(norm):exec(codes['gradient'],env)
       else:scaler.step(opt);scaler.update();p._train_stats['optimizer_steps_succeeded']+=1;p._train_stats['positive_lr_optimizer_steps']+=1
   assert all(not hasattr(s,key) for key in ['_stash_ids','_last_all_src','_last_all_dst']),'temporary sampler ID instrumentation leaked'
+  assert not p.loss_fn._forward_hooks and not p.model._forward_hooks,'loss/model hook leaked'
   assert methods==(DeviceEdgeSampler.__next__,torch.optim.AdamW.zero_grad,torch.optim.AdamW.step)
   validate(r,p._train_stats,E.validate(p._train_stats) if on else None)
   return {'model':p.model.state_dict(),'optimizer':opt.state_dict(),'scaler':scaler.state_dict(),'rng':s.gen.get_state(),'torch_rng':torch.get_rng_state(),'stats':p._train_stats,'record':r}
+# Reproduce why the old model-output NaN hook cannot prove nonfinite loss.
+m=torch.nn.Linear(1,2);h=m.register_forward_hook(lambda module,args,out:out*float('nan'))
+q=torch.nan_to_num(m(torch.ones(8,1)).sigmoid(),nan=1e-7,posinf=1-1e-7,neginf=1e-7).clamp(1e-7,1-1e-7)
+assert torch.isfinite(torch.nn.BCELoss()(q,torch.zeros_like(q)));h.remove()
 a=run(True);b=run(False);a['stats'].pop('card'+CARD+'_exposure');assert same(a,b)
-checks={'actual_hook_core_cleanup_loss20attempt18success':True,'observer_off_exact_parity':True,'all_hook_methods_restored':True,'absent_stash_flag_and_ID_attributes_supported_and_restored':True}
+checks={'old_forward_nan_sanitized_to_finite_BCE':True,'loss_module_hook_restored':True,'actual_hook_core_cleanup_loss20attempt18success':True,'observer_off_exact_parity':True,'all_hook_methods_restored':True,'absent_stash_flag_and_ID_attributes_supported_and_restored':True}
 for tag,n,d,dest,graph,off,resume in [('full',2000000,18,'/tmp/canary','/tmp/fixture',False,None),('dose',512,60000,'/tmp/canary','/tmp/fixture',False,None),('dest',512,18,str(C.TD/'a'),'/tmp/fixture',False,None),('graph',512,18,'/tmp/canary','/tmp/full',False,None),('offresume',512,18,'/tmp/canary','/tmp/fixture',True,'checkpoint')]:
  try:guard(n,d,dest,C.TD,graph,'/tmp/full',off,resume)
  except AssertionError as ex:assert str(ex) in ['fault injection restricted to canary fixture','observer-off control cannot resume'];checks[tag+'_rejected']=True
  else:raise AssertionError('unsafe fault route accepted')
-C.write(C.O/f'card{CARD}-device-proof-readiness/hook-cpu-contracts.json',{'PASS':True,'n_checks':len(checks),'checks':checks,'record':a['record'],'scope':'CPU hooks tested through actual core AST branches; actual full production fit-path proof added to GPU canary but not executed.'});print('HOOK CPU PASS',CARD,len(checks))
+C.write(C.O/f'card{CARD}-loss-proof-readiness/hook-cpu-contracts.json',{'PASS':True,'n_checks':len(checks),'checks':checks,'record':a['record'],'scope':'CPU hooks tested through actual core AST branches; actual full production fit-path proof added to GPU canary but not executed.'});print('HOOK CPU PASS',CARD,len(checks))
