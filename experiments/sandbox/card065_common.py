@@ -41,6 +41,6 @@ def configure(p,ident,radii,checkpoints):
  assert not getattr(p,'_card011_schedule',None);p.clip_grad_norm=1.;p._card013_radii=radii;p._card012_identity=ident;p._checkpoint_step_targets=set(checkpoints);p._card054_lmc=None
 def validate_ckpt(ck,ident):
  import torch
- import card060_resume as V
+ import card065_resume as V
  assert ck['card012_identity']==ident,'card065 admission-identity mismatch';step=ck['global_step'];assert isinstance(step,int) and 0<step<=ident['dose'];V.validate_resume_payload(ck,step,n_nodes=ident['n_nodes']);assert ck['config']['learning_rate']==LR and ck['config']['lr_schedule']=='constant' and ck['config']['replay_weight']==0. and not ck['config']['replay_enabled']
  original=torch.load(D/'fresh-init.pt',map_location='cpu',weights_only=False)['model_state'];assert set(original)==set(ck['model']) and all(original[k].shape==ck['model'][k].shape and torch.isfinite(ck['model'][k]).all() for k in original);return step
