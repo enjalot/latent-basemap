@@ -2,7 +2,7 @@
 from pathlib import Path
 import json,hashlib,sys
 import numpy as np
-R=Path(__file__).resolve().parents[2];O=R.parent/'overseer-codex';D=Path('/data/latent-basemap/substrates/card073-finishing');TD=R.parent/'card088-train';CHAMP=R.parent/'card023-train/model-actual3d.pt'
+R=Path(__file__).resolve().parents[2];O=R.parent/'overseer-codex';D=Path('/data/latent-basemap/substrates/card073-finishing');TD=R.parent/'card088-exposure-train';CHAMP=R.parent/'card023-train/model-actual3d.pt'
 GD=Path('/data/latent-basemap/substrates/card088-positive-support');ARMS=['original15','mixture'];N=2000000;DIM=1536;DOSE=60000;BATCH=16384;SEED=42;LR={a:.0001 for a in ARMS};SNAPS=[20000,40000,60000];PREP_STEPS=2000;PREP_BATCH=2048;PREP_SEED=65068
 def sha(p):
  h=hashlib.sha256()

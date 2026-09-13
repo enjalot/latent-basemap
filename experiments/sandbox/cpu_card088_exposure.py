@@ -14,7 +14,7 @@ from card088_sampler import matched_sampler
 from card088_graph import weights
 from gpu_card060_canary import same
 
-def _run(instrument=True,split=None):
+def _run(instrument=True,split=None,fault_batches=(4,),counter_fault=None):
  torch.manual_seed(42);n=512;src=np.repeat(np.arange(n,dtype='i4'),60);dst=np.array([(i+j)%n for i in range(n) for j in range(1,61)],dtype='i4');w=weights('mixture',n).ravel()
  s=DeviceEdgeSampler(DeviceArrayDataset(np.arange(n,dtype='f4')[:,None],device='cpu'),src,dst,w,n,pos_ratio=.1,batch_size=16384,random_state=42,positive_target_mode='binary',weighted_edge_sampling=True,device='cpu')
  p=SimpleNamespace(model=torch.nn.Linear(1,1),_train_stats={k:0 for k in ['attempted_batches','optimizer_steps_succeeded','positive_lr_optimizer_steps','amp_overflow_skips','nonfinite_loss_skips','nonfinite_gradient_skips']});opt=torch.optim.AdamW(p.model.parameters(),lr=.0001);scaler=torch.amp.GradScaler('cpu',init_scale=16);seen=[]
@@ -23,9 +23,16 @@ def _run(instrument=True,split=None):
   for epoch in range(2):
    iter(s)
    for batch in range(len(s)):
-    labels=next(s)[-1];p._train_stats['attempted_batches']+=1;opt.zero_grad();loss=p.model(torch.ones((1,1))).sum()
-    if batch==4:loss=loss*float('inf')
-    before=scaler.get_scale();scaler.scale(loss).backward();scaler.step(opt);scaler.update()
+    labels=next(s)[-1];p._train_stats['attempted_batches']+=1
+    if counter_fault=='reset' and batch==1:p._train_stats['attempted_batches']=0
+    opt.zero_grad()
+    if counter_fault=='unselected_increment' and batch==1:
+     p._train_stats['attempted_batches']+=1;opt.zero_grad()
+    loss=p.model(torch.ones((1,1))).sum()
+    if batch in fault_batches:loss=loss*float('inf')
+    before=scaler.get_scale();scaler.scale(loss).backward();scaler.unscale_(opt);norm=torch.nn.utils.clip_grad_norm_(p.model.parameters(),1.)
+    if not torch.isfinite(norm):opt.zero_grad(set_to_none=True);scaler.update() # exact core skip ordering: cleanup before skip accounting
+    else:scaler.step(opt);scaler.update()
     if scaler.get_scale()<before:p._train_stats['amp_overflow_skips']+=1
     else:p._train_stats['optimizer_steps_succeeded']+=1;p._train_stats['positive_lr_optimizer_steps']+=1
     seen.append(len(labels)-s.num_neg)
@@ -35,12 +42,12 @@ def _run(instrument=True,split=None):
       path=Path(td)/'state.pt';torch.save({'stats':p._train_stats,'model':p.model.state_dict(),'optimizer':opt.state_dict(),'scaler':scaler.state_dict(),'sampler_rng':s.gen.get_state(),'perm':s.perm,'pos':s.pos_idx},path);ck=torch.load(path,weights_only=False);p._train_stats=ck['stats'];p.model.load_state_dict(ck['model']);opt.load_state_dict(ck['optimizer']);scaler.load_state_dict(ck['scaler']);s.gen.set_state(ck['sampler_rng']);s.perm=ck['perm'];s.pos_idx=ck['pos']
  return p,opt,scaler,s,seen
 
-def run(instrument=True,split=None):
- with matched_sampler():return _run(instrument,split)
+def run(instrument=True,split=None,**kwargs):
+ with matched_sampler():return _run(instrument,split,**kwargs)
 
 def main():
  torch.set_num_threads(2);full=run();plain=run(False);checks={};e=validate(full[0]._train_stats)
- assert e['attempted_batches']==10 and e['successful_batches']==8 and e['attempted_positive_slots']==15360 and e['successful_positive_slots']==13104 and e['skipped_positive_slots']==2256 and e['skipped_short_tail_batches']==2;checks['actual_gradscaler_short_tail_overflows']=True
+ assert e['attempted_batches']==10 and e['successful_batches']==8 and e['attempted_positive_slots']==15360 and e['successful_positive_slots']==13104 and e['skipped_positive_slots']==2256 and e['skipped_short_tail_batches']==2;checks['actual_core_double_zero_grad_short_tail_overflows']=True
  fractions=support_fractions(e);assert fractions['attempted']['original15']==7736/15360 and fractions['successful']['original15']==6612/13104 and fractions['attempted']!=fractions['successful'];checks['actual_attempted_successful_fractions_distinct']=True
  for k in [2,5]:
   resumed=run(split=k);assert resumed[0]._train_stats==full[0]._train_stats and same(resumed[1].state_dict(),full[1].state_dict()) and torch.equal(resumed[3].gen.get_state(),full[3].gen.get_state());checks['serialized_'+('mid' if k==2 else 'epoch')+'_exposure']=True
@@ -49,5 +56,5 @@ def main():
  try:validate(bad)
  except AssertionError as error:assert str(error)=='invalid exposure counters';checks['corrupt_exposure_rejected']=True
  else:raise AssertionError('corrupt exposure accepted')
- C.write(C.O/'card088-exposure-cpu.json',{'PASS':True,'checks':checks,'exposure':e,'support_fractions':fractions,'scope':'Actual CPU GradScaler overflow on both short tails; durable stats serialization at mid/epoch; unchanged model/Adam/scaler/sampler versus instrumentation off. Actual device full-state twins remain required.'});print('EXPOSURE PASS',len(checks),e)
+ C.write(C.O/'card088-exposure-repair/exposure-cpu.json',{'PASS':True,'checks':checks,'exposure':e,'support_fractions':fractions,'scope':'Actual CPU GradScaler overflow on both short tails; durable stats serialization at mid/epoch; unchanged model/Adam/scaler/sampler versus instrumentation off. Actual device full-state twins remain required.'});print('EXPOSURE PASS',len(checks),e)
 if __name__=='__main__':main()

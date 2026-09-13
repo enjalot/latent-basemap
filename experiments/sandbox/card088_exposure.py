@@ -31,17 +31,22 @@ def support_fractions(e):
 
 @contextmanager
 def observe(p):
- advance=DeviceEdgeSampler.__next__;zero=torch.optim.AdamW.zero_grad;step=torch.optim.AdamW.step;pending=None
+ advance=DeviceEdgeSampler.__next__;zero=torch.optim.AdamW.zero_grad;step=torch.optim.AdamW.step;pending=None;counted=False
  def ours(opt):
   return opt.param_groups[0]['params'][0] is next(p.model.parameters())
  def next_batch(s):
-  nonlocal pending
-  out=advance(s);assert s.weighted_edge_sampling and s.positive_target_mode=='binary'
+  nonlocal pending,counted
+  out=advance(s);counted=False;assert s.weighted_edge_sampling and s.positive_target_mode=='binary'
   npos=len(out[-1])-s.num_neg;pending=(npos,s.num_neg,int(npos<s.num_pos),s.num_pos,s.n_pos%s.num_pos or s.num_pos,int((s._card088_last_edge_idx%60<15).sum()));return out
  def clear(opt,*args,**kwargs):
+  nonlocal counted
   if ours(opt):
    assert pending is not None,'exposure missing selected batch'
    e=p._train_stats.setdefault('card088_exposure',dict(schema=SCHEMA,normal_positive_slots=pending[3],negative_slots_per_batch=pending[1],short_tail_positive_slots=pending[4],**{k:0 for k in FIELDS}))
+   if counted:
+    assert e['attempted_batches']==p._train_stats['attempted_batches'],'exposure loop-entry mismatch'
+    return zero(opt,*args,**kwargs) # same batch: core clears nonfinite gradients before recording its skip
+   counted=True
    npos,nneg,tail=pending[:3];e['attempted_batches']+=1;e['attempted_positive_slots']+=npos;e['attempted_negative_slots']+=nneg;e['attempted_short_tail_batches']+=tail;e['attempted_original15_slots']+=pending[5];e['attempted_extra45_slots']+=npos-pending[5]
    assert e['attempted_batches']==p._train_stats['attempted_batches'],'exposure loop-entry mismatch'
   return zero(opt,*args,**kwargs)
