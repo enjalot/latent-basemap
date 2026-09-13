@@ -14,9 +14,9 @@ def main():
  with tempfile.TemporaryDirectory(dir=C.R.parent,prefix='card086-preflight-') as td:
   for dose in [500,3500]:
    record={};before=time.monotonic()
-   with probe(record,C.weight_sha(C.GD/f'{arm}-edges.npz')):p,ck,r=fit(arm,dose,Path(td)/str(dose),checkpoints=[dose])
+   p,ck,r=fit(arm,dose,Path(td)/str(dose),checkpoints=[dose],probe_record=record)
    stamp=time.monotonic();torch.save(ck,Path(td)/'serialize.pt');serial=time.monotonic()-stamp
-   fits[str(dose)]={'seconds':time.monotonic()-before,'serialization_s':serial,'positive_updates':r['train_stats']['positive_lr_optimizer_steps'],'global_vram_GiB':r['global_vram_GiB'],'sampler':record}
+   fits[str(dose)]={'seconds':time.monotonic()-before,'serialization_s':serial,'positive_updates':r['train_stats']['positive_lr_optimizer_steps'],'global_vram_GiB':r['global_vram_GiB'],'sampler':record,'cdf_proof':r['cdf_proof']}
    del p,ck;gc.collect();torch.cuda.empty_cache()
  w1=fits['500']['seconds'];w2=fits['3500']['seconds'];slope=max((w2-w1)/3000,w2/3500);assert math.isfinite(slope) and slope>0;setup=max(0,w1-500*slope)
  epoch_cost=max(t for v in fits.values() for t in v['sampler']['epoch_construction_s']);n_epochs=math.ceil(C.DOSE/math.ceil(C.N*15/int(C.BATCH*.1)));reserve=n_epochs*epoch_cost+2*max(v['serialization_s'] for v in fits.values())*(n_epochs+len(C.SNAPS))+90

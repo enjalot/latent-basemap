@@ -39,7 +39,7 @@ def verify_external_leases():
 def usage(pid):
     rows=subprocess.check_output(['ps','-eo','pid=,ppid=,rss='],text=True,timeout=2)
     processes={int(p):(int(parent),int(rss)*1024) for p,parent,rss in (line.split() for line in rows.splitlines())}
-    descendants={pid}
+    descendants={os.getpid(),pid}
     while True:
         expanded=descendants|{p for p,(parent,_) in processes.items() if parent in descendants}
         if expanded==descendants:break
@@ -107,6 +107,7 @@ def main():
     try:
         B.transact('controller',120.,check=True);reserved=True
         C.input_check()
+        stage_time+=stage('prepare_repair','prepare_card086.py',120)
         assert all(C.read(C.TD/a/'preparation.json')['READY'] for a in C.ARMS)
         stage_time+=stage('graph_canary','gpu_card086_graph_canary.py',300,receipt_path=C.O/'card086-graph-canary.json')
         for a in C.ARMS:stage_time+=stage('preflight-'+a,'gpu_card086_preflight.py',240,(a,),a,receipt_path=C.O/f'card086-preflight-{a}.json')

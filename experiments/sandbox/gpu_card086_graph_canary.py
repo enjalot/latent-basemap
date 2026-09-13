@@ -5,6 +5,8 @@ import tempfile,time,gc
 import numpy as np,torch
 import card086_common as C
 from card086_fit import fit
+from card086_cdf_adapter import fixed_cdf,values_sha
+from card086_serial_cdf import build
 from gpu_card060_canary import same
 start=time.monotonic();C.require_release();C.source_check();C.input_check();checks=[];hashes={};keys=['model','optimizer','scheduler','scaler','torch_rng','cuda_rng','loader_gen','loader_perm','loader_pos_idx','loader_batch_no','loader_rank_of_node','loader_node_at_rank','rankneg_scale','replay_gen','mn_gen','mn_rng','dens_gen','dens_rng','hold_gen','hold_rng','deriv_gen','global_step','epoch','train_stats']
 with tempfile.TemporaryDirectory(dir=C.R.parent,prefix='card086-graph-canary-') as path:
@@ -18,9 +20,11 @@ with tempfile.TemporaryDirectory(dir=C.R.parent,prefix='card086-graph-canary-') 
     if ck['step_checkpoint'] and 0<ck['loader_pos_idx']<len(ck['loader_perm']):mids.append((ck['global_step'],path))
     if not ck['step_checkpoint'] and ck['epoch']<full['epoch']:epochs.append((ck['global_step'],path))
   assert mids and epochs
+  if arm=='all_one':
+   p,old_control,_=fit(arm,18,td/'allone-original-control',allone_original_control=True,**kw);assert all(same(full[k],old_control[k]) for k in keys),'all_one original fullstate mismatch STOP';checks.append('all_one original versus repaired actual512model fullstate exact');del p,old_control;gc.collect();torch.cuda.empty_cache()
   for tag,path in [('mid',min(mids)[1]),('epoch',min(epochs)[1])]:
    p,res,_=fit(arm,18,td/(arm+'-'+tag),resume=path,**kw);assert all(same(full[k],res[k]) for k in keys),arm+' '+tag+' fullstate differs';checks.append(arm+' '+tag+' fullstate resume');del p,res;gc.collect();torch.cuda.empty_cache()
-  for tag,override in [('arm',{'arm':'wrong'}),('warm',{'warm_sha':'0'*64}),('scale',{'scale_manifest_sha':'0'*64}),('dimension',{'output_dim':8}),('learning_rate',{'lr':.00037}),('policy',{'rankneg_window':123}),('dose',{'dose':19}),('graph',{'graph_sha':'0'*64}),('weights',{'weight_values_sha':'0'*64}),('weighted_flag',{'weighted_edge_sampling':False}),('reference',{'reference_sha':'0'*64}),('data',{'data_manifest_sha':'0'*64}),('parent',{'parent_sha':'0'*64})]:
+  for tag,override in [('cdffile',{'cdf_file_sha':'bad'}),('cdf',{'cdf_values_sha':'bad'}),('cdfmanifest',{'cdf_manifest_sha':'bad'}),('normalization',{'cdf_normalization':'bad'}),('algorithm',{'cdf_algorithm':'bad'}),('cdfside',{'cdf_side':'right'}),('arm',{'arm':'wrong'}),('warm',{'warm_sha':'0'*64}),('scale',{'scale_manifest_sha':'0'*64}),('dimension',{'output_dim':8}),('learning_rate',{'lr':.00037}),('policy',{'rankneg_window':123}),('dose',{'dose':19}),('graph',{'graph_sha':'0'*64}),('weights',{'weight_values_sha':'0'*64}),('weighted_flag',{'weighted_edge_sampling':False}),('reference',{'reference_sha':'0'*64}),('data',{'data_manifest_sha':'0'*64}),('parent',{'parent_sha':'0'*64})]:
    try:fit(arm,18,td/(arm+'-reject-'+tag),resume=min(mids)[1],ident_override=override,**kw)
    except AssertionError as e:assert str(e)=='card086 identity mismatch: '+next(iter(override));checks.append(arm+' wrong '+tag+' rejected')
    else:raise AssertionError('wrong graph identity accepted')
@@ -28,7 +32,10 @@ with tempfile.TemporaryDirectory(dir=C.R.parent,prefix='card086-graph-canary-') 
  samplers=[]
  for arm in C.ARMS:
   weights=np.ones(len(src),'f4') if arm=='all_one' else np.array(np.load(C.GD/'membership-weights.npy',mmap_mode='r')[:n].ravel())
-  sampler=DeviceEdgeSampler(DeviceArrayDataset(X,device='cuda'),src,dst,weights,n,pos_ratio=.1,batch_size=16384,random_state=42,positive_target_mode='binary',weighted_edge_sampling=True,uniform_with_replacement=False,device='cuda');sampler._stash_ids=True;samplers.append(sampler)
+  cdf,_=build(weights)
+  with fixed_cdf(cdf,values_sha(cdf),values_sha(weights),require_old_exact=arm=='all_one'):
+   sampler=DeviceEdgeSampler(DeviceArrayDataset(X,device='cuda'),src,dst,weights,n,pos_ratio=.1,batch_size=16384,random_state=42,positive_target_mode='binary',weighted_edge_sampling=True,uniform_with_replacement=False,device='cuda')
+  sampler._stash_ids=True;samplers.append(sampler)
  for epoch in range(2):
   for sampler in samplers:iter(sampler)
   for attempt in range(len(samplers[0])):

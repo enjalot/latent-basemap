@@ -2,7 +2,8 @@
 from pathlib import Path
 import json,hashlib,sys
 import numpy as np
-R=Path(__file__).resolve().parents[2];O=R.parent/'overseer-codex';D=Path('/data/latent-basemap/substrates/card073-finishing');TD=R.parent/'card086-train';CHAMP=R.parent/'card023-train/model-actual3d.pt'
+R=Path(__file__).resolve().parents[2];O=R.parent/'overseer-codex';D=Path('/data/latent-basemap/substrates/card073-finishing');TD=R.parent/'card086-cdf-train';CHAMP=R.parent/'card023-train/model-actual3d.pt'
+CD=Path('/data/latent-basemap/substrates/card086-serial-cdf-v1')
 GD=Path('/data/latent-basemap/substrates/card086-directed-membership');ARMS=['all_one','membership'];N=2000000;DIM=1536;DOSE=60000;BATCH=16384;SEED=42;LR={a:.0001 for a in ARMS};SNAPS=[20000,40000,60000];PREP_STEPS=2000;PREP_BATCH=2048;PREP_SEED=65068
 def sha(p):
  h=hashlib.sha256()
@@ -19,6 +20,8 @@ def state_sha(sd):
 def source_check():
  m=read(R/'card086-runtime-sha.json');assert all(sha(R/n)==h for n,h in m.items()),'card086 runtime changed';return sha(R/'card086-runtime-sha.json')
 def input_check():
+ cm=read(CD/'manifest.json');assert cm['PASS'] and cm['old_graph_manifest_sha']==sha(GD/'manifest.json'),'CDF graph provenance mismatch';assert sha(R/'experiments/sandbox/card086_serial_cdf.py')==cm['algorithm_source_sha'],'CDF algorithm changed'
+ assert all(sha(CD/v['cdf_file'])==v['cdf_file_sha'] for v in cm['arms'].values()),'CDF artifact changed'
  m=read(D/'inputs-manifest.json');assert m['status']=='MATCHED_FINISH_READY_NO_DATA_CHANGED' and m['n']==N and m['dim']==DIM
  assert all(sha(D/n)==h for n,h in m['files'].items());g=read(GD/'manifest.json');assert g['PASS'] and all(sha(GD/n)==h for n,h in g['files'].items()),'card086 data artifact hash mismatch';assert all(sha(p)==h for p,h in g['inputs'].items()),'card086 data input hash mismatch';assert sha(g['reference']['module_path'])==g['reference']['module_sha'],'card086 reference source mismatch';return m
 def loaded_modules():
@@ -28,11 +31,11 @@ def loaded_modules():
    p=Path(m.__file__).resolve();assert p.is_relative_to(R),'basemap import escaped';out[k]={'path':str(p),'sha':sha(p)}
  return out
 def warm(arm):return TD/arm/'prepared.pt'
-def identity(arm,dose=DOSE,nodes=N,graph=None,radii_path=None,warm_path=None):
+def identity(arm,dose=DOSE,nodes=N,graph=None,radii_path=None,warm_path=None,cdf_values_sha=None):
  assert arm in ARMS;graph=Path(graph or GD/f'{arm}-edges.npz');rp=Path(radii_path or D/'radii.npy');wp=Path(warm_path or warm(arm))
  if warm_path is None:
   prepared=read(TD/arm/'preparation.json');assert prepared['READY'] and prepared['prepared_sha']==sha(wp) and prepared['runtime_sha']==source_check(),'prepared-start identity mismatch'
- return {'card':'086','arm':arm,'phase':'graph','exposure_schema':'card086-pair-exposure-v1','weighted_edge_sampling':True,'uniform_with_replacement':False,'data_manifest_sha':sha(GD/'manifest.json'),'weight_values_sha':weight_sha(graph),'endpoints_sha':endpoints_sha(graph),'protocol_sha':sha(O/'card086-directed-membership.md'),'reference_sha':read(GD/'manifest.json')['reference']['module_sha'],'output_dim':3,'initialization_sha':sha(TD/arm/'preparation.json'),'parent_sha':read(TD/arm/'preparation.json')['parent_sha'],'n_nodes':nodes,'dose':dose,'lr':LR[arm],'lr_schedule':'constant','batch_size':BATCH,'pos_ratio':.1,'seed':SEED,'warm_sha':sha(wp),'original_init_sha':sha(CHAMP),'scale_manifest_sha':sha(O/'card023-data-manifest.json'),'input_manifest_sha':sha(D/'inputs-manifest.json'),'graph_sha':sha(graph),'radii_sha':sha(rp),'radii_values_sha':hashlib.sha256(np.ascontiguousarray(np.load(rp),dtype='f4').tobytes()).hexdigest(),'runtime_manifest_sha':source_check(),'rankneg_window':0,'negative_policy':'uniform_nonself_rank_scaling_off','precision':'device_fp16','gpu_resident_vram_budget_gb':14.,'fneg_weight':1.,'neg_tanh_gamma':4.,'positive_target_mode':'binary','replay_weight':0.,'lmc_weight':0.,'weight_decay':.01,'grad_clip':1.,'all_auxiliary_losses_off':True}
+ return {'card':'086','arm':arm,'phase':'graph','cdf_algorithm':'serial_FP64_own_terminal_upload_v1','cdf_manifest_sha':sha(CD/'manifest.json'),'cdf_values_sha':cdf_values_sha or read(CD/'manifest.json')['arms'][arm]['cdf_values_sha'],'cdf_file_sha':read(CD/'manifest.json')['arms'][arm]['cdf_file_sha'],'cdf_normalization':'own_serial_FP64_terminal','cdf_side':'left_original_unchanged','exposure_schema':'card086-pair-exposure-v1','weighted_edge_sampling':True,'uniform_with_replacement':False,'data_manifest_sha':sha(GD/'manifest.json'),'weight_values_sha':weight_sha(graph),'endpoints_sha':endpoints_sha(graph),'protocol_sha':sha(O/'card086-directed-membership.md'),'reference_sha':read(GD/'manifest.json')['reference']['module_sha'],'output_dim':3,'initialization_sha':sha(TD/arm/'preparation.json'),'parent_sha':read(TD/arm/'preparation.json')['parent_sha'],'n_nodes':nodes,'dose':dose,'lr':LR[arm],'lr_schedule':'constant','batch_size':BATCH,'pos_ratio':.1,'seed':SEED,'warm_sha':sha(wp),'original_init_sha':sha(CHAMP),'scale_manifest_sha':sha(O/'card023-data-manifest.json'),'input_manifest_sha':sha(D/'inputs-manifest.json'),'graph_sha':sha(graph),'radii_sha':sha(rp),'radii_values_sha':hashlib.sha256(np.ascontiguousarray(np.load(rp),dtype='f4').tobytes()).hexdigest(),'runtime_manifest_sha':source_check(),'rankneg_window':0,'negative_policy':'uniform_nonself_rank_scaling_off','precision':'device_fp16','gpu_resident_vram_budget_gb':14.,'fneg_weight':1.,'neg_tanh_gamma':4.,'positive_target_mode':'binary','replay_weight':0.,'lmc_weight':0.,'weight_decay':.01,'grad_clip':1.,'all_auxiliary_losses_off':True}
 def configure(p,ident,radii,checkpoints):
  p.weighted_edge_sampling=True;p.model=None;p.n_components=3;p.hidden_dim=2048;p.learning_rate=ident['lr'];p.lr_schedule='constant';p.warmup_steps=0;p.n_epochs=100000;p._max_train_steps=ident['dose'];p.rankneg_window=ident['rankneg_window'];p._rankneg_scale=None;p.batch_size=BATCH;p.gpu_resident_vram_budget_gb=14.;p.x_residency='auto';p.required_input_pipeline='device'
  assert p.architecture=='residual_bottleneck' and not p.use_dropout and p.pos_ratio==.1 and p.fneg_weight==1. and p.neg_tanh_gamma==4. and p.positive_target_mode=='binary'

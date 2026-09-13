@@ -43,5 +43,5 @@ def main():
  try:validate(bad)
  except AssertionError as error:assert str(error)=='invalid exposure counters';checks['corrupt_exposure_rejected']=True
  else:raise AssertionError('corrupt exposure accepted')
- C.write(C.O/'card086-exposure-cpu.json',{'PASS':True,'checks':checks,'exposure':e,'scope':'Actual CPU GradScaler overflow on both short tails; durable stats serialization at mid/epoch; unchanged model/Adam/scaler/sampler versus instrumentation off. Actual device full-state twins remain required.'});print('EXPOSURE PASS',len(checks),e)
+ C.write(C.O/'card086-cdf-repair/exposure-contracts.json',{'PASS':True,'checks':checks,'exposure':e,'scope':'Actual CPU GradScaler overflow on both short tails; durable stats serialization at mid/epoch; unchanged model/Adam/scaler/sampler versus instrumentation off. Actual device full-state twins remain required.'});print('EXPOSURE PASS',len(checks),e)
 if __name__=='__main__':main()
