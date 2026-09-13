@@ -95,7 +95,7 @@ def main():
    for lo in [0,CHUNK,LOW+1000000,LOW+20000000,HIGH-2*CHUNK,HIGH-CHUNK]:
     t=time.monotonic();buf=raw(np.arange(lo,lo+CHUNK));digest=hashlib.sha256(buf.tobytes()).hexdigest();y=predict(buf);h={'lo':0,'hi':CHUNK,'raw_sha':digest,'sha':{}}
     for a,v in y.items():out[a][:]=v;h['sha'][a]=hashlib.sha256(v.tobytes()).hexdigest()
-    save_checkpoint(td,CHUNK,{},out,'preflight',[h]*len(hist32));torch.cuda.synchronize();timings.append(time.monotonic()-t);resources()
+    save_checkpoint(td,CHUNK,{},out,'preflight',[h]*len(hist32));torch.cuda.synchronize();resources();timings.append(time.monotonic()-t)
   del out,y,buf
   from run_card091_chain import cpu_state
   import shutil

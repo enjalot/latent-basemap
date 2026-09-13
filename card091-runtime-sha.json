@@ -115,7 +115,8 @@
   "experiments/sandbox/card091_loader_reference.py": "5fceb494b8c69a1f14e27f39334cdc037cddf904a7d84bbe494e1264218b6a8e",
   "experiments/sandbox/prepare_card091_selection.py": "c69d062001d31ac98835fda50bef1ea859cb6898a368b5829005281dca717fd0",
   "experiments/sandbox/run_card091_chain.py": "2081cd52d8cbe10bab990d881d0b9dfea539eff882840d3dd270bf146e16e21e",
-  "experiments/sandbox/run_card091_gpu.py": "5dea10db6223739b984509c04a2c69102b877fa57d0f79c124e7a745d0260e53",
+  "experiments/sandbox/run_card091_gpu.py": "29971eadc8bdd4771e4a03736c6c5f2c39e3505d7c9ef537ebb604e848535377",
   "experiments/sandbox/suggest_card091_release.py": "7a34a44439aa3d5e209f63ae64fb1e9778da2a3cfc29c9b534ef2706decb229d",
-  "experiments/sandbox/test_card091_contracts.py": "a0f703efd49be82dc8beab9fda2214a6377f422d89344207df2369d5a13d908a"
+  "experiments/sandbox/test_card091_contracts.py": "a0f703efd49be82dc8beab9fda2214a6377f422d89344207df2369d5a13d908a",
+  "experiments/sandbox/test_card091_preflight_timing.py": "ad2f26f7b784c4f72c9ed3b2a72e97a5540adf1b5157bade5131f6b64487f920"
 }
