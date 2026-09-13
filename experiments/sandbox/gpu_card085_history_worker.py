@@ -25,7 +25,7 @@ def main():
  warm_path=C.R.parent/'card015-init/init-card015-3d.pt' if a.card=='023' else hist/'uniform/prepared.pt';warm=torch.load(warm_path,map_location='cpu',weights_only=False)['model_state']
  resume=None;step=0
  if a.mode=='epoch':
-  resume=hist/sub/'ckpts/ckpt-epoch1.pt';ck=torch.load(resume,map_location='cpu',weights_only=False);assert not ck['step_checkpoint'];step=ck['global_step'];del ck
+  resume=hist/sub/'ckpts'/('ckpt-epoch20.pt' if a.card=='023' else 'ckpt-epoch2.pt');ck=torch.load(resume,map_location='cpu',weights_only=False);assert not ck['step_checkpoint'];step=ck['global_step'];del ck
  dose=step+8
  if a.runtime=='proposed':
   C.configure(p,{'arm':'fresh' if a.card=='023' else 'finish','dose':dose,'lr':p.learning_rate,'rankneg_window':p.rankneg_window},p._card013_radii,[dose]);p._card012_identity=ident

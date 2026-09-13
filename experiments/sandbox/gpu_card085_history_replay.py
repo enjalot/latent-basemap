@@ -20,5 +20,5 @@ def main():
     for key in KEYS:
      name=card+'-'+mode+'-'+key;checks[name]=same(outcomes[0][key],outcomes[1][key]);assert checks[name], 'historical compatibility STOP: '+name
     del outcomes
- C.write(C.O/'card085-history-device.json',{'PASS':True,'checks':checks,'evidence':evidence,'wall_s':time.monotonic()-start,'runtime_sha':C.source_check(),'history_cpu_sha':C.sha(C.O/'card085-history-compatibility.json'),'scope':'Full2M support; original and proposed source in separate processes; fresh8 steps and genuine historical epoch1 resume+8; complete numerical state exact. No historical controls retrained.'})
+ C.write(C.O/'card085-history-device.json',{'PASS':True,'checks':checks,'evidence':evidence,'wall_s':time.monotonic()-start,'runtime_sha':C.source_check(),'history_cpu_sha':C.sha(C.O/'card085-history-compatibility.json'),'scope':'Full2M support; original and proposed source in separate processes; fresh8 steps and genuine historical retained epoch20(023)/epoch2(075) resume+8; complete numerical state exact. No historical controls retrained.'})
 if __name__=='__main__':main()
