@@ -41,4 +41,4 @@ def run(fail=False):
   assert outputs[str(C.O/'card086-execution.json')]['status']=='TRAINED_VALIDATED'
  return {'actual_total_s':ledger['batch_spent_s'],'events':events}
 r={'PASS':True,'n_checks':2,'success':run(),'stage_failure':run(True),'scope':'Real chain main, simulated clock/stages, in-memory ledger; verifies settled admission139.5 not240 and exact controller+stage settlement including initial7s hash+3s lease overhead and exception. No GPU, files or live ledger mutation inside simulation.'}
-C.write(C.O/'card086-cdf-final-delivery/occupancy-revision/chain-accounting-contracts.json',r);print('CHAIN ACCOUNTING PASS2')
+C.write(C.O/'card086-reciprocal-readiness/chain-accounting-contracts.json',r);print('CHAIN ACCOUNTING PASS2')

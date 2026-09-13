@@ -17,13 +17,13 @@ def fit(arm,dose,dest,*,X=None,graph=None,radii=None,radius_path=None,checkpoint
  if radii is None:radii=np.load(radius_path).astype('f4')
  assert len(radii)==len(X) and np.isfinite(radii).all() and (radii>0).all()
  if len(X)==C.N and graph==C.GD/f'{arm}-edges.npz':
-  cm=C.read(C.CD/'manifest.json');info=cm['arms'][arm];assert C.sha(C.CD/info['cdf_file'])==info['cdf_file_sha'];cdf=np.load(C.CD/info['cdf_file'],mmap_mode='r');weight_sha=info['weight_values_sha']
+  cm=C.read(C.CD/'manifest.json');info=cm['arms'][arm];assert C.sha(C.CD/info['cdf_file'])==info['cdf_file_sha'];cdf=np.load(C.CD/info['cdf_file'],mmap_mode='r');weight_sha=info['weight_values_sha'];reciprocal_hex=info['reciprocal_FP64_hex']
  else:
   with np.load(graph) as z:weights=z['weights']
-  cdf,_=build_cdf(weights);weight_sha=values_sha(weights)
+  cdf,terminal=build_cdf(weights);weight_sha=values_sha(weights);reciprocal_hex=float(np.float64(1.)/np.float64(terminal)).hex()
  assert not allone_original_control or (arm=='all_one' and len(X)==512 and dose==18 and resume is None),'original control restricted to512node canary'
  cdf_sha=values_sha(cdf)
- ident=C.identity(arm,dose,len(X),graph,radius_path,warm_path,cdf_sha)
+ ident=C.identity(arm,dose,len(X),graph,radius_path,warm_path,cdf_sha,reciprocal_hex)
  assert hashlib.sha256(np.ascontiguousarray(radii,dtype='f4').tobytes()).hexdigest()==ident['radii_values_sha']
  if allone_original_control:ident['cdf_algorithm']='old_CUDA_scan_allone_canary_control'
  ident.update(ident_override or {})

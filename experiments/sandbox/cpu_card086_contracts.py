@@ -13,7 +13,7 @@ def reject(f,msg):
  raise AssertionError('negative control accepted: '+msg)
 def main():
  checks={}
- for key in ['cdf_algorithm','cdf_manifest_sha','cdf_values_sha','cdf_file_sha','cdf_normalization','cdf_side','arm','dose','lr','graph_sha','weight_values_sha','endpoints_sha','weighted_edge_sampling','uniform_with_replacement','parent_sha','warm_sha','reference_sha','data_manifest_sha','runtime_manifest_sha','positive_target_mode','negative_policy']:
+ for key in ['cdf_reciprocal_hex','cdf_algorithm','cdf_manifest_sha','cdf_values_sha','cdf_file_sha','cdf_normalization','cdf_side','arm','dose','lr','graph_sha','weight_values_sha','endpoints_sha','weighted_edge_sampling','uniform_with_replacement','parent_sha','warm_sha','reference_sha','data_manifest_sha','runtime_manifest_sha','positive_target_mode','negative_policy']:
   checks['wrong_'+key]=reject(lambda:C.assert_identity({key:'old'},{key:'new'}),'card086 identity mismatch: '+key)
  with tempfile.TemporaryDirectory() as td:
   p=Path(td)/'receipt.json';t=time.time_ns();checks['missing']=reject(lambda:validate_stage_receipt(p,t,'r','d'),'missing stage receipt');good={'PASS':True,'runtime_sha':'r','data_manifest_sha':'d'};p.write_text(json.dumps(good));os.utime(p,ns=(t,t));assert validate_stage_receipt(p,t,'r','d')==good;checks['fresh']=True
@@ -27,5 +27,5 @@ def main():
  from card086_resume import validate_resume_payload
  ck=torch.load(C.R.parent/'card075-train/uniform/ckpts/ckpt-step60000.pt',map_location='cpu',weights_only=False);ck['card012_identity']=dict(ck['card012_identity'],arm='all_one',weighted_edge_sampling=True,uniform_with_replacement=False)
  checks['legacy_unweighted_state_rejected']=reject(lambda:validate_resume_payload(ck,60000),'actual weighted pipeline mismatch')
- assert all(checks.values());C.write(C.O/'card086-cdf-repair-v2/runtime-contracts.json',{'PASS':True,'checks':checks,'n_checks':len(checks),'scope':'CPU contracts only; actual weighted device resume and numerical mass acceptance pending root release.'});print('CPU CONTRACTS PASS',len(checks))
+ assert all(checks.values());C.write(C.O/'card086-reciprocal-readiness/runtime-contracts.json',{'PASS':True,'checks':checks,'n_checks':len(checks),'scope':'CPU contracts only; actual weighted device resume and numerical mass acceptance pending root release.'});print('CPU CONTRACTS PASS',len(checks))
 if __name__=='__main__':main()

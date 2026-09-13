@@ -64,5 +64,5 @@ with tempfile.TemporaryDirectory() as td:
   assert C.require_release is req and C.source_check is src;checks['exception_restoration']=True
  finally:C.require_release,C.source_check,C.input_check,C.O=original
 assert C.sha is real_sha
-C.write(C.O/'card086-cdf-repair-v2/admission-contracts.json',{'PASS':True,'n_checks':len(checks),'checks':checks,'scope':'Pure settled budget checks, real filesystem full pre/post and metadata guards, mutable checkpoint hash offpath; no GPU or live ledger mutation.'})
+C.write(C.O/'card086-reciprocal-readiness/admission-contracts.json',{'PASS':True,'n_checks':len(checks),'checks':checks,'scope':'Pure settled budget checks, real filesystem full pre/post and metadata guards, mutable checkpoint hash offpath; no GPU or live ledger mutation.'})
 print('V2 ADMISSION PASS',len(checks))

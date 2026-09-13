@@ -23,4 +23,4 @@ with tempfile.TemporaryDirectory() as td:
   try:C.validate_preparations()
   except AssertionError as e:assert str(e)=='preparation parent tensors mismatch';checks['consistent_rehash_wrong_parent_tensors_rejected']=True
   else:raise AssertionError('wrong parent accepted')
-C.write(C.O/'card086-cdf-final-delivery/preparation-revision/preparation-contracts.json',{'PASS':True,'checks':checks,'n_checks':len(checks),'scope':'Synthetic CPU tensors through actual production preparation validator; no GPU or actual parent/model mutation.'});print('PREPARATION PASS',len(checks))
+C.write(C.O/'card086-reciprocal-readiness/preparation-contracts.json',{'PASS':True,'checks':checks,'n_checks':len(checks),'scope':'Synthetic CPU tensors through actual production preparation validator; no GPU or actual parent/model mutation.'});print('PREPARATION PASS',len(checks))
