@@ -2518,6 +2518,14 @@ class ParametricUMAP:
                     corr_loss = torch.zeros((), device=umap_loss.device)
                     loss = umap_loss
 
+                # Card084: reuse production positive pairs; no extra sampler or forward.
+                _attraction = getattr(self, '_card084_attraction', None)
+                if _attraction is not None and _attraction.get('coefficient', 0.) != 0.:
+                    from .bounded_attraction import add_attraction
+                    loss = add_attraction(loss, src_embeddings, dst_embeddings,
+                                          targets_for_loss > 0.5, _pair_scale,
+                                          **_attraction)
+
                 # Card054 isolated default-off stateless landmark objective.
                 _lmc_hook = getattr(self, '_card054_lmc', None)
                 if _lmc_hook is not None:
