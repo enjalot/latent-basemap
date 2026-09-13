@@ -32,6 +32,8 @@ with guarded_canary_admission(C) as admission_cache:
   from card088_offpath import restoration_control
   offpath=restoration_control(X,src,dst,make_weights('mixture',n).ravel(),n,'cuda');checks.append('actual CUDA base sampler offpath IDs RNG restoration')
   exposure={a:{'near':0,'extra':0} for a in C.ARMS};positive_hashers={a:hashlib.sha256() for a in C.ARMS}
+  from canary_cleanup_faults import device_controls
+  forced=device_controls(fit,C,C.ARMS[-1],kw,td,keys);checks.extend(forced['checks'])
   with matched_sampler():
    samplers=[]
    for arm in C.ARMS:
@@ -54,4 +56,4 @@ with guarded_canary_admission(C) as admission_cache:
   assert hashes['original15']!=hashes['mixture'],'trained endpoint hashes identical'
   assert all(v['extra45']==0 for v in training_exposure['original15'].values()),'trained control extra exposure'
   checks.extend(['actual control zero extra45','fixed122880-draw mixture half mass','positive endpoint IDs differ','trained endpoint hashes differ'])
-C.write(C.O/'card088-graph-canary.json',{'PASS':True,'admission_cache':admission_cache,'checks':checks,'n_checks':len(checks),'endpoints':hashes,'sampler_exposure':exposure,'mixture_near_fraction':fraction,'positive_ID_hashes':positive_hashes,'training_support_fractions':training_exposure,'offpath':offpath,'wall_s':time.monotonic()-start,'runtime_sha':C.source_check(),'data_manifest_sha':C.sha(C.GD/'manifest.json'),'scope':'Real1536D fit on512-node synthetic ring support with corresponding original radii only; not full2M device proof; midpoint and epoch resumes preserve model+optimizer+loader/RNG state; wrong warm/scale/arm reject. No assertion of identical sampled exposure across model-dependent rank orders or AMP skips.'});print('PASS',len(checks),flush=True)
+C.write(C.O/'card088-graph-canary.json',{'PASS':True,'actual_fit_forced_cleanup':forced,'admission_cache':admission_cache,'checks':checks,'n_checks':len(checks),'endpoints':hashes,'sampler_exposure':exposure,'mixture_near_fraction':fraction,'positive_ID_hashes':positive_hashes,'training_support_fractions':training_exposure,'offpath':offpath,'wall_s':time.monotonic()-start,'runtime_sha':C.source_check(),'data_manifest_sha':C.sha(C.GD/'manifest.json'),'scope':'Real1536D fit on512-node synthetic ring support with corresponding original radii only; not full2M device proof; midpoint and epoch resumes preserve model+optimizer+loader/RNG state; wrong warm/scale/arm reject. No assertion of identical sampled exposure across model-dependent rank orders or AMP skips.'});print('PASS',len(checks),flush=True)

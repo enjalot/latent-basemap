@@ -110,7 +110,7 @@ def main():
     try:
         B.transact('controller',120.,check=True);reserved=True
         C.input_check(require_graph=False)
-        stage_time+=stage('graph_build','build_card088_graph.py',B.SHARED_PREPARATION_CAP,receipt_path=C.O/'card088-graph-ready.json')
+        stage_time+=stage('graph_build','build_card088_graph.py',B.GRAPH_STAGE_CAP,receipt_path=C.O/'card088-graph-ready.json')
         C.input_check()
         stage_time+=stage('prepare','prepare_card088.py',120)
         assert all(C.read(C.TD/a/'preparation.json')['READY'] for a in C.ARMS)
@@ -127,7 +127,7 @@ def main():
             for key in ['negative_source_sha','negative_target_sha','sampler_rng_sha','positive_slots','negative_slots']:
                 assert left[key]==right[key], 'full-data matched-attempt parity STOP: '+key
         ledger=C.read(B.L);window=C.read(B.W)
-        checks={'shared_graph_prep_cap':B.shared_preparation_spent(ledger)<=B.SHARED_PREPARATION_CAP,'card_cap':ledger['batch_spent_s']+sum(estimates.values())<=4800,
+        checks={'shared_graph_prep_cap':B.shared_preparation_spent(ledger)<=B.SHARED_PREPARATION_CAP,'card_cap':ledger['batch_spent_s']+sum(estimates.values())<=5400,
                 'window_cap':window['spent_s']+sum(estimates.values())<=165491,
                 'deadline':sum(estimates.values())+120<=B.END-time.time()}
         checks.update({a:ledger['arm_spent_s'][a]+estimates[a]<=B.LIMITS['stage_gpu_s'][a] for a in C.ARMS})

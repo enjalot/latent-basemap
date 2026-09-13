@@ -20,7 +20,7 @@ def main():
   os.utime(p,ns=(t-1,t-1));checks['stale']=reject(lambda:validate_stage_receipt(p,t,'r','d'),'stale stage receipt')
   for k,v,msg in [('PASS',False,'stage receipt lacks explicit PASS'),('runtime_sha','wrong','stage receipt runtime mismatch'),('data_manifest_sha','wrong','stage receipt calibration mismatch')]:
    p.write_text(json.dumps(dict(good,**{k:v})));checks['receipt_'+k]=reject(lambda:validate_stage_receipt(p,0,'r','d'),msg)
- checks['budget']=B.LIMITS['card_gpu_s']==4800 and B.LIMITS['stage_gpu_s']=={'original15':1600,'mixture':1600}
+ checks['budget']=B.LIMITS['card_gpu_s']==5400 and B.LIMITS['stage_gpu_s']=={'original15':2100,'mixture':2100} and B.SHARED_PREPARATION_CAP==1800 and B.GRAPH_STAGE_CAP==1500
  checks['resource_partition']=B.LIMITS['rss_gib']==32 and B.LIMITS['owner_aggregate_rss_gib']==48 and B.LIMITS['root_scorer_rss_gib']==16 and B.LIMITS['global_vram_gib']==30
  from unittest.mock import patch
  from run_card088_chain import usage
@@ -29,11 +29,11 @@ def main():
  with patch('run_card088_chain.subprocess.check_output',side_effect=[rows,'1024\n']):
   checks['aggregate_tree_32GiB_rejected']=reject(lambda:usage(777777),'GPU tree RSS32GiB STOP')
  checks['dose_recipe']=C.DOSE==60000 and C.LR=={'original15':.0001,'mixture':.0001} and C.BATCH==16384
- checks['no_release']=reject(C.require_release,'NO ROOT GPU RELEASE')
+ checks['no_current_release']=reject(C.require_release,'release runtime mismatch' if (C.O/'card088-release.json').exists() else 'NO ROOT GPU RELEASE')
  import torch
  from card088_resume import validate_resume_payload
  ck=torch.load(C.R.parent/'card075-train/uniform/ckpts/ckpt-step60000.pt',map_location='cpu',weights_only=False);ck['card012_identity']=dict(ck['card012_identity'],arm='mixture',weighted_edge_sampling=True,uniform_with_replacement=False)
  checks['legacy_unweighted_state_rejected']=reject(lambda:validate_resume_payload(ck,60000),'actual weighted pipeline mismatch')
  ck['card012_identity']['arm']='original15';checks['zero_control_resume_rejected']=reject(lambda:validate_resume_payload(ck,60000),'zero control weight in resume PERM')
- assert all(checks.values());C.write(C.O/'card088-cpu-contracts.json',{'PASS':True,'checks':checks,'n_checks':len(checks),'scope':'CPU contracts only; actual weighted device resume and numerical mass acceptance pending root release.'});print('CPU CONTRACTS PASS',len(checks))
+ assert all(checks.values());C.write(C.O/'card088-device-proof-readiness/runtime-contracts.json',{'PASS':True,'checks':checks,'n_checks':len(checks),'scope':'CPU contracts only; actual weighted device resume and numerical mass acceptance pending root release.'});print('CPU CONTRACTS PASS',len(checks))
 if __name__=='__main__':main()

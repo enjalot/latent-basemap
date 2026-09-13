@@ -8,15 +8,20 @@ from basemap.pumap.parametric_umap.core import ParametricUMAP
 from card088_sampler import matched_sampler
 from card088_exposure import observe,support_fractions,validate as validate_exposure
 
-def fit(arm,dose,dest,*,X=None,graph=None,radii=None,radius_path=None,checkpoints=None,resume=None,ident_override=None,warm_path=None,probe_record=None):
+def fit(arm,dose,dest,*,X=None,graph=None,radii=None,radius_path=None,checkpoints=None,resume=None,ident_override=None,warm_path=None,probe_record=None,canary_faults=False,canary_observer_off=False):
  C.require_release();dest=Path(dest);dest.mkdir(parents=True,exist_ok=True);start=time.monotonic();assert torch.cuda.is_available();torch.backends.cuda.matmul.allow_tf32=False;torch.backends.cudnn.allow_tf32=False;torch.set_float32_matmul_precision('highest')
  graph=Path(graph) if graph else C.GD/f'{arm}-edges.npz'
  if X is None:X=np.asarray(np.load(C.D/'train.f16.npy',mmap_mode='r'),dtype='f4')
  if radius_path is None:radius_path=C.D/'radii.npy'
  if radii is None:radii=np.load(radius_path).astype('f4')
+ assert not canary_observer_off or canary_faults,'observer-off requires canary faults'
+ if canary_faults:
+  from canary_cleanup_faults import guard
+  guard(len(X),dose,dest,C.TD,graph,C.GD/f'{arm}-edges.npz',canary_observer_off,resume)
  assert len(radii)==len(X) and np.isfinite(radii).all() and (radii>0).all()
  ident=C.identity(arm,dose,len(X),graph,radius_path,warm_path)
  assert hashlib.sha256(np.ascontiguousarray(radii,dtype='f4').tobytes()).hexdigest()==ident['radii_values_sha']
+ if canary_faults:ident.update(canary_fault_plan='gradient5_loss7_v1',canary_observer=not canary_observer_off)
  ident.update(ident_override or {})
  torch.set_num_threads(2);torch.manual_seed(C.SEED);torch.cuda.manual_seed_all(C.SEED);np.random.seed(C.SEED)
  p=ParametricUMAP.load(str(C.CHAMP),device='cuda');C.configure(p,ident,radii,checkpoints or [dose]);prepared=torch.load(warm_path or C.warm(arm),map_location='cpu',weights_only=False);assert prepared['READY'];warm=prepared['model_state']
@@ -27,14 +32,19 @@ def fit(arm,dose,dest,*,X=None,graph=None,radii=None,radius_path=None,checkpoint
  else:C.write(adm,ident)
  from contextlib import nullcontext
  from card088_sampler_probe import probe
- with matched_sampler(arm,stats=lambda:p._train_stats), (probe(probe_record,C.weight_sha(graph)) if probe_record is not None else nullcontext()), observe(p):
+ from canary_cleanup_faults import force
+ fault_record={}
+ with matched_sampler(arm,stats=lambda:p._train_stats), (probe(probe_record,C.weight_sha(graph)) if probe_record is not None else nullcontext()), (nullcontext() if canary_observer_off else observe(p)), (force(p,fault_record,'088') if canary_faults else nullcontext()):
   p.fit(X,precomputed_edges_path=str(graph),random_state=C.SEED,verbose=False,warm_start_state=None if resume else warm,snapshot_steps=tuple(checkpoints or [dose]),snapshot_dir=str(dest),checkpoint_every_epochs=1,checkpoint_dir=str(dest/'ckpts'),resume_from=str(resume) if resume else None)
  if resume is None:assert p.warm_start_sha256==expected_warm,'actual warm-start differs'
- ts=dict(p._train_stats);exposure=validate_exposure(ts);pi=dict(p._pipeline_info);assert ts['executed_iters']==ts['positive_lr_optimizer_steps']==dose;assert ts['lr_used_min']==ts['lr_used_max']==ident['lr'] and pi['x_residency']=='device_fp16'
- end=dest/'ckpts'/f'ckpt-step{dose}.pt';ck=torch.load(end,map_location='cpu',weights_only=False);C.validate_ckpt(ck,ident);assert C.state_sha(p.model.state_dict())==C.state_sha(ck['model'])
+ ts=dict(p._train_stats);exposure=None if canary_observer_off else validate_exposure(ts);pi=dict(p._pipeline_info);assert ts['executed_iters']==ts['positive_lr_optimizer_steps']==dose;assert ts['lr_used_min']==ts['lr_used_max']==ident['lr'] and pi['x_residency']=='device_fp16'
+ end=dest/'ckpts'/f'ckpt-step{dose}.pt';ck=torch.load(end,map_location='cpu',weights_only=False);(C.assert_identity(ck['card012_identity'],ident) if canary_observer_off else C.validate_ckpt(ck,ident));assert C.state_sha(p.model.state_dict())==C.state_sha(ck['model'])
+ if canary_observer_off:
+  from card088_resume import validate_resume_payload
+  validate_resume_payload(ck,dose,n_nodes=len(X));assert 'card088_exposure' not in ts,'off control observer was enabled'
  assert pi['weighted_requested'] is True and pi['weighted_effective'] is True and pi['positive_sampling']=='weighted_with_replacement' and p.weighted_edge_sampling;assert p.rankneg_window==0 and p._rankneg_scale is None, 'actual negative policy differs'
  free,total=torch.cuda.mem_get_info();assert (total-free)/2**30<30
- report={'support_fractions':support_fractions(exposure),'exposure':exposure,'arm':arm,'dose':dose,'wall_s':time.monotonic()-start,'train_stats':ts,'pipeline_info':pi,'identity':ident,'state_sha':C.state_sha(ck['model']),'global_vram_GiB':(total-free)/2**30,'endpoint_checkpoint':str(end),'loaded_modules':C.loaded_modules(),'actual_warm_sha':getattr(p,'warm_start_sha256',None),'resumed_from':str(resume) if resume else None,'expected_fresh_warm_sha':expected_warm,'lmc_stats':None,'resume_start_step':int(torch.load(resume,map_location='cpu',weights_only=False)['global_step']) if resume else 0}
+ report={'canary_fault_record':fault_record,'support_fractions':None if exposure is None else support_fractions(exposure),'exposure':exposure,'arm':arm,'dose':dose,'wall_s':time.monotonic()-start,'train_stats':ts,'pipeline_info':pi,'identity':ident,'state_sha':C.state_sha(ck['model']),'global_vram_GiB':(total-free)/2**30,'endpoint_checkpoint':str(end),'loaded_modules':C.loaded_modules(),'actual_warm_sha':getattr(p,'warm_start_sha256',None),'resumed_from':str(resume) if resume else None,'expected_fresh_warm_sha':expected_warm,'lmc_stats':None,'resume_start_step':int(torch.load(resume,map_location='cpu',weights_only=False)['global_step']) if resume else 0}
  return p,ck,report
 
 def validate_arm(arm):

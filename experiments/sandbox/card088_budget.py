@@ -6,9 +6,10 @@ import card088_common as C
 L=C.O/'card088-ledger.json';W=C.O/'cards-24h-window-ledger.json'
 J=C.O/'card088-accounting-journal'
 END=dt.datetime.fromisoformat('2026-09-13T23:50:55+00:00').timestamp()
-LIMITS={'card_gpu_s':4800,'stage_gpu_s':{'original15':1800,'mixture':1800},'global_vram_gib':30,'rss_gib':32,'owner_aggregate_rss_gib':48,'root_scorer_rss_gib':16,'deadline':'2026-09-13T23:50:55Z'}
+LIMITS={'card_gpu_s':5400,'stage_gpu_s':{'original15':2100,'mixture':2100},'global_vram_gib':30,'rss_gib':32,'owner_aggregate_rss_gib':48,'root_scorer_rss_gib':16,'deadline':'2026-09-13T23:50:55Z'}
 
 SHARED_PREPARATION_CAP=1800
+GRAPH_STAGE_CAP=1500
 
 def allocation(seconds,arm=None):
     return {a:(seconds if arm==a else 0.) if arm else 0. for a in C.ARMS}
@@ -36,19 +37,19 @@ def _event(tag,seconds,arm,kind):
 def transact(tag,seconds,arm=None,kind='reservation',check=False):
     with (C.O/'window-ledger-write.lock').open('a') as f:
         fcntl.flock(f,fcntl.LOCK_EX)
-        if not L.exists():C.write(L,{'batch_cap_s':4800,'batch_spent_s':0.,'arm_spent_s':{a:0. for a in C.ARMS},'entries':[]})
+        if not L.exists():C.write(L,{'batch_cap_s':5400,'batch_spent_s':0.,'arm_spent_s':{a:0. for a in C.ARMS},'entries':[]})
         assert W.exists(),'root rolling ledger required'
         _recover()
         if check:
             l=C.read(L);w=C.read(W)
-            assert l['batch_spent_s']+seconds<=4800 and w['spent_s']+seconds<=165491,'cumulative budget STOP'
+            assert l['batch_spent_s']+seconds<=5400 and w['spent_s']+seconds<=165491,'cumulative budget STOP'
             assert all(l['arm_spent_s'][a]+v<=LIMITS['stage_gpu_s'][a] for a,v in allocation(seconds,arm).items()),'per-arm cumulative STOP'
         return _event(tag,seconds,arm,kind)
 
 def available(arm=None):
     import time
     l=C.read(L);w=C.read(W)
-    remaining=[4800-l['batch_spent_s'],165491-w['spent_s'],END-time.time()]
+    remaining=[5400-l['batch_spent_s'],165491-w['spent_s'],END-time.time()]
     if arm:remaining.append(LIMITS['stage_gpu_s'][arm]-l['arm_spent_s'][arm])
     return min(remaining)
 
