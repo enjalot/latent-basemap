@@ -43,4 +43,4 @@ def validate_ckpt(ck,ident):
  import torch
  import card067_resume as V
  assert ck['card012_identity']==ident,'card067 admission-identity mismatch';step=ck['global_step'];assert isinstance(step,int) and 0<step<=ident['dose'];V.validate_resume_payload(ck,step,n_nodes=ident['n_nodes']);assert ck['config']['learning_rate']==LR and ck['config']['lr_schedule']=='constant' and ck['config']['replay_weight']==0. and not ck['config']['replay_enabled']
- assert ck['config']['n_components']==8;original=torch.load(warm(ident['arm']),map_location='cpu',weights_only=False)['model_state'];assert set(original)==set(ck['model']) and all(original[k].shape==ck['model'][k].shape and torch.isfinite(ck['model'][k]).all() for k in original);return step
+ assert ck['model']['proj_out.weight'].shape==(8,2048) and ck['model']['proj_out.bias'].shape==(8,);original=torch.load(warm(ident['arm']),map_location='cpu',weights_only=False)['model_state'];assert set(original)==set(ck['model']) and all(original[k].shape==ck['model'][k].shape and torch.isfinite(ck['model'][k]).all() for k in original);return step
