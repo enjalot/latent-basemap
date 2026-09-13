@@ -109,7 +109,7 @@
   "basemap/roundwatch_gate.py": "35972f3f6169e5ce54b2ffc4e2d84e4360f32757a11b3c8691e110de5f44d2f1",
   "basemap/run_controller.py": "2d33eb8ca22d92c938e7ce1b95c888c2e3b7c555bd98ae6306eb1ecbe82a09f9",
   "basemap/source_closure.py": "787b3188ae01a532d4f1bc2e810768d94b0abc2f6960ea237ac5f7f12d360f94",
-  "experiments/sandbox/card084-implementation.md": "c420935a96b38d2b3f09d9cd4d9901885bda824b0daf98e3e082b39c199d7c6b",
+  "experiments/sandbox/card084-implementation.md": "0e319d745ae1fcb45d665b8868900e64e9ead107410c89a9d15b6f3b6b151520",
   "experiments/sandbox/card084-protocol.md": "4e7e437fbafe2301979190182e5da4809104cd443badd424e8fea42c6534dced",
   "experiments/sandbox/card084_budget.py": "c6fd144cdc2f44cf9ee1c9147f53aa9eb84617ae74b8befbce1efdcf0a01e405",
   "experiments/sandbox/card084_calibration.py": "3cedf87dc5367fb418c91b034802cb0db5629b62acec7bd8a2397b2d79c80972",
@@ -123,7 +123,8 @@
   "experiments/sandbox/gpu_card084_preflight.py": "878ccaf337ee4b5e9748246eaf890e0e25b92333bf3884293f4ec240edaa54f4",
   "experiments/sandbox/prepare_card084.py": "bd5325b76fc639f2c307302a307d60ebae28b48aba354114d940e1d1d9afa53f",
   "experiments/sandbox/run_card084_arm.py": "3dc9927cff40ea4ea8a7f85b3aed047de27178f87c9fe5c844187f755f2d14b8",
-  "experiments/sandbox/run_card084_chain.py": "fc73718ce8772641c96462c461849e6a500f7f0e2f872a86d66374589339c61d",
+  "experiments/sandbox/run_card084_chain.py": "5879d2c11842021b97e2d98835ebb655ab6c74c05ac1aed34bbc76c3408c5c8d",
   "experiments/sandbox/test_card084_controls.py": "fe9939b1f9305977a8f2901e2555ba4e66834ca31ec82f6964c76d0ec6ce6b6d",
-  "experiments/sandbox/test_card084_cpu.py": "419c43552170543e779046f8e32b5142bb0014fb5505c7f2afd0743d4d6d2e3b"
+  "experiments/sandbox/test_card084_cpu.py": "419c43552170543e779046f8e32b5142bb0014fb5505c7f2afd0743d4d6d2e3b",
+  "experiments/sandbox/test_card084_receipts.py": "5ae34e43924ec57a641b1af64e13514216c4fb17fe477aad95bdd3fa6b70b597"
 }

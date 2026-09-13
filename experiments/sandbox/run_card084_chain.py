@@ -8,6 +8,7 @@ import card084_budget as B
 PY='/home/enjalot/code/latent-basemap/.venv/bin/python'
 S=C.R/'experiments/sandbox'
 STAGE_TIME=0.
+STAGE_RECEIPTS={}
 
 def verify():
     release=C.O/'card084-release.json'
@@ -52,12 +53,24 @@ def usage(pid):
     assert mem['MemAvailable']>4*2**30,'host available RAM below4GiB STOP'
     return rss,vram
 
-def stage(tag,script,cap,args=(),arm=None):
+def validate_stage_receipt(path, started_ns, runtime_sha, calibration_sha):
+    path=Path(path)
+    assert path.is_file(), 'missing stage receipt'
+    assert path.stat().st_mtime_ns>=started_ns, 'stale stage receipt'
+    receipt=C.read(path)
+    assert receipt.get('PASS') is True, 'stage receipt lacks explicit PASS'
+    assert receipt.get('runtime_sha')==runtime_sha, 'stage receipt runtime mismatch'
+    assert receipt.get('calibration_sha')==calibration_sha, 'stage receipt calibration mismatch'
+    return receipt
+
+def stage(tag,script,cap,args=(),arm=None,receipt_path=None):
     global STAGE_TIME
     release=verify();limit=min(cap,B.available(arm)-2)
     assert limit>5,'budget/deadline STOP'
     B.transact(tag,limit,arm,check=True);start=time.monotonic();child=None;rc=999
-    peak_rss=0;peak_vram=0
+    peak_rss=0;peak_vram=0;stage_error=None;proof=None
+    runtime_sha=C.source_check();calibration_sha=C.sha(C.CAL) if receipt_path is not None else None
+    started_ns=time.time_ns()
     try:
         env=dict(os.environ,CARD084_RELEASE_SHA=release)
         child=subprocess.Popen([PY,str(S/script),*args],cwd=C.R,env=env,start_new_session=True)
@@ -67,13 +80,23 @@ def stage(tag,script,cap,args=(),arm=None):
             time.sleep(.5)
         rc=child.returncode
         assert rc==0,tag+' failed with '+str(rc)
+        if receipt_path is not None:
+            assert C.source_check()==runtime_sha, 'stage runtime changed while running'
+            assert C.sha(C.CAL)==calibration_sha, 'stage calibration changed while running'
+            receipt=validate_stage_receipt(receipt_path,started_ns,runtime_sha,calibration_sha)
+            proof={'path':str(receipt_path),'sha':C.sha(receipt_path),'started_ns':started_ns,
+                   'mtime_ns':Path(receipt_path).stat().st_mtime_ns}
+            STAGE_RECEIPTS[tag]={'receipt':receipt,'proof':proof}
+    except BaseException as error:
+        stage_error=repr(error)
+        raise
     finally:
         if child is not None and child.poll() is None:
             os.killpg(child.pid,signal.SIGKILL);child.wait()
         elapsed=time.monotonic()-start
         STAGE_TIME+=elapsed
         B.transact(tag,elapsed-limit,arm,kind='settlement')
-        C.write(C.O/f'card084-stage-{tag}.json',{'rc':rc,'wall_s':elapsed,'peak_tree_rss_bytes':peak_rss,'peak_global_vram_gib':peak_vram,'runtime_sha':C.source_check()})
+        C.write(C.O/f'card084-stage-{tag}.json',{'PASS':rc==0 and stage_error is None,'rc':rc,'error':stage_error,'receipt_proof':proof,'stage_started_ns':started_ns,'wall_s':elapsed,'peak_tree_rss_bytes':peak_rss,'peak_global_vram_gib':peak_vram,'runtime_sha':C.source_check()})
     verify()
     return elapsed
 
@@ -89,11 +112,11 @@ def main():
         if C.CAL.exists():
             assert C.read(C.CAL)['PASS'] and C.read(C.CAL)['runtime_sha']==C.source_check()
         else:stage_time+=stage('calibration','gpu_card084_calibrate.py',180)
-        stage_time+=stage('graph_canary','gpu_card084_graph_canary.py',400)
-        for a in C.ARMS:stage_time+=stage('preflight-'+a,'gpu_card084_preflight.py',300,(a,),a)
+        stage_time+=stage('graph_canary','gpu_card084_graph_canary.py',400,receipt_path=C.O/'card084-graph-canary.json')
+        for a in C.ARMS:stage_time+=stage('preflight-'+a,'gpu_card084_preflight.py',300,(a,),a,receipt_path=C.O/f'card084-preflight-{a}.json')
         estimates={}
         for a in C.ARMS:
-            pf=C.read(C.O/f'card084-preflight-{a}.json')
+            pf=STAGE_RECEIPTS['preflight-'+a]['receipt']
             assert pf['PASS'] and pf['runtime_sha']==C.source_check() and pf['calibration_sha']==C.sha(C.CAL)
             estimates[a]=pf['estimate']['complete_arm_s']
         ledger=C.read(B.L);window=C.read(B.W)

@@ -48,6 +48,11 @@ direct H-Q contrast descriptive. This runtime has no scorer.
 - gpu_card084_preflight.py: per-arm full2M500/3500-update fits and full checkpoint
   serialization; conservative slope/setup and epoch/snapshot reserve. Full60K
   admitted only if both estimates fit remaining cumulative caps and deadline.
+  A successful canary or per-arm preflight process must also produce a receipt
+  with mtime>=that stage start (nanosecond timestamps), explicit PASS=true, and
+  current runtime/calibration hashes. Missing, stale, non-PASS or mismatched
+  receipts STOP even when the child exits0. Admission consumes the validated
+  receipt object; stage audit records start/mtime/hash and any rejection error.
 - run_card084_chain.py / card084_budget.py: no release => no device work;
   root's two external flock wrappers own both leases, as081–083. The chain
   checks actual ancestor-owned FLOCK inode locks via /proc/locks and never
