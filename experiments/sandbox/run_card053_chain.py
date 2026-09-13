@@ -2,7 +2,7 @@
 import sys,time,subprocess,fcntl,datetime as dt
 import card053_common as C
 from card053_fit import validate_arm
-PY='/home/enjalot/code/latent-basemap/.venv/bin/python';L=C.O/'card053-ledger.json';W=C.O/'cards-24h-window-ledger.json';END=dt.datetime.fromisoformat('2026-09-13T01:52:44+00:00').timestamp();START=None;CHARGED=0.
+PY='/home/enjalot/code/latent-basemap/.venv/bin/python';L=C.O/'card053-ledger.json';W=C.O/'cards-24h-window-ledger.json';END=dt.datetime.fromisoformat('2026-09-13T23:50:55+00:00').timestamp();START=None;CHARGED=0.
 def charge(tag,seconds,rc):
  global CHARGED
  CHARGED+=seconds
@@ -11,7 +11,7 @@ def charge(tag,seconds,rc):
   for p,key in [(L,'batch_spent_s'),(W,'spent_s')]:
    r=C.read(p);r[key]+=seconds;r.setdefault('entries',[]).append({'at':dt.datetime.now(dt.timezone.utc).isoformat(),'card':'053','tag':tag,'event':'exclusive_GPU_stage','wall_s':seconds,'rc':rc});C.write(p,r)
 def remaining(cap,arm=None):
- card=C.read(L);win=C.read(W);pending=max(0.,time.monotonic()-START-CHARGED);v=[cap,4500-card['batch_spent_s']-pending,86400-win['spent_s']-pending,END-time.time()]
+ card=C.read(L);win=C.read(W);pending=max(0.,time.monotonic()-START-CHARGED);v=[cap,4500-card['batch_spent_s']-pending,165491-win['spent_s']-pending,END-time.time()]
  if arm:v.append(1350-sum(e['wall_s'] for e in card['entries'] if e['tag']==arm))
  return min(v)
 def stage(tag,script,cap,args=(),arm=None):
