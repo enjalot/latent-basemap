@@ -121,7 +121,7 @@ def main():
     try:
         B.transact('controller',120.,check=True);controller_charged=120.;reserved=True
         C.input_check()
-        stage_time+=stage('prepare_repair','prepare_card086.py',120,receipt_path=C.O/'card086-reciprocal-initialization.json')
+        stage_time+=stage('prepare_repair','prepare_card086.py',120,receipt_path=C.O/'card086-observer-initialization.json')
         C.validate_preparations()
         stage_time+=stage('graph_canary','gpu_card086_graph_canary.py',300,receipt_path=C.O/'card086-graph-canary.json')
         for a in C.ARMS:stage_time+=stage('preflight-'+a,'gpu_card086_preflight.py',240,(a,),a,receipt_path=C.O/f'card086-preflight-{a}.json')

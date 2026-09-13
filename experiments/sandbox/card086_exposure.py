@@ -23,17 +23,22 @@ def validate(stats):
  return dict(e,skipped_batches=e['attempted_batches']-e['successful_batches'],skipped_positive_slots=e['attempted_positive_slots']-e['successful_positive_slots'],skipped_negative_slots=e['attempted_negative_slots']-e['successful_negative_slots'],skipped_short_tail_batches=e['attempted_short_tail_batches']-e['successful_short_tail_batches'])
 @contextmanager
 def observe(p):
- advance=DeviceEdgeSampler.__next__;zero=torch.optim.AdamW.zero_grad;step=torch.optim.AdamW.step;pending=None
+ advance=DeviceEdgeSampler.__next__;zero=torch.optim.AdamW.zero_grad;step=torch.optim.AdamW.step;pending=None;counted=False
  def ours(opt):
   return opt.param_groups[0]['params'][0] is next(p.model.parameters())
  def next_batch(s):
-  nonlocal pending
-  out=advance(s);assert s.weighted_edge_sampling and s.positive_target_mode=='binary'
+  nonlocal pending,counted
+  out=advance(s);counted=False;assert s.weighted_edge_sampling and s.positive_target_mode=='binary'
   npos=len(out[-1])-s.num_neg;pending=(npos,s.num_neg,int(npos<s.num_pos),s.num_pos,s.n_pos%s.num_pos or s.num_pos);return out
  def clear(opt,*args,**kwargs):
+  nonlocal counted
   if ours(opt):
    assert pending is not None,'exposure missing selected batch'
    e=p._train_stats.setdefault('card086_exposure',dict(schema=SCHEMA,normal_positive_slots=pending[3],negative_slots_per_batch=pending[1],short_tail_positive_slots=pending[4],**{k:0 for k in FIELDS}))
+   if counted:
+    assert e['attempted_batches']==p._train_stats['attempted_batches'],'exposure loop-entry mismatch'
+    return zero(opt,*args,**kwargs) # repeated cleanup on this selected attempt is not another exposure
+   counted=True
    npos,nneg,tail=pending[:3];e['attempted_batches']+=1;e['attempted_positive_slots']+=npos;e['attempted_negative_slots']+=nneg;e['attempted_short_tail_batches']+=tail
    assert e['attempted_batches']==p._train_stats['attempted_batches'],'exposure loop-entry mismatch'
   return zero(opt,*args,**kwargs)
