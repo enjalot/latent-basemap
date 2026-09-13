@@ -66,8 +66,7 @@ def validate_stage_receipt(path, started_ns, runtime_sha, data_manifest_sha):
 def stage(tag,script,cap,args=(),arm=None,receipt_path=None):
     global STAGE_TIME
     release=verify();available=B.available(arm)
-    if tag in ('graph_build','prepare'):
-        ledger=C.read(B.L);spent=sum(e['wall_s'] for e in ledger['entries'] if e['tag'] in ('graph_build','prepare'));cap=min(cap,1500-spent)
+    if tag not in C.ARMS:cap=min(cap,1500-B.shared_preparation_spent(C.read(B.L)))
     limit=min(cap,available-2)
     assert limit>5,'budget/deadline STOP'
     B.transact(tag,limit,arm,check=True);start=time.monotonic();child=None;rc=999
@@ -128,7 +127,7 @@ def main():
             for key in ['negative_source_sha','negative_target_sha','sampler_rng_sha','positive_slots','negative_slots']:
                 assert left[key]==right[key], 'full-data matched-attempt parity STOP: '+key
         ledger=C.read(B.L);window=C.read(B.W)
-        checks={'card_cap':ledger['batch_spent_s']+sum(estimates.values())<=4800,
+        checks={'shared_graph_prep_cap':B.shared_preparation_spent(ledger)<=1500,'card_cap':ledger['batch_spent_s']+sum(estimates.values())<=4800,
                 'window_cap':window['spent_s']+sum(estimates.values())<=165491,
                 'deadline':sum(estimates.values())+120<=B.END-time.time()}
         checks.update({a:ledger['arm_spent_s'][a]+estimates[a]<=B.LIMITS['stage_gpu_s'][a] for a in C.ARMS})

@@ -49,3 +49,8 @@ def available(arm=None):
     remaining=[4800-l['batch_spent_s'],165491-w['spent_s'],END-time.time()]
     if arm:remaining.append(LIMITS['stage_gpu_s'][arm]-l['arm_spent_s'][arm])
     return min(remaining)
+
+
+def shared_preparation_spent(ledger):
+    # Production arm entries are excluded; their preflights retain distinct tags.
+    return sum(e['wall_s'] for e in ledger['entries'] if e['tag'] not in C.ARMS)
