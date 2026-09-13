@@ -1,7 +1,7 @@
 """Root-released, dual-lease, resource-monitored durable Card084 chain. No scoring."""
 import os
 for k in ('OMP_NUM_THREADS','MKL_NUM_THREADS','OPENBLAS_NUM_THREADS'):os.environ[k]='2'
-import subprocess,fcntl,datetime as dt,time,signal,sys
+import subprocess,datetime as dt,time,signal,sys
 from pathlib import Path
 import card084_common as C
 import card084_budget as B
@@ -16,6 +16,24 @@ def verify():
     assert r['PASS'] and r['card']=='084' and r['limits']==B.LIMITS
     assert r['runtime_sha']==C.source_check() and all(C.sha(p)==h for p,h in r['files'].items())
     return C.sha(release)
+
+LEASE_PATHS=('/data/latent-basemap/.gpu_lease','/data/latent-basemap/sandbox/.gpu.lock')
+
+def verify_external_leases():
+    ancestors=set();pid=os.getpid()
+    while pid>1 and pid not in ancestors:
+        ancestors.add(pid)
+        status=Path(f'/proc/{pid}/status').read_text()
+        pid=int(next(line.split()[1] for line in status.splitlines() if line.startswith('PPid:')))
+    held=set()
+    for line in Path('/proc/locks').read_text().splitlines():
+        fields=line.split()
+        if len(fields)>=8 and fields[1]=='FLOCK' and fields[3]=='WRITE' and int(fields[4]) in ancestors:
+            major,minor,inode=fields[5].split(':')
+            held.add((int(major,16),int(minor,16),int(inode)))
+    for path in LEASE_PATHS:
+        st=os.stat(path)
+        assert (os.major(st.st_dev),os.minor(st.st_dev),st.st_ino) in held, 'missing actual external flock: '+path
 
 def usage(pid):
     rows=subprocess.check_output(['ps','-eo','pid=,ppid=,rss='],text=True,timeout=2)
@@ -61,9 +79,7 @@ def stage(tag,script,cap,args=(),arm=None):
 
 def main():
     verify() # no lease or GPU activity without root's immutable release
-    leases=[]
-    for path in ('/data/latent-basemap/.gpu_lease','/data/latent-basemap/sandbox/.gpu.lock'):
-        f=open(path,'a');fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB);leases.append(f)
+    verify_external_leases() # inspect real ancestor-owned locks; never reacquire
     start=time.monotonic();stage_time=0.;reserved=False
     try:
         # Shared controller time distributed equally to the two cumulative arm caps.
@@ -100,5 +116,4 @@ def main():
         raise
     finally:
         if reserved:B.transact('controller',max(0.,time.monotonic()-start-STAGE_TIME)-120.,kind='settlement')
-        for f in leases:f.close()
 if __name__=='__main__':main()

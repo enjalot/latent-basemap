@@ -1,18 +1,22 @@
 """CPU negative controls for finite loss/gradient, calibration and accounting."""
 import os
 os.environ['CUDA_VISIBLE_DEVICES']=''
-import sys,json,tempfile,math
+import sys,json,tempfile,math,subprocess
+import numpy as np
 from pathlib import Path
 import torch
 import card084_common as C
 sys.path.insert(0,str(C.R))
 from basemap.pumap.parametric_umap.bounded_attraction import add_attraction,require_finite_gradient
-from card084_calibration import coefficient_from_ratios
+from card084_calibration import coefficient_from_ratios,compare_sampler_capture
+from card084_gradient_controls import check_extra_gradient_faults
 import card084_budget as B
 checks=[]
-def reject(name,call):
+def reject(name,call,expected=None):
     try:call()
-    except (ValueError,AssertionError,FloatingPointError):checks.append(name)
+    except (ValueError,AssertionError,FloatingPointError) as error:
+        if expected is not None:assert str(error)==expected,(name,str(error))
+        checks.append(name)
     else:raise AssertionError(name+' accepted')
 x=torch.ones(2,3,requires_grad=True);y=torch.zeros_like(x);mask=torch.ones(2,dtype=torch.bool);scale=torch.ones(2)
 def call(**kw):
@@ -24,9 +28,7 @@ reject('unknown family',lambda:call(family='cubic'))
 for family in C.ARMS:
     xx=torch.full((2,3),1e30,requires_grad=True)
     reject(family+' nonfinite extra value',lambda:add_attraction(torch.tensor(0.),xx,y,mask,scale,coefficient=1.,family=family,delta=C.DELTA))
-    # Finite forward but nonfinite backward, deliberately amplify upstream derivative.
-    val=call(family=family)
-    reject(family+' nonfinite extra backward',lambda:torch.autograd.grad(val,x,grad_outputs=torch.tensor(float('inf'))))
+checks.extend(check_extra_gradient_faults('cpu'))
 reject('nonfinite explicit gradient guard',lambda:require_finite_gradient(torch.tensor([float('nan')])))
 reject('no positive edges',lambda:add_attraction(torch.tensor(0.),x,y,~mask,scale,coefficient=1.,delta=C.DELTA))
 reject('zero radius product',lambda:add_attraction(torch.tensor(0.),x,y,mask,scale*0,coefficient=1.,delta=C.DELTA))
@@ -50,7 +52,7 @@ for field,value in [('family','pseudo_huber'),('coefficient',.3),('delta',.5),
                     ('calibration_sha','wrong'),('runtime_manifest_sha','wrong'),
                     ('bank_sha','wrong'),('dose',59999),('calibration_batches_sha','wrong')]:
     mutated={**ident,field:value}
-    reject('resume wrong '+field,lambda:C.validate_ckpt({'card012_identity':ident},mutated))
+    reject('resume wrong '+field,lambda:C.validate_ckpt({'card012_identity':ident},mutated),'card084 admission-identity mismatch')
 import run_card084_chain as chain
 with tempfile.TemporaryDirectory(prefix='card084-release-cpu-') as td:
     old=C.O;C.O=Path(td)
@@ -58,6 +60,43 @@ with tempfile.TemporaryDirectory(prefix='card084-release-cpu-') as td:
     reject('trainer refuses absent root release',C.require_gpu_stage)
     C.O=old
 checks.append('root release gates evaluated without GPU access')
+# Actual CPU external-flock wrappers: inspect held inodes, never reacquire them.
+with tempfile.TemporaryDirectory(prefix='card084-leases-cpu-') as td:
+    paths=[str(Path(td)/name) for name in ('a.lock','b.lock')]
+    for path in paths:Path(path).touch()
+    script='import sys; sys.path.insert(0,'+repr(str(C.R/'experiments/sandbox'))+'); import run_card084_chain as c; c.LEASE_PATHS='+repr(paths)+'; c.verify_external_leases(); print("PASS")'
+    result=subprocess.run(['flock','-n',paths[0],'flock','-n',paths[1],sys.executable,'-c',script],capture_output=True,text=True,timeout=10)
+    assert result.returncode==0 and result.stdout.strip()=='PASS',result.stderr
+    old_paths=chain.LEASE_PATHS;chain.LEASE_PATHS=paths
+    reject('unheld real leases rejected',chain.verify_external_leases,'missing actual external flock: '+paths[0])
+    chain.LEASE_PATHS=old_paths
+    checks.append('real two-external-flock CPU wrappers accepted without reacquisition')
+# Matched loss/GradScaler skip and successful-step policy is text-identical to083.
+core=(C.R/'basemap/pumap/parametric_umap/core.py').read_text()
+old=(C.R.parent/'card083-code/basemap/pumap/parametric_umap/core.py').read_text()
+def policy(text):return text[text.index('                if not torch.isfinite(loss):'):text.index('                # P0-B: capture the LR')]
+assert policy(core)==policy(old)
+checks.append('combined nonfinite/GradScaler skip policy identical to frozen083')
+with tempfile.TemporaryDirectory(prefix='card084-sampler-parity-cpu-') as td:
+    ca=[];ba=[]
+    for i in range(8):
+        a=Path(td)/f'cal{i}.npz';b=Path(td)/f'base{i}.npz'
+        data={'src':np.array([i,i+1]),'dst':np.array([i+2,i+3]),'targets':np.array([1,0]),
+              'pair_scale':np.ones(2),'rng_before':np.array([i]),'rng_after':np.array([i+1]),
+              'positive_edge_rows':np.array([i]),'pos_idx':i+1,'batch_no':0,'noise_pairs':i+1}
+        np.savez(a,**data);np.savez(b,**data)
+        ca.append({'index':i,'path':str(a)});ba.append({'index':i,'path':str(b)})
+    assert compare_sampler_capture(ca,ba)['n_distinct_ordered_batches']==8
+    with np.load(ba[3]['path']) as z:data={k:z[k] for k in z.files}
+    for key in ('src','rng_before','rng_after','pos_idx','noise_pairs'):
+        bad=dict(data);bad[key]=data[key]+1;np.savez(ba[3]['path'],**bad)
+        reject('sampler parity rejects '+key,lambda:compare_sampler_capture(ca,ba),f'batch3 baseline sampler mismatch: {key}')
+    np.savez(ba[3]['path'],**data)
+    for item in ca+ba:
+        with np.load(item['path']) as z:data={k:z[k] for k in z.files}
+        data['src']=np.array([0,1]);data['dst']=np.array([2,3]);np.savez(item['path'],**data)
+    reject('repeated ordered batches rejected',lambda:compare_sampler_capture(ca,ba),'eight distinct ordered pair batches required')
+    checks.append('eight-batch parity positive control')
 # Never write real ledgers. Test reservation/settlement and crash recovery in isolated CPU fixture.
 with tempfile.TemporaryDirectory(prefix='card084-budget-cpu-') as td:
     old=C.O;C.O=Path(td);B.L=C.O/'card084-ledger.json';B.W=C.O/'window.json';B.J=C.O/'journal'

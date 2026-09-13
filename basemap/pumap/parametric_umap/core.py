@@ -2699,8 +2699,6 @@ class ParametricUMAP:
                 _fwd_ph.__exit__(None, None, None)   # S2: close forward+loss phase
 
                 if not torch.isfinite(loss):
-                    if getattr(self, '_card084_attraction', {}).get('coefficient', 0.) != 0.:
-                        raise FloatingPointError('Card084 nonfinite combined loss; STOP')
                     consecutive_nonfinite_losses += 1
                     self._train_stats["nonfinite_loss_skips"] += 1
                     if getattr(self, "_abort_on_first_nonfinite", False):
@@ -2750,8 +2748,6 @@ class ParametricUMAP:
                         p.grad.detach().norm() for p in self.model.parameters()
                         if p.grad is not None]))
                 if not bool(torch.isfinite(total_norm)):
-                    if getattr(self, '_card084_attraction', {}).get('coefficient', 0.) != 0.:
-                        raise FloatingPointError('Card084 nonfinite parameter gradient (including AMP); STOP')
                     optimizer.zero_grad(set_to_none=True)
                     if scaler is not None:
                         # Historical receipts call this ``amp_overflow`` because

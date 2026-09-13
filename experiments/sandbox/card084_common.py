@@ -45,8 +45,9 @@ def configure(p,ident,radii,checkpoints):
 def validate_ckpt(ck,ident):
  import torch
  import card084_resume as V
+ assert ck['card012_identity']==ident,'card084 admission-identity mismatch'
  validate_identity(ident)
- assert ck['card012_identity']==ident,'card084 admission-identity mismatch';step=ck['global_step'];assert isinstance(step,int) and 0<step<=ident['dose'];V.validate_resume_payload(ck,step,n_nodes=ident['n_nodes']);assert ck['config']['learning_rate']==ident['lr'] and ck['config']['lr_schedule']=='constant' and ck['config']['replay_weight']==0. and not ck['config']['replay_enabled']
+ step=ck['global_step'];assert isinstance(step,int) and 0<step<=ident['dose'];V.validate_resume_payload(ck,step,n_nodes=ident['n_nodes']);assert ck['config']['learning_rate']==ident['lr'] and ck['config']['lr_schedule']=='constant' and ck['config']['replay_weight']==0. and not ck['config']['replay_enabled']
  assert isinstance(ck.get('card081_noise_pairs'),int) and ck['card081_noise_pairs']>=0
  assert ck['model']['proj_out.weight'].shape==(3,2048) and ck['model']['proj_out.bias'].shape==(3,);original=torch.load(warm(ident['arm']),map_location='cpu',weights_only=False)['model_state'];assert set(original)==set(ck['model']) and all(original[k].shape==ck['model'][k].shape and torch.isfinite(ck['model'][k]).all() for k in original);return step
 
@@ -70,6 +71,11 @@ def attraction_identity(arm, *, calibration=False):
   assert len(c['batches'])==8 and [b['index'] for b in c['batches']]==list(range(8))
   assert all(sha(b['path'])==b['sha'] for b in c['batches']), 'calibration batch content changed'
   assert hashlib.sha256(''.join(b['sha'] for b in c['batches']).encode()).hexdigest()==c['batches_sha']
+  assert c['sampler_parity']['PASS'] and c['sampler_parity']['n_distinct_ordered_batches']==8
+  assert len(set(c['sampler_parity']['ordered_pair_hashes']))==8 and c['all_eight_model_states_unchanged']
+  assert set(c['zero_step_counters'])=={'optimizer_steps_attempted','optimizer_steps_succeeded','positive_lr_optimizer_steps','executed_iters'}
+  assert all(v==0 for v in c['zero_step_counters'].values())
+  assert all(sha(b['path'])==b['sha'] for b in c['sampler_parity']['baseline_batches'])
   a=c['arms'][arm];v=a['coefficient'];ratios=a['raw_ratios']
   assert len(ratios)==8 and all(math.isfinite(x) and x>0 for x in ratios)
   assert max(ratios)/min(ratios)<=10 and math.isfinite(v) and v>0
@@ -89,7 +95,7 @@ def validate_identity(ident):
  assert ident['fneg_weight']==1. and ident['neg_tanh_gamma']==4., 'both-on recipe'
 
 def require_gpu_stage():
- # Root-controlled chain owns both leases and exports this bound release hash.
+ # Root external flock wrappers own both leases; chain exports this bound release hash.
  import os
  release=O/'card084-release.json'
  assert release.exists(), 'NO ROOT GPU RELEASE'

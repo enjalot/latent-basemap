@@ -16,15 +16,20 @@ direct H-Q contrast descriptive. This runtime has no scorer.
 ## Implemented paths
 
 - bounded_attraction.py and core.py: default-off stateless production-pair hook;
-  finite per-positive values and extra scalar checked; extra coordinate backward
-  checked; enabled combined loss and parameter-gradient nonfinites STOP before
-  any optimizer update, including AMP overflows. This is deliberately stricter
-  than inherited AMP retry behavior. Coefficient0 bypasses all new loss checks.
+  finite per-positive values and extra scalar fail explicitly. The inherited
+  combined-loss/GradScaler skip/successful-step policy is unchanged, including
+  bounded AMP skips. Diagnostic unscaled extra-gradient checks reject genuine
+  backward defects on CPU/device; no production hook treats scaled overflow as
+  a new-term defect. Coefficient0 bypasses all new loss checks.
 - card084_calibration.py and gpu_card084_calibrate.py: exact production callback
   before backward/optimizer, same frozen parent on all8 batches, actual graph
   positive rows verified against PERM, all endpoint global IDs exclude ref/val;
   ordered pair/target/radius/RNG-before/RNG-after artifacts hashed. Training
-  restarts fresh seed42. No separately sampled training bank or extra forward.
+  restarts fresh seed42. An independent production loader capture (no calibration
+  callback, no forward/optimizer) must match all8 ordered pairs, targets, radii,
+  RNG-before/after, graph rows, PERM cursor and noise counts;8 ordered batches
+  must be distinct. All8 model states equal the original and four optimizer/step
+  counters remain zero. No separately sampled training bank or extra forward.
 - card084_common.py / fit.py / resume.py / run_card084_arm.py: bound family,
   coefficient, delta, calibration and batch hashes, training-panel bank SHA,
   dose, graph/radii/q/input/source/parent identity; reconstruct hook before fit
@@ -35,14 +40,18 @@ direct H-Q contrast descriptive. This runtime has no scorer.
   batch16384 and sampler on512-node synthetic graph using real training feature
   rows/radii. Exact model/Adam/scheduler/scaler/sampler/global+aux RNG, loop
   counters and hook reconstruction from both mid and real epoch checkpoints.
-  Wrong family/coefficient/delta/calibration/source/bank/dose/batches rejected.
+  Wrong family/coefficient/delta/calibration/source/bank/dose/batches rejected
+  with the exact expected admission-identity mismatch; unrelated errors fail
+  the canary. Device unscaled backward-fault controls reject genuine defects.
   Absent-hook versus coefficient0 full-state control, enabled divergence.
   This is not a full2M-epoch resume twin; full2M is the separate throughput test.
 - gpu_card084_preflight.py: per-arm full2M500/3500-update fits and full checkpoint
   serialization; conservative slope/setup and epoch/snapshot reserve. Full60K
   admitted only if both estimates fit remaining cumulative caps and deadline.
-- run_card084_chain.py / card084_budget.py: no release => no leases/device work;
-  nonblocking flock bothleases, monitor global VRAM<30GiB, treeRSS<32GiB and
+- run_card084_chain.py / card084_budget.py: no release => no device work;
+  root's two external flock wrappers own both leases, as081–083. The chain
+  checks actual ancestor-owned FLOCK inode locks via /proc/locks and never
+  reacquires either lease. Monitor global VRAM<30GiB, treeRSS<32GiB and
   available host RAM>4GiB. Enforce deadline23:50:55Z,4200s total and1800s per arm
   inclusive of attributable stages; shared calibration/canary/controller split
   equally. Reservations debit the sole rolling ledger before work, settle to
@@ -71,12 +80,13 @@ this is a candidate, never a release. Root may add scorer/protocol files.
 Do not add mutable output calibration/ledger files to the pre-calibration root
 release; post-calibration SHA and eight batch contents bind every fit identity.
 A failed calibration leaves durable batch artifacts and no PASS receipt; root
-reviews before any retry. A valid calibration is reused by hash on chain restart.
+reviews before any retry. A valid calibration, its parity proof and baseline capture files are reused by
+hash on chain restart.
 
-Root launches the chain as a durable systemd unit with MemoryMax=32G,
-KillMode=control-group and an overall deadline. The chain itself owns both
-flocks; do not wrap it in a process already holding either lease:
-/home/enjalot/code/latent-basemap/.venv/bin/python /data/latent-basemap/sandbox/card084-code/experiments/sandbox/run_card084_chain.py
+Root launches basemap-card084.service as a durable systemd unit with
+MemoryMax=32G, KillMode=control-group and an overall deadline, using BOTH real
+external flock wrappers (watcher-recognized paths, no fake arguments):
+/usr/bin/flock -n /data/latent-basemap/.gpu_lease /usr/bin/flock -n /data/latent-basemap/sandbox/.gpu.lock /home/enjalot/code/latent-basemap/.venv/bin/python /data/latent-basemap/sandbox/card084-code/experiments/sandbox/run_card084_chain.py
 It exports the exact root release SHA to GPU stages; direct stage execution
 without that bound release environment fails. This document is not permission
 to launch and the runner has not created a unit or root release.

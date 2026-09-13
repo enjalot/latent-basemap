@@ -6,6 +6,7 @@ import tempfile,time,gc
 import numpy as np,torch
 import card084_common as C
 from card084_fit import fit
+from card084_gradient_controls import check_extra_gradient_faults
 
 def same(a,b):
     if torch.is_tensor(a):return torch.equal(a.cpu(),b.cpu())
@@ -21,7 +22,11 @@ KEYS=['model','optimizer','scheduler','scaler','torch_rng','cuda_rng','loader_ge
       'global_step','epoch','config','current_replay_bank_path']
 
 def main():
-    C.require_gpu_stage();start=time.monotonic();checks=[];hashes={}
+    C.require_gpu_stage();start=time.monotonic();checks=check_extra_gradient_faults('cuda');hashes={}
+    calibration=C.read(C.CAL)
+    assert calibration['sampler_parity']['PASS'] and calibration['sampler_parity']['n_distinct_ordered_batches']==8
+    assert calibration['all_eight_model_states_unchanged'] and all(v==0 for v in calibration['zero_step_counters'].values())
+    checks.append('full2M calibration:8 distinct ordered batches match independent baseline sampler states, model unchanged, all optimizer counters zero')
     with tempfile.TemporaryDirectory(dir=C.R.parent,prefix='card084-graph-canary-') as path:
         td=Path(path);n=512
         X=np.array(np.load(C.D/'train.f16.npy',mmap_mode='r')[:n],dtype='f4')
@@ -56,7 +61,9 @@ def main():
                 ('bank',{'bank_sha':'0'*64}),('dose',{'dose':19}),('batches',{'calibration_batches_sha':'0'*64})]:
                 # Validation runs before model configuration or fit; no updates on rejection.
                 try:fit(arm,18,td/(arm+'-reject-'+tag),resume=min(mids)[1],ident_override=override,**kw)
-                except (AssertionError,ValueError):checks.append(arm+' wrong '+tag+' rejected')
+                except AssertionError as error:
+                    assert str(error)=='card084 admission-identity mismatch', (tag,str(error))
+                    checks.append(arm+' wrong '+tag+' rejected with exact identity-mismatch message')
                 else:raise AssertionError('wrong identity accepted: '+tag)
         off={'coefficient':0.,'canary_off_control':True}
         p,base,_=fit('quadratic',18,td/'absent',ident_override=off,omit_hook=True,**kw)

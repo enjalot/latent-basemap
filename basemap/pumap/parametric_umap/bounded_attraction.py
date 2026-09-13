@@ -25,8 +25,6 @@ def add_attraction(base, src, dst, positive, pair_scale, *, coefficient=0.,
     if not bool(torch.isfinite(scale).all() and (scale > 0).all()):
         raise ValueError('invalid radius products')
     diff = src[mask].to(dtype) - dst[mask].to(dtype)
-    if diff.requires_grad:
-        diff.register_hook(require_finite_gradient)
     u = diff.square().sum(-1) / scale
     if family == 'quadratic':
         values = u / 2
@@ -45,3 +43,11 @@ def require_finite_gradient(gradient):
     if not bool(torch.isfinite(gradient).all()):
         raise FloatingPointError('Card084 nonfinite extra attraction gradient; STOP')
     return gradient
+
+
+def checked_unscaled_gradients(extra, parameters, *, retain_graph=False):
+    """Diagnostic-only raw extra gradients; never apply to GradScaler-scaled loss."""
+    gradients = torch.autograd.grad(extra, tuple(parameters), retain_graph=retain_graph)
+    for gradient in gradients:
+        require_finite_gradient(gradient)
+    return gradients
