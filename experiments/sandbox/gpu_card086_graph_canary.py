@@ -30,6 +30,8 @@ with admitted_canary(admission):
     try:fit(arm,18,td/(arm+'-reject-'+tag),resume=min(mids)[1],ident_override=override,**kw)
     except AssertionError as e:assert str(e)=='card086 identity mismatch: '+next(iter(override));checks.append(arm+' wrong '+tag+' rejected')
     else:raise AssertionError('wrong graph identity accepted')
+  from canary_cleanup_faults import device_controls
+  forced=device_controls(fit,C,C.ARMS[-1],kw,td,keys);checks.extend(forced['checks'])
   from basemap.pumap.parametric_umap.datasets.edge_list_dataset import DeviceArrayDataset,DeviceEdgeSampler
   samplers=[]
   for arm in C.ARMS:
@@ -46,4 +48,4 @@ with admitted_canary(admission):
     a,b=samplers;assert torch.equal(a._last_all_src[npos:],b._last_all_src[npos:]) and torch.equal(a._last_all_dst[npos:],b._last_all_dst[npos:]) and torch.equal(a.gen.get_state(),b.gen.get_state())
   checks.append('CUDA matched-attempt negative IDs and RNG parity across two real sampler epochs')
   assert len(hashes)==2;checks.append('weighted small-graph endpoints validated')
-C.write(C.O/'card086-graph-canary.json',{'PASS':True,'immutable_stage_admission':admission,'checks':checks,'n_checks':len(checks),'endpoints':hashes,'wall_s':time.monotonic()-start,'runtime_sha':C.source_check(),'data_manifest_sha':C.sha(C.GD/'manifest.json'),'scope':'Real1536D fit,512 nodes,full radii; midpoint and epoch resumes preserve model+optimizer+loader/RNG state; wrong warm/scale/arm reject. No assertion of identical sampled exposure across model-dependent rank orders or AMP skips.'});print('PASS',len(checks),flush=True)
+C.write(C.O/'card086-graph-canary.json',{'PASS':True,'actual_fit_forced_cleanup':forced,'immutable_stage_admission':admission,'checks':checks,'n_checks':len(checks),'endpoints':hashes,'wall_s':time.monotonic()-start,'runtime_sha':C.source_check(),'data_manifest_sha':C.sha(C.GD/'manifest.json'),'scope':'Real1536D fit,512 nodes,full radii; midpoint and epoch resumes preserve model+optimizer+loader/RNG state; wrong warm/scale/arm reject. No assertion of identical sampled exposure across model-dependent rank orders or AMP skips.'});print('PASS',len(checks),flush=True)
