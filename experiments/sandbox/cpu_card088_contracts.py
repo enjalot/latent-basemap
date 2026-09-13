@@ -13,14 +13,14 @@ def reject(f,msg):
  raise AssertionError('negative control accepted: '+msg)
 def main():
  checks={}
- for key in ['protocol_sha','quality_prereg_sha','arm','dose','lr','graph_sha','weight_values_sha','endpoints_sha','weighted_edge_sampling','uniform_with_replacement','parent_sha','warm_sha','reference_sha','data_manifest_sha','runtime_manifest_sha','positive_target_mode','negative_policy','positive_support_law','logical_epoch_draws','cdf_side','endpoint_columns','positive_rng_policy','negative_rng_policy']:
+ for key in ['protocol_sha','quality_prereg_sha','shared_resource_addendum_sha','shared_resource_decision_sha','arm','dose','lr','graph_sha','weight_values_sha','endpoints_sha','weighted_edge_sampling','uniform_with_replacement','parent_sha','warm_sha','reference_sha','data_manifest_sha','runtime_manifest_sha','positive_target_mode','negative_policy','positive_support_law','logical_epoch_draws','cdf_side','endpoint_columns','positive_rng_policy','negative_rng_policy']:
   checks['wrong_'+key]=reject(lambda:C.assert_identity({key:'old'},{key:'new'}),'card088 identity mismatch: '+key)
  with tempfile.TemporaryDirectory() as td:
   p=Path(td)/'receipt.json';t=time.time_ns();checks['missing']=reject(lambda:validate_stage_receipt(p,t,'r','d'),'missing stage receipt');good={'PASS':True,'runtime_sha':'r','data_manifest_sha':'d'};p.write_text(json.dumps(good));os.utime(p,ns=(t,t));assert validate_stage_receipt(p,t,'r','d')==good;checks['fresh']=True
   os.utime(p,ns=(t-1,t-1));checks['stale']=reject(lambda:validate_stage_receipt(p,t,'r','d'),'stale stage receipt')
   for k,v,msg in [('PASS',False,'stage receipt lacks explicit PASS'),('runtime_sha','wrong','stage receipt runtime mismatch'),('data_manifest_sha','wrong','stage receipt calibration mismatch')]:
    p.write_text(json.dumps(dict(good,**{k:v})));checks['receipt_'+k]=reject(lambda:validate_stage_receipt(p,0,'r','d'),msg)
- checks['budget']=B.LIMITS['card_gpu_s']==5400 and B.LIMITS['stage_gpu_s']=={'original15':2100,'mixture':2100} and B.SHARED_PREPARATION_CAP==1800 and B.GRAPH_STAGE_CAP==1500
+ checks['budget']=B.LIMITS['card_gpu_s']==5400 and B.LIMITS['stage_gpu_s']=={'original15':2100,'mixture':2100} and B.SHARED_PREPARATION_CAP==2400 and B.GRAPH_STAGE_CAP==1500
  checks['resource_partition']=B.LIMITS['rss_gib']==32 and B.LIMITS['owner_aggregate_rss_gib']==48 and B.LIMITS['root_scorer_rss_gib']==16 and B.LIMITS['global_vram_gib']==30
  from unittest.mock import patch
  from run_card088_chain import usage
@@ -35,5 +35,5 @@ def main():
  ck=torch.load(C.R.parent/'card075-train/uniform/ckpts/ckpt-step60000.pt',map_location='cpu',weights_only=False);ck['card012_identity']=dict(ck['card012_identity'],arm='mixture',weighted_edge_sampling=True,uniform_with_replacement=False)
  checks['legacy_unweighted_state_rejected']=reject(lambda:validate_resume_payload(ck,60000),'actual weighted pipeline mismatch')
  ck['card012_identity']['arm']='original15';checks['zero_control_resume_rejected']=reject(lambda:validate_resume_payload(ck,60000),'zero control weight in resume PERM')
- assert all(checks.values());C.write(C.O/'card088-device-proof-readiness/runtime-contracts.json',{'PASS':True,'checks':checks,'n_checks':len(checks),'scope':'CPU contracts only; actual weighted device resume and numerical mass acceptance pending root release.'});print('CPU CONTRACTS PASS',len(checks))
+ assert all(checks.values());C.write(C.O/'card088-functional-loss-readiness/runtime-contracts.json',{'PASS':True,'checks':checks,'n_checks':len(checks),'scope':'CPU contracts only; actual weighted device resume and numerical mass acceptance pending root release.'});print('CPU CONTRACTS PASS',len(checks))
 if __name__=='__main__':main()

@@ -8,7 +8,7 @@ J=C.O/'card088-accounting-journal'
 END=dt.datetime.fromisoformat('2026-09-13T23:50:55+00:00').timestamp()
 LIMITS={'card_gpu_s':5400,'stage_gpu_s':{'original15':2100,'mixture':2100},'global_vram_gib':30,'rss_gib':32,'owner_aggregate_rss_gib':48,'root_scorer_rss_gib':16,'deadline':'2026-09-13T23:50:55Z'}
 
-SHARED_PREPARATION_CAP=1800
+SHARED_PREPARATION_CAP=2400
 GRAPH_STAGE_CAP=1500
 
 def allocation(seconds,arm=None):

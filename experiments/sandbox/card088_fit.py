@@ -21,7 +21,7 @@ def fit(arm,dose,dest,*,X=None,graph=None,radii=None,radius_path=None,checkpoint
  assert len(radii)==len(X) and np.isfinite(radii).all() and (radii>0).all()
  ident=C.identity(arm,dose,len(X),graph,radius_path,warm_path)
  assert hashlib.sha256(np.ascontiguousarray(radii,dtype='f4').tobytes()).hexdigest()==ident['radii_values_sha']
- if canary_faults:ident.update(canary_fault_plan='gradient5_loss7_v1',canary_observer=not canary_observer_off)
+ if canary_faults:ident.update(canary_fault_plan='gradient5_functional_bce_none_loss7_v3',canary_observer=not canary_observer_off)
  ident.update(ident_override or {})
  torch.set_num_threads(2);torch.manual_seed(C.SEED);torch.cuda.manual_seed_all(C.SEED);np.random.seed(C.SEED)
  p=ParametricUMAP.load(str(C.CHAMP),device='cuda');C.configure(p,ident,radii,checkpoints or [dose]);prepared=torch.load(warm_path or C.warm(arm),map_location='cpu',weights_only=False);assert prepared['READY'];warm=prepared['model_state']
