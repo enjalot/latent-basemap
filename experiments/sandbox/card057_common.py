@@ -96,4 +96,3 @@ def device_setup():
     torch.backends.cudnn.allow_tf32=False
     torch.set_float32_matmul_precision('highest')
     assert torch.cuda.is_available()
-
