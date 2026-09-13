@@ -20,11 +20,11 @@ def main():
   os.utime(p,ns=(t-1,t-1));checks['stale_receipt']=rejected(lambda:validate_stage_receipt(p,t,'runtime','history'),'stale stage receipt')
   for key,bad,msg in [('PASS',False,'stage receipt lacks explicit PASS'),('runtime_sha','wrong','stage receipt runtime mismatch'),('history_cpu_sha','wrong','stage receipt calibration mismatch')]:
    p.write_text(json.dumps(dict(base,**{key:bad})));checks['wrong_receipt_'+key]=rejected(lambda:validate_stage_receipt(p,0,'runtime','history'),msg)
- for key in ['arm','dose','stage_full_dose','lr','lr_schedule','graph_sha','radii_sha','warm_sha','parent_sha','original_untrained_sha','negative_policy','rankneg_window','fneg_weight','neg_tanh_gamma','source_files','runtime_manifest_sha','optimizer_reset','validation_rows']:
+ for key in ['arm','dose','stage_full_dose','lr','lr_schedule','graph_sha','radii_sha','warm_sha','parent_sha','original_untrained_sha','negative_policy','rankneg_window','fneg_weight','neg_tanh_gamma','source_files','runtime_manifest_sha','optimizer_reset','validation_rows','budget_addendum_sha']:
   expected={key:'original'};checks['wrong_identity_'+key]=rejected(lambda:C.assert_identity({key:'wrong'},expected),'card085 identity mismatch: '+key)
  checks['identity_keys']=rejected(lambda:C.assert_identity({}, {'arm':'fresh'}),'card085 identity mismatch: keys')
  checks['full_doses']=C.DOSES=={'fresh':400000,'finish':60000} and C.LR=={'fresh':.001,'finish':.0001}
- checks['limits']=B.LIMITS['card_gpu_s']==10800 and B.LIMITS['stage_gpu_s']=={'fresh':9000,'finish':1500}
+ checks['limits']=B.LIMITS['card_gpu_s']==10800 and B.LIMITS['stage_gpu_s']=={'fresh':8700,'finish':1800}
  checks['accounting_stage']=B.allocation(13,'fresh')=={'fresh':13,'finish':0.} and B.allocation(13,'finish')=={'fresh':0.,'finish':13}
  checks['shared_counted_only_card']=B.allocation(13)=={'fresh':0.,'finish':0.}
  import torch,copy
@@ -35,7 +35,10 @@ def main():
  for key,bad,msg in [('scaler',{},'missing AMP scaler continuation state'),('loader_gen',None,'device loader RNG schema'),('loader_pos_idx',-1,'PERM cursor'),('loader_rank_of_node',torch.zeros(1),'uniform policy unexpectedly retains ranking')]:
   altered=dict(ck);altered[key]=bad
   checks['resume_corrupt_'+key]=rejected(lambda:validate_resume_payload(altered,60000),msg)
- checks['no_release']=rejected(C.require_release,'NO ROOT GPU RELEASE')
+ from unittest.mock import patch
+ with tempfile.TemporaryDirectory() as empty, patch.object(C,'O',Path(empty)):
+  checks['no_release']=rejected(C.require_release,'NO ROOT GPU RELEASE')
+ checks['approved_reallocation']=C.read(C.O/'card085-budget-reallocation-addendum.json')['new_stage_caps_s']==B.LIMITS['stage_gpu_s']
  assert all(checks.values())
  C.write(C.O/'card085-cpu-contracts.json',{'PASS':True,'checks':checks,'n_checks':len(checks),'device_tests':'NOT_RUN_NO_ROOT_RELEASE'})
  print('PASS',len(checks))
