@@ -760,6 +760,8 @@ class DeviceEdgeSampler:
         return neg_src, neg_dst
 
     def _sample_negatives(self, n):
+        if getattr(self, "_card081_noise", None) is not None:
+            return self._card081_noise.draw(n, self.gen)
         if self.positive_source_rows_t is not None:
             if self._inject_active():                                        # fail-closed: unsupported path
                 raise RuntimeError("card011 injection is not supported on the positive_source_rows negative "

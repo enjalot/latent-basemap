@@ -2083,6 +2083,22 @@ class ParametricUMAP:
         # 0.6dev sandbox: annealed runs start at the weakened kernel; every
         # other run keeps the exact kernel from step 0.
         self._kernel_exp = 0.25 if self.kernel_anneal_frac > 0 else 1.0
+        # Card081 is default-off. Existing loader generator already has exact resume state.
+        _noise_path = getattr(self, "_card081_q_path", None)
+        self._card081_actual_q_sha = None
+        if _noise_path is not None:
+            from .degree_noise import ConditionalCDF
+            import hashlib as _hashlib
+            if (not self._fast_device_path or self.rankneg_window != 0
+                or getattr(loader, "_grouped_neg", 0) or getattr(loader, "positive_source_rows_t", None) is not None
+                or float(getattr(self, "_inject_frac_cfg", 0.) or 0.) > 0):
+                raise ValueError("unsupported degree-noise path")
+            with open(_noise_path, "rb") as _f: self._card081_actual_q_sha = _hashlib.sha256(_f.read()).hexdigest()
+            if self._card081_actual_q_sha != self._card012_identity["noise_q_sha"]:
+                raise ValueError("degree proposal content mismatch")
+            _q = np.load(_noise_path, allow_pickle=False)
+            if len(_q) != loader.n_nodes: raise ValueError("degree proposal row-count mismatch")
+            loader._card081_noise = ConditionalCDF(_q, self.device)
         # ── #11 resumable checkpointing (opt-in, default-off, DEVICE path only) ──
         # Epoch-boundary state: every RNG stream the loop reads (torch global cpu+cuda, the sampler
         # gen, the 3 aux gens np+torch) + model/optimizer/scheduler/scaler + loop counters. Acceptance
@@ -2130,6 +2146,7 @@ class ParametricUMAP:
                 "scaler": (scaler.state_dict() if scaler is not None else None),
                 "torch_rng": torch.get_rng_state(),
                 "cuda_rng": (torch.cuda.get_rng_state_all() if 'cuda' in str(self.device) else None),
+                "card081_noise_pairs": int(getattr(getattr(loader, "_card081_noise", None), "count", 0)),
                 "loader_gen": _tgst(getattr(loader, "gen", None)),
                 "mn_gen": _tgst(mn_gen), "mn_rng": _npst(mn_rng),
                 "dens_gen": _tgst(dens_gen), "dens_rng": _npst(dens_rng),
@@ -2231,6 +2248,9 @@ class ParametricUMAP:
                     raise ValueError(f"resume deriv config/content mismatch: ckpt {_dsaved} vs current {_dcur}")
                 if _ck.get("deriv_gen") is None:
                     raise ValueError("resume with deriv enabled but checkpoint has no deriv_gen RNG state")
+            if _noise_path is not None:
+                if not isinstance(_ck.get("card081_noise_pairs"), int): raise ValueError("missing degree-noise exposure state")
+                loader._card081_noise.count = _ck["card081_noise_pairs"]
             self.model.load_state_dict(_ck["model"])
             optimizer.load_state_dict(_ck["optimizer"])
             scheduler.load_state_dict(_ck["scheduler"])
