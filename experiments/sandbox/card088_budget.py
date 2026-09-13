@@ -6,7 +6,7 @@ import card088_common as C
 L=C.O/'card088-ledger.json';W=C.O/'cards-24h-window-ledger.json'
 J=C.O/'card088-accounting-journal'
 END=dt.datetime.fromisoformat('2026-09-13T23:50:55+00:00').timestamp()
-LIMITS={'card_gpu_s':4800,'stage_gpu_s':{'original15':1600,'mixture':1600},'global_vram_gib':30,'rss_gib':48,'deadline':'2026-09-13T23:50:55Z'}
+LIMITS={'card_gpu_s':4800,'stage_gpu_s':{'original15':1600,'mixture':1600},'global_vram_gib':30,'rss_gib':32,'owner_aggregate_rss_gib':48,'root_scorer_rss_gib':16,'deadline':'2026-09-13T23:50:55Z'}
 
 def allocation(seconds,arm=None):
     return {a:(seconds if arm==a else 0.) if arm else 0. for a in C.ARMS}

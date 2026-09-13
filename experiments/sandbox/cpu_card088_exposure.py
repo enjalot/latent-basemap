@@ -9,7 +9,7 @@ import numpy as np,torch
 import card088_common as C
 sys.path.insert(0,str(C.R))
 from basemap.pumap.parametric_umap.datasets.edge_list_dataset import DeviceArrayDataset,DeviceEdgeSampler
-from card088_exposure import observe,validate
+from card088_exposure import observe,validate,support_fractions
 from card088_sampler import matched_sampler
 from card088_graph import weights
 from gpu_card060_canary import same
@@ -41,6 +41,7 @@ def run(instrument=True,split=None):
 def main():
  torch.set_num_threads(2);full=run();plain=run(False);checks={};e=validate(full[0]._train_stats)
  assert e['attempted_batches']==10 and e['successful_batches']==8 and e['attempted_positive_slots']==15360 and e['successful_positive_slots']==13104 and e['skipped_positive_slots']==2256 and e['skipped_short_tail_batches']==2;checks['actual_gradscaler_short_tail_overflows']=True
+ fractions=support_fractions(e);assert fractions['attempted']['original15']==7736/15360 and fractions['successful']['original15']==6612/13104 and fractions['attempted']!=fractions['successful'];checks['actual_attempted_successful_fractions_distinct']=True
  for k in [2,5]:
   resumed=run(split=k);assert resumed[0]._train_stats==full[0]._train_stats and same(resumed[1].state_dict(),full[1].state_dict()) and torch.equal(resumed[3].gen.get_state(),full[3].gen.get_state());checks['serialized_'+('mid' if k==2 else 'epoch')+'_exposure']=True
  assert same(full[0].model.state_dict(),plain[0].model.state_dict()) and same(full[1].state_dict(),plain[1].state_dict()) and full[2].state_dict()==plain[2].state_dict() and torch.equal(full[3].gen.get_state(),plain[3].gen.get_state());checks['instrumentation_numerical_rng_parity']=True
@@ -48,5 +49,5 @@ def main():
  try:validate(bad)
  except AssertionError as error:assert str(error)=='invalid exposure counters';checks['corrupt_exposure_rejected']=True
  else:raise AssertionError('corrupt exposure accepted')
- C.write(C.O/'card088-exposure-cpu.json',{'PASS':True,'checks':checks,'exposure':e,'scope':'Actual CPU GradScaler overflow on both short tails; durable stats serialization at mid/epoch; unchanged model/Adam/scaler/sampler versus instrumentation off. Actual device full-state twins remain required.'});print('EXPOSURE PASS',len(checks),e)
+ C.write(C.O/'card088-exposure-cpu.json',{'PASS':True,'checks':checks,'exposure':e,'support_fractions':fractions,'scope':'Actual CPU GradScaler overflow on both short tails; durable stats serialization at mid/epoch; unchanged model/Adam/scaler/sampler versus instrumentation off. Actual device full-state twins remain required.'});print('EXPOSURE PASS',len(checks),e)
 if __name__=='__main__':main()

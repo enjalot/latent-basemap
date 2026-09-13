@@ -30,7 +30,7 @@ def main():
  assert release.get('graph_stage_cap_s')==1500,'root graph cap binding required'
  reserve=float(release['post_graph_full_dose_reserve_s']);assert reserve>=3000,'root full-dose reserve too small'
  D=G.D;D.mkdir(parents=True,exist_ok=True);runtime=C.source_check()
- inputs={str(G.INPUT/'manifest.json'):G.sha(G.INPUT/'manifest.json')}
+ inputs={str(G.INPUT/'manifest.json'):G.sha(G.INPUT/'manifest.json'),**{str(C.O/n):C.sha(C.O/n) for n in ['card088-positive-support.md','card088-quality-prereg.md']}}
  im=G.read(G.INPUT/'manifest.json');assert im['PASS']
  for p,h in im['inputs'].items():assert G.sha(p)==h;inputs[p]=h
  oldpath=G.OLD/'knn_indices.npy';feature=G.INPUT/'substrate.f16.npy'
@@ -43,7 +43,7 @@ def main():
  db=torch.empty(mm.shape,device='cuda',dtype=torch.float16)
  def limits():
   free,total=torch.cuda.mem_get_info();used=(total-free)/2**30;rss=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024
-  assert used<30 and rss<49152,'graph memory STOP'
+  assert used<30 and rss<32768,'graph memory STOP'
   assert time.monotonic()-start<stage_cap-5,'graph wall STOP'
   assert time.time()<Budget.END-1,'graph deadline STOP'
   return used,rss

@@ -23,6 +23,8 @@ def main():
  assert np.array_equal(old,np.array([[(i+j)%n for j in range(70,85)] for i in range(n)],dtype='i4'));checks['original15_not_recomputed']=True
  w=G.weights('original15',n);v=G.weights('mixture',n);assert np.all(w.sum(1)==90) and np.all(v.sum(1)==90) and np.all(v[:,:15].sum(1)==v[:,15:].sum(1));checks['integer_exact_row_and_half_mass']=True
  src=np.repeat(np.arange(n,dtype='i4'),60);dst=np.array([(i+j)%n for i in range(n) for j in range(1,61)],dtype='i4')
+ from card088_offpath import restoration_control
+ offpath=restoration_control(np.arange(n,dtype='f4')[:,None],src,dst,v.ravel(),n,'cpu');checks['actual_base_sampler_offpath_restoration']=offpath['PASS']
  def make(weight):
   s=DeviceEdgeSampler(DeviceArrayDataset(np.arange(n,dtype='f4')[:,None],device='cpu'),src,dst,weight.ravel(),n,pos_ratio=.1,batch_size=16384,random_state=42,positive_target_mode='binary',weighted_edge_sampling=True,device='cpu');s._stash_ids=True;return s
  with matched_sampler():

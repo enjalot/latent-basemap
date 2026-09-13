@@ -22,6 +22,13 @@ def validate(stats):
   assert e['successful_'+k]<=e['attempted_'+k],'exposure ordering mismatch'
  assert e['attempted_batches']-e['successful_batches']==sum(stats[k] for k in ['amp_overflow_skips','nonfinite_loss_skips','nonfinite_gradient_skips']),'skip exposure counter mismatch'
  return dict(e,skipped_batches=e['attempted_batches']-e['successful_batches'],skipped_positive_slots=e['attempted_positive_slots']-e['successful_positive_slots'],skipped_negative_slots=e['attempted_negative_slots']-e['successful_negative_slots'],skipped_short_tail_batches=e['attempted_short_tail_batches']-e['successful_short_tail_batches'])
+def support_fractions(e):
+ result={}
+ for prefix in ['attempted','successful']:
+  total=e[prefix+'_positive_slots'];assert total>0,'empty support exposure'
+  result[prefix]={part:e[prefix+'_'+part+'_slots']/total for part in ['original15','extra45']}
+ return result
+
 @contextmanager
 def observe(p):
  advance=DeviceEdgeSampler.__next__;zero=torch.optim.AdamW.zero_grad;step=torch.optim.AdamW.step;pending=None

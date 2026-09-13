@@ -39,7 +39,7 @@ def verify_external_leases():
 def usage(pid):
     rows=subprocess.check_output(['ps','-eo','pid=,ppid=,rss='],text=True,timeout=2)
     processes={int(p):(int(parent),int(rss)*1024) for p,parent,rss in (line.split() for line in rows.splitlines())}
-    descendants={pid}
+    descendants={os.getpid(),pid}
     while True:
         expanded=descendants|{p for p,(parent,_) in processes.items() if parent in descendants}
         if expanded==descendants:break
@@ -47,7 +47,7 @@ def usage(pid):
     rss=sum(processes.get(p,(0,0))[1] for p in descendants)
     output=subprocess.check_output(['nvidia-smi','--query-gpu=memory.used','--format=csv,noheader,nounits'],text=True,timeout=5)
     vram=sum(float(line.strip()) for line in output.splitlines())/1024
-    assert rss<48*2**30,'RSS48GiB STOP'
+    assert rss<B.LIMITS['rss_gib']*2**30,'GPU tree RSS32GiB STOP'
     assert vram<30,'global VRAM30GiB STOP'
     mem={line.split(':')[0]:int(line.split()[1])*1024 for line in Path('/proc/meminfo').read_text().splitlines()}
     assert mem['MemAvailable']>4*2**30,'host available RAM below4GiB STOP'

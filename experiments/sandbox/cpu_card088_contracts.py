@@ -13,7 +13,7 @@ def reject(f,msg):
  raise AssertionError('negative control accepted: '+msg)
 def main():
  checks={}
- for key in ['arm','dose','lr','graph_sha','weight_values_sha','endpoints_sha','weighted_edge_sampling','uniform_with_replacement','parent_sha','warm_sha','reference_sha','data_manifest_sha','runtime_manifest_sha','positive_target_mode','negative_policy','positive_support_law','logical_epoch_draws','cdf_side','endpoint_columns','positive_rng_policy','negative_rng_policy']:
+ for key in ['protocol_sha','quality_prereg_sha','arm','dose','lr','graph_sha','weight_values_sha','endpoints_sha','weighted_edge_sampling','uniform_with_replacement','parent_sha','warm_sha','reference_sha','data_manifest_sha','runtime_manifest_sha','positive_target_mode','negative_policy','positive_support_law','logical_epoch_draws','cdf_side','endpoint_columns','positive_rng_policy','negative_rng_policy']:
   checks['wrong_'+key]=reject(lambda:C.assert_identity({key:'old'},{key:'new'}),'card088 identity mismatch: '+key)
  with tempfile.TemporaryDirectory() as td:
   p=Path(td)/'receipt.json';t=time.time_ns();checks['missing']=reject(lambda:validate_stage_receipt(p,t,'r','d'),'missing stage receipt');good={'PASS':True,'runtime_sha':'r','data_manifest_sha':'d'};p.write_text(json.dumps(good));os.utime(p,ns=(t,t));assert validate_stage_receipt(p,t,'r','d')==good;checks['fresh']=True
@@ -21,6 +21,13 @@ def main():
   for k,v,msg in [('PASS',False,'stage receipt lacks explicit PASS'),('runtime_sha','wrong','stage receipt runtime mismatch'),('data_manifest_sha','wrong','stage receipt calibration mismatch')]:
    p.write_text(json.dumps(dict(good,**{k:v})));checks['receipt_'+k]=reject(lambda:validate_stage_receipt(p,0,'r','d'),msg)
  checks['budget']=B.LIMITS['card_gpu_s']==4800 and B.LIMITS['stage_gpu_s']=={'original15':1600,'mixture':1600}
+ checks['resource_partition']=B.LIMITS['rss_gib']==32 and B.LIMITS['owner_aggregate_rss_gib']==48 and B.LIMITS['root_scorer_rss_gib']==16 and B.LIMITS['global_vram_gib']==30
+ from unittest.mock import patch
+ from run_card088_chain import usage
+ # Include controller and its sibling descendants, not only the active child.
+ rows=f'{os.getpid()} 1 {2*2**20}\n777777 {os.getpid()} {30*2**20}\n888888 {os.getpid()} 1\n'
+ with patch('run_card088_chain.subprocess.check_output',side_effect=[rows,'1024\n']):
+  checks['aggregate_tree_32GiB_rejected']=reject(lambda:usage(777777),'GPU tree RSS32GiB STOP')
  checks['dose_recipe']=C.DOSE==60000 and C.LR=={'original15':.0001,'mixture':.0001} and C.BATCH==16384
  checks['no_release']=reject(C.require_release,'NO ROOT GPU RELEASE')
  import torch
