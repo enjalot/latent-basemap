@@ -23,7 +23,7 @@ def main():
  from card089_baseline import bound_baseline
  from unittest.mock import patch
  with tempfile.TemporaryDirectory() as td:
-  root=Path(td)/'code';base=Path(td)/'card086-observer-train/all_one';(base/'ckpts').mkdir(parents=True);epoch=base/'ckpts/ckpt-epoch1.pt';paths=[base/n for n in ['validation.json','admission.json','model.pt','prepared.pt']]+[epoch]
+  root=Path(td)/'code';base=Path(td)/'card086-observer-train/all_one';(base/'ckpts').mkdir(parents=True);epoch=base/'ckpts/ckpt-epoch1.pt';paths=[base/n for n in ['validation.json','admission.json','model.pt','prepared.pt','preparation.json','manifest.json']]+[epoch]
   for p in paths:p.write_text('fixture')
   rel={'baseline_files':{str(p):C.sha(p) for p in paths},'baseline_epoch_checkpoint':str(epoch)}
   with patch.object(C,'R',root):
@@ -36,5 +36,5 @@ def main():
  import ast
  def config(path):return ast.dump(next(n for n in ast.parse(path.read_text()).body if isinstance(n,ast.FunctionDef) and n.name=='configure'),include_attributes=False)
  checks['configure_AST_matches086']=config(old/'experiments/sandbox/card086_common.py')==config(C.R/'experiments/sandbox/card089_common.py')
- assert all(checks.values());C.write(C.O/'card089-observer-readiness/runtime-contracts.json',{'PASS':True,'checks':checks,'n_checks':len(checks),'baseline_source_files':len(baseline),'baseline_runtime_sha':C.sha(old/'card086-runtime-sha.json'),'scope':'Static same-core proof only; historical numerical reuse requires completed086 all_one validation and released full2M separate-process fresh8/retained-epoch+8 exact state. No feature/query/model load.'});print('CONTRACTS PASS',len(checks))
+ assert all(checks.values());C.write(C.O/'card089-final-readiness/runtime-contracts.json',{'PASS':True,'checks':checks,'n_checks':len(checks),'baseline_source_files':len(baseline),'baseline_runtime_sha':C.sha(old/'card086-runtime-sha.json'),'scope':'Static same-core proof only; historical numerical reuse requires completed086 all_one validation and released full2M separate-process fresh8/retained-epoch+8 exact state. No feature/query/model load.'});print('CONTRACTS PASS',len(checks))
 if __name__=='__main__':main()
